@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.3.0-rc1`，支持：
+当前版本为 `0.3.0-rc2`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -12,7 +12,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - `run_command`、`create_file`、`edit_file`；
 - 工作区路径隔离；
 - 交互式写入/命令审批与 `--full-auto`；
-- 面向自动化的 NDJSON 事件输出。
+- 面向自动化的 NDJSON 事件输出；
 - `~/.willdeep/config.toml` 多 Provider 配置；
 - Ratatui 交互界面与同一套审批机制；
 - 版本化 JSON 会话持久化、列表和恢复；
@@ -99,6 +99,25 @@ chmod 600 ~/.willdeep/config.toml
 willdeep --profile some-im --workspace .
 ```
 
+聊天记录默认自动跟随最新内容；手动查看历史后暂停跟随，回到底部后自动恢复：
+
+| 按键 | 行为 |
+|---|---|
+| `↑` / `↓` | 按显示行滚动聊天记录 |
+| `PageUp` / `PageDown` | 按页滚动 |
+| `Home` / `End` | 跳到顶部 / 回到底部并恢复自动跟随 |
+| `Ctrl+O` | 展开或收起最近 Tool Use 明细 |
+| `Enter` | 发送 Prompt |
+| `Ctrl+C` | 退出并恢复终端 |
+
+Tool Use 默认显示为单条聚合活动摘要，例如：
+
+```text
+Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
+```
+
+失败数量不会被隐藏；需要排查时使用 `Ctrl+O` 查看最近明细。
+
 每次成功回复会原子保存到 `$WILLDEEP_HOME/sessions/<uuid>.json`。命令行可查看或恢复：
 
 ```bash
@@ -106,6 +125,8 @@ willdeep --list-sessions
 willdeep --resume latest "继续检查刚才的问题"
 willdeep --resume 550e8400-e29b-41d4-a716-446655440000 "继续"
 ```
+
+当前 Prompt 编辑器仍是基础单行输入。多行编辑、光标移动、Bracketed Paste 文本附件和图片附件属于下一阶段，尚未包含在 `0.3.0-rc2`，README 不把设计稿当成已交付功能。
 
 ## Skills 与 MCP
 
