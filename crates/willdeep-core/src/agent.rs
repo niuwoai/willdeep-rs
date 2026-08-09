@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::provider::{Provider, ProviderError};
+use crate::subagent::{SpawnAgentArgs, SubagentCatalog};
 use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage};
 
@@ -63,6 +64,8 @@ pub enum AgentError {
     EmptyResponse,
     #[error("agent reached the maximum of {0} turns before producing a final answer")]
     MaxTurns(usize),
+    #[error("subagent failed: {0}")]
+    Subagent(String),
 }
 
 pub struct Agent {
@@ -71,6 +74,7 @@ pub struct Agent {
     config: AgentConfig,
     sink: Arc<dyn EventSink>,
     image_fallback: Option<(Arc<dyn Provider>, String)>,
+    subagents: Option<Arc<SubagentCatalog>>,
 }
 
 impl Agent {
@@ -81,6 +85,7 @@ impl Agent {
             config,
             sink: Arc::new(NoopSink),
             image_fallback: None,
+            subagents: None,
         }
     }
 
@@ -90,6 +95,11 @@ impl Agent {
         label: impl Into<String>,
     ) -> Self {
         self.image_fallback = Some((provider, label.into()));
+        self
+    }
+
+    pub fn with_subagents(mut self, catalog: Arc<SubagentCatalog>) -> Self {
+        self.subagents = Some(catalog);
         self
     }
 
@@ -171,7 +181,7 @@ impl Agent {
                 self.sink
                     .emit(AgentEvent::ToolRequested(call.clone()))
                     .await;
-                let result = self.tools.execute(&call).await;
+                let result = self.execute_tool(&call).await;
                 let (output, is_error) = match result {
                     Ok(output) => (output, false),
                     Err(error) => (format!("tool error: {error}"), true),
@@ -187,6 +197,45 @@ impl Agent {
             }
         }
         Err(AgentError::MaxTurns(self.config.max_turns))
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, ToolError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if call.name != "spawn_agent" {
+                return self.tools.execute(call).await;
+            }
+            let catalog = self
+                .subagents
+                .as_ref()
+                .ok_or_else(|| ToolError::UnknownTool(call.name.clone()))?;
+            let args: SpawnAgentArgs =
+                serde_json::from_value(call.parsed_arguments().map_err(|source| {
+                    ToolError::InvalidArguments {
+                        tool: call.name.clone(),
+                        source,
+                    }
+                })?)
+                .map_err(|source| ToolError::InvalidArguments {
+                    tool: call.name.clone(),
+                    source,
+                })?;
+            let approved_target = if catalog.needs_write_approval(args.profile.as_deref()) {
+                let requested = args.target_file.as_deref().ok_or_else(|| {
+                    ToolError::OutsideWorkspace("editor profile requires target_file".to_owned())
+                })?;
+                Some(self.tools.approve_subagent_editor(requested).await?)
+            } else {
+                None
+            };
+            catalog
+                .run(args, approved_target)
+                .await
+                .map_err(|error| ToolError::Network(error.to_string()))
+        })
     }
 
     pub async fn compress_history(

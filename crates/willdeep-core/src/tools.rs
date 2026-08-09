@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,6 +13,9 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::background::{
+    BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
+};
 use crate::types::{ToolCall, ToolDefinition};
 use crate::{McpRegistry, SkillCatalog};
 
@@ -99,6 +103,9 @@ pub struct ToolRegistry {
     skills: Arc<SkillCatalog>,
     mcp: Arc<McpRegistry>,
     web: Option<WebToolConfig>,
+    background: Arc<BackgroundTaskRegistry>,
+    allowed_tools: Option<HashSet<String>>,
+    write_target: Option<PathBuf>,
 }
 
 impl ToolRegistry {
@@ -120,6 +127,9 @@ impl ToolRegistry {
             skills: Arc::new(SkillCatalog::default()),
             mcp: Arc::new(McpRegistry::default()),
             web: None,
+            background: Arc::new(BackgroundTaskRegistry::default()),
+            allowed_tools: None,
+            write_target: None,
         })
     }
 
@@ -139,6 +149,37 @@ impl ToolRegistry {
     pub fn with_web_tools(mut self, config: Option<WebToolConfig>) -> Self {
         self.web = config;
         self
+    }
+    pub fn with_background_tasks(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
+        self.background = registry;
+        self
+    }
+    pub fn with_allowed_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_tools = Some(names.into_iter().collect());
+        self
+    }
+    pub fn with_write_target(mut self, target: Option<PathBuf>) -> Self {
+        self.write_target = target;
+        self
+    }
+
+    pub async fn approve_subagent_editor(&self, requested: &str) -> Result<PathBuf, ToolError> {
+        let target = self.resolve_existing(requested)?;
+        if !target.is_file() {
+            return Err(ToolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "editor target is not a file",
+            )));
+        }
+        self.require_approval(
+            &format!(
+                "allow editor subagent to modify exactly: {}",
+                display_relative(&self.workspace, &target)
+            ),
+            false,
+        )
+        .await?;
+        Ok(target)
     }
 
     pub fn workspace(&self) -> &Path {
@@ -213,6 +254,21 @@ impl ToolRegistry {
                 json!({"type": "object", "properties": {}, "additionalProperties": false}),
             ),
             definition(
+                "get_job_output",
+                "Read the captured output of a background shell job or subagent.",
+                json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000}},"required":["job_id"],"additionalProperties":false}),
+            ),
+            definition(
+                "kill_job",
+                "Request cancellation of a running background shell job or subagent.",
+                json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"],"additionalProperties":false}),
+            ),
+            definition(
+                "spawn_agent",
+                "Delegate a self-contained task to a child agent with an isolated context. Profiles: scout (locate), reader (summarize), deep (investigate), editor (one separately approved file). Children cannot spawn more agents.",
+                json!({"type":"object","properties":{"prompt":{"type":"string"},"label":{"type":"string"},"profile":{"type":"string","enum":["scout","reader","deep","editor"]},"run_in_background":{"type":"boolean"},"target_file":{"type":"string"}},"required":["prompt"],"additionalProperties":false}),
+            ),
+            definition(
                 "web_search",
                 "Search the public web through the configured some.im managed search. Network access requires approval.",
                 json!({"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","minimum":1,"maximum":20}},"required":["query"],"additionalProperties":false}),
@@ -230,7 +286,8 @@ impl ToolRegistry {
                     "properties": {
                         "command": {"type": "string", "description": "Shell command line."},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-                        "label": {"type": "string", "description": "Optional concise action label; never include secrets."}
+                        "label": {"type": "string", "description": "Optional concise action label; never include secrets."},
+                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately. Completion is delivered back to the main harness."}
                     },
                     "required": ["command"], "additionalProperties": false
                 }),
@@ -263,6 +320,9 @@ impl ToolRegistry {
             ),
         ];
         tools.extend(self.mcp.definitions());
+        if let Some(allowed) = &self.allowed_tools {
+            tools.retain(|tool| allowed.contains(&tool.name));
+        }
         tools
     }
 
@@ -275,6 +335,8 @@ impl ToolRegistry {
             "read_file" => self.read_file(parse(call)?).await,
             "list_directory" => self.list_directory(parse(call)?).await,
             "git_status" => self.git_status().await,
+            "get_job_output" => self.get_job_output(parse(call)?),
+            "kill_job" => self.kill_job(parse(call)?).await,
             "web_search" => self.web_search(parse(call)?).await,
             "web_fetch" => self.web_fetch(parse(call)?).await,
             "run_command" => self.run_command(parse(call)?).await,
@@ -644,6 +706,57 @@ impl ToolRegistry {
             .timeout_seconds
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
             .clamp(1, MAX_COMMAND_TIMEOUT_SECS);
+        if args.run_in_background.unwrap_or(false) {
+            let command = args.command;
+            let workspace = self.workspace.clone();
+            let id = self
+                .background
+                .start(BackgroundTaskKind::Shell, description, async move {
+                    let mut process = platform_shell(&command);
+                    process
+                        .current_dir(workspace)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .kill_on_drop(true);
+                    let output =
+                        match tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+                            process.spawn()?.wait_with_output().await
+                        })
+                        .await
+                        {
+                            Ok(Ok(output)) => output,
+                            Ok(Err(error)) => {
+                                return TaskResult {
+                                    status: BackgroundTaskStatus::LaunchFailed,
+                                    exit_code: Some(-1),
+                                    output: error.to_string(),
+                                };
+                            }
+                            Err(_) => {
+                                return TaskResult {
+                                    status: BackgroundTaskStatus::TimedOut,
+                                    exit_code: None,
+                                    output: format!("command timed out after {timeout} seconds"),
+                                };
+                            }
+                        };
+                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    TaskResult {
+                        status: if output.status.success() {
+                            BackgroundTaskStatus::Completed
+                        } else {
+                            BackgroundTaskStatus::Failed
+                        },
+                        exit_code: output.status.code(),
+                        output: text,
+                    }
+                });
+            return Ok(format!(
+                "Background task started: {id}. Completion will be delivered automatically; use get_job_output for details."
+            ));
+        }
         let mut command = platform_shell(&args.command);
         command
             .current_dir(&self.workspace)
@@ -667,6 +780,7 @@ impl ToolRegistry {
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
+        self.require_write_target(&args.path)?;
         self.require_approval(&format!("create file: {}", args.path), true)
             .await?;
         let path = self.resolve_new(&args.path)?;
@@ -688,6 +802,7 @@ impl ToolRegistry {
     }
 
     async fn edit_file(&self, args: EditArgs) -> Result<String, ToolError> {
+        self.require_write_target(&args.path)?;
         if args.old_string == args.new_string {
             return Err(ToolError::IdenticalEdit);
         }
@@ -728,6 +843,40 @@ impl ToolRegistry {
             Ok(())
         } else {
             Err(ToolError::ApprovalDenied(description.to_owned()))
+        }
+    }
+
+    fn require_write_target(&self, requested: &str) -> Result<(), ToolError> {
+        if let Some(target) = &self.write_target {
+            let resolved = self.resolve_existing(requested)?;
+            if &resolved != target {
+                return Err(ToolError::OutsideWorkspace(format!(
+                    "subagent may only edit {}",
+                    display_relative(&self.workspace, target)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
+        self.background
+            .output(&args.job_id, args.tail_lines.unwrap_or(200).clamp(1, 2_000))
+            .ok_or_else(|| {
+                ToolError::Network(format!("background task not found: {}", args.job_id))
+            })
+    }
+
+    async fn kill_job(&self, args: JobIDArgs) -> Result<String, ToolError> {
+        self.require_approval(&format!("cancel background task: {}", args.job_id), false)
+            .await?;
+        if self.background.kill(&args.job_id) {
+            Ok(format!("kill requested for {}", args.job_id))
+        } else {
+            Err(ToolError::Network(format!(
+                "running background task not found: {}",
+                args.job_id
+            )))
         }
     }
 
@@ -1074,6 +1223,18 @@ struct CommandArgs {
     command: String,
     timeout_seconds: Option<u64>,
     label: Option<String>,
+    run_in_background: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct JobOutputArgs {
+    job_id: String,
+    tail_lines: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct JobIDArgs {
+    job_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1105,6 +1266,14 @@ struct EditArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct AllowApprover;
+    #[async_trait]
+    impl Approver for AllowApprover {
+        async fn approve(&self, _description: &str) -> bool {
+            true
+        }
+    }
 
     fn workspace(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("willdeep-{name}-{}", uuid::Uuid::new_v4()));
@@ -1180,6 +1349,7 @@ mod tests {
                 command: "printf should-not-run".to_owned(),
                 timeout_seconds: None,
                 label: None,
+                run_in_background: None,
             })
             .await;
 
@@ -1216,5 +1386,78 @@ mod tests {
         assert!(!is_public_ip("10.0.0.1".parse().expect("IPv4")));
         assert!(!is_public_ip("::1".parse().expect("IPv6")));
         assert!(is_public_ip("1.1.1.1".parse().expect("IPv4")));
+    }
+
+    #[tokio::test]
+    async fn subagent_write_target_rejects_every_other_file() {
+        let root = workspace("subagent-target");
+        std::fs::write(root.join("allowed.txt"), "before").expect("allowed fixture");
+        std::fs::write(root.join("other.txt"), "before").expect("other fixture");
+        let target = root
+            .join("allowed.txt")
+            .canonicalize()
+            .expect("canonical target");
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_write_target(Some(target));
+
+        registry
+            .edit_file(EditArgs {
+                path: "allowed.txt".to_owned(),
+                old_string: "before".to_owned(),
+                new_string: "after".to_owned(),
+                replace_all: None,
+            })
+            .await
+            .expect("approved target");
+        let denied = registry
+            .edit_file(EditArgs {
+                path: "other.txt".to_owned(),
+                old_string: "before".to_owned(),
+                new_string: "after".to_owned(),
+                replace_all: None,
+            })
+            .await;
+        assert!(matches!(denied, Err(ToolError::OutsideWorkspace(_))));
+        assert_eq!(
+            std::fs::read_to_string(root.join("other.txt")).expect("other"),
+            "before"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn approved_background_command_returns_handle_and_publishes_completion() {
+        let root = workspace("background-command");
+        let background = Arc::new(BackgroundTaskRegistry::default());
+        let mut events = background.subscribe();
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_approver(Arc::new(AllowApprover))
+            .with_background_tasks(background.clone());
+        let command = if cfg!(windows) {
+            "Write-Output background-ok"
+        } else {
+            "printf background-ok"
+        };
+        let result = registry
+            .run_command(CommandArgs {
+                command: command.to_owned(),
+                timeout_seconds: Some(10),
+                label: Some("test command".to_owned()),
+                run_in_background: Some(true),
+            })
+            .await
+            .expect("start");
+        assert!(result.contains("job_"));
+        let event = events.recv().await.expect("completion");
+        assert_eq!(event.snapshot.status, BackgroundTaskStatus::Completed);
+        assert!(
+            background
+                .output(&event.snapshot.id, 20)
+                .expect("output")
+                .contains("background-ok")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

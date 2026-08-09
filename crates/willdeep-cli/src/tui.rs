@@ -24,8 +24,8 @@ use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::types::Usage;
 use willdeep_core::{
-    Agent, AgentEvent, Approver, EventSink, Message, MessageAttachment, Session, SessionStore,
-    SkillCatalog,
+    Agent, AgentEvent, Approver, BackgroundTaskRegistry, BackgroundTaskSnapshot, EventSink,
+    Message, MessageAttachment, Session, SessionStore, SkillCatalog,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
@@ -92,6 +92,8 @@ struct App {
     context_window: u64,
     context_tokens: u64,
     activity_line: String,
+    background_tasks: Vec<BackgroundTaskSnapshot>,
+    background_notices: VecDeque<String>,
 }
 
 #[derive(Default)]
@@ -151,6 +153,7 @@ pub async fn run(
         mpsc::UnboundedSender<UiMessage>,
         mpsc::UnboundedReceiver<UiMessage>,
         u64,
+        Arc<BackgroundTaskRegistry>,
     ),
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -167,6 +170,7 @@ pub async fn run(
         skills,
         relay_bridge,
         context_window: ui.2,
+        background_tasks: ui.3,
         tx: ui.0,
         rx: ui.1,
     };
@@ -187,6 +191,7 @@ struct TuiRuntime {
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
     context_window: u64,
+    background_tasks: Arc<BackgroundTaskRegistry>,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
 }
@@ -200,11 +205,15 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::new(transcript(&session.messages));
     app.context_window = runtime.context_window.max(1);
+    app.background_tasks = runtime.background_tasks.snapshots();
+    let mut background_rx = runtime.background_tasks.subscribe();
     let mut events = EventStream::new();
+    let mut refresh = tokio::time::interval(Duration::from_secs(1));
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         draw(term, &mut app)?;
         tokio::select! {
+            _=refresh.tick()=>app.background_tasks=runtime.background_tasks.snapshots(),
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse) if matches!(mouse.kind,MouseEventKind::Down(_))=>app.handle_mouse(mouse.column,mouse.row),
@@ -243,7 +252,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Compressing context".to_owned();},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
                 UiMessage::Approval(v,s)=>app.approval=Some((v,s)),
-                UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
@@ -251,6 +260,13 @@ async fn event_loop(
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
                 else {app.append_transcript(format!("Phone: {}",prompt.text));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt.text)?;}
+            },
+            Ok(event)=background_rx.recv()=>{
+                let _=runtime.background_tasks.drain_pending();
+                app.background_tasks=runtime.background_tasks.snapshots();
+                app.background_notices.push_back(event.notice);
+                app.notice=Some(format!("{} finished · returning result to main harness",event.snapshot.id));
+                if !app.running && let Some(notice)=app.background_notices.pop_front(){dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}
             },
         }
     }
@@ -285,6 +301,8 @@ impl App {
             context_window: 128_000,
             context_tokens: 0,
             activity_line: String::new(),
+            background_tasks: Vec::new(),
+            background_notices: VecDeque::new(),
         }
     }
     fn finish_turn(&mut self) {
@@ -534,6 +552,31 @@ fn dispatch_compress(
     });
 }
 
+fn dispatch_notification(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    agent: &Arc<Agent>,
+    tx: &mpsc::UnboundedSender<UiMessage>,
+    notice: String,
+) -> Result<()> {
+    app.running = true;
+    app.turn_started = Some(Instant::now());
+    app.activity_line = "Handling background result".to_owned();
+    let history = session.messages.clone();
+    let message = Message::user(notice);
+    session.messages.push(message.clone());
+    store.save(session)?;
+    let agent = agent.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(UiMessage::Finished(
+            agent.run_with_history_message(history, message).await,
+        ));
+    });
+    Ok(())
+}
+
 fn mobile_snapshot(session: &Session) -> serde_json::Value {
     serde_json::json!({
         "id": uuid::Uuid::new_v4(),
@@ -743,12 +786,14 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         if columns[1].width > 0 {
             let relay = if app.mobile_gateway.is_some() { "connected" } else { "off" };
             let agent = if app.running { "running" } else { "idle" };
+            let jobs = app.background_tasks.iter().take(8).map(|task| format!("{} · {:?} · {:.1}s\n  {}",task.id,task.status,task.elapsed_millis as f64/1000.0,task.label)).collect::<Vec<_>>().join("\n");
             let background = format!(
-                "Agent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}",
+                "Agent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}\n\n{}",
                 app.mobile_queue.len(),
                 app.tools.completed,
                 app.tools.requested,
-                app.tools.failed
+                app.tools.failed,
+                if jobs.is_empty(){"No background tasks"}else{&jobs}
             );
             f.render_widget(
                 Paragraph::new(background)

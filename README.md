@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.7.0-rc1`，支持：
+当前版本为 `0.8.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -24,6 +24,8 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
 - some.im 纯文本模型通过同一账号下的视觉模型理解图片；
 - 上下文自动摘要压缩、Token/耗时状态和宽屏后台状态栏。
+- 后台 Shell Job 完成/失败自动回流主 Harness；
+- 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
 
 当前暂不包含 Computer Use、Browser Use、多 Agent 与后台 daemon。
 
@@ -161,6 +163,35 @@ enabled = true
 ```
 
 启动时完成 initialize 和 `tools/list`，远端工具暴露为 `mcp__filesystem__<tool>`。MCP 调用在所有审批模式下均逐次确认；`smart`、`workspace-write` 和兼容参数 `--full-auto` 只免审当前工作区内的创建、编辑操作。敏感值应由 MCP 子进程继承环境变量；不要把 Token 写入配置。
+
+## 后台任务与子 Agent
+
+模型可用 `run_command` 的 `run_in_background = true` 启动后台 Shell，立即获得 `job_xxxxxx`。任务完成、失败、超时或被取消后，CLI 会把带输出尾部的 `<background-task-notification>` 自动送回主 Harness；主 Agent 空闲时立即续跑，忙碌时在当前回复结束后续跑。`get_job_output` 查看捕获输出，`kill_job` 请求取消。非 TUI 模式会保持进程存活，直到相关后台任务完成并处理完回流结果。
+
+`spawn_agent` 把自包含任务交给隔离上下文的子 Agent，可选择同步等待或 `run_in_background = true`：
+
+| Profile | 用途 | 默认工具 |
+|---|---|---|
+| `scout` | 快速定位文件、符号和调用点 | search/grep/list/read |
+| `reader` | 阅读和总结长文件或文档 | read/list/search |
+| `deep` | 跨文件深入调查 | search/grep/read/list/git status |
+| `editor` | 修改一个明确目标文件 | read/edit |
+
+子 Agent 看不到父对话、不能询问用户、不能继续派生。`editor` 必须提供 `target_file`，主 Harness 会对 canonicalize 后的现有文件单独请求批准；批准后的子 Agent 仍只能修改这一个文件。
+
+各工种可绑定不同模型：
+
+```toml
+[subagents.scout]
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 8
+context_window = 128000
+
+[subagents.deep]
+# 省略绑定时继承当前会话模型
+max_turns = 12
+```
 
 ### some.im
 

@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalMode, Approver, EventSink, ToolRegistry, WebToolConfig,
-    build_provider,
+    Agent, AgentConfig, AgentEvent, ApprovalMode, Approver, BackgroundTaskRegistry, EventSink,
+    SubagentCatalog, ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
 };
 
 mod config;
@@ -198,6 +198,7 @@ async fn run() -> Result<()> {
     } else {
         None
     };
+    let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
 
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("strict");
@@ -228,10 +229,12 @@ async fn run() -> Result<()> {
     } else {
         Arc::new(TerminalApprover)
     };
+    let background_tasks = Arc::new(BackgroundTaskRegistry::default());
     let tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
         .with_skills(skills.clone())
         .with_mcp(mcp)
+        .with_background_tasks(background_tasks.clone())
         .with_web_tools(web_tools);
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
     if !skills.list().is_empty() {
@@ -249,6 +252,42 @@ async fn run() -> Result<()> {
     let context_window = profile
         .and_then(|value| value.context_window)
         .unwrap_or(128_000);
+    let cheap_provider = if kind == ProviderKind::SomeIm {
+        let mut cheap = parent_provider_config.clone();
+        cheap.model = "glm-5".to_owned();
+        build_provider(cheap).context("initialize default subagent provider")?
+    } else {
+        provider.clone()
+    };
+    let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
+    for subagent in &mut subagent_profiles {
+        if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
+            if let Some(provider_name) = settings.provider_profile.as_deref() {
+                let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
+                if let Some(model) = &settings.model {
+                    configured.model = model.clone();
+                }
+                subagent.provider = build_provider(configured)
+                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
+            } else if let Some(model) = &settings.model {
+                let mut configured = parent_provider_config.clone();
+                configured.model = model.clone();
+                subagent.provider = build_provider(configured)
+                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
+            }
+            if let Some(max_turns) = settings.max_turns {
+                subagent.max_turns = max_turns;
+            }
+            if let Some(window) = settings.context_window {
+                subagent.context_window = window;
+            }
+        }
+    }
+    let subagents = Arc::new(SubagentCatalog::new(
+        &workspace,
+        subagent_profiles,
+        background_tasks.clone(),
+    ));
     let mut agent = Agent::new(
         provider,
         tools,
@@ -258,10 +297,12 @@ async fn run() -> Result<()> {
             context_window,
         },
     )
-    .with_event_sink(sink);
+    .with_event_sink(sink)
+    .with_subagents(subagents);
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
+    let agent = Arc::new(agent);
 
     let mut session = resumed.unwrap_or_else(|| {
         willdeep_core::Session::new(
@@ -273,13 +314,13 @@ async fn run() -> Result<()> {
     relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
         return tui::run(
-            Arc::new(agent),
+            agent,
             session,
             store,
             home,
             skills,
             relay_bridge,
-            (tui_tx, tui_rx, context_window),
+            (tui_tx, tui_rx, context_window, background_tasks),
         )
         .await;
     }
@@ -287,9 +328,36 @@ async fn run() -> Result<()> {
     let history = session.messages.clone();
     session.messages.push(willdeep_core::Message::user(&prompt));
     store.save(&mut session)?;
-    let outcome = agent.run_with_history(history, prompt).await?;
+    let mut outcome = agent.run_with_history(history, prompt).await?;
     session.messages = outcome.messages.clone();
     store.save(&mut session)?;
+    loop {
+        let events = background_tasks.drain_pending();
+        if events.is_empty() {
+            let running = background_tasks
+                .snapshots()
+                .iter()
+                .any(|task| task.status == willdeep_core::BackgroundTaskStatus::Running);
+            if !running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+        for event in events {
+            if !cli.json {
+                eprintln!(
+                    "[background] {} finished; continuing main harness",
+                    event.snapshot.id
+                );
+            }
+            outcome = agent
+                .run_with_history(session.messages.clone(), event.notice)
+                .await?;
+            session.messages = outcome.messages.clone();
+            store.save(&mut session)?;
+        }
+    }
     if cli.json {
         println!(
             "{}",
@@ -340,6 +408,57 @@ fn resolve_base(
             "API base is required; set it in the provider profile, WILLDEEP_API_BASE, or --api-base"
         ),
     }
+}
+
+fn provider_config_from_profile(file: &config::ConfigFile, name: &str) -> Result<ProviderConfig> {
+    let profile = file
+        .providers
+        .get(name)
+        .with_context(|| format!("provider profile not found: {name}"))?;
+    let provider_arg = profile
+        .provider
+        .as_deref()
+        .map(parse_provider)
+        .transpose()?
+        .unwrap_or(ProviderArg::Auto);
+    let base = profile
+        .api_base
+        .clone()
+        .or_else(|| match provider_arg {
+            ProviderArg::SomeIm => Some("https://some.im/v1".to_owned()),
+            ProviderArg::Anthropic => Some("https://api.anthropic.com".to_owned()),
+            _ => None,
+        })
+        .with_context(|| format!("providers.{name}.api_base is required"))?;
+    let kind = resolve_provider(provider_arg, &base);
+    let api = profile
+        .api
+        .as_deref()
+        .map(parse_api)
+        .transpose()?
+        .unwrap_or(ApiArg::Auto);
+    let key = profile
+        .api_key
+        .clone()
+        .or_else(|| {
+            profile
+                .api_key_env
+                .as_deref()
+                .and_then(|variable| std::env::var(variable).ok())
+        })
+        .or_else(|| match kind {
+            ProviderKind::SomeIm => std::env::var("SOMEIM_API_KEY").ok(),
+            ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
+            ProviderKind::OpenAiCompatible => std::env::var("OPENAI_API_KEY").ok(),
+        })
+        .with_context(|| format!("API key for providers.{name} is unavailable"))?;
+    let model = profile
+        .model
+        .clone()
+        .with_context(|| format!("providers.{name}.model is required"))?;
+    let mut configured = ProviderConfig::new(kind, resolve_dialect(api, kind), base, key, model);
+    configured.max_output_tokens = profile.max_output_tokens.unwrap_or(16_384);
+    Ok(configured)
 }
 
 fn resolve_provider(provider: ProviderArg, base: &str) -> ProviderKind {

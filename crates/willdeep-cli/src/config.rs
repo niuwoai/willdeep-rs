@@ -17,6 +17,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderProfile>,
     #[serde(default)]
+    pub subagents: BTreeMap<String, SubagentProfileSettings>,
+    #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub skills: SkillSettings,
@@ -48,6 +50,15 @@ pub struct ProviderProfile {
     pub max_output_tokens: Option<u32>,
     pub context_window: Option<u64>,
     pub vision_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentProfileSettings {
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+    pub max_turns: Option<usize>,
+    pub context_window: Option<u64>,
 }
 
 pub struct LoadedConfig {
@@ -137,6 +148,22 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         }
         if provider.api_key.is_some() && provider.api_key_env.is_some() {
             bail!("providers.{name} cannot define both api_key and api_key_env");
+        }
+    }
+    for (name, subagent) in &file.subagents {
+        if !matches!(name.as_str(), "scout" | "reader" | "deep" | "editor") {
+            bail!("unknown subagent profile: {name}");
+        }
+        if subagent
+            .max_turns
+            .is_some_and(|value| !(1..=24).contains(&value))
+        {
+            bail!("subagents.{name}.max_turns must be between 1 and 24");
+        }
+        if let Some(provider) = &subagent.provider_profile
+            && !file.providers.contains_key(provider)
+        {
+            bail!("subagents.{name}.provider_profile not found: {provider}");
         }
     }
     for (name, server) in &file.mcp_servers {

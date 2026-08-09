@@ -30,6 +30,28 @@ api_key_env = "ANTHROPIC_API_KEY"
 model = "claude-sonnet-4-5"
 max_output_tokens = 16384
 
+# Optional per-trade model bindings. Omit a section to use the built-in
+# defaults: scout/reader/editor use some.im glm-5 when the parent is some.im;
+# deep inherits the parent model. provider_profile references [providers.*].
+[subagents.scout]
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 8
+context_window = 128000
+
+[subagents.reader]
+provider_profile = "some-im"
+model = "glm-5"
+
+[subagents.deep]
+# Inherits the current session when provider_profile/model are omitted.
+max_turns = 12
+
+[subagents.editor]
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 6
+
 # MCP stdio servers are initialized once and exposed as
 # mcp__<server>__<tool>. Put credentials in inherited environment variables;
 # do not write tokens into this file.

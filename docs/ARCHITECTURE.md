@@ -93,6 +93,12 @@ Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% �
 
 Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。手机的 `message.send` 进入当前会话；Agent 忙碌时请求按到达顺序排队，最终回复使用 Android 已支持的 `message.append` 与 `message.done` 事件返回。
 
+### 后台任务回流与子 Agent
+
+`BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
+
+`SubagentCatalog` 内置 scout、reader、deep、editor。每个工种绑定 Provider、模型、工具白名单、上下文窗口和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。editor 的目标先由父 ToolRegistry canonicalize 并单独审批，子 ToolRegistry 再以 canonical 绝对路径执行单文件匹配，符号链接或路径别名不能扩大授权范围。
+
 ## 尚未满足的长期架构要求
 
 阶段 0 文档要求的 ACP 双轨验证、crate 级复用清单、协议 Schema 与跨客户端会话均尚未完成。当前实现是原生 Harness 起点，不能视为完整阶段 0 或阶段 1 产品。

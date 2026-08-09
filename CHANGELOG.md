@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.0-rc1] - 2026-08-09
+
+### Added
+
+- `run_command` 支持 `run_in_background`，返回 `job_xxxxxx`；增加 `get_job_output` 与 `kill_job`。
+- 后台 Shell 和后台子 Agent 成功、失败、超时或取消后，结果自动注入主 Harness 并触发后续处理。
+- 增加 `spawn_agent`，支持前台或后台运行及 `scout`、`reader`、`deep`、`editor` 四种内置工种。
+- TOML 增加 `[subagents.<trade>]`，可为各工种绑定不同 Provider Profile、模型、上下文和轮数。
+- TUI 宽屏右栏实时显示后台任务/子 Agent 的 ID、状态、耗时和标签。
+
+### Security
+
+- 子 Agent 禁止嵌套派生；只读工种不含写工具和 Shell。
+- `editor` 必须单独审批 canonicalize 后的现有目标文件，子 Agent 只能编辑该文件。
+
 ## [0.7.0-rc1] - 2026-08-09
 
 ### Added
