@@ -4,6 +4,7 @@ default_provider = "some-im"
 [agent]
 max_turns = 24
 approval = "smart"
+language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--language
 
 [providers.some-im]
 provider = "some-im"

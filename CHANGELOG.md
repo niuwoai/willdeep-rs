@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.0-rc1] - 2026-08-10
+
+### Added
+
+- TUI 与 Web 支持简体中文、英语和日语；可通过 `agent.language`、`--language`、`WILLDEEP_LANGUAGE` 或 Web 语言选择器切换。
+- Web 语言偏好保存在浏览器本地，并随 SSE 请求传递，使实时 Harness 状态也使用所选语言。
+
+### Changed
+
+- TUI 审批弹窗将 `Y`/`A` 显示为黄色高亮键，将拒绝键 `N` 显示为红色高亮键，动作说明同步本地化。
+
 ## [0.11.0-rc1] - 2026-08-10
 
 ### Added

@@ -18,7 +18,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -29,6 +29,7 @@ use willdeep_core::{
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
+use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 pub enum UiMessage {
@@ -109,6 +110,7 @@ struct App {
     background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
+    language: Language,
 }
 
 struct AskDialog {
@@ -144,7 +146,7 @@ impl ToolActivity {
             *v = format!("{} {name}", if is_error { "✗" } else { "✓" });
         }
     }
-    fn summary(&self) -> String {
+    fn summary(&self, language: Language) -> String {
         let calls = self
             .counts
             .iter()
@@ -152,16 +154,32 @@ impl ToolActivity {
             .collect::<Vec<_>>()
             .join(" · ");
         let progress = if self.completed < self.requested {
-            format!("{}/{} complete", self.completed, self.requested)
+            format!(
+                "{}/{} {}",
+                self.completed,
+                self.requested,
+                language.text("完成", "complete", "完了")
+            )
         } else {
-            format!("{} calls", self.requested)
+            format!(
+                "{} {}",
+                self.requested,
+                language.text("次调用", "calls", "回呼び出し")
+            )
         };
         let failed = if self.failed > 0 {
-            format!(" · {} failed", self.failed)
+            format!(
+                " · {} {}",
+                self.failed,
+                language.text("失败", "failed", "失敗")
+            )
         } else {
             String::new()
         };
-        format!("Tools: {progress}{failed} · {calls}")
+        format!(
+            "{}: {progress}{failed} · {calls}",
+            language.text("工具", "Tools", "ツール")
+        )
     }
 }
 
@@ -177,6 +195,7 @@ pub async fn run(
         mpsc::UnboundedReceiver<UiMessage>,
         u64,
         Arc<BackgroundTaskRegistry>,
+        Language,
     ),
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -197,7 +216,7 @@ pub async fn run(
         tx: ui.0,
         rx: ui.1,
     };
-    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime).await;
+    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.4).await;
     terminal::disable_raw_mode()?;
     execute!(
         term.backend_mut(),
@@ -225,13 +244,14 @@ async fn event_loop(
     session: &mut Session,
     store: &SessionStore,
     runtime: &mut TuiRuntime,
+    language: Language,
 ) -> Result<()> {
     let mut initial_transcript = transcript(&session.messages);
     if initial_transcript.is_empty() {
-        initial_transcript.push(welcome_message(&session.workspace));
+        initial_transcript.push(welcome_message(&session.workspace, language));
     }
-    let mut app = App::new(initial_transcript);
-    app.workspace_status = workspace_status(&session.workspace);
+    let mut app = App::new(initial_transcript, language);
+    app.workspace_status = workspace_status(&session.workspace, language);
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
     let mut background_rx = runtime.background_tasks.subscribe();
@@ -276,13 +296,13 @@ async fn event_loop(
                 _=>{}
             }},
             Some(message)=runtime.rx.recv()=>match message {
-                UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line="Answering".to_owned();app.append_transcript(format!("WillDeep: {v}"));},
-                UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("Thinking · preparing turn {turn}")),
-                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.record_progress(format!("Using {}",v.name));app.tools.requested(&v.name);},
-                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace);}},
+                UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在回答","Answering","回答中").to_owned();app.append_transcript(format!("WillDeep: {v}"));},
+                UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
+                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
+                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
-                UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress("Compressing context".to_owned());},
-                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress("Context compressed".to_owned());},
+                UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
+                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
                 UiMessage::Approval(v,a,s)=>app.approval=Some((v,a,s)),
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
                 UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
@@ -307,7 +327,7 @@ async fn event_loop(
 }
 
 impl App {
-    fn new(transcript: Vec<String>) -> Self {
+    fn new(transcript: Vec<String>, language: Language) -> Self {
         Self {
             input: PromptEditor::default(),
             transcript,
@@ -339,12 +359,13 @@ impl App {
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
+            language,
         }
     }
     fn finish_turn(&mut self) {
         self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
         self.running = false;
-        self.activity_line = "Ready".to_owned();
+        self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
     fn record_progress(&mut self, value: String) {
         self.activity_line = value.clone();
@@ -628,7 +649,15 @@ fn dispatch_prompt(
     app.turn_started = Some(Instant::now());
     app.tools.reset();
     app.progress_log.clear();
-    app.record_progress("Thinking · understanding your request".to_owned());
+    app.record_progress(
+        app.language
+            .text(
+                "正在思考 · 理解你的请求",
+                "Thinking · understanding your request",
+                "思考中 · リクエストを理解しています",
+            )
+            .to_owned(),
+    );
     let history = session.messages.clone();
     let attachments = std::mem::take(&mut app.attachments)
         .into_iter()
@@ -814,7 +843,7 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                 format!(
                     "{} · {}\n{}",
                     app.activity_line,
-                    app.tools.summary(),
+                    app.tools.summary(app.language),
                     app.tools
                         .details
                         .iter()
@@ -826,16 +855,31 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                         .join("\n")
                 )
             } else if app.running {
-                app.progress_log.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join("\n")
+                app.progress_log
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .rev()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
             } else if app.tools.requested == 0 {
                 app.activity_line.clone()
             } else {
-                format!("{} · {}", app.activity_line, app.tools.summary())
+                format!(
+                    "{} · {}",
+                    app.activity_line,
+                    app.tools.summary(app.language)
+                )
             };
             f.render_widget(
                 Paragraph::new(text).block(
                     Block::default()
-                        .title("Activity · Ctrl+O details")
+                        .title(app.language.text(
+                            "活动 · Ctrl+O 查看详情",
+                            "Activity · Ctrl+O details",
+                            "アクティビティ · Ctrl+O で詳細",
+                        ))
                         .borders(Borders::ALL),
                 ),
                 areas[1],
@@ -862,7 +906,11 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             f.render_widget(
                 Paragraph::new(items).block(
                     Block::default()
-                        .title("Attachments · Ctrl+D remove")
+                        .title(app.language.text(
+                            "附件 · Ctrl+D 删除",
+                            "Attachments · Ctrl+D remove",
+                            "添付ファイル · Ctrl+D で削除",
+                        ))
                         .borders(Borders::ALL),
                 ),
                 areas[2],
@@ -877,7 +925,11 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             Paragraph::new(app.input.text())
                 .block(
                     Block::default()
-                        .title("Prompt · Shift/Alt+Enter newline")
+                        .title(app.language.text(
+                            "输入 · Shift/Alt+Enter 换行",
+                            "Prompt · Shift/Alt+Enter newline",
+                            "入力 · Shift/Alt+Enter で改行",
+                        ))
                         .borders(Borders::ALL),
                 )
                 .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0))
@@ -892,30 +944,92 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             let output = app.latest_usage.output_tokens.unwrap_or(0);
             let context_tokens = app.context_tokens.max(input);
             let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
-            let elapsed = app.turn_started.map(|value| value.elapsed()).or(app.last_elapsed).unwrap_or_default().as_secs_f32();
+            let elapsed = app
+                .turn_started
+                .map(|value| value.elapsed())
+                .or(app.last_elapsed)
+                .unwrap_or_default()
+                .as_secs_f32();
             if app.running {
-                format!("Running · context {context_pct}% · latest ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+O tools")
+                format!(
+                    "{} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+O",
+                    app.language.text("运行中", "Running", "実行中"),
+                    app.language.text("上下文", "context", "コンテキスト"),
+                    app.language.text("最近", "latest", "直近")
+                )
             } else {
-                format!("Ready · context {context_pct}% · latest ↑{input} ↓{output} · {elapsed:.1}s · Enter send")
+                format!(
+                    "{} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {}",
+                    app.language.text("就绪", "Ready", "準備完了"),
+                    app.language.text("上下文", "context", "コンテキスト"),
+                    app.language.text("最近", "latest", "直近"),
+                    app.language
+                        .text("Enter 发送", "Enter send", "Enter で送信")
+                )
             }
         });
         f.render_widget(Paragraph::new(status), areas[4]);
         if columns[1].width > 0 {
-            let relay = if app.mobile_gateway.is_some() { "connected" } else { "off" };
-            let agent = if app.running { "running" } else { "idle" };
-            let jobs = app.background_tasks.iter().take(8).map(|task| format!("{} · {:?} · {:.1}s\n  {}",task.id,task.status,task.elapsed_millis as f64/1000.0,task.label)).collect::<Vec<_>>().join("\n");
+            let relay = if app.mobile_gateway.is_some() {
+                app.language.text("已连接", "connected", "接続済み")
+            } else {
+                app.language.text("关闭", "off", "オフ")
+            };
+            let agent = if app.running {
+                app.language.text("运行中", "running", "実行中")
+            } else {
+                app.language.text("空闲", "idle", "待機中")
+            };
+            let jobs = app
+                .background_tasks
+                .iter()
+                .take(8)
+                .map(|task| {
+                    format!(
+                        "{} · {:?} · {:.1}s\n  {}",
+                        task.id,
+                        task.status,
+                        task.elapsed_millis as f64 / 1000.0,
+                        task.label
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             let background = format!(
-                "{}\n\nAgent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}\n\n{}",
+                "{}\n\n{}: {agent}\n{}: {relay}\n{}: {}\n{}: {}/{}\n{}: {}\n\n{}",
                 app.workspace_status,
+                app.language.text("智能体", "Agent", "エージェント"),
+                app.language.text("中继", "Relay", "リレー"),
+                app.language
+                    .text("手机队列", "Phone queue", "モバイルキュー"),
                 app.mobile_queue.len(),
+                app.language
+                    .text("工具完成", "Tools complete", "ツール完了"),
                 app.tools.completed,
                 app.tools.requested,
+                app.language.text("失败", "Failed", "失敗"),
                 app.tools.failed,
-                if jobs.is_empty(){"No background tasks"}else{&jobs}
+                if jobs.is_empty() {
+                    app.language.text(
+                        "没有后台任务",
+                        "No background tasks",
+                        "バックグラウンドタスクなし",
+                    )
+                } else {
+                    &jobs
+                }
             );
             f.render_widget(
                 Paragraph::new(background)
-                    .block(Block::default().title("Workspace · Background").borders(Borders::ALL))
+                    .block(
+                        Block::default()
+                            .title(app.language.text(
+                                "工作区 · 后台任务",
+                                "Workspace · Background",
+                                "ワークスペース · バックグラウンド",
+                            ))
+                            .borders(Borders::ALL),
+                    )
                     .wrap(Wrap { trim: false }),
                 columns[1],
             );
@@ -932,7 +1046,11 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             f.render_widget(
                 Paragraph::new(qr.clone()).block(
                     Block::default()
-                        .title("Scan with WillDeep Mobile · Esc hides")
+                        .title(app.language.text(
+                            "使用 WillDeep Mobile 扫码 · Esc 隐藏",
+                            "Scan with WillDeep Mobile · Esc hides",
+                            "WillDeep Mobile でスキャン · Esc で非表示",
+                        ))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan)),
                 ),
@@ -940,29 +1058,95 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             );
         }
         if let Some((description, always, _)) = &app.approval {
-            let actions = if *always { "Y Allow once · A Always allow · N Disallow" } else { "Y Allow once · N Disallow" };
-            let content = format!("{description}\n\n{actions}");
+            let content = approval_content(description, *always, app.language);
             let popup = centered_rect(f.area().width.min(76), 9.min(f.area().height), f.area());
             f.render_widget(Clear, popup);
-            f.render_widget(Paragraph::new(content).block(Block::default().title("Approval required").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow))).wrap(Wrap{trim:false}), popup);
+            f.render_widget(
+                Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .title(
+                                app.language
+                                    .text("需要确认", "Approval required", "承認が必要"),
+                            )
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Yellow)),
+                    )
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
         }
         if let Some(dialog) = &app.question {
-            let options = dialog.request.options.iter().enumerate().map(|(index,option)| {
-                let marker = if dialog.request.multi_select { if dialog.checked[index] { "[x]" } else { "[ ]" } } else if index == dialog.selected { "(*)" } else { "( )" };
-                format!("{} {} {}",if index==dialog.selected{"▶"}else{" "},marker,option)
-            }).collect::<Vec<_>>().join("\n");
-            let help = if dialog.request.multi_select { "↑/↓ select · Space toggle · type another answer · Enter send · Esc skip" } else { "↑/↓ select · type another answer · Enter send · Esc skip" };
-            let content = format!("{}\n\n{}\n\nOther answer: {}\n{}",dialog.request.question,options,dialog.answer.text(),help);
-            let height = (content.lines().count() as u16 + 2).min(f.area().height).max(8);
+            let options = dialog
+                .request
+                .options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let marker = if dialog.request.multi_select {
+                        if dialog.checked[index] { "[x]" } else { "[ ]" }
+                    } else if index == dialog.selected {
+                        "(*)"
+                    } else {
+                        "( )"
+                    };
+                    format!(
+                        "{} {} {}",
+                        if index == dialog.selected { "▶" } else { " " },
+                        marker,
+                        option
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let help = if dialog.request.multi_select {
+                app.language.text(
+                    "↑/↓ 选择 · Space 勾选 · 可输入其他答案 · Enter 发送 · Esc 跳过",
+                    "↑/↓ select · Space toggle · type another answer · Enter send · Esc skip",
+                    "↑/↓ 選択 · Space 切替 · その他を入力 · Enter 送信 · Esc スキップ",
+                )
+            } else {
+                app.language.text(
+                    "↑/↓ 选择 · 可输入其他答案 · Enter 发送 · Esc 跳过",
+                    "↑/↓ select · type another answer · Enter send · Esc skip",
+                    "↑/↓ 選択 · その他を入力 · Enter 送信 · Esc スキップ",
+                )
+            };
+            let content = format!(
+                "{}\n\n{}\n\n{}: {}\n{}",
+                dialog.request.question,
+                options,
+                app.language
+                    .text("其他答案", "Other answer", "その他の回答"),
+                dialog.answer.text(),
+                help
+            );
+            let height = (content.lines().count() as u16 + 2)
+                .min(f.area().height)
+                .max(8);
             let popup = centered_rect(f.area().width.min(84), height, f.area());
-            f.render_widget(Clear,popup);
-            f.render_widget(Paragraph::new(content).block(Block::default().title("Question from Agent").borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))).wrap(Wrap{trim:false}),popup);
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .title(app.language.text(
+                                "智能体提问",
+                                "Question from Agent",
+                                "エージェントからの質問",
+                            ))
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Cyan)),
+                    )
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
         }
     })?;
     Ok(())
 }
 
-fn workspace_status(workspace: &std::path::Path) -> String {
+fn workspace_status(workspace: &std::path::Path, language: Language) -> String {
     let branch = std::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(workspace)
@@ -994,12 +1178,57 @@ fn workspace_status(workspace: &std::path::Path) -> String {
         })
         .unwrap_or(0);
     format!(
-        "Project: {}\nBranch: {branch}\nDiff files: {status}\nWorktrees: {worktrees}",
+        "{}: {}\n{}: {branch}\n{}: {status}\n{}: {worktrees}",
+        language.text("项目", "Project", "プロジェクト"),
         workspace
             .file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or("workspace")
+            .unwrap_or("workspace"),
+        language.text("分支", "Branch", "ブランチ"),
+        language.text("变更文件", "Diff files", "変更ファイル"),
+        language.text("工作树", "Worktrees", "ワークツリー")
     )
+}
+
+fn approval_content(description: &str, always: bool, language: Language) -> Vec<Line<'static>> {
+    let allow_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let deny_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Red)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let mut content = description
+        .lines()
+        .map(|line| Line::raw(line.to_owned()))
+        .collect::<Vec<_>>();
+    content.push(Line::raw(""));
+    let mut actions = vec![
+        Span::styled(" Y ", allow_style),
+        Span::styled(
+            language.text(" 允许一次  ", " Allow once  ", " 一度だけ許可  "),
+            label_style,
+        ),
+    ];
+    if always {
+        actions.extend([
+            Span::styled(" A ", allow_style),
+            Span::styled(
+                language.text(" 始终允许  ", " Always allow  ", " 常に許可  "),
+                label_style,
+            ),
+        ]);
+    }
+    actions.extend([
+        Span::styled(" N ", deny_style),
+        Span::styled(language.text(" 拒绝", " Disallow", " 拒否"), label_style),
+    ]);
+    content.push(Line::from(actions));
+    content
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1056,7 +1285,7 @@ mod command_tests {
 
     #[test]
     fn goal_command_enriches_future_prompts() {
-        let mut app = App::new(Vec::new());
+        let mut app = App::new(Vec::new(), Language::En);
         let skills = SkillCatalog::default();
 
         assert!(app.handle_slash_command("/goal ship the CLI", &skills));
@@ -1070,7 +1299,7 @@ mod command_tests {
 
     #[test]
     fn unknown_slash_command_is_handled_locally() {
-        let mut app = App::new(Vec::new());
+        let mut app = App::new(Vec::new(), Language::En);
         let skills = SkillCatalog::default();
 
         assert!(app.handle_slash_command("/wat", &skills));
@@ -1079,7 +1308,7 @@ mod command_tests {
 
     #[test]
     fn ordinary_prompt_is_not_treated_as_command() {
-        let mut app = App::new(Vec::new());
+        let mut app = App::new(Vec::new(), Language::En);
         assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
     }
 }
@@ -1104,15 +1333,23 @@ fn transcript(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-fn welcome_message(workspace: &std::path::Path) -> String {
+fn welcome_message(workspace: &std::path::Path, language: Language) -> String {
     let project = workspace
         .file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("当前工作区");
-    format!(
-        "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
-    )
+        .unwrap_or(language.text("当前工作区", "current workspace", "現在のワークスペース"));
+    match language {
+        Language::ZhCn => format!(
+            "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
+        ),
+        Language::En => format!(
+            "WillDeep: Hello, I’m in {project}. Tell me what you want to build, fix, or investigate; I’ll inspect the project before making changes."
+        ),
+        Language::Ja => format!(
+            "WillDeep: こんにちは。{project} を開きました。実装、修正、調査したいことを教えてください。まずプロジェクトを確認してから作業します。"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1123,18 +1360,43 @@ mod tests {
         let mut a = ToolActivity::default();
         a.requested("read_file");
         a.completed("read_file", true);
-        assert!(a.summary().contains("1 failed"));
+        assert!(a.summary(Language::En).contains("1 failed"));
     }
 
     #[test]
     fn welcome_mentions_workspace_without_entering_model_history() {
-        let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"));
+        let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"), Language::ZhCn);
         assert!(welcome.starts_with("WillDeep:"));
         assert!(welcome.contains("willdeep-rs"));
     }
     #[test]
+    fn approval_shortcuts_are_colored_and_localized() {
+        let lines = approval_content("run command", true, Language::Ja);
+        let actions = lines.last().unwrap();
+        assert_eq!(actions.spans[0].content, " Y ");
+        assert_eq!(actions.spans[0].style.bg, Some(Color::Yellow));
+        assert!(
+            actions
+                .spans
+                .iter()
+                .any(|span| span.content.contains("常に許可"))
+        );
+        let deny = actions
+            .spans
+            .iter()
+            .find(|span| span.content == " N ")
+            .unwrap();
+        assert_eq!(deny.style.bg, Some(Color::Red));
+        assert!(
+            actions
+                .spans
+                .iter()
+                .any(|span| span.content.contains("拒否"))
+        );
+    }
+    #[test]
     fn long_paste_is_attachment_and_deletable() {
-        let mut a = App::new(Vec::new());
+        let mut a = App::new(Vec::new(), Language::En);
         a.handle_paste("one\ntwo".to_owned());
         assert_eq!(a.attachments.len(), 1);
         a.delete_selected_attachment();
@@ -1158,7 +1420,7 @@ mod tests {
     }
     #[tokio::test]
     async fn ask_dialog_accepts_custom_text() {
-        let mut app = App::new(Vec::new());
+        let mut app = App::new(Vec::new(), Language::En);
         let (sender, receiver) = oneshot::channel();
         app.question = Some(AskDialog {
             request: UserQuestion {
@@ -1179,7 +1441,7 @@ mod tests {
     }
     #[tokio::test]
     async fn ask_dialog_supports_multiple_selected_options() {
-        let mut app = App::new(Vec::new());
+        let mut app = App::new(Vec::new(), Language::En);
         let (sender, receiver) = oneshot::channel();
         app.question = Some(AskDialog {
             request: UserQuestion {

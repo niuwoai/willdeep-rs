@@ -14,6 +14,7 @@ use willdeep_core::{
 
 mod config;
 mod editor;
+mod i18n;
 mod mobile;
 mod onboarding;
 mod projects;
@@ -124,6 +125,10 @@ struct Cli {
     /// Web server listen address. Authentication belongs at the reverse proxy.
     #[arg(long, default_value = "127.0.0.1:9847")]
     listen: std::net::SocketAddr,
+
+    /// UI language: zh-CN, en, or ja. Overrides agent.language.
+    #[arg(long, env = "WILLDEEP_LANGUAGE")]
+    language: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -164,6 +169,11 @@ async fn run() -> Result<()> {
         onboarding::run(cli.config.as_deref()).await?;
     }
     let loaded = LoadedConfig::load(cli.config.as_deref())?;
+    let language = i18n::Language::parse(
+        cli.language
+            .as_deref()
+            .or(loaded.file.agent.language.as_deref()),
+    )?;
     let home = willdeep_home()?;
     if cli.web {
         let mut candidates = Vec::new();
@@ -192,6 +202,7 @@ async fn run() -> Result<()> {
             profile: cli.profile.clone(),
             workspaces,
             home,
+            language,
         })
         .await;
     }
@@ -329,7 +340,7 @@ async fn run() -> Result<()> {
     let approver: Arc<dyn Approver> = if interactive_tui {
         Arc::new(tui::TuiApprover(tui_tx.clone()))
     } else {
-        Arc::new(TerminalApprover)
+        Arc::new(TerminalApprover(language))
     };
     let background_tasks = Arc::new(BackgroundTaskRegistry::default());
     let tools = ToolRegistry::new(&workspace, approval_mode)?
@@ -423,7 +434,7 @@ async fn run() -> Result<()> {
             home,
             skills,
             relay_bridge,
-            (tui_tx, tui_rx, context_window, background_tasks),
+            (tui_tx, tui_rx, context_window, background_tasks, language),
         )
         .await;
     }
@@ -692,7 +703,7 @@ fn save_approval_rules(path: &std::path::Path, rules: &[String]) -> Result<()> {
     Ok(())
 }
 
-struct TerminalApprover;
+struct TerminalApprover(i18n::Language);
 
 #[async_trait]
 impl Approver for TerminalApprover {
@@ -701,13 +712,23 @@ impl Approver for TerminalApprover {
             return ApprovalDecision::Deny;
         }
         let description = description.to_owned();
+        let language = self.0;
         tokio::task::spawn_blocking(move || {
             eprint!(
-                "\nApproval required: {description}\n{} ",
+                "\n{}: {description}\n{} ",
+                language.text("需要确认", "Approval required", "承認が必要"),
                 if always_allow_available {
-                    "[y] Allow once / [a] Always allow / [N] Disallow"
+                    language.text(
+                        "[y] 允许一次 / [a] 始终允许 / [N] 拒绝",
+                        "[y] Allow once / [a] Always allow / [N] Disallow",
+                        "[y] 一度だけ許可 / [a] 常に許可 / [N] 拒否",
+                    )
                 } else {
-                    "[y] Allow once / [N] Disallow"
+                    language.text(
+                        "[y] 允许一次 / [N] 拒绝",
+                        "[y] Allow once / [N] Disallow",
+                        "[y] 一度だけ許可 / [N] 拒否",
+                    )
                 }
             );
             let _ = std::io::stderr().flush();

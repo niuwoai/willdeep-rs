@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.9.0-rc1`，支持：
+当前版本为 `0.12.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -107,6 +107,8 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 ```bash
 chmod 600 ~/.willdeep/config.toml
 ```
+
+界面语言支持简体中文、英语和日语。可在 `[agent]` 中设置 `language = "zh-CN"`、`"en"` 或 `"ja"`，也可用 `--language` / `WILLDEEP_LANGUAGE` 临时覆盖。Web 左栏可直接切换语言，选择会保存在当前浏览器。
 
 ## TUI 与会话
 
@@ -355,6 +357,7 @@ willdeep --full-auto --json ...
 | `WILLDEEP_MODEL` | 模型 ID |
 | `WILLDEEP_CONFIG` | 显式 TOML 配置文件路径 |
 | `WILLDEEP_HOME` | WillDeep 配置目录，默认 `~/.willdeep` |
+| `WILLDEEP_LANGUAGE` | 界面语言：`zh-CN`、`en` 或 `ja` |
 | `SOMEIM_API_KEY` | some.im Key 回退 |
 | `ANTHROPIC_API_KEY` | Anthropic Key 回退 |
 | `OPENAI_API_KEY` | OpenAI-compatible Key 回退 |

@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::i18n::Language;
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -33,6 +34,7 @@ pub struct WebConfig {
     pub profile: Option<String>,
     pub workspaces: Vec<PathBuf>,
     pub home: PathBuf,
+    pub language: Language,
 }
 
 struct WebState {
@@ -40,6 +42,7 @@ struct WebState {
     profile: Option<String>,
     workspaces: Vec<PathBuf>,
     home: PathBuf,
+    language: Language,
     harness_slots: Arc<Semaphore>,
 }
 
@@ -48,6 +51,7 @@ struct ChatRequest {
     prompt: String,
     session_id: Option<String>,
     workspace: Option<String>,
+    language: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +74,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         profile: config.profile,
         workspaces: config.workspaces,
         home: config.home,
+        language: config.language,
         harness_slots: Arc::new(Semaphore::new(2)),
     });
     let app = Router::new()
@@ -158,6 +163,8 @@ fn validate_chat(state: &WebState, input: &ChatRequest) -> Result<(), WebError> 
             "prompt must contain 1 to 100000 characters",
         ));
     }
+    Language::parse(input.language.as_deref())
+        .map_err(|error| WebError::bad_request(error.to_string()))?;
     let workspace = select_workspace(&state.workspaces, input.workspace.as_deref())?;
     if let Some(raw_id) = input.session_id.as_deref() {
         let id = uuid::Uuid::parse_str(raw_id)
@@ -249,7 +256,10 @@ async fn run_harness_inner(
         .map_err(|error| WebError::internal(error.to_string()))?
     {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
-            && let Some(client) = client_event(value)
+            && let Some(client) = client_event(
+                value,
+                Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
+            )
         {
             send_event(tx, client).await;
         }
@@ -268,15 +278,21 @@ async fn run_harness_inner(
     Ok(())
 }
 
-fn client_event(value: serde_json::Value) -> Option<serde_json::Value> {
+fn state_language(state: &WebState) -> Language {
+    state.language
+}
+
+fn client_event(value: serde_json::Value, language: Language) -> Option<serde_json::Value> {
     let kind = value.get("type")?.as_str()?;
     let label = match kind {
         "turn_started" => format!(
-            "正在思考 · 第 {} 轮",
+            "{} {}",
+            language.text("正在思考 · 第", "Thinking · turn", "思考中 · ターン"),
             value.get("turn").and_then(|v| v.as_u64()).unwrap_or(1)
         ),
         "tool_requested" => format!(
-            "正在使用 {}",
+            "{} {}",
+            language.text("正在使用", "Using", "使用中"),
             value.get("name").and_then(|v| v.as_str()).unwrap_or("tool")
         ),
         "tool_completed" => format!(
@@ -286,15 +302,29 @@ fn client_event(value: serde_json::Value) -> Option<serde_json::Value> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                "执行失败"
+                language.text("执行失败", "Failed", "実行失敗")
             } else {
-                "已完成"
+                language.text("已完成", "Finished", "完了")
             },
             value.get("name").and_then(|v| v.as_str()).unwrap_or("tool")
         ),
-        "compression_started" => "正在压缩上下文".to_owned(),
-        "compression_completed" => "上下文压缩完成".to_owned(),
-        "usage" => "正在整理结果".to_owned(),
+        "compression_started" => language
+            .text(
+                "正在压缩上下文",
+                "Compressing context",
+                "コンテキストを圧縮中",
+            )
+            .to_owned(),
+        "compression_completed" => language
+            .text(
+                "上下文压缩完成",
+                "Context compressed",
+                "コンテキストを圧縮しました",
+            )
+            .to_owned(),
+        "usage" => language
+            .text("正在整理结果", "Preparing result", "結果を整理中")
+            .to_owned(),
         "completed" => return Some(value),
         "assistant_text" => return None,
         _ => kind.to_owned(),
@@ -392,7 +422,7 @@ mod tests {
     }
     #[test]
     fn tool_events_are_redacted_for_sse() {
-        let event=client_event(serde_json::json!({"type":"tool_completed","name":"read_file","output":"secret","is_error":false})).unwrap();
+        let event=client_event(serde_json::json!({"type":"tool_completed","name":"read_file","output":"secret","is_error":false}),Language::En).unwrap();
         assert!(event.get("output").is_none());
     }
 }

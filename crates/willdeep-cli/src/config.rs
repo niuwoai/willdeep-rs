@@ -29,6 +29,7 @@ pub struct ConfigFile {
 pub struct AgentSettings {
     pub max_turns: Option<usize>,
     pub approval: Option<String>,
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -139,6 +140,7 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     {
         bail!("agent.max_turns must be between 1 and 100");
     }
+    crate::i18n::Language::parse(file.agent.language.as_deref())?;
     for (name, provider) in &file.providers {
         if provider.api_key.as_deref().is_some_and(str::is_empty) {
             bail!("providers.{name}.api_key cannot be empty");
