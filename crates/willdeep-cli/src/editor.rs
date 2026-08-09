@@ -68,6 +68,30 @@ impl PromptEditor {
     pub fn cursor_visual(&self, width: usize) -> (usize, usize) {
         visual_position(&self.text, self.cursor, width)
     }
+    pub fn marker_query(&self, marker: char) -> Option<(usize, &str)> {
+        let prefix = &self.text[..self.cursor];
+        let start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| {
+                character
+                    .is_whitespace()
+                    .then_some(index + character.len_utf8())
+            })
+            .unwrap_or(0);
+        let token = &prefix[start..];
+        let query = token.strip_prefix(marker)?;
+        query
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            .then_some((start, query))
+    }
+    pub fn replace_before_cursor(&mut self, start: usize, value: &str) {
+        if start <= self.cursor && self.text.is_char_boundary(start) {
+            self.text.replace_range(start..self.cursor, value);
+            self.cursor = start + value.len();
+        }
+    }
     pub fn set_cursor_visual(&mut self, target_row: usize, target_column: usize, width: usize) {
         self.cursor = byte_at_visual(&self.text, target_row, target_column, width);
     }
@@ -187,5 +211,16 @@ mod tests {
         e.set_cursor_visual(0, 2, 10);
         e.insert("X");
         assert_eq!(e.text(), "中X文ab");
+    }
+    #[test]
+    fn finds_and_replaces_marker_query_at_cursor() {
+        let mut editor = PromptEditor::default();
+        editor.insert("please use $image-pro");
+        let (start, query) = editor.marker_query('$').unwrap();
+        assert_eq!(query, "image-pro");
+
+        editor.replace_before_cursor(start, "$image-processing ");
+        assert_eq!(editor.text(), "please use $image-processing ");
+        assert!(editor.marker_query('$').is_none());
     }
 }

@@ -114,6 +114,8 @@ struct App {
     language: Language,
     transient_thought: Option<String>,
     selection_mode: bool,
+    skill_selected: usize,
+    skill_menu_dismissed: bool,
 }
 
 struct AskDialog {
@@ -262,7 +264,7 @@ async fn event_loop(
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
-        draw(term, &mut app)?;
+        draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
             _=refresh.tick()=>app.background_tasks=runtime.background_tasks.snapshots(),
             event=events.next()=>if let Some(Ok(event))=event { match event {
@@ -288,6 +290,7 @@ async fn event_loop(
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
+                    if app.handle_skill_key(key, &runtime.skills) { continue; }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
@@ -304,8 +307,11 @@ async fn event_loop(
                             if app.handle_slash_command(&prompt,&runtime.skills){continue;}
                             dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;
                         }
-                        KeyCode::Left=>app.input.left(),KeyCode::Right=>app.input.right(),KeyCode::Up=>app.input.up_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Down=>app.input.down_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Home=>app.input.home(),KeyCode::End=>app.input.end(),KeyCode::Backspace=>app.input.backspace(),KeyCode::Delete=>app.input.delete(),
-                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>app.input.insert(&c.to_string()),_=>{}
+                        KeyCode::Left=>app.edit_input(|input| input.left()),KeyCode::Right=>app.edit_input(|input| input.right()),
+                        KeyCode::Up=>{let width=app.prompt_rect.width.saturating_sub(2).max(1) as usize;app.edit_input(|input| input.up_visual(width));},
+                        KeyCode::Down=>{let width=app.prompt_rect.width.saturating_sub(2).max(1) as usize;app.edit_input(|input| input.down_visual(width));},
+                        KeyCode::Home=>app.edit_input(|input| input.home()),KeyCode::End=>app.edit_input(|input| input.end()),KeyCode::Backspace=>app.edit_input(|input| input.backspace()),KeyCode::Delete=>app.edit_input(|input| input.delete()),
+                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>app.edit_input(|input| input.insert(&c.to_string())),_=>{}
                     }
                 }
                 _=>{}
@@ -378,6 +384,70 @@ impl App {
             language,
             transient_thought: None,
             selection_mode: false,
+            skill_selected: 0,
+            skill_menu_dismissed: false,
+        }
+    }
+    fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
+        edit(&mut self.input);
+        self.skill_selected = 0;
+        self.skill_menu_dismissed = false;
+    }
+    fn skill_matches(&self, skills: &SkillCatalog) -> Vec<usize> {
+        let Some((_, query)) = self.input.marker_query('$') else {
+            return Vec::new();
+        };
+        let query = query.to_lowercase();
+        skills
+            .list()
+            .iter()
+            .enumerate()
+            .filter(|(_, skill)| {
+                format!("{} {} {}", skill.identifier, skill.name, skill.description)
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .map(|(index, _)| index)
+            .take(8)
+            .collect()
+    }
+    fn handle_skill_key(&mut self, key: KeyEvent, skills: &SkillCatalog) -> bool {
+        if self.skill_menu_dismissed || self.input.marker_query('$').is_none() {
+            return false;
+        }
+        let matches = self.skill_matches(skills);
+        match key.code {
+            KeyCode::Esc => {
+                self.skill_menu_dismissed = true;
+                true
+            }
+            KeyCode::Up if !matches.is_empty() => {
+                self.skill_selected = self
+                    .skill_selected
+                    .checked_sub(1)
+                    .unwrap_or(matches.len() - 1);
+                true
+            }
+            KeyCode::Down if !matches.is_empty() => {
+                self.skill_selected = (self.skill_selected + 1) % matches.len();
+                true
+            }
+            KeyCode::Tab | KeyCode::Enter
+                if !matches.is_empty()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                let selected = matches[self.skill_selected.min(matches.len() - 1)];
+                let skill = &skills.list()[selected];
+                let (start, _) = self.input.marker_query('$').expect("skill query exists");
+                self.input
+                    .replace_before_cursor(start, &format!("${} ", skill.identifier));
+                self.skill_selected = 0;
+                self.skill_menu_dismissed = true;
+                true
+            }
+            _ => false,
         }
     }
     fn finish_turn(&mut self) {
@@ -798,7 +868,11 @@ fn encode_clipboard_image(width: usize, height: usize, bytes: Vec<u8>) -> Result
     })
 }
 
-fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn draw(
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    skills: &SkillCatalog,
+) -> Result<()> {
     term.draw(|f| {
         let columns = if f.area().width >= 110 {
             Layout::default()
@@ -1069,6 +1143,59 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                     )
                     .wrap(Wrap { trim: false }),
                 columns[1],
+            );
+        }
+        let skill_matches = app.skill_matches(skills);
+        if !app.skill_menu_dismissed
+            && app.input.marker_query('$').is_some()
+            && !skill_matches.is_empty()
+        {
+            app.skill_selected = app.skill_selected.min(skill_matches.len() - 1);
+            let width = areas[3].width.min(76);
+            let height = (skill_matches.len() as u16 + 2).min(10);
+            let popup = Rect {
+                x: areas[3].x,
+                y: areas[3].y.saturating_sub(height),
+                width,
+                height,
+            };
+            let lines = skill_matches
+                .iter()
+                .enumerate()
+                .map(|(position, index)| {
+                    let skill = &skills.list()[*index];
+                    let prefix = if position == app.skill_selected {
+                        "▶"
+                    } else {
+                        " "
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{prefix} ${} ", skill.identifier),
+                            Style::default()
+                                .fg(Color::LightCyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{} · {}", skill.name, skill.description),
+                            Style::default().fg(Color::White),
+                        ),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .title(app.language.text(
+                            "技能 · ↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭",
+                            "Skills · ↑/↓ select · Enter/Tab insert · Esc close",
+                            "スキル · ↑/↓ 選択 · Enter/Tab 挿入 · Esc 閉じる",
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
+                popup,
             );
         }
         if let Some(qr) = &app.mobile_qr {
@@ -1610,6 +1737,26 @@ mod tests {
 
         assert_eq!(rendered_transcript_height(&entries, 10), 4);
         assert_eq!(visual_lines(&entries.join("\n"), 10), 3);
+    }
+    #[test]
+    fn skill_menu_filters_and_inserts_selected_skill() {
+        let workspace =
+            std::env::temp_dir().join(format!("willdeep-tui-skill-menu-{}", uuid::Uuid::new_v4()));
+        let skill_dir = workspace.join(".willdeep/skills/image-processing");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Image Processing\ndescription: Edit images\n---\n# Instructions",
+        )
+        .unwrap();
+        let skills = SkillCatalog::discover(&workspace, &[]);
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("use $image-pro");
+
+        assert!(app.handle_skill_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &skills));
+        assert_eq!(app.input.text(), "use $image-processing ");
+
+        std::fs::remove_dir_all(workspace).unwrap();
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
