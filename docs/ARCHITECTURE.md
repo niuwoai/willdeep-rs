@@ -83,7 +83,7 @@ TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 
 
 ### 上下文与网络工具
 
-Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% 且历史足够长时，Agent 使用当前 Provider 总结较旧历史，构造临时请求视图；会话存档仍保存完整消息。TUI 展示最近一次 Provider Usage、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
+Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% 且历史足够长时，Agent 使用当前 Provider 总结较旧历史，构造临时请求视图；自动压缩仍保存完整消息。用户执行 `/compress` 时则显式生成摘要、保留最近六条消息并原子保存精简后的会话。TUI 展示最近一次 Provider Usage、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
 
 `web_search` 调用同一 some.im Origin 的 `/api/v1/customer/web-search`。`web_fetch` 只接受 HTTP(S) 公网目标，在请求前解析 DNS 并拒绝私网、回环、链路本地和文档保留地址；客户端禁用重定向，并限制 3 MiB 响应和最多 100,000 字符。两项网络工具在所有审批模式下都逐次审批。
 

@@ -189,6 +189,46 @@ impl Agent {
         Err(AgentError::MaxTurns(self.config.max_turns))
     }
 
+    pub async fn compress_history(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<Message>, AgentError> {
+        let mut history = messages
+            .into_iter()
+            .filter(|message| message.role != crate::types::Role::System)
+            .collect::<Vec<_>>();
+        if history.len() < 8 {
+            return Ok(history);
+        }
+        let split = history.len().saturating_sub(6);
+        let estimated = estimate_tokens(&history);
+        self.sink
+            .emit(AgentEvent::CompressionStarted {
+                estimated_tokens: estimated,
+            })
+            .await;
+        let source = history[..split]
+            .iter()
+            .map(|message| format!("{:?}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = Message::user(format!(
+            "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
+        ));
+        let summary = self.provider.complete(&[request], &[]).await?.content;
+        let recent = history.split_off(split);
+        let mut compressed = vec![Message::user(format!(
+            "<context-summary>\n{summary}\n</context-summary>"
+        ))];
+        compressed.extend(recent);
+        self.sink
+            .emit(AgentEvent::CompressionCompleted {
+                estimated_tokens: estimate_tokens(&compressed),
+            })
+            .await;
+        Ok(compressed)
+    }
+
     async fn request_messages(
         &self,
         messages: &[Message],
@@ -392,5 +432,28 @@ mod tests {
                 .any(|message| message.content.contains("<context-summary>"))
         );
         assert!(outcome.messages.len() >= 21);
+    }
+
+    #[tokio::test]
+    async fn manual_compression_replaces_old_history_with_summary() {
+        let provider = RecordingProvider::new(&["manual summary"]);
+        let agent = Agent::new(
+            provider,
+            registry("manual-compression"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+            },
+        );
+        let history = (0..12)
+            .map(|index| Message::user(format!("message {index}")))
+            .collect::<Vec<_>>();
+
+        let compressed = agent.compress_history(history).await.expect("compress");
+
+        assert_eq!(compressed.len(), 7);
+        assert!(compressed[0].content.contains("manual summary"));
+        assert_eq!(compressed.last().expect("last").content, "message 11");
     }
 }

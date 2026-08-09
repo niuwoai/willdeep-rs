@@ -35,6 +35,7 @@ pub enum UiMessage {
     Agent(AgentEvent),
     Approval(String, oneshot::Sender<bool>),
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
+    Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
 }
 pub struct TuiSink {
     pub ui: mpsc::UnboundedSender<UiMessage>,
@@ -223,6 +224,7 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if app.handle_slash_command(&prompt,&runtime.skills){continue;}
                             dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;
                         }
@@ -242,7 +244,9 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
                 UiMessage::Approval(v,s)=>app.approval=Some((v,s)),
                 UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
-                UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();}
+                UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
+                UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
+                UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
             },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
@@ -376,7 +380,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: /goal <text>|off · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: /goal <text>|off · /compress · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -511,6 +515,23 @@ fn dispatch_prompt(
         ));
     });
     Ok(())
+}
+
+fn dispatch_compress(
+    app: &mut App,
+    session: &Session,
+    agent: &Arc<Agent>,
+    tx: &mpsc::UnboundedSender<UiMessage>,
+) {
+    app.running = true;
+    app.turn_started = Some(Instant::now());
+    app.activity_line = "Compressing context".to_owned();
+    let history = session.messages.clone();
+    let agent = agent.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(UiMessage::Compressed(agent.compress_history(history).await));
+    });
 }
 
 fn mobile_snapshot(session: &Session) -> serde_json::Value {

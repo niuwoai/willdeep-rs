@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.6.0-rc1`，支持：
+当前版本为 `0.7.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -19,7 +19,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 版本化 JSON 会话持久化、列表和恢复；
 - Codex/WillDeep 兼容的 `SKILL.md` 发现、列表和安全资源读取；
 - MCP stdio server 初始化、工具发现、命名空间注册与调用。
-- `/goal`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用；
+- `/goal`、`/compress`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用；
 - `/mobile` 二维码入口，通过 `j.niuwoai.com` WebSocket Relay 连接 WillDeep Mobile；
 - GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
 - some.im 纯文本模型通过同一账号下的视觉模型理解图片；
@@ -132,7 +132,7 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 失败数量不会被隐藏；需要排查时使用 `Ctrl+O` 查看最近明细。
 默认活动区只占一行内容，显示 Thinking、工具调用或上下文压缩阶段；宽终端会在右侧显示 Agent、Mobile Relay、手机队列和工具完成情况。状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
 
-输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
+输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。输入 `/compress` 会立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存当前会话；历史不足八条时不会消耗模型请求。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
 
 输入 `/mobile` 会连接 `wss://j.niuwoai.com/ws/broadcast/<room>` 并弹出配对二维码；使用 WillDeep Mobile 扫码后可从手机向当前 CLI 会话发消息。`Esc` 或 `/mobile hide` 只隐藏二维码，`/mobile show` 再次显示，`/mobile off` 断开 Relay。CLI 使用独立于 Swift App 的 room/token，凭据保存在 `~/.willdeep/mobile-relay.toml`；Unix 权限为 `0600`，不会写入仓库。CLI 不监听本地端口。
 
