@@ -11,6 +11,7 @@ use willdeep_core::{
 };
 
 mod config;
+mod editor;
 mod tui;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};

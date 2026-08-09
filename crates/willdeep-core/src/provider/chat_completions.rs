@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{client, decode_success, endpoint, openai_auth};
 use super::{Provider, ProviderConfig, ProviderError};
-use crate::types::{Completion, Message, Role, ToolCall, ToolDefinition, Usage};
+use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
 pub struct ChatCompletionsProvider {
     config: ProviderConfig,
@@ -84,8 +84,7 @@ struct ChatRequest<'a> {
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    content: &'a String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -101,7 +100,7 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             },
-            content: &message.content,
+            content: chat_content(message),
             tool_call_id: &message.tool_call_id,
             tool_calls: message
                 .tool_calls
@@ -117,6 +116,20 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 .collect(),
         }
     }
+}
+
+fn chat_content(message: &Message) -> serde_json::Value {
+    if message.attachments.is_empty() {
+        return serde_json::Value::String(message.content.clone());
+    }
+    let mut parts = vec![serde_json::json!({"type":"text","text":message.content})];
+    for attachment in &message.attachments {
+        match attachment {
+            MessageAttachment::Text { name, content } => parts.push(serde_json::json!({"type":"text","text":format!("[Pasted text: {name}]\n{content}")})),
+            MessageAttachment::Image { media_type, data, .. } => parts.push(serde_json::json!({"type":"image_url","image_url":{"url":format!("data:{media_type};base64,{data}")}})),
+        }
+    }
+    serde_json::Value::Array(parts)
 }
 
 #[derive(Serialize)]
@@ -196,4 +209,25 @@ struct ChatUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    #[test]
+    fn image_attachment_becomes_data_url_part() {
+        let message = Message::user_with_attachments(
+            "look",
+            vec![MessageAttachment::Image {
+                name: "a.png".into(),
+                media_type: "image/png".into(),
+                data: "YWJj".into(),
+                width: 1,
+                height: 1,
+            }],
+        );
+        let value = chat_content(&message);
+        assert_eq!(value[1]["type"], "image_url");
+        assert_eq!(value[1]["image_url"]["url"], "data:image/png;base64,YWJj");
+    }
 }

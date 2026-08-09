@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{anthropic_auth, anthropic_endpoint, client, decode_success};
 use super::{Provider, ProviderConfig, ProviderError};
-use crate::types::{Completion, Message, Role, ToolCall, ToolDefinition, Usage};
+use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
 pub struct AnthropicMessagesProvider {
     config: ProviderConfig,
@@ -114,6 +114,25 @@ fn encode_messages(messages: &[Message]) -> (String, Vec<AnthropicMessage>) {
                 content.push(AnthropicContent::Text {
                     text: message.content.clone(),
                 });
+                content.extend(
+                    message
+                        .attachments
+                        .iter()
+                        .map(|attachment| match attachment {
+                            MessageAttachment::Text { name, content } => AnthropicContent::Text {
+                                text: format!("[Pasted text: {name}]\n{content}"),
+                            },
+                            MessageAttachment::Image {
+                                media_type, data, ..
+                            } => AnthropicContent::Image {
+                                source: AnthropicImageSource {
+                                    kind: "base64",
+                                    media_type: media_type.clone(),
+                                    data: data.clone(),
+                                },
+                            },
+                        }),
+                );
                 output.push(AnthropicMessage {
                     role: "user",
                     content,
@@ -180,6 +199,8 @@ struct AnthropicMessage {
 enum AnthropicContent {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -191,6 +212,14 @@ enum AnthropicContent {
         tool_use_id: String,
         content: String,
     },
+}
+
+#[derive(Serialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Serialize)]
@@ -261,5 +290,23 @@ mod tests {
         assert_eq!(max_output_tokens("claude-3-opus", 16_384), 4_096);
         assert_eq!(max_output_tokens("claude-3-5-sonnet", 16_384), 8_192);
         assert_eq!(max_output_tokens("claude-sonnet-4", 16_384), 16_384);
+    }
+
+    #[test]
+    fn image_attachment_becomes_native_image_block() {
+        let message = Message::user_with_attachments(
+            "look",
+            vec![MessageAttachment::Image {
+                name: "a.png".into(),
+                media_type: "image/png".into(),
+                data: "YWJj".into(),
+                width: 1,
+                height: 1,
+            }],
+        );
+        let (_, encoded) = encode_messages(&[message]);
+        let value = serde_json::to_value(&encoded[0]).unwrap();
+        assert_eq!(value["content"][1]["type"], "image");
+        assert_eq!(value["content"][1]["source"]["data"], "YWJj");
     }
 }

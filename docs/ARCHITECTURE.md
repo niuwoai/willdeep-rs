@@ -75,6 +75,12 @@ Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为
 
 MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并将工具动态注册成 `mcp__<server>__<tool>`。所有 MCP 调用默认进入统一审批链，只有 workspace-access 模式免审。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
 
+### Prompt 与附件
+
+TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 Unicode 显示宽度计算换行、上下移动、点击定位和内部滚动。终端启用 Bracketed Paste，长文本保留为消息附件而不是撑满编辑框。
+
+图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`，Agent Loop 不包含协议分支。
+
 ## 尚未满足的长期架构要求
 
 阶段 0 文档要求的 ACP 双轨验证、crate 级复用清单、协议 Schema 与跨客户端会话均尚未完成。当前实现是原生 Harness 起点，不能视为完整阶段 0 或阶段 1 产品。

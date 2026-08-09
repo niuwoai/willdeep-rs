@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.3.0-rc2`，支持：
+当前版本为 `0.4.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -103,11 +103,16 @@ willdeep --profile some-im --workspace .
 
 | 按键 | 行为 |
 |---|---|
-| `↑` / `↓` | 按显示行滚动聊天记录 |
+| `↑` / `↓` | 在 Prompt 多行之间移动光标 |
+| `←` / `→`、`Home` / `End` | 移动编辑光标；也可鼠标点击定位 |
+| `Alt+↑` / `Alt+↓` | 按显示行滚动聊天记录 |
 | `PageUp` / `PageDown` | 按页滚动 |
-| `Home` / `End` | 跳到顶部 / 回到底部并恢复自动跟随 |
+| `Ctrl+Home` / `Ctrl+End` | 跳到聊天顶部 / 回到底部并恢复自动跟随 |
 | `Ctrl+O` | 展开或收起最近 Tool Use 明细 |
 | `Enter` | 发送 Prompt |
+| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | 插入换行 |
+| `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
+| `Ctrl+D` | 删除当前（最近）附件，可重复删除 |
 | `Ctrl+C` | 退出并恢复终端 |
 
 Tool Use 默认显示为单条聚合活动摘要，例如：
@@ -126,7 +131,7 @@ willdeep --resume latest "继续检查刚才的问题"
 willdeep --resume 550e8400-e29b-41d4-a716-446655440000 "继续"
 ```
 
-当前 Prompt 编辑器仍是基础单行输入。多行编辑、光标移动、Bracketed Paste 文本附件和图片附件属于下一阶段，尚未包含在 `0.3.0-rc2`，README 不把设计稿当成已交付功能。
+终端启用 Bracketed Paste：短单行粘贴直接插入光标处，多行或超过 200 字符的内容显示为 `Pasted text` 附件行。图片粘贴会读取本机系统剪贴板、转为 PNG 并显示尺寸和大小；发送前可用 `Ctrl+D` 删除。SSH 会话无法读取远端电脑的系统剪贴板图片，这是终端边界，不会静默伪装成功。
 
 ## Skills 与 MCP
 

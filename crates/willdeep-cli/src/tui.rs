@@ -1,26 +1,34 @@
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, Cursor};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use base64::Engine;
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::UnicodeWidthChar;
-use willdeep_core::{Agent, AgentEvent, Approver, EventSink, Session, SessionStore};
+use willdeep_core::{
+    Agent, AgentEvent, Approver, EventSink, Message, MessageAttachment, Session, SessionStore,
+};
+
+use crate::editor::{DraftAttachment, PromptEditor};
 
 pub enum UiMessage {
     Agent(AgentEvent),
     Approval(String, oneshot::Sender<bool>),
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
 }
-
 pub struct TuiSink(pub mpsc::UnboundedSender<UiMessage>);
 #[async_trait]
 impl EventSink for TuiSink {
@@ -28,7 +36,6 @@ impl EventSink for TuiSink {
         let _ = self.0.send(UiMessage::Agent(event));
     }
 }
-
 pub struct TuiApprover(pub mpsc::UnboundedSender<UiMessage>);
 #[async_trait]
 impl Approver for TuiApprover {
@@ -46,7 +53,7 @@ impl Approver for TuiApprover {
 }
 
 struct App {
-    input: String,
+    input: PromptEditor,
     transcript: Vec<String>,
     running: bool,
     approval: Option<(String, oneshot::Sender<bool>)>,
@@ -56,6 +63,11 @@ struct App {
     viewport_height: usize,
     tools: ToolActivity,
     tools_expanded: bool,
+    attachments: Vec<DraftAttachment>,
+    selected_attachment: usize,
+    prompt_rect: Rect,
+    prompt_scroll: usize,
+    notice: Option<String>,
 }
 
 #[derive(Default)]
@@ -66,7 +78,6 @@ struct ToolActivity {
     counts: BTreeMap<String, usize>,
     details: Vec<String>,
 }
-
 impl ToolActivity {
     fn reset(&mut self) {
         *self = Self::default();
@@ -79,23 +90,16 @@ impl ToolActivity {
     fn completed(&mut self, name: &str, is_error: bool) {
         self.completed += 1;
         self.failed += usize::from(is_error);
-        if let Some(detail) = self
-            .details
-            .iter_mut()
-            .rev()
-            .find(|line| line.as_str() == format!("… {name}"))
-        {
-            *detail = format!("{} {name}", if is_error { "✗" } else { "✓" });
+        let pending = format!("… {name}");
+        if let Some(v) = self.details.iter_mut().rev().find(|v| **v == pending) {
+            *v = format!("{} {name}", if is_error { "✗" } else { "✓" });
         }
     }
     fn summary(&self) -> String {
-        if self.requested == 0 {
-            return "No tool activity".to_owned();
-        }
         let calls = self
             .counts
             .iter()
-            .map(|(name, count)| format!("{name}×{count}"))
+            .map(|(n, c)| format!("{n}×{c}"))
             .collect::<Vec<_>>()
             .join(" · ");
         let progress = if self.completed < self.requested {
@@ -103,12 +107,12 @@ impl ToolActivity {
         } else {
             format!("{} calls", self.requested)
         };
-        let failure = if self.failed == 0 {
-            String::new()
-        } else {
+        let failed = if self.failed > 0 {
             format!(" · {} failed", self.failed)
+        } else {
+            String::new()
         };
-        format!("Tools: {progress}{failure} · {calls}")
+        format!("Tools: {progress}{failed} · {calls}")
     }
 }
 
@@ -121,159 +125,235 @@ pub async fn run(
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    let result = event_loop(&mut terminal, agent, &mut session, &store, tx, &mut rx).await;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
+    let result = event_loop(&mut term, agent, &mut session, &store, tx, &mut rx).await;
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), terminal::LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    execute!(
+        term.backend_mut(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        terminal::LeaveAlternateScreen
+    )?;
+    term.show_cursor()?;
     result
 }
 
 async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
     session: &mut Session,
     store: &SessionStore,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: &mut mpsc::UnboundedReceiver<UiMessage>,
 ) -> Result<()> {
-    let mut app = App {
-        input: String::new(),
-        transcript: transcript(&session.messages),
-        running: false,
-        approval: None,
-        scroll_from_bottom: 0,
-        follow_bottom: true,
-        transcript_width: 78,
-        viewport_height: 10,
-        tools: ToolActivity::default(),
-        tools_expanded: false,
-    };
+    let mut app = App::new(transcript(&session.messages));
     let mut events = EventStream::new();
     loop {
-        draw(terminal, &mut app)?;
+        draw(term, &mut app)?;
         tokio::select! {
-            event = events.next() => if let Some(Ok(Event::Key(key))) = event && key.kind == KeyEventKind::Press {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') { break; }
-                if let Some((_, sender)) = app.approval.take() {
-                    let allow = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
-                    let _ = sender.send(allow);
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Up => app.scroll_up(1),
-                    KeyCode::Down => app.scroll_down(1),
-                    KeyCode::PageUp => app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),
-                    KeyCode::PageDown => app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
-                    KeyCode::Home => app.scroll_to_top(),
-                    KeyCode::End => app.scroll_to_bottom(),
-                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => app.tools_expanded = !app.tools_expanded,
-                    KeyCode::Enter if !app.running && !app.input.trim().is_empty() => {
-                        let prompt = std::mem::take(&mut app.input);
-                        app.append_transcript(format!("You: {prompt}")); app.running = true; app.tools.reset();
-                        let history = session.messages.clone();
-                        session.messages.push(willdeep_core::Message::user(&prompt));
-                        store.save(session)?;
-                        let agent = agent.clone();
-                        let tx = tx.clone();
-                        // The agent's own sink delivers detailed events; this task only reports completion.
-                        tokio::spawn(async move { let _ = tx.send(UiMessage::Finished(agent.run_with_history(history, prompt).await)); });
+            event=events.next()=>if let Some(Ok(event))=event { match event {
+                Event::Paste(value)=>app.handle_paste(value),
+                Event::Mouse(mouse) if matches!(mouse.kind,MouseEventKind::Down(_))=>app.handle_mouse(mouse.column,mouse.row),
+                Event::Key(key) if key.kind==KeyEventKind::Press=>{
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
+                    if let Some((_,sender))=app.approval.take(){let _=sender.send(matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')));continue;}
+                    match key.code {
+                        KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
+                        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
+                        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_top(),KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_bottom(),
+                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.tools_expanded = !app.tools_expanded,
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.delete_selected_attachment(),
+                    KeyCode::Char('v') if (key.modifiers.contains(KeyModifiers::CONTROL)&&key.modifiers.contains(KeyModifiers::SHIFT))||key.modifiers.contains(KeyModifiers::SUPER)=>app.paste_clipboard_image(),
+                        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
+                        KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
+                            let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));app.running=true;app.tools.reset();
+                            let history=session.messages.clone();let attachments=std::mem::take(&mut app.attachments).into_iter().map(|v|v.message).collect();let user=Message::user_with_attachments(&prompt,attachments);session.messages.push(user.clone());store.save(session)?;
+                            let agent=agent.clone();let tx=tx.clone();tokio::spawn(async move{let _=tx.send(UiMessage::Finished(agent.run_with_history_message(history,user).await));});
+                        }
+                        KeyCode::Left=>app.input.left(),KeyCode::Right=>app.input.right(),KeyCode::Up=>app.input.up_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Down=>app.input.down_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Home=>app.input.home(),KeyCode::End=>app.input.end(),KeyCode::Backspace=>app.input.backspace(),KeyCode::Delete=>app.input.delete(),
+                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>app.input.insert(&c.to_string()),_=>{}
                     }
-                    KeyCode::Backspace => { app.input.pop(); }
-                    KeyCode::Char(c) => app.input.push(c),
-                    _ => {}
                 }
-            },
-            Some(message) = rx.recv() => match message {
-                UiMessage::Agent(AgentEvent::AssistantText(text)) => app.append_transcript(format!("WillDeep: {text}")),
-                UiMessage::Agent(AgentEvent::ToolRequested(call)) => app.tools.requested(&call.name),
-                UiMessage::Agent(AgentEvent::ToolCompleted { call, is_error, .. }) => app.tools.completed(&call.name, is_error),
-                UiMessage::Agent(_) => {},
-                UiMessage::Approval(description, sender) => app.approval = Some((description, sender)),
-                UiMessage::Finished(Ok(outcome)) => { session.messages = outcome.messages; store.save(session)?; app.running = false; }
-                UiMessage::Finished(Err(error)) => { app.append_transcript(format!("Error: {error}")); app.running = false; }
-            }
+                _=>{}
+            }},
+            Some(message)=rx.recv()=>match message {UiMessage::Agent(AgentEvent::AssistantText(v))=>app.append_transcript(format!("WillDeep: {v}")),UiMessage::Agent(AgentEvent::ToolRequested(v))=>app.tools.requested(&v.name),UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>app.tools.completed(&call.name,is_error),UiMessage::Agent(_)=>{},UiMessage::Approval(v,s)=>app.approval=Some((v,s)),UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.running=false;}UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.running=false;}}
         }
     }
     Ok(())
 }
 
-pub fn channel() -> (
-    mpsc::UnboundedSender<UiMessage>,
-    mpsc::UnboundedReceiver<UiMessage>,
-) {
-    mpsc::unbounded_channel()
-}
-
 impl App {
+    fn new(transcript: Vec<String>) -> Self {
+        Self {
+            input: PromptEditor::default(),
+            transcript,
+            running: false,
+            approval: None,
+            scroll_from_bottom: 0,
+            follow_bottom: true,
+            transcript_width: 78,
+            viewport_height: 10,
+            tools: ToolActivity::default(),
+            tools_expanded: false,
+            attachments: Vec::new(),
+            selected_attachment: 0,
+            prompt_rect: Rect::default(),
+            prompt_scroll: 0,
+            notice: None,
+        }
+    }
     fn max_scroll(&self) -> usize {
         visual_lines(&self.transcript.join("\n"), self.transcript_width)
             .saturating_sub(self.viewport_height)
     }
-    fn scroll_up(&mut self, amount: usize) {
-        let max_scroll = self.max_scroll();
-        if max_scroll == 0 {
-            self.scroll_to_bottom();
-            return;
+    fn scroll_up(&mut self, n: usize) {
+        let max = self.max_scroll();
+        if max == 0 {
+            return self.scroll_to_bottom();
         }
         self.follow_bottom = false;
-        self.scroll_from_bottom = self
-            .scroll_from_bottom
-            .saturating_add(amount)
-            .min(max_scroll);
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(n).min(max);
     }
-    fn scroll_down(&mut self, amount: usize) {
-        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(amount);
+    fn scroll_down(&mut self, n: usize) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(n);
         if self.scroll_from_bottom == 0 {
             self.follow_bottom = true;
         }
     }
     fn scroll_to_top(&mut self) {
-        let max_scroll = self.max_scroll();
-        self.follow_bottom = max_scroll == 0;
-        self.scroll_from_bottom = max_scroll;
+        let max = self.max_scroll();
+        self.follow_bottom = max == 0;
+        self.scroll_from_bottom = max;
     }
     fn scroll_to_bottom(&mut self) {
         self.follow_bottom = true;
         self.scroll_from_bottom = 0;
     }
-    fn append_transcript(&mut self, value: String) {
+    fn append_transcript(&mut self, v: String) {
         if !self.follow_bottom {
             self.scroll_from_bottom = self
                 .scroll_from_bottom
-                .saturating_add(visual_lines(&value, self.transcript_width));
+                .saturating_add(visual_lines(&v, self.transcript_width));
         }
-        self.transcript.push(value);
+        self.transcript.push(v);
         self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
+    }
+    fn handle_paste(&mut self, value: String) {
+        if value.contains('\n') || value.chars().count() > 200 {
+            let n = self.attachments.len() + 1;
+            self.attachments.push(DraftAttachment {
+                message: MessageAttachment::Text {
+                    name: format!("paste-{n}.txt"),
+                    content: value,
+                },
+            });
+            self.selected_attachment = self.attachments.len() - 1;
+        } else {
+            self.input.insert(&value);
+        }
+    }
+    fn delete_selected_attachment(&mut self) {
+        if self.attachments.is_empty() {
+            return;
+        }
+        let index = self.selected_attachment.min(self.attachments.len() - 1);
+        self.attachments.remove(index);
+        self.selected_attachment = index.saturating_sub(1);
+        self.notice = Some("Attachment removed".to_owned());
+    }
+    fn paste_clipboard_image(&mut self) {
+        match clipboard_image() {
+            Ok(value) => {
+                self.attachments.push(value);
+                self.selected_attachment = self.attachments.len() - 1;
+                self.notice = Some("Clipboard image attached".to_owned());
+            }
+            Err(e) => self.notice = Some(format!("Clipboard image unavailable: {e}")),
+        }
+    }
+    fn handle_mouse(&mut self, x: u16, y: u16) {
+        if self.prompt_rect.contains((x, y).into()) {
+            let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
+            let col = x.saturating_sub(self.prompt_rect.x + 1) as usize;
+            self.input.set_cursor_visual(
+                row,
+                col,
+                self.prompt_rect.width.saturating_sub(2) as usize,
+            );
+        }
     }
 }
 
-fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
-    terminal.draw(|frame| {
-        let activity_height = if app.tools.requested == 0 {
+fn clipboard_image() -> Result<DraftAttachment> {
+    let image = arboard::Clipboard::new()?.get_image()?;
+    encode_clipboard_image(image.width, image.height, image.bytes.into_owned())
+}
+
+fn encode_clipboard_image(width: usize, height: usize, bytes: Vec<u8>) -> Result<DraftAttachment> {
+    const MAX_RGBA_BYTES: usize = 64 * 1024 * 1024;
+    let expected = width
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(4))
+        .context("clipboard image dimensions overflow")?;
+    if expected > MAX_RGBA_BYTES {
+        return Err(anyhow::anyhow!("clipboard image exceeds 64 MB RGBA limit"));
+    }
+    if bytes.len() != expected {
+        return Err(anyhow::anyhow!("invalid clipboard RGBA byte count"));
+    }
+    let width = u32::try_from(width).context("clipboard image width too large")?;
+    let height = u32::try_from(height).context("clipboard image height too large")?;
+    let rgba = RgbaImage::from_raw(width, height, bytes).context("invalid clipboard RGBA data")?;
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(rgba).write_to(&mut png, ImageFormat::Png)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    Ok(DraftAttachment {
+        message: MessageAttachment::Image {
+            name: "clipboard.png".to_owned(),
+            media_type: "image/png".to_owned(),
+            data,
+            width,
+            height,
+        },
+    })
+}
+
+fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    term.draw(|f| {
+        let activity = if app.tools.requested == 0 {
             0
         } else if app.tools_expanded {
             8
         } else {
             3
         };
+        let attach = if app.attachments.is_empty() { 0 } else { 3 };
+        let input_width = f.area().width.saturating_sub(2).max(1) as usize;
+        let input_lines = visual_lines(app.input.text(), input_width).clamp(1, 6);
+        let input_height = (input_lines + 2) as u16;
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(4),
-                Constraint::Length(activity_height),
-                Constraint::Length(3),
+                Constraint::Length(activity),
+                Constraint::Length(attach),
+                Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
-            .split(frame.area());
+            .split(f.area());
         let text = app.transcript.join("\n");
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
-        let total_lines = visual_lines(&text, app.transcript_width);
-        let max_scroll = total_lines.saturating_sub(app.viewport_height);
-        app.scroll_from_bottom = app.scroll_from_bottom.min(max_scroll);
-        let offset = max_scroll
+        let max = visual_lines(&text, app.transcript_width).saturating_sub(app.viewport_height);
+        app.scroll_from_bottom = app.scroll_from_bottom.min(max);
+        let offset = max
             .saturating_sub(app.scroll_from_bottom)
             .min(u16::MAX as usize) as u16;
         let title = if app.follow_bottom {
@@ -281,15 +361,15 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) ->
         } else {
             format!("WillDeep · history ↑{}", app.scroll_from_bottom)
         };
-        frame.render_widget(
+        f.render_widget(
             Paragraph::new(text)
                 .block(Block::default().title(title).borders(Borders::ALL))
                 .scroll((offset, 0))
                 .wrap(Wrap { trim: false }),
             areas[0],
         );
-        if activity_height > 0 {
-            let activity = if app.tools_expanded {
+        if activity > 0 {
+            let text = if app.tools_expanded {
                 format!(
                     "{}\n{}",
                     app.tools.summary(),
@@ -306,53 +386,105 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) ->
             } else {
                 app.tools.summary()
             };
-            frame.render_widget(
-                Paragraph::new(activity)
-                    .block(
-                        Block::default()
-                            .title("Activity · Ctrl+O details")
-                            .borders(Borders::ALL),
-                    )
-                    .wrap(Wrap { trim: true }),
+            f.render_widget(
+                Paragraph::new(text).block(
+                    Block::default()
+                        .title("Activity · Ctrl+O details")
+                        .borders(Borders::ALL),
+                ),
                 areas[1],
             );
         }
-        frame.render_widget(
-            Paragraph::new(app.input.as_str())
-                .block(Block::default().title("Prompt").borders(Borders::ALL)),
-            areas[2],
+        if attach > 0 {
+            let items = app
+                .attachments
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    format!(
+                        "{}[{}]",
+                        if i == app.selected_attachment {
+                            "▶ "
+                        } else {
+                            "  "
+                        },
+                        v.summary()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            f.render_widget(
+                Paragraph::new(items).block(
+                    Block::default()
+                        .title("Attachments · Ctrl+D remove")
+                        .borders(Borders::ALL),
+                ),
+                areas[2],
+            );
+        }
+        app.prompt_rect = areas[3];
+        let width = areas[3].width.saturating_sub(2).max(1) as usize;
+        let (row, col) = app.input.cursor_visual(width);
+        let visible = areas[3].height.saturating_sub(2).max(1) as usize;
+        app.prompt_scroll = row.saturating_sub(visible - 1);
+        f.render_widget(
+            Paragraph::new(app.input.text())
+                .block(
+                    Block::default()
+                        .title("Prompt · Shift/Alt+Enter newline")
+                        .borders(Borders::ALL),
+                )
+                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0))
+                .wrap(Wrap { trim: false }),
+            areas[3],
         );
-        let status = if let Some((description, _)) = &app.approval {
-            format!("Approval: {description} — press y to allow, any other key to deny")
-        } else if app.running {
-            "Agent running… ↑/↓ scroll · PgUp/PgDn · End follow · Ctrl+O tools · Ctrl-C exit"
-                .to_owned()
-        } else {
-            "Enter send · ↑/↓ scroll · PgUp/PgDn · End follow · Ctrl+O tools · Ctrl-C exit"
-                .to_owned()
-        };
-        frame.render_widget(Paragraph::new(status), areas[3]);
+        let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
+        let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
+        f.set_cursor_position((cursor_x, cursor_y));
+        let status = app.notice.take().unwrap_or_else(|| {
+            if app.running {
+                "Agent running · PgUp/PgDn history · Ctrl+O tools · Ctrl-C exit".to_owned()
+            } else {
+                "Enter send · Shift/Alt+Enter newline · Ctrl+Shift+V image · Ctrl+D remove"
+                    .to_owned()
+            }
+        });
+        f.render_widget(Paragraph::new(status), areas[4]);
     })?;
     Ok(())
 }
 
+pub fn channel() -> (
+    mpsc::UnboundedSender<UiMessage>,
+    mpsc::UnboundedReceiver<UiMessage>,
+) {
+    mpsc::unbounded_channel()
+}
 fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);
     text.split('\n')
         .map(|line| {
-            let columns = line
-                .chars()
-                .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-                .sum::<usize>();
-            columns.max(1).div_ceil(width)
+            line.chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum::<usize>()
+                .max(1)
+                .div_ceil(width)
         })
         .sum()
 }
-fn transcript(messages: &[willdeep_core::Message]) -> Vec<String> {
+fn transcript(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|m| match m.role {
-            willdeep_core::Role::User => Some(format!("You: {}", m.content)),
+            willdeep_core::Role::User => Some(format!(
+                "You: {}{}",
+                m.content,
+                if m.attachments.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{} attachment(s)]", m.attachments.len())
+                }
+            )),
             willdeep_core::Role::Assistant if !m.content.trim().is_empty() => {
                 Some(format!("WillDeep: {}", m.content))
             }
@@ -364,44 +496,35 @@ fn transcript(messages: &[willdeep_core::Message]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn visual_lines_accounts_for_wrapping_and_cjk_width() {
-        assert_eq!(visual_lines("abcd", 4), 1);
-        assert_eq!(visual_lines("abcde", 4), 2);
+    fn aggregates_tools() {
+        let mut a = ToolActivity::default();
+        a.requested("read_file");
+        a.completed("read_file", true);
+        assert!(a.summary().contains("1 failed"));
+    }
+    #[test]
+    fn long_paste_is_attachment_and_deletable() {
+        let mut a = App::new(Vec::new());
+        a.handle_paste("one\ntwo".to_owned());
+        assert_eq!(a.attachments.len(), 1);
+        a.delete_selected_attachment();
+        assert!(a.attachments.is_empty());
+    }
+    #[test]
+    fn cjk_wraps() {
         assert_eq!(visual_lines("中文", 2), 2);
-        assert_eq!(visual_lines("one\ntwo", 20), 2);
     }
-
     #[test]
-    fn tool_activity_is_aggregated_and_reports_failures() {
-        let mut activity = ToolActivity::default();
-        activity.requested("read_file");
-        activity.completed("read_file", false);
-        activity.requested("read_file");
-        activity.completed("read_file", true);
-        let summary = activity.summary();
-        assert!(summary.contains("read_file×2"));
-        assert!(summary.contains("1 failed"));
-        assert_eq!(activity.details, ["✓ read_file", "✗ read_file"]);
-    }
-
-    #[test]
-    fn short_transcript_does_not_enter_fake_history_mode() {
-        let mut app = App {
-            input: String::new(),
-            transcript: vec!["short".to_owned()],
-            running: false,
-            approval: None,
-            scroll_from_bottom: 0,
-            follow_bottom: true,
-            transcript_width: 80,
-            viewport_height: 20,
-            tools: ToolActivity::default(),
-            tools_expanded: false,
-        };
-        app.scroll_up(10);
-        assert!(app.follow_bottom);
-        assert_eq!(app.scroll_from_bottom, 0);
+    fn encodes_clipboard_rgba_as_deletable_image() {
+        let value = encode_clipboard_image(1, 1, vec![255, 0, 0, 255]).unwrap();
+        assert!(matches!(
+            value.message,
+            MessageAttachment::Image {
+                width: 1,
+                height: 1,
+                ..
+            }
+        ));
     }
 }

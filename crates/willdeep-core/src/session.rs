@@ -124,9 +124,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!("willdeep-session-{}", Uuid::new_v4()));
         let store = SessionStore::new(&root);
         let mut session = Session::new(root.clone(), None, "hello session");
-        session.messages.push(Message::user("hello"));
+        session.messages.push(Message::user_with_attachments(
+            "hello",
+            vec![crate::MessageAttachment::Image {
+                name: "test.png".to_owned(),
+                media_type: "image/png".to_owned(),
+                data: "YWJj".to_owned(),
+                width: 1,
+                height: 1,
+            }],
+        ));
         store.save(&mut session).unwrap();
-        assert_eq!(store.load(session.id).unwrap().messages.len(), 1);
+        let loaded = store.load(session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].attachments.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

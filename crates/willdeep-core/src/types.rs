@@ -18,6 +18,24 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageAttachment {
+    Text {
+        name: String,
+        content: String,
+    },
+    Image {
+        name: String,
+        media_type: String,
+        data: String,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl Message {
@@ -29,12 +47,22 @@ impl Message {
         Self::plain(Role::User, content)
     }
 
+    pub fn user_with_attachments(
+        content: impl Into<String>,
+        attachments: Vec<MessageAttachment>,
+    ) -> Self {
+        let mut message = Self::plain(Role::User, content);
+        message.attachments = attachments;
+        message
+    }
+
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
             tool_calls,
+            attachments: Vec::new(),
         }
     }
 
@@ -44,6 +72,7 @@ impl Message {
             content: content.into(),
             tool_call_id: Some(call.id.clone()),
             tool_calls: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -53,6 +82,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }

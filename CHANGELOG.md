@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0-rc1] - 2026-08-09
+
+### Added
+
+- TUI Prompt 升级为可换行编辑器，支持左右/上下、Home/End、鼠标点击定位和内部滚动。
+- 支持 `Shift+Enter`、`Alt+Enter` 或 `Ctrl+J` 插入换行，`Enter` 发送。
+- 支持 Bracketed Paste；多行或长文本显示为可删除的粘贴附件。
+- 支持从系统剪贴板读取图片、编码 PNG、展示附件摘要，并通过 `Ctrl+D` 删除附件。
+- 图片附件原生编码到 Chat Completions、Responses 和 Anthropic Messages 三种协议，并随会话持久化。
+
 ## [0.3.0-rc2] - 2026-08-09
 
 ### Fixed

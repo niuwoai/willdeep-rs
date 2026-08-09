@@ -86,12 +86,21 @@ impl Agent {
 
     pub async fn run_with_history(
         &self,
-        mut messages: Vec<Message>,
+        messages: Vec<Message>,
         prompt: impl Into<String>,
+    ) -> Result<AgentOutcome, AgentError> {
+        self.run_with_history_message(messages, Message::user(prompt))
+            .await
+    }
+
+    pub async fn run_with_history_message(
+        &self,
+        mut messages: Vec<Message>,
+        user_message: Message,
     ) -> Result<AgentOutcome, AgentError> {
         messages.retain(|message| message.role != crate::types::Role::System);
         messages.insert(0, Message::system(&self.config.system_prompt));
-        messages.push(Message::user(prompt));
+        messages.push(user_message);
         let definitions = self.tools.definitions();
         for turn in 1..=self.config.max_turns {
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;

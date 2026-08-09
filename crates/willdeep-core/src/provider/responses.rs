@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{client, decode_success, endpoint, openai_auth};
 use super::{Provider, ProviderConfig, ProviderError};
-use crate::types::{Completion, Message, Role, ToolCall, ToolDefinition, Usage};
+use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
 pub struct ResponsesProvider {
     config: ProviderConfig,
@@ -96,7 +96,7 @@ fn encode_input(messages: &[Message]) -> (String, Vec<ResponseInputItem>) {
     for message in messages {
         match message.role {
             Role::System => instructions.push(message.content.clone()),
-            Role::User => input.push(ResponseInputItem::message("user", &message.content)),
+            Role::User => input.push(ResponseInputItem::user_message(message)),
             Role::Assistant => {
                 if !message.content.is_empty() {
                     input.push(ResponseInputItem::message("assistant", &message.content));
@@ -160,19 +160,41 @@ impl ResponseInputItem {
         Self {
             kind: "message",
             role: Some(role),
-            content: vec![ResponseContent {
-                kind: if role == "assistant" {
+            content: vec![ResponseContent::text(
+                if role == "assistant" {
                     "output_text"
                 } else {
                     "input_text"
                 },
-                text: text.to_owned(),
-            }],
+                text.to_owned(),
+            )],
             call_id: None,
             name: None,
             arguments: None,
             output: None,
         }
+    }
+
+    fn user_message(message: &Message) -> Self {
+        let mut value = Self::message("user", &message.content);
+        for attachment in &message.attachments {
+            match attachment {
+                MessageAttachment::Text { name, content } => {
+                    value.content.push(ResponseContent::text(
+                        "input_text",
+                        format!("[Pasted text: {name}]\n{content}"),
+                    ))
+                }
+                MessageAttachment::Image {
+                    media_type, data, ..
+                } => value.content.push(ResponseContent {
+                    kind: "input_image",
+                    text: None,
+                    image_url: Some(format!("data:{media_type};base64,{data}")),
+                }),
+            }
+        }
+        value
     }
 }
 
@@ -180,7 +202,20 @@ impl ResponseInputItem {
 struct ResponseContent {
     #[serde(rename = "type")]
     kind: &'static str,
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_url: Option<String>,
+}
+
+impl ResponseContent {
+    fn text(kind: &'static str, text: String) -> Self {
+        Self {
+            kind,
+            text: Some(text),
+            image_url: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -258,5 +293,25 @@ mod tests {
         assert_eq!(input.len(), 2);
         assert_eq!(input[0].call_id.as_deref(), Some("call_1"));
         assert_eq!(input[1].call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn image_attachment_becomes_input_image() {
+        let message = Message::user_with_attachments(
+            "look",
+            vec![MessageAttachment::Image {
+                name: "a.png".into(),
+                media_type: "image/png".into(),
+                data: "YWJj".into(),
+                width: 1,
+                height: 1,
+            }],
+        );
+        let (_, input) = encode_input(&[message]);
+        assert_eq!(input[0].content[1].kind, "input_image");
+        assert_eq!(
+            input[0].content[1].image_url.as_deref(),
+            Some("data:image/png;base64,YWJj")
+        );
     }
 }
