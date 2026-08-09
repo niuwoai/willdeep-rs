@@ -88,6 +88,7 @@ struct App {
     scroll_from_bottom: usize,
     follow_bottom: bool,
     transcript_width: usize,
+    transcript_height: usize,
     viewport_height: usize,
     tools: ToolActivity,
     tools_expanded: bool,
@@ -351,6 +352,7 @@ impl App {
             scroll_from_bottom: 0,
             follow_bottom: true,
             transcript_width: 78,
+            transcript_height: 0,
             viewport_height: 10,
             tools: ToolActivity::default(),
             tools_expanded: false,
@@ -460,8 +462,7 @@ impl App {
         }
     }
     fn max_scroll(&self) -> usize {
-        visual_lines(&self.transcript.join("\n"), self.transcript_width)
-            .saturating_sub(self.viewport_height)
+        self.transcript_height.saturating_sub(self.viewport_height)
     }
     fn scroll_up(&mut self, n: usize) {
         let max = self.max_scroll();
@@ -487,12 +488,15 @@ impl App {
         self.scroll_from_bottom = 0;
     }
     fn append_transcript(&mut self, v: String) {
+        let previous_height = rendered_transcript_height(&self.transcript, self.transcript_width);
+        self.transcript.push(v);
+        self.transcript_height =
+            rendered_transcript_height(&self.transcript, self.transcript_width);
         if !self.follow_bottom {
             self.scroll_from_bottom = self
                 .scroll_from_bottom
-                .saturating_add(visual_lines(&v, self.transcript_width));
+                .saturating_add(self.transcript_height.saturating_sub(previous_height));
         }
-        self.transcript.push(v);
         self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
     }
     fn handle_paste(&mut self, value: String) {
@@ -836,10 +840,11 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                 app.language.text("思考中", "thinking", "思考中")
             ));
         }
-        let text = visible_transcript.join("\n");
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
-        let max = visual_lines(&text, app.transcript_width).saturating_sub(app.viewport_height);
+        app.transcript_height =
+            rendered_transcript_height(&visible_transcript, app.transcript_width);
+        let max = app.max_scroll();
         app.scroll_from_bottom = app.scroll_from_bottom.min(max);
         let offset = max
             .saturating_sub(app.scroll_from_bottom)
@@ -1301,6 +1306,12 @@ fn colored_transcript(entries: &[String]) -> Text<'static> {
     Text::from(lines)
 }
 
+fn rendered_transcript_height(entries: &[String], width: usize) -> usize {
+    Paragraph::new(colored_transcript(entries))
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1).min(u16::MAX as usize) as u16)
+}
+
 fn render_assistant_markdown(content: &str) -> Vec<Line<'static>> {
     let mut output = Vec::new();
     let mut code_block = false;
@@ -1592,6 +1603,13 @@ mod tests {
     #[test]
     fn cjk_wraps() {
         assert_eq!(visual_lines("中文", 2), 2);
+    }
+    #[test]
+    fn transcript_height_uses_ratatui_word_wrapping() {
+        let entries = vec!["WillDeep: 12345 12345 12345".to_owned()];
+
+        assert_eq!(rendered_transcript_height(&entries, 10), 4);
+        assert_eq!(visual_lines(&entries.join("\n"), 10), 3);
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
