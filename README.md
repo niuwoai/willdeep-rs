@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.12.0-rc1`，支持：
+当前版本为 `0.13.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -124,7 +124,7 @@ WillDeep 会加载 `~/.willdeep/CLAUDE.md`，以及工作区根的 `PRODUCT_OVER
 willdeep --web --workspace /path/to/project
 ```
 
-浏览器打开 `http://127.0.0.1:9847`。前端采用 React + Chakra UI + Vite 纯客户端渲染，用户消息立即显示，Harness 阶段与工具进度通过 SSE 返回。
+浏览器打开 `http://127.0.0.1:9847`。前端采用 React + Chakra UI + Vite 纯客户端渲染，用户消息立即显示；单行工作状态吸附在 Composer 上方，每轮工具调用在聊天区精简保留。发送按钮在运行时切换为停止按钮，断开 SSE 的同时终止对应 Harness。Composer 支持粘贴长文本和图片、发送前删除、`/` 命令候选及 `$` 技能候选。
 
 允许多个明确授权的工作区：
 
@@ -151,8 +151,10 @@ willdeep --profile some-im --workspace .
 | `←` / `→`、`Home` / `End` | 移动编辑光标；也可鼠标点击定位 |
 | `Alt+↑` / `Alt+↓` | 按显示行滚动聊天记录 |
 | `PageUp` / `PageDown` | 按页滚动 |
+| 鼠标滚轮 | 浏览聊天历史；回到底部后恢复自动跟随 |
 | `Ctrl+Home` / `Ctrl+End` | 跳到聊天顶部 / 回到底部并恢复自动跟随 |
 | `Ctrl+O` | 展开或收起最近 Tool Use 明细 |
+| `Ctrl+S` | 切换文本选择模式；启用后可拖选聊天文字并使用终端复制快捷键 |
 | `Enter` | 发送 Prompt |
 | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | 插入换行 |
 | `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
@@ -169,6 +171,8 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 运行时活动区显示最近三条可验证进度，包括当前轮次、工具调用/完成、上下文压缩和后台结果；不展示或伪造模型私有思维链。宽终端会在右侧显示 Agent、Mobile Relay、手机队列和工具完成情况。状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
 
 输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。输入 `/compress` 会立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存当前会话；历史不足八条时不会消耗模型请求。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
+
+TUI 会按终端能力渐进渲染常用 Markdown：标题、粗体、行内代码、引用、列表、代码块和链接；原始会话内容仍以 Markdown 文本保存。
 
 输入 `/mobile` 会连接 `wss://j.niuwoai.com/ws/broadcast/<room>` 并弹出配对二维码；使用 WillDeep Mobile 扫码后可从手机向当前 CLI 会话发消息。`Esc` 或 `/mobile hide` 只隐藏二维码，`/mobile show` 再次显示，`/mobile off` 断开 Relay。CLI 使用独立于 Swift App 的 room/token，凭据保存在 `~/.willdeep/mobile-relay.toml`；Unix 权限为 `0600`，不会写入仓库。CLI 不监听本地端口。
 
@@ -238,6 +242,8 @@ max_turns = 12
 - `A`：Always allow，仅在界面明确显示该选项时可用。
 
 Always Allow 不是全局“免死金牌”：Shell 只记住规范化后的完整命令，MCP 只记住精确 `server/tool`。含管道、重定向、命令连接符或换行的 Shell 命令，以及文件写入、网络重定向、任务取消和 editor 授权都不提供持久放行。规则存放于 `$WILLDEEP_HOME/always-allow.json`，Unix 权限为 `0600`：
+
+未显式配置时默认采用 `smart`。该模式还会免审 `cargo test`，以及它后面只由 `grep`、`head`、`tail` 构成的输出过滤管道；`tee`、重定向、`&&`、命令替换和其他 Cargo 子命令不在此范围内。
 
 ```bash
 willdeep --list-approvals
@@ -330,7 +336,7 @@ willdeep --provider some-im --api anthropic-messages ...
 只读工具默认执行。审批模式与 Swift App 对齐为三档：
 
 - `strict`：创建、编辑、Shell、MCP 都逐次审批；
-- `smart`：当前工作区内的创建、编辑免审，Shell、MCP、网络仍审批；
+- `smart`（默认）：当前工作区内的创建、编辑免审；另精确放行 `cargo test` 与其只读输出过滤管道，其他 Shell、MCP、网络仍审批；
 - `workspace-write`：与当前 Rust 阶段的 `smart` 保持相同安全边界，为后续自动审核器预留独立语义。
 
 需要审批时显示：
@@ -346,7 +352,7 @@ Allow once? [y/N]
 willdeep --full-auto --json ...
 ```
 
-非交互输入下，`smart` / `workspace-write` 允许当前工作区内的创建和编辑；Shell、MCP 和其他外部操作仍因无法交互审批而拒绝。Harness 会把拒绝结果返回模型，不会静默放行。
+非交互输入下，`smart` / `workspace-write` 允许当前工作区内的创建和编辑；`smart` 另允许上述测试管道。其他 Shell、MCP 和外部操作仍因无法交互审批而拒绝。Harness 会把拒绝结果返回模型，不会静默放行。
 
 ## 配置环境变量
 

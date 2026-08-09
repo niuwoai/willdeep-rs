@@ -892,7 +892,9 @@ impl ToolRegistry {
             .filter(|label| !label.trim().is_empty())
             .map(|label| format!("{label}\ncommand: {}", args.command))
             .unwrap_or_else(|| args.command.clone());
-        if let Some(signature) = command_signature(&args.command) {
+        if self.approval_mode == ApprovalMode::Smart && is_test_inspection_pipeline(&args.command) {
+            // Explicit smart-mode policy: cargo test plus read-only output filters.
+        } else if let Some(signature) = command_signature(&args.command) {
             self.require_rememberable_approval(&format!("run command: {description}"), signature)
                 .await?;
         } else {
@@ -1286,6 +1288,88 @@ fn command_signature(command: &str) -> Option<String> {
     }
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty()).then(|| format!("command-exact:{normalized}"))
+}
+
+fn is_test_inspection_pipeline(command: &str) -> bool {
+    let normalized = command.replace("2>&1", " ");
+    if normalized.contains("$(")
+        || normalized.contains("${")
+        || normalized
+            .chars()
+            .any(|value| matches!(value, '&' | ';' | '>' | '<' | '`' | '\n' | '\r'))
+    {
+        return false;
+    }
+    let Some(segments) = split_inspection_pipeline(&normalized) else {
+        return false;
+    };
+    let Some(first) = segments.first() else {
+        return false;
+    };
+    if first.first().map(String::as_str) != Some("cargo")
+        || first.get(1).map(String::as_str) != Some("test")
+    {
+        return false;
+    }
+    segments.iter().skip(1).all(|words| {
+        matches!(
+            words.first().map(String::as_str),
+            Some("grep" | "head" | "tail")
+        )
+    })
+}
+
+fn split_inspection_pipeline(command: &str) -> Option<Vec<Vec<String>>> {
+    let mut segments = Vec::new();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for value in command.chars() {
+        if escaped {
+            word.push(value);
+            escaped = false;
+            continue;
+        }
+        if value == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(value, '\'' | '"') {
+            if quote == Some(value) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(value);
+            } else {
+                word.push(value);
+            }
+        } else if quote.is_none() && value == '|' {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            if words.is_empty() {
+                return None;
+            }
+            segments.push(std::mem::take(&mut words));
+        } else if quote.is_none() && value.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(value);
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    if words.is_empty() {
+        return None;
+    }
+    segments.push(words);
+    Some(segments)
 }
 
 fn escape_user_answer(answer: &str) -> String {
@@ -1905,5 +1989,18 @@ mod tests {
             Some("command-exact:cargo test --all")
         );
         assert_eq!(command_signature("cargo test && deploy"), None);
+    }
+
+    #[test]
+    fn smart_test_pipeline_scope_is_exact() {
+        assert!(is_test_inspection_pipeline(
+            "cargo test -p willdeep 2>&1 | grep -E 'FAILED|warning' | head -40"
+        ));
+        assert!(is_test_inspection_pipeline("cargo test --workspace"));
+        assert!(!is_test_inspection_pipeline("cargo run"));
+        assert!(!is_test_inspection_pipeline("cargo test | tee result.txt"));
+        assert!(!is_test_inspection_pipeline("cargo test > result.txt"));
+        assert!(!is_test_inspection_pipeline("cargo test && touch owned"));
+        assert!(!is_test_inspection_pipeline("cargo test $(danger)"));
     }
 }

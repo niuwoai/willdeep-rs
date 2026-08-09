@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::i18n::Language;
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -16,11 +16,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use willdeep_core::SessionStore;
+use willdeep_core::{MessageAttachment, SessionStore, SkillCatalog};
 
 const MAX_PROMPT_CHARS: usize = 100_000;
 
@@ -52,6 +52,8 @@ struct ChatRequest {
     session_id: Option<String>,
     workspace: Option<String>,
     language: Option<String>,
+    #[serde(default)]
+    attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +70,24 @@ struct WorkspaceSummary {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct ComposerQuery {
+    workspace: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ComposerData {
+    commands: Vec<&'static str>,
+    skills: Vec<ComposerSkill>,
+}
+
+#[derive(Serialize)]
+struct ComposerSkill {
+    identifier: String,
+    name: String,
+    description: String,
+}
+
 pub async fn serve(config: WebConfig) -> Result<()> {
     let state = Arc::new(WebState {
         config_path: config.config_path,
@@ -82,6 +102,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/sessions", get(sessions))
         .route("/api/workspaces", get(workspaces))
+        .route("/api/composer", get(composer))
         .route("/", get(index))
         .route("/{*path}", get(asset))
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -100,6 +121,41 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     }
     axum::serve(listener, app).await.context("run Web server")?;
     Ok(())
+}
+
+async fn composer(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<ComposerQuery>,
+) -> Result<Json<ComposerData>, WebError> {
+    let workspace = select_workspace(&state.workspaces, query.workspace.as_deref())?;
+    let catalog = SkillCatalog::discover(workspace, &[]);
+    let skills = catalog
+        .list()
+        .iter()
+        .filter(|skill| !skill.identifier.starts_with("auto-"))
+        .map(|skill| ComposerSkill {
+            identifier: skill.identifier.clone(),
+            name: skill.name.clone(),
+            description: safe_skill_description(&skill.description),
+        })
+        .collect();
+    Ok(Json(ComposerData {
+        commands: vec!["/help", "/goal", "/compress", "/skills", "/clear"],
+        skills,
+    }))
+}
+
+fn safe_skill_description(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "password", "passwd", "api_key", "api-key", "token=", "secret",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "[sensitive description hidden]".to_owned();
+    }
+    truncate(value, 320)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -165,6 +221,7 @@ fn validate_chat(state: &WebState, input: &ChatRequest) -> Result<(), WebError> 
     }
     Language::parse(input.language.as_deref())
         .map_err(|error| WebError::bad_request(error.to_string()))?;
+    validate_attachments(&input.attachments)?;
     let workspace = select_workspace(&state.workspaces, input.workspace.as_deref())?;
     if let Some(raw_id) = input.session_id.as_deref() {
         let id = uuid::Uuid::parse_str(raw_id)
@@ -227,15 +284,31 @@ async fn run_harness_inner(
     if let Some(session) = input.session_id.as_deref() {
         command.args(["--resume", session]);
     }
+    command.arg("--web-input-json");
     let mut child = command
-        .arg(input.prompt.trim())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("start WillDeep harness")
         .map_err(WebError::from_anyhow)?;
+    let payload = serde_json::to_vec(
+        &serde_json::json!({"prompt":input.prompt.trim(),"attachments":input.attachments}),
+    )
+    .map_err(|error| WebError::internal(error.to_string()))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WebError::internal("harness stdin unavailable"))?;
+    stdin
+        .write_all(&payload)
+        .await
+        .map_err(|error| WebError::internal(error.to_string()))?;
+    stdin
+        .shutdown()
+        .await
+        .map_err(|error| WebError::internal(error.to_string()))?;
     let stdout = child
         .stdout
         .take()
@@ -250,11 +323,15 @@ async fn run_harness_inner(
         value
     });
     let mut lines = BufReader::new(stdout).lines();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|error| WebError::internal(error.to_string()))?
-    {
+    loop {
+        let line = tokio::select! {
+            _ = tx.closed() => {
+                let _ = child.kill().await;
+                return Ok(());
+            }
+            line = lines.next_line() => line.map_err(|error| WebError::internal(error.to_string()))?,
+        };
+        let Some(line) = line else { break };
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
             && let Some(client) = client_event(
                 value,
@@ -280,6 +357,40 @@ async fn run_harness_inner(
 
 fn state_language(state: &WebState) -> Language {
     state.language
+}
+
+fn validate_attachments(attachments: &[MessageAttachment]) -> Result<(), WebError> {
+    if attachments.len() > 12 {
+        return Err(WebError::bad_request("at most 12 attachments are allowed"));
+    }
+    for attachment in attachments {
+        match attachment {
+            MessageAttachment::Text { content, .. } if content.chars().count() > 200_000 => {
+                return Err(WebError::bad_request("pasted text attachment is too large"));
+            }
+            MessageAttachment::Image {
+                media_type,
+                data,
+                width,
+                height,
+                ..
+            } => {
+                if !matches!(
+                    media_type.as_str(),
+                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                ) || data.len() > 20_000_000
+                    || *width == 0
+                    || *height == 0
+                {
+                    return Err(WebError::bad_request(
+                        "image attachment is unsupported or too large",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn client_event(value: serde_json::Value, language: Language) -> Option<serde_json::Value> {
@@ -326,10 +437,22 @@ fn client_event(value: serde_json::Value, language: Language) -> Option<serde_js
             .text("正在整理结果", "Preparing result", "結果を整理中")
             .to_owned(),
         "completed" => return Some(value),
-        "assistant_text" => return None,
+        "assistant_text" => {
+            let thought = value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            return Some(serde_json::json!({"type":"thought","text":truncate(thought,240)}));
+        }
         _ => kind.to_owned(),
     };
-    Some(serde_json::json!({"type":kind,"label":label}))
+    Some(serde_json::json!({
+        "type":kind,
+        "label":label,
+        "id":value.get("id").and_then(|item| item.as_str()),
+        "name":value.get("name").and_then(|item| item.as_str()),
+        "is_error":value.get("is_error").and_then(|item| item.as_bool()),
+    }))
 }
 
 async fn send_event(tx: &mpsc::Sender<Result<Event, Infallible>>, value: serde_json::Value) {
@@ -424,5 +547,46 @@ mod tests {
     fn tool_events_are_redacted_for_sse() {
         let event=client_event(serde_json::json!({"type":"tool_completed","name":"read_file","output":"secret","is_error":false}),Language::En).unwrap();
         assert!(event.get("output").is_none());
+    }
+    #[test]
+    fn thought_events_are_compact_and_tool_arguments_stay_private() {
+        let event = client_event(
+            serde_json::json!({"type":"assistant_text","text":"x".repeat(500)}),
+            Language::En,
+        )
+        .unwrap();
+        assert_eq!(event["type"], "thought");
+        assert!(event["text"].as_str().unwrap().chars().count() <= 240);
+    }
+    #[test]
+    fn validates_web_attachments() {
+        let valid = vec![MessageAttachment::Image {
+            name: "shot.png".into(),
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+            width: 1,
+            height: 1,
+        }];
+        assert!(validate_attachments(&valid).is_ok());
+        let invalid = vec![MessageAttachment::Image {
+            name: "shot.svg".into(),
+            media_type: "image/svg+xml".into(),
+            data: "AAAA".into(),
+            width: 1,
+            height: 1,
+        }];
+        assert!(validate_attachments(&invalid).is_err());
+    }
+    #[test]
+    fn skill_descriptions_hide_sensitive_metadata() {
+        assert_eq!(
+            safe_skill_description("password: example"),
+            "[sensitive description hidden]"
+        );
+        assert_eq!(
+            safe_skill_description("Review Rust code"),
+            "Review Rust code"
+        );
+        assert!(safe_skill_description(&"x".repeat(500)).chars().count() <= 320);
     }
 }

@@ -9,6 +9,11 @@ const zhCN = {
   promptPlaceholder: "描述你想完成的任务…", send: "发送", working: "正在处理",
   loadFailed: "加载失败", requestFailed: "请求失败", noSessions: "这个工作区还没有会话",
   emptyReply: "Harness 没有返回文本",
+  stop: "停止生成", sendHint: "Enter 发送 · Shift+Enter 换行", commands: "命令",
+  thinking: "正在思考", stopped: "已停止", toolRunning: "运行中", toolDone: "已完成", toolFailed: "失败",
+  attachments: "附件", removeAttachment: "删除附件", pastedText: "粘贴文本", pastedImage: "粘贴图片", attachmentPrompt: "请分析附件", attachmentCount: "个附件",
+  helpText: "可用命令：/help、/goal <目标>、/goal off、/compress、/skills、/clear。输入 $ 可选择技能。", cleared: "聊天显示已清空", goalSet: "目标模式已开启", goalOff: "目标模式已关闭",
+  skills: "技能", noSkills: "当前工作区没有发现技能",
 };
 
 export type Messages = typeof zhCN;
@@ -21,6 +26,11 @@ const en: Messages = {
   promptPlaceholder: "Describe the task you want to complete…", send: "Send", working: "Working",
   loadFailed: "Failed to load", requestFailed: "Request failed", noSessions: "No sessions in this workspace",
   emptyReply: "The harness returned no text",
+  stop: "Stop generating", sendHint: "Enter to send · Shift+Enter for newline", commands: "Commands",
+  thinking: "Thinking", stopped: "Stopped", toolRunning: "Running", toolDone: "Done", toolFailed: "Failed",
+  attachments: "Attachments", removeAttachment: "Remove attachment", pastedText: "Pasted text", pastedImage: "Pasted image", attachmentPrompt: "Please analyze the attachments", attachmentCount: "attachments",
+  helpText: "Commands: /help, /goal <text>, /goal off, /compress, /skills, /clear. Type $ to choose a skill.", cleared: "Chat display cleared", goalSet: "Goal mode enabled", goalOff: "Goal mode disabled",
+  skills: "Skills", noSkills: "No skills found in this workspace",
 };
 
 const ja: Messages = {
@@ -31,6 +41,11 @@ const ja: Messages = {
   promptPlaceholder: "完了したいタスクを入力…", send: "送信", working: "処理中",
   loadFailed: "読み込みに失敗しました", requestFailed: "リクエストに失敗しました", noSessions: "このワークスペースには履歴がありません",
   emptyReply: "Harness からテキストが返されませんでした",
+  stop: "生成を停止", sendHint: "Enter で送信 · Shift+Enter で改行", commands: "コマンド",
+  thinking: "思考中", stopped: "停止しました", toolRunning: "実行中", toolDone: "完了", toolFailed: "失敗",
+  attachments: "添付ファイル", removeAttachment: "添付を削除", pastedText: "貼り付けたテキスト", pastedImage: "貼り付けた画像", attachmentPrompt: "添付ファイルを分析してください", attachmentCount: "件の添付",
+  helpText: "コマンド：/help、/goal <目標>、/goal off、/compress、/skills、/clear。$ でスキルを選択できます。", cleared: "チャット表示を消去しました", goalSet: "ゴールモードを有効にしました", goalOff: "ゴールモードを無効にしました",
+  skills: "スキル", noSkills: "このワークスペースにはスキルがありません",
 };
 
 export const messages: Record<Language, Messages> = { "zh-CN": zhCN, en, ja };

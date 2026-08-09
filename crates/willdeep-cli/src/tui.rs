@@ -111,6 +111,8 @@ struct App {
     workspace_status: String,
     progress_log: VecDeque<String>,
     language: Language,
+    transient_thought: Option<String>,
+    selection_mode: bool,
 }
 
 struct AskDialog {
@@ -264,9 +266,21 @@ async fn event_loop(
             _=refresh.tick()=>app.background_tasks=runtime.background_tasks.snapshots(),
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
-                Event::Mouse(mouse) if matches!(mouse.kind,MouseEventKind::Down(_))=>app.handle_mouse(mouse.column,mouse.row),
+                Event::Mouse(mouse)=>match mouse.kind {
+                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row),
+                    MouseEventKind::ScrollUp=>app.scroll_up(3),
+                    MouseEventKind::ScrollDown=>app.scroll_down(3),
+                    _=>{}
+                },
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
+                        app.selection_mode = !app.selection_mode;
+                        if app.selection_mode {execute!(term.backend_mut(),DisableMouseCapture)?;} else {execute!(term.backend_mut(),EnableMouseCapture)?;}
+                        let notice=if app.selection_mode {language.text("文本选择模式 · 拖动选择，Ctrl+S 恢复交互","Text selection · drag to select, Ctrl+S restores interaction","テキスト選択 · ドラッグで選択、Ctrl+S で戻る")} else {language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました")};
+                        app.notice=Some(notice.to_owned());
+                        continue;
+                    }
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if let Some((_,always,sender))=app.approval.take(){
@@ -296,16 +310,16 @@ async fn event_loop(
                 _=>{}
             }},
             Some(message)=runtime.rx.recv()=>match message {
-                UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在回答","Answering","回答中").to_owned();app.append_transcript(format!("WillDeep: {v}"));},
+                UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在整理思路","Working through it","考えを整理中").to_owned();app.transient_thought=Some(compact_thought(&v));},
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
-                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
+                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
                 UiMessage::Approval(v,a,s)=>app.approval=Some((v,a,s)),
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
-                UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
@@ -360,11 +374,14 @@ impl App {
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
             language,
+            transient_thought: None,
+            selection_mode: false,
         }
     }
     fn finish_turn(&mut self) {
         self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
         self.running = false;
+        self.transient_thought = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
     fn record_progress(&mut self, value: String) {
@@ -812,7 +829,14 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                 Constraint::Length(1),
             ])
             .split(canvas);
-        let text = app.transcript.join("\n");
+        let mut visible_transcript = app.transcript.clone();
+        if let Some(thought) = &app.transient_thought {
+            visible_transcript.push(format!(
+                "WillDeep · {}: {thought}",
+                app.language.text("思考中", "thinking", "思考中")
+            ));
+        }
+        let text = visible_transcript.join("\n");
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
         let max = visual_lines(&text, app.transcript_width).saturating_sub(app.viewport_height);
@@ -820,12 +844,20 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         let offset = max
             .saturating_sub(app.scroll_from_bottom)
             .min(u16::MAX as usize) as u16;
-        let title = if app.follow_bottom {
+        let title = if app.selection_mode {
+            app.language
+                .text(
+                    "WillDeep · 文本选择模式 · Ctrl+S 退出",
+                    "WillDeep · text selection · Ctrl+S exits",
+                    "WillDeep · テキスト選択 · Ctrl+S で終了",
+                )
+                .to_owned()
+        } else if app.follow_bottom {
             "WillDeep".to_owned()
         } else {
             format!("WillDeep · history ↑{}", app.scroll_from_bottom)
         };
-        let colored = colored_transcript(&app.transcript);
+        let colored = colored_transcript(&visible_transcript);
         f.render_widget(
             Paragraph::new(colored)
                 .block(
@@ -1249,10 +1281,12 @@ pub fn channel() -> (
 fn colored_transcript(entries: &[String]) -> Text<'static> {
     let mut lines = Vec::new();
     for value in entries {
+        if let Some(content) = value.strip_prefix("WillDeep: ") {
+            lines.extend(render_assistant_markdown(content));
+            continue;
+        }
         let style = if value.starts_with("You:") {
             Style::default().fg(Color::Cyan)
-        } else if value.starts_with("WillDeep:") {
-            Style::default().fg(Color::Green)
         } else if value.starts_with("Error:") {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else {
@@ -1265,6 +1299,159 @@ fn colored_transcript(entries: &[String]) -> Text<'static> {
         );
     }
     Text::from(lines)
+}
+
+fn render_assistant_markdown(content: &str) -> Vec<Line<'static>> {
+    let mut output = Vec::new();
+    let mut code_block = false;
+    for (index, raw) in content.lines().enumerate() {
+        if raw.trim_start().starts_with("```") {
+            code_block = !code_block;
+            continue;
+        }
+        let prefix = (index == 0).then(|| {
+            Span::styled(
+                "WillDeep: ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+        let mut spans = Vec::new();
+        if let Some(prefix) = prefix {
+            spans.push(prefix);
+        }
+        if code_block {
+            spans.push(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            ));
+        } else {
+            let trimmed = raw.trim_start();
+            let (marker, body, base) = if let Some(body) = trimmed.strip_prefix("### ") {
+                (
+                    "▸ ",
+                    body,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if let Some(body) = trimmed.strip_prefix("## ") {
+                (
+                    "◆ ",
+                    body,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if let Some(body) = trimmed.strip_prefix("# ") {
+                (
+                    "■ ",
+                    body,
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if let Some(body) = trimmed.strip_prefix("> ") {
+                (
+                    "│ ",
+                    body,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )
+            } else if let Some(body) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+            {
+                ("• ", body, Style::default().fg(Color::Green))
+            } else {
+                ("", raw, Style::default().fg(Color::Green))
+            };
+            if !marker.is_empty() {
+                spans.push(Span::styled(marker, base));
+            }
+            spans.extend(render_inline_markdown(body, base));
+        }
+        output.push(Line::from(spans));
+    }
+    if output.is_empty() {
+        output.push(Line::styled("WillDeep:", Style::default().fg(Color::Green)));
+    }
+    output
+}
+
+fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = value;
+    while !rest.is_empty() {
+        let bold = rest.find("**").map(|index| (index, "bold"));
+        let code = rest.find('`').map(|index| (index, "code"));
+        let link = rest.find('[').map(|index| (index, "link"));
+        let Some((index, kind)) = [bold, code, link]
+            .into_iter()
+            .flatten()
+            .min_by_key(|item| item.0)
+        else {
+            spans.push(Span::styled(rest.to_owned(), base));
+            break;
+        };
+        if index > 0 {
+            spans.push(Span::styled(rest[..index].to_owned(), base));
+            rest = &rest[index..];
+        }
+        match kind {
+            "bold" if rest[2..].find("**").is_some() => {
+                let end = rest[2..].find("**").unwrap() + 2;
+                spans.push(Span::styled(
+                    rest[2..end].to_owned(),
+                    base.add_modifier(Modifier::BOLD),
+                ));
+                rest = &rest[end + 2..];
+            }
+            "code" if rest[1..].find('`').is_some() => {
+                let end = rest[1..].find('`').unwrap() + 1;
+                spans.push(Span::styled(
+                    rest[1..end].to_owned(),
+                    Style::default().fg(Color::LightCyan).bg(Color::DarkGray),
+                ));
+                rest = &rest[end + 1..];
+            }
+            "link" if rest.find("](").is_some() => {
+                let label_end = rest.find("](").unwrap();
+                if let Some(url_end) = rest[label_end + 2..].find(')') {
+                    let url_end = label_end + 2 + url_end;
+                    spans.push(Span::styled(
+                        rest[1..label_end].to_owned(),
+                        Style::default()
+                            .fg(Color::LightBlue)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ));
+                    spans.push(Span::styled(
+                        format!(" ({})", &rest[label_end + 2..url_end]),
+                        base,
+                    ));
+                    rest = &rest[url_end + 1..];
+                } else {
+                    spans.push(Span::styled(rest[..1].to_owned(), base));
+                    rest = &rest[1..];
+                }
+            }
+            _ => {
+                spans.push(Span::styled(rest[..1].to_owned(), base));
+                rest = &rest[1..];
+            }
+        }
+    }
+    spans
+}
+fn compact_thought(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = normalized.chars().take(180).collect::<String>();
+    if normalized.chars().count() > 180 {
+        compact.push('…');
+    }
+    compact
 }
 fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);
@@ -1405,6 +1592,32 @@ mod tests {
     #[test]
     fn cjk_wraps() {
         assert_eq!(visual_lines("中文", 2), 2);
+    }
+    #[test]
+    fn transient_thought_is_single_line_and_bounded() {
+        let value = compact_thought(&format!("first\n{}", "x".repeat(300)));
+        assert!(!value.contains('\n'));
+        assert!(value.chars().count() <= 181);
+    }
+    #[test]
+    fn renders_common_markdown_for_terminal() {
+        let lines = render_assistant_markdown(
+            "# Title\n- **bold** and `code`\n[Docs](https://example.com)",
+        );
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("■ Title"));
+        assert!(rendered.contains("• bold and code"));
+        assert!(rendered.contains("Docs (https://example.com)"));
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
     #[test]
     fn encodes_clipboard_rgba_as_deletable_image() {

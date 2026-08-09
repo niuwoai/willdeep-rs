@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
     Agent, AgentConfig, AgentEvent, ApprovalDecision, ApprovalMode, Approver,
@@ -129,6 +130,17 @@ struct Cli {
     /// UI language: zh-CN, en, or ja. Overrides agent.language.
     #[arg(long, env = "WILLDEEP_LANGUAGE")]
     language: Option<String>,
+
+    /// Read a trusted Web bridge prompt and attachments as JSON from stdin.
+    #[arg(long, hide = true)]
+    web_input_json: bool,
+}
+
+#[derive(Deserialize)]
+struct WebInput {
+    prompt: String,
+    #[serde(default)]
+    attachments: Vec<willdeep_core::MessageAttachment>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -286,7 +298,18 @@ async fn run() -> Result<()> {
         .or_else(|| profile.and_then(|provider| provider.model.clone()))
         .or_else(|| (kind == ProviderKind::SomeIm).then(|| "deepseek-v4-flash".to_owned()))
         .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
-    let prompt = read_prompt(&cli.prompt, cli.no_tui)?;
+    let web_input = if cli.web_input_json {
+        let mut value = String::new();
+        std::io::stdin().read_to_string(&mut value)?;
+        Some(serde_json::from_str::<WebInput>(&value).context("parse Web bridge input")?)
+    } else {
+        None
+    };
+    let prompt = if let Some(input) = &web_input {
+        Some(input.prompt.clone())
+    } else {
+        read_prompt(&cli.prompt, cli.no_tui)?
+    };
 
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: base.clone(),
@@ -314,7 +337,7 @@ async fn run() -> Result<()> {
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
 
-    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("strict");
+    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
     let approval_mode = if cli.full_auto {
         ApprovalMode::WorkspaceAccess
     } else {
@@ -440,9 +463,28 @@ async fn run() -> Result<()> {
     }
     let prompt = prompt.context("provide a prompt argument or pipe one on stdin")?;
     let history = session.messages.clone();
-    session.messages.push(willdeep_core::Message::user(&prompt));
+    if web_input.is_some() && prompt.trim() == "/compress" {
+        let messages = agent.compress_history(history).await?;
+        let changed = messages.len() < session.messages.len();
+        session.messages = messages;
+        store.save(&mut session)?;
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({"type":"completed","turns":0,"text":language.text(if changed {"上下文已压缩"} else {"当前上下文较短，无需压缩"},if changed {"Context compressed"} else {"Context is too short to compress"},if changed {"コンテキストを圧縮しました"} else {"コンテキストが短いため圧縮は不要です"}),"session_id":session.id})
+            );
+        }
+        return Ok(());
+    }
+    let user_message = willdeep_core::Message::user_with_attachments(
+        &prompt,
+        web_input.map(|input| input.attachments).unwrap_or_default(),
+    );
+    session.messages.push(user_message.clone());
     store.save(&mut session)?;
-    let mut outcome = agent.run_with_history(history, prompt).await?;
+    let mut outcome = agent
+        .run_with_history_message(history, user_message)
+        .await?;
     session.messages = outcome.messages.clone();
     store.save(&mut session)?;
     loop {
