@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0-rc1] - 2026-08-09
+
+### Added
+
+- 增加 Core Harness `ask_user` 工具，支持候选单选、多选、跳过以及自由输入其他答案；TUI 与普通终端均可交互。
+- 审批决策升级为 Allow once、Disallow、Always allow；TUI 使用 Y/N/A，普通终端提供同等选项。
+- Always Allow 规则持久化到 `$WILLDEEP_HOME/always-allow.json`，增加 `--list-approvals` 与 `--clear-approvals`。
+
+### Security
+
+- Shell Always Allow 仅匹配规范化后的完整命令，含管道、重定向、命令连接或换行的命令不提供持久授权；MCP 按精确 server/tool 记忆。
+- 文件写入、网络跳转、后台任务取消和 editor 单文件授权不允许持久放行。
+- `ask_user` 问题、选项和答案均限制长度，用户自由输入在回传模型前进行标记转义。
+
 ## [0.8.0-rc2] - 2026-08-09
 
 ### Fixed

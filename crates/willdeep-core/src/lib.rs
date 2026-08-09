@@ -19,7 +19,9 @@ pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use session::{Session, SessionStore};
 pub use skills::SkillCatalog;
 pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
-pub use tools::{ApprovalMode, Approver, ToolRegistry, WebToolConfig};
+pub use tools::{
+    ApprovalDecision, ApprovalMode, Approver, ToolRegistry, UserQuestion, WebToolConfig,
+};
 pub use types::{Message, MessageAttachment, Role, ToolCall};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

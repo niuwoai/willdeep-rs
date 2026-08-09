@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
@@ -24,8 +24,8 @@ use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::types::Usage;
 use willdeep_core::{
-    Agent, AgentEvent, Approver, BackgroundTaskRegistry, BackgroundTaskSnapshot, EventSink,
-    Message, MessageAttachment, Session, SessionStore, SkillCatalog,
+    Agent, AgentEvent, ApprovalDecision, Approver, BackgroundTaskRegistry, BackgroundTaskSnapshot,
+    EventSink, Message, MessageAttachment, Session, SessionStore, SkillCatalog, UserQuestion,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
@@ -33,7 +33,8 @@ use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 pub enum UiMessage {
     Agent(AgentEvent),
-    Approval(String, oneshot::Sender<bool>),
+    Approval(String, bool, oneshot::Sender<ApprovalDecision>),
+    Question(UserQuestion, oneshot::Sender<Option<String>>),
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
 }
@@ -53,16 +54,27 @@ impl EventSink for TuiSink {
 pub struct TuiApprover(pub mpsc::UnboundedSender<UiMessage>);
 #[async_trait]
 impl Approver for TuiApprover {
-    async fn approve(&self, description: &str) -> bool {
+    async fn approve(&self, description: &str, always_allow_available: bool) -> ApprovalDecision {
         let (tx, rx) = oneshot::channel();
         if self
             .0
-            .send(UiMessage::Approval(description.to_owned(), tx))
+            .send(UiMessage::Approval(
+                description.to_owned(),
+                always_allow_available,
+                tx,
+            ))
             .is_err()
         {
-            return false;
+            return ApprovalDecision::Deny;
         }
-        rx.await.unwrap_or(false)
+        rx.await.unwrap_or(ApprovalDecision::Deny)
+    }
+    async fn ask_user(&self, question: UserQuestion) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self.0.send(UiMessage::Question(question, tx)).is_err() {
+            return None;
+        }
+        rx.await.unwrap_or(None)
     }
 }
 
@@ -70,7 +82,8 @@ struct App {
     input: PromptEditor,
     transcript: Vec<String>,
     running: bool,
-    approval: Option<(String, oneshot::Sender<bool>)>,
+    approval: Option<(String, bool, oneshot::Sender<ApprovalDecision>)>,
+    question: Option<AskDialog>,
     scroll_from_bottom: usize,
     follow_bottom: bool,
     transcript_width: usize,
@@ -94,6 +107,14 @@ struct App {
     activity_line: String,
     background_tasks: Vec<BackgroundTaskSnapshot>,
     background_notices: VecDeque<String>,
+}
+
+struct AskDialog {
+    request: UserQuestion,
+    selected: usize,
+    checked: Vec<bool>,
+    answer: PromptEditor,
+    sender: oneshot::Sender<Option<String>>,
 }
 
 #[derive(Default)]
@@ -220,7 +241,11 @@ async fn event_loop(
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
-                    if let Some((_,sender))=app.approval.take(){let _=sender.send(matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')));continue;}
+                    if app.question.is_some(){app.handle_question_key(key);continue;}
+                    if let Some((_,always,sender))=app.approval.take(){
+                        let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
+                        let _=sender.send(decision);continue;
+                    }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
@@ -251,7 +276,8 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Compressing context".to_owned();},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
-                UiMessage::Approval(v,s)=>app.approval=Some((v,s)),
+                UiMessage::Approval(v,a,s)=>app.approval=Some((v,a,s)),
+                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
                 UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
@@ -280,6 +306,7 @@ impl App {
             transcript,
             running: false,
             approval: None,
+            question: None,
             scroll_from_bottom: 0,
             follow_bottom: true,
             transcript_width: 78,
@@ -309,6 +336,69 @@ impl App {
         self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
         self.running = false;
         self.activity_line = "Ready".to_owned();
+    }
+    fn handle_question_key(&mut self, key: KeyEvent) {
+        let Some(dialog) = self.question.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(dialog) = self.question.take() {
+                    let _ = dialog.sender.send(None);
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => dialog.selected = dialog.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => {
+                if !dialog.request.options.is_empty() {
+                    dialog.selected = (dialog.selected + 1) % dialog.request.options.len();
+                }
+            }
+            KeyCode::Char(' ')
+                if dialog.request.multi_select
+                    && dialog.answer.is_empty()
+                    && !dialog.checked.is_empty() =>
+            {
+                dialog.checked[dialog.selected] = !dialog.checked[dialog.selected];
+            }
+            KeyCode::Enter => {
+                let dialog = self.question.take().expect("question dialog");
+                let typed = dialog.answer.text().trim();
+                let answer = if !typed.is_empty() {
+                    typed.to_owned()
+                } else if dialog.request.multi_select {
+                    dialog
+                        .request
+                        .options
+                        .into_iter()
+                        .zip(dialog.checked)
+                        .filter_map(|(option, checked)| checked.then_some(option))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    dialog
+                        .request
+                        .options
+                        .get(dialog.selected)
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                let _ = dialog.sender.send(Some(answer));
+            }
+            KeyCode::Left => dialog.answer.left(),
+            KeyCode::Right => dialog.answer.right(),
+            KeyCode::Home => dialog.answer.home(),
+            KeyCode::End => dialog.answer.end(),
+            KeyCode::Backspace => dialog.answer.backspace(),
+            KeyCode::Delete => dialog.answer.delete(),
+            KeyCode::Char(value)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
+                dialog.answer.insert(&value.to_string())
+            }
+            _ => {}
+        }
     }
     fn max_scroll(&self) -> usize {
         visual_lines(&self.transcript.join("\n"), self.transcript_width)
@@ -821,6 +911,25 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                 popup,
             );
         }
+        if let Some((description, always, _)) = &app.approval {
+            let actions = if *always { "Y Allow once · A Always allow · N Disallow" } else { "Y Allow once · N Disallow" };
+            let content = format!("{description}\n\n{actions}");
+            let popup = centered_rect(f.area().width.min(76), 9.min(f.area().height), f.area());
+            f.render_widget(Clear, popup);
+            f.render_widget(Paragraph::new(content).block(Block::default().title("Approval required").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow))).wrap(Wrap{trim:false}), popup);
+        }
+        if let Some(dialog) = &app.question {
+            let options = dialog.request.options.iter().enumerate().map(|(index,option)| {
+                let marker = if dialog.request.multi_select { if dialog.checked[index] { "[x]" } else { "[ ]" } } else if index == dialog.selected { "(*)" } else { "( )" };
+                format!("{} {} {}",if index==dialog.selected{"▶"}else{" "},marker,option)
+            }).collect::<Vec<_>>().join("\n");
+            let help = if dialog.request.multi_select { "↑/↓ select · Space toggle · type another answer · Enter send · Esc skip" } else { "↑/↓ select · type another answer · Enter send · Esc skip" };
+            let content = format!("{}\n\n{}\n\nOther answer: {}\n{}",dialog.request.question,options,dialog.answer.text(),help);
+            let height = (content.lines().count() as u16 + 2).min(f.area().height).max(8);
+            let popup = centered_rect(f.area().width.min(84), height, f.area());
+            f.render_widget(Clear,popup);
+            f.render_widget(Paragraph::new(content).block(Block::default().title("Question from Agent").borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))).wrap(Wrap{trim:false}),popup);
+        }
     })?;
     Ok(())
 }
@@ -960,5 +1069,47 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[tokio::test]
+    async fn ask_dialog_accepts_custom_text() {
+        let mut app = App::new(Vec::new());
+        let (sender, receiver) = oneshot::channel();
+        app.question = Some(AskDialog {
+            request: UserQuestion {
+                question: "Choose".to_owned(),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                multi_select: false,
+            },
+            selected: 0,
+            checked: vec![false, false],
+            answer: PromptEditor::default(),
+            sender,
+        });
+        for value in "Other".chars() {
+            app.handle_question_key(KeyEvent::new(KeyCode::Char(value), KeyModifiers::NONE));
+        }
+        app.handle_question_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(receiver.await.expect("answer").as_deref(), Some("Other"));
+    }
+    #[tokio::test]
+    async fn ask_dialog_supports_multiple_selected_options() {
+        let mut app = App::new(Vec::new());
+        let (sender, receiver) = oneshot::channel();
+        app.question = Some(AskDialog {
+            request: UserQuestion {
+                question: "Choose".to_owned(),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                multi_select: true,
+            },
+            selected: 0,
+            checked: vec![false, false],
+            answer: PromptEditor::default(),
+            sender,
+        });
+        app.handle_question_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_question_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_question_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_question_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(receiver.await.expect("answer").as_deref(), Some("A, B"));
     }
 }

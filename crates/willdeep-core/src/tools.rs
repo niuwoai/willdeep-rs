@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use globset::Glob;
@@ -44,17 +45,34 @@ pub struct WebToolConfig {
     pub api_key: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    AllowOnce,
+    Deny,
+    AlwaysAllow,
+}
+
+#[derive(Clone, Debug)]
+pub struct UserQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    pub multi_select: bool,
+}
+
 #[async_trait]
 pub trait Approver: Send + Sync {
-    async fn approve(&self, description: &str) -> bool;
+    async fn approve(&self, description: &str, always_allow_available: bool) -> ApprovalDecision;
+    async fn ask_user(&self, _question: UserQuestion) -> Option<String> {
+        None
+    }
 }
 
 struct DenyApprover;
 
 #[async_trait]
 impl Approver for DenyApprover {
-    async fn approve(&self, _description: &str) -> bool {
-        false
+    async fn approve(&self, _description: &str, _always_allow_available: bool) -> ApprovalDecision {
+        ApprovalDecision::Deny
     }
 }
 
@@ -107,6 +125,8 @@ pub struct ToolRegistry {
     background: Arc<BackgroundTaskRegistry>,
     allowed_tools: Option<HashSet<String>>,
     write_target: Option<PathBuf>,
+    always_allowed: Arc<Mutex<HashSet<String>>>,
+    always_allow_path: Option<PathBuf>,
 }
 
 impl ToolRegistry {
@@ -131,6 +151,8 @@ impl ToolRegistry {
             background: Arc::new(BackgroundTaskRegistry::default()),
             allowed_tools: None,
             write_target: None,
+            always_allowed: Arc::new(Mutex::new(HashSet::new())),
+            always_allow_path: None,
         })
     }
 
@@ -154,6 +176,28 @@ impl ToolRegistry {
     pub fn with_background_tasks(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
         self.background = registry;
         self
+    }
+    pub fn with_always_allow_store(mut self, path: PathBuf) -> Result<Self, ToolError> {
+        #[cfg(unix)]
+        if path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&path)?.permissions().mode() & 0o077 != 0 {
+                return Err(ToolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "always-allow store must have 0600 permissions",
+                )));
+            }
+        }
+        let rules = if path.exists() {
+            serde_json::from_str::<Vec<String>>(&std::fs::read_to_string(&path)?).map_err(
+                |error| ToolError::Network(format!("invalid always-allow store: {error}")),
+            )?
+        } else {
+            Vec::new()
+        };
+        self.always_allowed = Arc::new(Mutex::new(rules.into_iter().collect()));
+        self.always_allow_path = Some(path);
+        Ok(self)
     }
     pub fn with_allowed_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.allowed_tools = Some(names.into_iter().collect());
@@ -270,6 +314,11 @@ impl ToolRegistry {
                 json!({"type":"object","properties":{"prompt":{"type":"string"},"label":{"type":"string"},"profile":{"type":"string","enum":["scout","reader","deep","editor"]},"run_in_background":{"type":"boolean"},"target_file":{"type":"string"}},"required":["prompt"],"additionalProperties":false}),
             ),
             definition(
+                "ask_user",
+                "Ask the user a necessary clarifying question and wait for their answer. Provide options when the valid choices are known; the user may still type another answer.",
+                json!({"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"multi_select":{"type":"boolean"}},"required":["question"],"additionalProperties":false}),
+            ),
+            definition(
                 "web_search",
                 "Search the public web through the configured some.im managed search. Network access requires approval.",
                 json!({"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","minimum":1,"maximum":20}},"required":["query"],"additionalProperties":false}),
@@ -338,14 +387,18 @@ impl ToolRegistry {
             "git_status" => self.git_status().await,
             "get_job_output" => self.get_job_output(parse(call)?),
             "kill_job" => self.kill_job(parse(call)?).await,
+            "ask_user" => self.ask_user(parse(call)?).await,
             "web_search" => self.web_search(parse(call)?).await,
             "web_fetch" => self.web_fetch(parse(call)?).await,
             "run_command" => self.run_command(parse(call)?).await,
             "create_file" => self.create_file(parse(call)?).await,
             "edit_file" => self.edit_file(parse(call)?).await,
             name if self.mcp.handles(name) => {
-                self.require_approval(&format!("call MCP tool: {name}"), false)
-                    .await?;
+                self.require_rememberable_approval(
+                    &format!("call MCP tool: {name}"),
+                    format!("mcp:{name}"),
+                )
+                .await?;
                 let arguments =
                     call.parsed_arguments()
                         .map_err(|source| ToolError::InvalidArguments {
@@ -733,8 +786,13 @@ impl ToolRegistry {
             .filter(|label| !label.trim().is_empty())
             .map(|label| format!("{label}\ncommand: {}", args.command))
             .unwrap_or_else(|| args.command.clone());
-        self.require_approval(&format!("run command: {description}"), false)
-            .await?;
+        if let Some(signature) = command_signature(&args.command) {
+            self.require_rememberable_approval(&format!("run command: {description}"), signature)
+                .await?;
+        } else {
+            self.require_approval(&format!("run command: {description}"), false)
+                .await?;
+        }
         let timeout = args
             .timeout_seconds
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
@@ -872,11 +930,101 @@ impl ToolRegistry {
                 self.approval_mode,
                 ApprovalMode::Smart | ApprovalMode::WorkspaceAccess
             );
-        if workspace_write_allowed || self.approver.approve(description).await {
-            Ok(())
-        } else {
-            Err(ToolError::ApprovalDenied(description.to_owned()))
+        if workspace_write_allowed {
+            return Ok(());
         }
+        match self.approver.approve(description, false).await {
+            ApprovalDecision::AllowOnce | ApprovalDecision::AlwaysAllow => Ok(()),
+            ApprovalDecision::Deny => Err(ToolError::ApprovalDenied(description.to_owned())),
+        }
+    }
+
+    async fn require_rememberable_approval(
+        &self,
+        description: &str,
+        signature: String,
+    ) -> Result<(), ToolError> {
+        if self
+            .always_allowed
+            .lock()
+            .expect("always allow rules")
+            .contains(&signature)
+        {
+            return Ok(());
+        }
+        match self.approver.approve(description, true).await {
+            ApprovalDecision::AllowOnce => Ok(()),
+            ApprovalDecision::AlwaysAllow => {
+                self.always_allowed
+                    .lock()
+                    .expect("always allow rules")
+                    .insert(signature);
+                self.persist_always_allowed()?;
+                Ok(())
+            }
+            ApprovalDecision::Deny => Err(ToolError::ApprovalDenied(description.to_owned())),
+        }
+    }
+
+    fn persist_always_allowed(&self) -> Result<(), ToolError> {
+        let Some(path) = &self.always_allow_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut rules = self
+            .always_allowed
+            .lock()
+            .expect("always allow rules")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        rules.sort();
+        let bytes = serde_json::to_vec_pretty(&rules)
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        let mut file = options.open(path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    async fn ask_user(&self, args: AskUserArgs) -> Result<String, ToolError> {
+        let question = args.question.trim();
+        if question.is_empty() {
+            return Err(ToolError::Network("ask_user question is empty".to_owned()));
+        }
+        let mut options = args
+            .options
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| truncate_line(value.trim(), 500))
+            .filter(|value| !value.is_empty())
+            .take(12)
+            .collect::<Vec<_>>();
+        options.dedup();
+        self.approver
+            .ask_user(UserQuestion {
+                question: truncate_line(question, 2_000),
+                options,
+                multi_select: args.multi_select.unwrap_or(false),
+            })
+            .await
+            .map(|answer| format!("<user_answer>{}</user_answer>", escape_user_answer(&answer)))
+            .ok_or_else(|| ToolError::ApprovalDenied("user skipped ask_user".to_owned()))
     }
 
     fn require_write_target(&self, requested: &str) -> Result<(), ToolError> {
@@ -1021,6 +1169,28 @@ fn truncate_line(line: &str, max_chars: usize) -> String {
         value.push('…');
     }
     value
+}
+
+fn command_signature(command: &str) -> Option<String> {
+    if command
+        .chars()
+        .any(|value| matches!(value, '|' | '&' | ';' | '>' | '<' | '`' | '\n' | '\r'))
+    {
+        return None;
+    }
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then(|| format!("command-exact:{normalized}"))
+}
+
+fn escape_user_answer(answer: &str) -> String {
+    answer
+        .trim()
+        .chars()
+        .take(8_000)
+        .collect::<String>()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn web_client() -> Result<reqwest::Client, ToolError> {
@@ -1277,6 +1447,13 @@ struct JobIDArgs {
 }
 
 #[derive(Deserialize)]
+struct AskUserArgs {
+    question: String,
+    options: Option<Vec<String>>,
+    multi_select: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct WebSearchArgs {
     query: String,
     count: Option<usize>,
@@ -1305,12 +1482,42 @@ struct EditArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct AllowApprover;
     #[async_trait]
     impl Approver for AllowApprover {
-        async fn approve(&self, _description: &str) -> bool {
-            true
+        async fn approve(
+            &self,
+            _description: &str,
+            _always_allow_available: bool,
+        ) -> ApprovalDecision {
+            ApprovalDecision::AllowOnce
+        }
+    }
+
+    struct AlwaysApprover(AtomicUsize);
+    #[async_trait]
+    impl Approver for AlwaysApprover {
+        async fn approve(&self, _description: &str, available: bool) -> ApprovalDecision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if available {
+                ApprovalDecision::AlwaysAllow
+            } else {
+                ApprovalDecision::AllowOnce
+            }
+        }
+    }
+
+    struct AnswerApprover;
+    #[async_trait]
+    impl Approver for AnswerApprover {
+        async fn approve(&self, _description: &str, _available: bool) -> ApprovalDecision {
+            ApprovalDecision::Deny
+        }
+        async fn ask_user(&self, question: UserQuestion) -> Option<String> {
+            assert_eq!(question.options, vec!["Rust", "Go"]);
+            Some("Other <custom>".to_owned())
         }
     }
 
@@ -1507,5 +1714,62 @@ mod tests {
                 .contains("background-ok")
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn always_allow_is_persisted_and_reused_for_exact_signature() {
+        let root = workspace("always-allow");
+        let store = root.join("rules.json");
+        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_approver(approver.clone())
+            .with_always_allow_store(store.clone())
+            .expect("store");
+        registry
+            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
+            .await
+            .expect("first");
+        registry
+            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
+            .await
+            .expect("remembered");
+        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
+        let reloaded = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_always_allow_store(store)
+            .expect("reload");
+        reloaded
+            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
+            .await
+            .expect("persisted");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn ask_user_accepts_custom_answer_and_escapes_markup() {
+        let root = workspace("ask-user");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_approver(Arc::new(AnswerApprover));
+        let answer = registry
+            .ask_user(AskUserArgs {
+                question: "Choose language".to_owned(),
+                options: Some(vec!["Rust".to_owned(), "Go".to_owned()]),
+                multi_select: Some(false),
+            })
+            .await
+            .expect("answer");
+        assert_eq!(answer, "<user_answer>Other &lt;custom&gt;</user_answer>");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn command_always_allow_signature_is_exact_and_rejects_shell_composition() {
+        assert_eq!(
+            command_signature(" cargo   test --all ").as_deref(),
+            Some("command-exact:cargo test --all")
+        );
+        assert_eq!(command_signature("cargo test && deploy"), None);
     }
 }

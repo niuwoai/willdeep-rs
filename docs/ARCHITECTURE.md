@@ -99,6 +99,12 @@ Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。
 
 `SubagentCatalog` 内置 scout、reader、deep、editor。每个工种绑定 Provider、模型、工具白名单、上下文窗口和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。editor 的目标先由父 ToolRegistry canonicalize 并单独审批，子 ToolRegistry 再以 canonical 绝对路径执行单文件匹配，符号链接或路径别名不能扩大授权范围。
 
+### 用户交互与持久授权
+
+Core 的 `Approver` 同时承载结构化 `ApprovalDecision`（AllowOnce / Deny / AlwaysAllow）和 `UserQuestion`。因此 `ask_user`、审批状态机及其工具结果属于 Harness，不依赖 SwiftUI 或 Ratatui；不同宿主只实现交互适配器。`ask_user` 支持 options、multi_select 和自由答案，答案使用 `<user_answer>` 边界并转义标记字符。
+
+Always Allow 使用可撤销的窄签名。当前 Shell 仅保存无组合操作符的完整规范化命令，MCP 保存精确工具名；没有安全签名的调用不会向前端提供 AlwaysAllow。规则保存在 `$WILLDEEP_HOME/always-allow.json`，可用 CLI 列出或清空。后续 Swift App 复用 Rust Core 时，可替换规则存储适配器而保持相同决策语义。
+
 ## 尚未满足的长期架构要求
 
 阶段 0 文档要求的 ACP 双轨验证、crate 级复用清单、协议 Schema 与跨客户端会话均尚未完成。当前实现是原生 Harness 起点，不能视为完整阶段 0 或阶段 1 产品。

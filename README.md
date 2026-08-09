@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.8.0-rc2`，支持：
+当前版本为 `0.9.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -26,6 +26,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 上下文自动摘要压缩、Token/耗时状态和宽屏后台状态栏。
 - 后台 Shell Job 完成/失败自动回流主 Harness；
 - 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
+- `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 
 当前暂不包含 Computer Use、Browser Use、多 Agent 与后台 daemon。
 
@@ -191,6 +192,23 @@ context_window = 128000
 [subagents.deep]
 # 省略绑定时继承当前会话模型
 max_turns = 12
+```
+
+## ask_user 与审批
+
+模型需要用户做实质选择时可调用 `ask_user`，传入 `question`、可选 `options` 和 `multi_select`。TUI 弹层支持方向键选择、空格多选，也可以直接键入未列出的其他答案；普通终端支持输入序号或自由文本。用户答案经长度限制和标记转义后回到同一工具轮次。
+
+需要审批的操作提供三种决定：
+
+- `Y`：Allow once，仅当前调用；
+- `N`：Disallow，拒绝当前调用；
+- `A`：Always allow，仅在界面明确显示该选项时可用。
+
+Always Allow 不是全局“免死金牌”：Shell 只记住规范化后的完整命令，MCP 只记住精确 `server/tool`。含管道、重定向、命令连接符或换行的 Shell 命令，以及文件写入、网络重定向、任务取消和 editor 授权都不提供持久放行。规则存放于 `$WILLDEEP_HOME/always-allow.json`，Unix 权限为 `0600`：
+
+```bash
+willdeep --list-approvals
+willdeep --clear-approvals
 ```
 
 ### some.im

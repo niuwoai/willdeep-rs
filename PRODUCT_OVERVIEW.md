@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-09 | 当前版本：v0.8.0-rc2
+> 最后更新：2026-08-09 | 当前版本：v0.9.0-rc1
 
 ## 项目简介
 
@@ -33,6 +33,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
 - `spawn_agent` 前台/后台子 Agent，内置 scout、reader、deep、editor 工种并支持独立模型绑定；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
+- Core `ask_user` 候选单选/多选与自由输入交互；
+- Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；
 
 ## 技术栈
 

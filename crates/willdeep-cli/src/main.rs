@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalMode, Approver, BackgroundTaskRegistry, EventSink,
-    SubagentCatalog, ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
+    Agent, AgentConfig, AgentEvent, ApprovalDecision, ApprovalMode, Approver,
+    BackgroundTaskRegistry, EventSink, SubagentCatalog, ToolRegistry, UserQuestion, WebToolConfig,
+    build_provider, builtin_profiles,
 };
 
 mod config;
@@ -85,6 +86,14 @@ struct Cli {
     #[arg(long)]
     list_sessions: bool,
 
+    /// List persisted exact-command and MCP Always Allow rules, then exit.
+    #[arg(long)]
+    list_approvals: bool,
+
+    /// Clear all persisted Always Allow rules, then exit.
+    #[arg(long)]
+    clear_approvals: bool,
+
     /// Disable the interactive TUI when no prompt argument is supplied.
     #[arg(long)]
     no_tui: bool,
@@ -122,6 +131,18 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let loaded = LoadedConfig::load(cli.config.as_deref())?;
     let home = willdeep_home()?;
+    let approval_store = home.join("always-allow.json");
+    if cli.list_approvals {
+        for rule in load_approval_rules(&approval_store)? {
+            println!("{rule}");
+        }
+        return Ok(());
+    }
+    if cli.clear_approvals {
+        save_approval_rules(&approval_store, &[])?;
+        println!("Cleared Always Allow rules.");
+        return Ok(());
+    }
     let store = willdeep_core::SessionStore::new(&home);
     if cli.list_sessions {
         for session in store.list()? {
@@ -235,7 +256,8 @@ async fn run() -> Result<()> {
         .with_skills(skills.clone())
         .with_mcp(mcp)
         .with_background_tasks(background_tasks.clone())
-        .with_web_tools(web_tools);
+        .with_web_tools(web_tools)
+        .with_always_allow_store(approval_store)?;
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
     if !skills.list().is_empty() {
         system_prompt.push_str("\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill.\n");
@@ -559,24 +581,110 @@ fn load_session(
     }
 }
 
+fn load_approval_rules(path: &std::path::Path) -> Result<Vec<String>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&std::fs::read_to_string(path)?).context("parse Always Allow rules")
+}
+
+fn save_approval_rules(path: &std::path::Path, rules: &[String]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(&serde_json::to_vec_pretty(rules)?)?;
+    file.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 struct TerminalApprover;
 
 #[async_trait]
 impl Approver for TerminalApprover {
-    async fn approve(&self, description: &str) -> bool {
+    async fn approve(&self, description: &str, always_allow_available: bool) -> ApprovalDecision {
         if !std::io::stdin().is_terminal() {
-            return false;
+            return ApprovalDecision::Deny;
         }
         let description = description.to_owned();
         tokio::task::spawn_blocking(move || {
-            eprint!("\nApproval required: {description}\nAllow once? [y/N] ");
+            eprint!(
+                "\nApproval required: {description}\n{} ",
+                if always_allow_available {
+                    "[y] Allow once / [a] Always allow / [N] Disallow"
+                } else {
+                    "[y] Allow once / [N] Disallow"
+                }
+            );
             let _ = std::io::stderr().flush();
             let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer).is_ok()
-                && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+            if std::io::stdin().read_line(&mut answer).is_err() {
+                return ApprovalDecision::Deny;
+            }
+            match answer.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => ApprovalDecision::AllowOnce,
+                "a" | "always" if always_allow_available => ApprovalDecision::AlwaysAllow,
+                _ => ApprovalDecision::Deny,
+            }
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(ApprovalDecision::Deny)
+    }
+    async fn ask_user(&self, request: UserQuestion) -> Option<String> {
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+        tokio::task::spawn_blocking(move || {
+            eprintln!("\n{}", request.question);
+            for (index, option) in request.options.iter().enumerate() {
+                eprintln!("  {}. {}", index + 1, option);
+            }
+            eprint!(
+                "{}: ",
+                if request.multi_select {
+                    "Choose numbers separated by commas, or type another answer"
+                } else {
+                    "Choose a number, or type another answer"
+                }
+            );
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).ok()?;
+            let answer = answer.trim();
+            let selected = answer
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .filter(|values| request.multi_select || values.len() == 1)
+                .map(|values| {
+                    values
+                        .into_iter()
+                        .filter_map(|index| request.options.get(index.saturating_sub(1)).cloned())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|values| !values.is_empty());
+            Some(
+                selected
+                    .map(|values| values.join(", "))
+                    .unwrap_or_else(|| answer.to_owned()),
+            )
+        })
+        .await
+        .unwrap_or(None)
     }
 }
 
