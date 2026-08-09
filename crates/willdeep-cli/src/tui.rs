@@ -107,6 +107,7 @@ struct App {
     activity_line: String,
     background_tasks: Vec<BackgroundTaskSnapshot>,
     background_notices: VecDeque<String>,
+    workspace_status: String,
 }
 
 struct AskDialog {
@@ -225,6 +226,7 @@ async fn event_loop(
     runtime: &mut TuiRuntime,
 ) -> Result<()> {
     let mut app = App::new(transcript(&session.messages));
+    app.workspace_status = workspace_status(&session.workspace);
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
     let mut background_rx = runtime.background_tasks.subscribe();
@@ -272,7 +274,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line="Answering".to_owned();app.append_transcript(format!("WillDeep: {v}"));},
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.activity_line=format!("Thinking · turn {turn}"),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.activity_line=format!("Using {}",v.name);app.tools.requested(&v.name);},
-                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.activity_line=format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name);app.tools.completed(&call.name,is_error);},
+                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.activity_line=format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name);app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Compressing context".to_owned();},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
@@ -330,6 +332,7 @@ impl App {
             activity_line: String::new(),
             background_tasks: Vec::new(),
             background_notices: VecDeque::new(),
+            workspace_status: String::new(),
         }
     }
     fn finish_turn(&mut self) {
@@ -878,7 +881,8 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             let agent = if app.running { "running" } else { "idle" };
             let jobs = app.background_tasks.iter().take(8).map(|task| format!("{} · {:?} · {:.1}s\n  {}",task.id,task.status,task.elapsed_millis as f64/1000.0,task.label)).collect::<Vec<_>>().join("\n");
             let background = format!(
-                "Agent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}\n\n{}",
+                "{}\n\nAgent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}\n\n{}",
+                app.workspace_status,
                 app.mobile_queue.len(),
                 app.tools.completed,
                 app.tools.requested,
@@ -887,7 +891,7 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             );
             f.render_widget(
                 Paragraph::new(background)
-                    .block(Block::default().title("Background").borders(Borders::ALL))
+                    .block(Block::default().title("Workspace · Background").borders(Borders::ALL))
                     .wrap(Wrap { trim: false }),
                 columns[1],
             );
@@ -932,6 +936,46 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         }
     })?;
     Ok(())
+}
+
+fn workspace_status(workspace: &std::path::Path) -> String {
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "detached / non-git".to_owned());
+    let status = std::process::Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).lines().count())
+        .unwrap_or(0);
+    let worktrees = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count()
+        })
+        .unwrap_or(0);
+    format!(
+        "Project: {}\nBranch: {branch}\nDiff files: {status}\nWorktrees: {worktrees}",
+        workspace
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace")
+    )
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

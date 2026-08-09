@@ -21,6 +21,7 @@ futures-util.workspace = true
 image.workspace = true
 http.workspace = true
 qrcode.workspace = true
+reqwest.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

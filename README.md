@@ -46,6 +46,8 @@ API Key 建议放在环境变量中，不要直接写进命令历史。
 
 ## TOML 配置
 
+首次运行且没有配置时会自动进入交互式设置，也可随时执行 `willdeep --onboarding`。some.im 模式会输出浏览器登录 URL 并等待授权；发布构建需通过 `WILLDEEP_CLIENT_LOGIN_SECRET` 注入客户端登录密钥，该密钥不得提交到 Git。生成的配置在 Unix 上自动设为 `0600`。
+
 默认配置文件为 `~/.willdeep/config.toml`。也可以通过 `WILLDEEP_HOME` 改变配置目录，或使用 `--config /path/to/config.toml` 指定文件。
 
 ```toml
@@ -103,6 +105,10 @@ chmod 600 ~/.willdeep/config.toml
 ```
 
 ## TUI 与会话
+
+macOS 会同时发现 Swift WillDeep 的 Project 与历史会话：`willdeep --list-projects`、`willdeep --project "项目名"`、`willdeep --list-sessions`、`willdeep --resume <UUID>`。从 Swift 会话续聊时，结果保存为 `~/.willdeep/sessions` 下的 Rust 副本，不覆盖 Swift 原文件。
+
+WillDeep 会加载 `~/.willdeep/CLAUDE.md`，以及工作区根的 `PRODUCT_OVERVIEW.md`、`AGENTS.md` 和 `CLAUDE.md`。Agent 可调用 `git_diff`、`list_worktrees`、`create_worktree`；TUI 右栏显示当前项目、分支、变更文件数与 worktree 数。
 
 终端中不带 Prompt 启动时会进入 TUI：
 

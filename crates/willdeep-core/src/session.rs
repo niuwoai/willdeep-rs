@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::Message;
+use crate::types::Role;
 
 pub const SESSION_VERSION: u32 = 1;
 
@@ -18,6 +19,8 @@ pub struct Session {
     pub created_at: u64,
     pub updated_at: u64,
     pub messages: Vec<Message>,
+    #[serde(skip)]
+    pub swift_source: Option<PathBuf>,
 }
 
 impl Session {
@@ -32,6 +35,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            swift_source: None,
         }
     }
 }
@@ -48,7 +52,21 @@ impl SessionStore {
         }
     }
     pub fn load(&self, id: Uuid) -> Result<Session, SessionError> {
-        let session: Session = serde_json::from_slice(&std::fs::read(self.path(id))?)?;
+        let local = self.path(id);
+        let session: Session = if local.exists() {
+            serde_json::from_slice(&std::fs::read(local)?)?
+        } else if let Some(path) = swift_session_directory()
+            .map(|dir| dir.join(format!("{id}.json")))
+            .filter(|path| path.exists())
+        {
+            swift_session(&path)?
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("session {id} not found"),
+            )
+            .into());
+        };
         if session.version != SESSION_VERSION {
             return Err(SessionError::Version(session.version));
         }
@@ -58,18 +76,29 @@ impl SessionStore {
         Ok(self.list()?.into_iter().max_by_key(|s| s.updated_at))
     }
     pub fn list(&self) -> Result<Vec<Session>, SessionError> {
-        let Ok(entries) = std::fs::read_dir(&self.directory) else {
-            return Ok(Vec::new());
-        };
         let mut values = Vec::new();
-        for entry in entries.flatten() {
-            if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
-                continue;
+        if let Ok(entries) = std::fs::read_dir(&self.directory) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(data) = std::fs::read(entry.path())
+                    && let Ok(session) = serde_json::from_slice::<Session>(&data)
+                {
+                    values.push(session);
+                }
             }
-            if let Ok(data) = std::fs::read(entry.path())
-                && let Ok(session) = serde_json::from_slice::<Session>(&data)
-            {
-                values.push(session);
+        }
+        if let Some(directory) = swift_session_directory()
+            && let Ok(entries) = std::fs::read_dir(directory)
+        {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                    && let Ok(session) = swift_session(&entry.path())
+                    && !values.iter().any(|existing| existing.id == session.id)
+                {
+                    values.push(session);
+                }
             }
         }
         values.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
@@ -89,6 +118,86 @@ impl SessionStore {
     fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
+}
+
+fn swift_session_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join("Library/Application Support/WillDeep/agent-sessions"),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn swift_session(path: &Path) -> Result<Session, SessionError> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let id = value
+        .get("id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| serde_json::Error::io(std::io::Error::other("invalid Swift session id")))?;
+    let workspace = value
+        .get("workspaceLocation")
+        .and_then(|value| value.get("path"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            value
+                .get("workspaceRootPath")
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or(".");
+    let messages = value
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|message| {
+            let role = match message.get("role")?.as_str()? {
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                "system" => Role::System,
+                "tool" => Role::Tool,
+                _ => return None,
+            };
+            Some(Message {
+                role,
+                content: message
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                attachments: Vec::new(),
+            })
+        })
+        .collect();
+    let updated = std::fs::metadata(path)?
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    Ok(Session {
+        version: SESSION_VERSION,
+        id,
+        title: value
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Swift session")
+            .to_owned(),
+        workspace: PathBuf::from(workspace),
+        profile: None,
+        created_at: updated,
+        updated_at: updated,
+        messages,
+        swift_source: Some(path.to_path_buf()),
+    })
 }
 
 #[derive(Debug, thiserror::Error)]

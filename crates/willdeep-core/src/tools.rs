@@ -299,6 +299,21 @@ impl ToolRegistry {
                 json!({"type": "object", "properties": {}, "additionalProperties": false}),
             ),
             definition(
+                "git_diff",
+                "Return the workspace diff, optionally for one path. Read-only.",
+                json!({"type":"object","properties":{"path":{"type":"string"},"staged":{"type":"boolean"},"stat_only":{"type":"boolean"}},"additionalProperties":false}),
+            ),
+            definition(
+                "list_worktrees",
+                "List Git worktrees with path, HEAD, branch, detached and prunable state. Read-only.",
+                json!({"type":"object","properties":{},"additionalProperties":false}),
+            ),
+            definition(
+                "create_worktree",
+                "Create a Git worktree for a new branch under ~/.willdeep/worktrees. Requires approval.",
+                json!({"type":"object","properties":{"branch":{"type":"string"}},"required":["branch"],"additionalProperties":false}),
+            ),
+            definition(
                 "get_job_output",
                 "Read the captured output of a background shell job or subagent.",
                 json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000}},"required":["job_id"],"additionalProperties":false}),
@@ -385,6 +400,9 @@ impl ToolRegistry {
             "read_file" => self.read_file(parse(call)?).await,
             "list_directory" => self.list_directory(parse(call)?).await,
             "git_status" => self.git_status().await,
+            "git_diff" => self.git_diff(parse(call)?).await,
+            "list_worktrees" => self.list_worktrees().await,
+            "create_worktree" => self.create_worktree(parse(call)?).await,
             "get_job_output" => self.get_job_output(parse(call)?),
             "kill_job" => self.kill_job(parse(call)?).await,
             "ask_user" => self.ask_user(parse(call)?).await,
@@ -648,6 +666,94 @@ impl ToolRegistry {
             "branch: {}\nstatus:\n{}",
             String::from_utf8_lossy(&branch.stdout).trim(),
             String::from_utf8_lossy(&status.stdout)
+        ))
+    }
+
+    async fn git_diff(&self, args: GitDiffArgs) -> Result<String, ToolError> {
+        let mut command = Command::new("git");
+        command.arg("diff");
+        if args.staged.unwrap_or(false) {
+            command.arg("--cached");
+        }
+        if args.stat_only.unwrap_or(false) {
+            command.arg("--stat");
+        }
+        if let Some(path) = args.path.as_deref() {
+            self.resolve_existing(path)?;
+            command.args(["--", path]);
+        }
+        let output = command.current_dir(&self.workspace).output().await?;
+        if !output.status.success() {
+            return Err(ToolError::Io(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )));
+        }
+        Ok(truncate_bytes(
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
+    }
+
+    async fn list_worktrees(&self) -> Result<String, ToolError> {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.workspace)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(ToolError::Io(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    async fn create_worktree(&self, args: CreateWorktreeArgs) -> Result<String, ToolError> {
+        let branch = sanitize_branch(&args.branch)?;
+        self.require_approval(
+            &format!("create Git worktree for new branch: {branch}"),
+            false,
+        )
+        .await?;
+        let repository = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.workspace)
+            .output()
+            .await?;
+        if !repository.status.success() {
+            return Err(ToolError::Io(std::io::Error::other(
+                "workspace is not a Git repository",
+            )));
+        }
+        let repository = PathBuf::from(String::from_utf8_lossy(&repository.stdout).trim());
+        let home = std::env::var_os("WILLDEEP_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".willdeep"))
+            })
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|value| PathBuf::from(value).join(".willdeep"))
+            })
+            .ok_or_else(|| ToolError::Io(std::io::Error::other("cannot locate WillDeep home")))?;
+        let repo_name = repository
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("repo");
+        let target = home.join("worktrees").join(repo_name).join(&branch);
+        tokio::fs::create_dir_all(target.parent().expect("worktree parent")).await?;
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&target)
+            .current_dir(&repository)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(ToolError::Io(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )));
+        }
+        Ok(format!(
+            "created worktree {} on branch {branch}",
+            target.display()
         ))
     }
 
@@ -1451,6 +1557,34 @@ struct AskUserArgs {
     question: String,
     options: Option<Vec<String>>,
     multi_select: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitDiffArgs {
+    path: Option<String>,
+    staged: Option<bool>,
+    stat_only: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CreateWorktreeArgs {
+    branch: String,
+}
+
+fn sanitize_branch(value: &str) -> Result<String, ToolError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.contains("..")
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || "~^:?*[\\".contains(c))
+    {
+        return Err(ToolError::Io(std::io::Error::other(
+            "invalid Git branch name",
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 #[derive(Deserialize)]

@@ -15,6 +15,8 @@ use willdeep_core::{
 mod config;
 mod editor;
 mod mobile;
+mod onboarding;
+mod projects;
 mod tui;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};
@@ -86,6 +88,14 @@ struct Cli {
     #[arg(long)]
     list_sessions: bool,
 
+    /// List projects shared with the Swift app and exit (macOS).
+    #[arg(long)]
+    list_projects: bool,
+
+    /// Select a shared Swift project by name or UUID.
+    #[arg(long)]
+    project: Option<String>,
+
     /// List persisted exact-command and MCP Always Allow rules, then exit.
     #[arg(long)]
     list_approvals: bool,
@@ -97,6 +107,10 @@ struct Cli {
     /// Disable the interactive TUI when no prompt argument is supplied.
     #[arg(long)]
     no_tui: bool,
+
+    /// Run the interactive first-use provider setup again.
+    #[arg(long)]
+    onboarding: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -129,6 +143,13 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let administrative =
+        cli.list_projects || cli.list_sessions || cli.list_approvals || cli.clear_approvals;
+    if cli.onboarding
+        || (!administrative && cli.config.is_none() && !config::default_config_path()?.exists())
+    {
+        onboarding::run(cli.config.as_deref()).await?;
+    }
     let loaded = LoadedConfig::load(cli.config.as_deref())?;
     let home = willdeep_home()?;
     let approval_store = home.join("always-allow.json");
@@ -141,6 +162,21 @@ async fn run() -> Result<()> {
     if cli.clear_approvals {
         save_approval_rules(&approval_store, &[])?;
         println!("Cleared Always Allow rules.");
+        return Ok(());
+    }
+    if cli.list_projects {
+        for project in projects::load() {
+            println!(
+                "{}\t{}\t{}",
+                project.id,
+                project.display_name,
+                project
+                    .folder_paths
+                    .first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
         return Ok(());
     }
     let store = willdeep_core::SessionStore::new(&home);
@@ -179,9 +215,11 @@ async fn run() -> Result<()> {
     if !(1..=100).contains(&max_turns) {
         bail!("--max-turns must be between 1 and 100");
     }
+    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
     let requested_workspace = cli
         .workspace
         .clone()
+        .or(project_workspace)
         .or_else(|| resumed.as_ref().map(|session| session.workspace.clone()))
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace = requested_workspace

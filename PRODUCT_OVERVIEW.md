@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-09 | 当前版本：v0.9.0-rc1
+> 最后更新：2026-08-09 | 当前版本：v0.10.0-rc1
 
 ## 项目简介
 
@@ -35,6 +35,10 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
 - Core `ask_user` 候选单选/多选与自由输入交互；
 - Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；
+- 首次运行交互式 onboarding 与 some.im 浏览器登录；
+- Swift Project 元数据和历史会话兼容读取；
+- Git diff/worktree 原生工具与 TUI 工作区状态；
+- 全局、项目根 `AGENTS.md` / `CLAUDE.md` 指令加载；
 
 ## 技术栈
 
@@ -75,4 +79,4 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
-- [ ] 多 Agent 与 Goal 编排。
+- [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。

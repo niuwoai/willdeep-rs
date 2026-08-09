@@ -31,6 +31,11 @@ Stable tool contract:
 
 pub fn build_system_prompt(workspace: &Path) -> String {
     let mut sections = vec![STABLE_CONTRACT.to_owned()];
+    if let Some(rules) = load_global_rules() {
+        sections.push(format!(
+            "Global user instructions:\nProject and directory instructions below are more specific.\n{rules}"
+        ));
+    }
     if let Some(rules) = load_project_rules(workspace) {
         sections.push(format!(
             "Project instructions:\nThese workspace rules are more specific than the stable contract.\n{rules}"
@@ -42,6 +47,22 @@ pub fn build_system_prompt(workspace: &Path) -> String {
         std::env::consts::OS
     ));
     sections.join("\n\n")
+}
+
+fn load_global_rules() -> Option<String> {
+    let home = std::env::var_os("WILLDEEP_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".willdeep"))
+        })
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|home| std::path::PathBuf::from(home).join(".willdeep"))
+        })?;
+    let path = home.join("CLAUDE.md");
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    (!trimmed.is_empty()).then(|| trimmed.chars().take(8_000).collect())
 }
 
 fn load_project_rules(workspace: &Path) -> Option<String> {
