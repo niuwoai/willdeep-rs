@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0-rc2] - 2026-08-09
+
+### Fixed
+
+- 为无 checkout 的发布 Job 显式设置 `GH_REPO`，修复四平台产物完成后 GitHub Release 创建失败。
+
 ## [0.5.0-rc1] - 2026-08-09
 
 ### Added
