@@ -116,6 +116,8 @@ struct App {
     selection_mode: bool,
     skill_selected: usize,
     skill_menu_dismissed: bool,
+    command_selected: usize,
+    command_menu_dismissed: bool,
 }
 
 struct AskDialog {
@@ -290,7 +292,7 @@ async fn event_loop(
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
-                    if app.handle_skill_key(key, &runtime.skills) { continue; }
+                    if app.handle_command_key(key) || app.handle_skill_key(key, &runtime.skills) { continue; }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
@@ -386,12 +388,74 @@ impl App {
             selection_mode: false,
             skill_selected: 0,
             skill_menu_dismissed: false,
+            command_selected: 0,
+            command_menu_dismissed: false,
         }
     }
     fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
         self.skill_selected = 0;
         self.skill_menu_dismissed = false;
+        self.command_selected = 0;
+        self.command_menu_dismissed = false;
+    }
+    fn command_matches(&self) -> Vec<(&'static str, &'static str)> {
+        let Some((start, query)) = self.input.marker_query('/') else {
+            return Vec::new();
+        };
+        if start != 0 {
+            return Vec::new();
+        }
+        let query = query.to_ascii_lowercase();
+        command_candidates(self.language)
+            .into_iter()
+            .filter(|(command, description)| {
+                command[1..].starts_with(&query)
+                    || description.to_ascii_lowercase().contains(&query)
+            })
+            .collect()
+    }
+    fn handle_command_key(&mut self, key: KeyEvent) -> bool {
+        if self.command_menu_dismissed || self.input.marker_query('/').is_none() {
+            return false;
+        }
+        let matches = self.command_matches();
+        match key.code {
+            KeyCode::Esc => {
+                self.command_menu_dismissed = true;
+                true
+            }
+            KeyCode::Up if !matches.is_empty() => {
+                self.command_selected = self
+                    .command_selected
+                    .checked_sub(1)
+                    .unwrap_or(matches.len() - 1);
+                true
+            }
+            KeyCode::Down if !matches.is_empty() => {
+                self.command_selected = (self.command_selected + 1) % matches.len();
+                true
+            }
+            KeyCode::Tab | KeyCode::Enter
+                if !matches.is_empty()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                let command = matches[self.command_selected.min(matches.len() - 1)].0;
+                let suffix = if matches!(command, "/goal" | "/mobile") {
+                    " "
+                } else {
+                    ""
+                };
+                self.input
+                    .replace_before_cursor(0, &format!("{command}{suffix}"));
+                self.command_selected = 0;
+                self.command_menu_dismissed = true;
+                true
+            }
+            _ => false,
+        }
     }
     fn skill_matches(&self, skills: &SkillCatalog) -> Vec<usize> {
         let Some((_, query)) = self.input.marker_query('$') else {
@@ -1145,6 +1209,55 @@ fn draw(
                 columns[1],
             );
         }
+        let command_matches = app.command_matches();
+        if !app.command_menu_dismissed
+            && !command_matches.is_empty()
+            && app.input.marker_query('/').is_some()
+        {
+            app.command_selected = app.command_selected.min(command_matches.len() - 1);
+            let width = areas[3].width.min(76);
+            let height = (command_matches.len() as u16 + 2).min(10);
+            let popup = Rect {
+                x: areas[3].x,
+                y: areas[3].y.saturating_sub(height),
+                width,
+                height,
+            };
+            let lines = command_matches
+                .iter()
+                .enumerate()
+                .map(|(position, (command, description))| {
+                    let prefix = if position == app.command_selected {
+                        "▶"
+                    } else {
+                        " "
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{prefix} {command} "),
+                            Style::default()
+                                .fg(Color::LightMagenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(*description, Style::default().fg(Color::White)),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .title(app.language.text(
+                            "命令 · ↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭",
+                            "Commands · ↑/↓ select · Enter/Tab insert · Esc close",
+                            "コマンド · ↑/↓ 選択 · Enter/Tab 挿入 · Esc 閉じる",
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Magenta)),
+                ),
+                popup,
+            );
+        }
         let skill_matches = app.skill_matches(skills);
         if !app.skill_menu_dismissed
             && app.input.marker_query('$').is_some()
@@ -1393,6 +1506,47 @@ fn approval_content(description: &str, always: bool, language: Language) -> Vec<
     ]);
     content.push(Line::from(actions));
     content
+}
+
+fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
+    [
+        (
+            "/help",
+            language.text("查看帮助", "Show help", "ヘルプを表示"),
+        ),
+        (
+            "/goal",
+            language.text("设置持续目标", "Set persistent goal", "継続目標を設定"),
+        ),
+        (
+            "/compress",
+            language.text(
+                "压缩会话上下文",
+                "Compress conversation context",
+                "会話コンテキストを圧縮",
+            ),
+        ),
+        (
+            "/mobile",
+            language.text(
+                "管理手机中继",
+                "Manage mobile relay",
+                "モバイルリレーを管理",
+            ),
+        ),
+        (
+            "/skills",
+            language.text(
+                "查看可用技能",
+                "List available skills",
+                "利用可能なスキルを表示",
+            ),
+        ),
+        (
+            "/clear",
+            language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
+        ),
+    ]
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1757,6 +1911,15 @@ mod tests {
         assert_eq!(app.input.text(), "use $image-processing ");
 
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+    #[test]
+    fn command_menu_filters_and_inserts_without_executing() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.input.insert("/com");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/compress");
+        assert!(app.transcript.is_empty());
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
