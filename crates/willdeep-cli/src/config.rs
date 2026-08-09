@@ -189,7 +189,7 @@ default_provider = "some-im"
 
 [agent]
 max_turns = 30
-approval = "ask"
+approval = "smart"
 
 [providers.some-im]
 provider = "some-im"

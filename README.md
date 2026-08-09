@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.4.0-rc1`，支持：
+当前版本为 `0.5.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -11,13 +11,16 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - `search_files`、`grep_files`、`read_file`、`list_directory`、`git_status`；
 - `run_command`、`create_file`、`edit_file`；
 - 工作区路径隔离；
-- 交互式写入/命令审批与 `--full-auto`；
+- `strict`、`smart`、`workspace-write` 三档审批模式；
 - 面向自动化的 NDJSON 事件输出；
 - `~/.willdeep/config.toml` 多 Provider 配置；
 - Ratatui 交互界面与同一套审批机制；
 - 版本化 JSON 会话持久化、列表和恢复；
 - Codex/WillDeep 兼容的 `SKILL.md` 发现、列表和安全资源读取；
 - MCP stdio server 初始化、工具发现、命名空间注册与调用。
+- `/goal`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用；
+- `/mobile` 二维码入口，通过 `j.niuwoai.com` WebSocket Relay 连接 WillDeep Mobile；
+- GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
 
 当前暂不包含 Computer Use、Browser Use、多 Agent 与后台 daemon。
 
@@ -45,7 +48,7 @@ default_provider = "some-im"
 
 [agent]
 max_turns = 24
-approval = "ask"
+approval = "smart"
 
 [providers.some-im]
 provider = "some-im"
@@ -123,6 +126,10 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 
 失败数量不会被隐藏；需要排查时使用 `Ctrl+O` 查看最近明细。
 
+输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
+
+输入 `/mobile` 会连接 `wss://j.niuwoai.com/ws/broadcast/<room>` 并弹出配对二维码；使用 WillDeep Mobile 扫码后可从手机向当前 CLI 会话发消息。`Esc` 或 `/mobile hide` 只隐藏二维码，`/mobile show` 再次显示，`/mobile off` 断开 Relay。CLI 使用独立于 Swift App 的 room/token，凭据保存在 `~/.willdeep/mobile-relay.toml`；Unix 权限为 `0600`，不会写入仓库。CLI 不监听本地端口。
+
 每次成功回复会原子保存到 `$WILLDEEP_HOME/sessions/<uuid>.json`。命令行可查看或恢复：
 
 ```bash
@@ -147,7 +154,7 @@ startup_timeout_seconds = 30
 enabled = true
 ```
 
-启动时完成 initialize 和 `tools/list`，远端工具暴露为 `mcp__filesystem__<tool>`。MCP 调用默认逐次审批，只有 `--full-auto` / `workspace-access` 才自动执行。敏感值应由 MCP 子进程继承环境变量；不要把 Token 写入配置。
+启动时完成 initialize 和 `tools/list`，远端工具暴露为 `mcp__filesystem__<tool>`。MCP 调用在所有审批模式下均逐次确认；`smart`、`workspace-write` 和兼容参数 `--full-auto` 只免审当前工作区内的创建、编辑操作。敏感值应由 MCP 子进程继承环境变量；不要把 Token 写入配置。
 
 ### some.im
 
@@ -230,7 +237,13 @@ willdeep --provider some-im --api anthropic-messages ...
 
 ## 审批与自动化
 
-只读工具默认执行。`create_file`、`edit_file` 和 `run_command` 默认逐次询问：
+只读工具默认执行。审批模式与 Swift App 对齐为三档：
+
+- `strict`：创建、编辑、Shell、MCP 都逐次审批；
+- `smart`：当前工作区内的创建、编辑免审，Shell、MCP、网络仍审批；
+- `workspace-write`：与当前 Rust 阶段的 `smart` 保持相同安全边界，为后续自动审核器预留独立语义。
+
+需要审批时显示：
 
 ```text
 Approval required: edit file: src/main.rs
@@ -243,7 +256,7 @@ Allow once? [y/N]
 willdeep --full-auto --json ...
 ```
 
-非交互输入下，如果没有 `--full-auto`，所有写入和命令请求都会拒绝；Harness 会把拒绝结果返回模型，不会静默放行。
+非交互输入下，`smart` / `workspace-write` 允许当前工作区内的创建和编辑；Shell、MCP 和其他外部操作仍因无法交互审批而拒绝。Harness 会把拒绝结果返回模型，不会静默放行。
 
 ## 配置环境变量
 

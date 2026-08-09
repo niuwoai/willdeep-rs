@@ -63,7 +63,7 @@ Agent Loop 只理解：
 - 拒绝绝对路径和 `..`；
 - 已有文件 canonicalize 后再次检查工作区前缀，阻止符号链接逃逸；
 - 新文件检查最近存在的父目录，阻止通过符号链接写出工作区；
-- 写入和命令默认审批；
+- `strict` 对写入和命令逐次审批，`smart` / `workspace-write` 仅放行已通过工作区边界校验的创建和编辑；
 - 非交互审批失败时拒绝，不自动升级；
 - HTTP 错误体限长并进行基础凭据脱敏。
 
@@ -73,13 +73,19 @@ Agent Loop 只理解：
 
 Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为 `SKILL.md`；附属资源 canonicalize 后必须仍位于 Skill 根目录，单次读取最多 48,000 字符。
 
-MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并将工具动态注册成 `mcp__<server>__<tool>`。所有 MCP 调用默认进入统一审批链，只有 workspace-access 模式免审。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
+MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并将工具动态注册成 `mcp__<server>__<tool>`。所有 MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链；后两种模式只免审当前工作区内的 `create_file`、`edit_file`。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
 
 ### Prompt 与附件
 
 TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 Unicode 显示宽度计算换行、上下移动、点击定位和内部滚动。终端启用 Bracketed Paste，长文本保留为消息附件而不是撑满编辑框。
 
 图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`，Agent Loop 不包含协议分支。
+
+### Mobile Relay
+
+`/mobile` 按需创建独立于 Swift App 的 CLI room/token，并主动连接 `wss://j.niuwoai.com/ws/broadcast/<room>`。二维码沿用 `mobile-gateway.v1` 的 `relay_base_url`、`relay_room`、`relay_token` 字段；Android 与 CLI 使用同一 Bearer Token 加入广播房间。CLI 不开放本地监听端口。
+
+Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。手机的 `message.send` 进入当前会话；Agent 忙碌时请求按到达顺序排队，最终回复使用 Android 已支持的 `message.append` 与 `message.done` 事件返回。
 
 ## 尚未满足的长期架构要求
 

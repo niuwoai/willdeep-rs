@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-09 | 当前版本：v0.4.0-rc1
+> 最后更新：2026-08-09 | 当前版本：v0.5.0-rc1
 
 ## 项目简介
 
@@ -21,6 +21,10 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
 - MCP stdio 工具发现、注册和调用。
+- `/goal` 命令模式和 `$skill-name` 显式技能触发；
+- `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
+- 区分角色的 TUI 配色；
+- macOS Universal、Windows x64、Linux AMD64/ARM64 自动构建与 tag 发布。
 
 ## 技术栈
 
@@ -58,6 +62,6 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] SSE 流式增量输出；
 - [ ] ACP/Codex App Server/Goose 接入；
 - [ ] MCP Streamable HTTP 与 OAuth；
-- [ ] 后台 daemon 和跨设备审批；
+- [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；
 - [ ] 多 Agent 与 Goal 编排。

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0-rc1] - 2026-08-09
+
+### Added
+
+- 增加 `/goal`、`/skills`、`/clear`、`/help` 本地命令和 `$skill-name` 显式技能引用。
+- 增加 `/mobile` 二维码界面，通过 `j.niuwoai.com` WebSocket Relay 接入现有 Android Mobile Gateway 协议。
+- 手机消息进入当前 CLI 会话，运行中的请求自动排队；助手回复以 `message.append` / `message.done` 回传手机。
+- TUI 按用户、助手、系统和错误类型显示不同颜色。
+- 增加 Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和四产物 tag Release workflow。
+
+### Changed
+
+- 审批模式对齐为 `strict`、`smart`、`workspace-write`；后两者仅免审当前工作区内的创建与编辑，Shell、MCP 和网络仍需审批。
+
 ## [0.4.0-rc1] - 2026-08-09
 
 ### Added

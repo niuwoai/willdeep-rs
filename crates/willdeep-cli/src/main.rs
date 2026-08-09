@@ -12,6 +12,7 @@ use willdeep_core::{
 
 mod config;
 mod editor;
+mod mobile;
 mod tui;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};
@@ -59,7 +60,7 @@ struct Cli {
     #[arg(long)]
     workspace: Option<PathBuf>,
 
-    /// Allow workspace writes and commands without interactive approval.
+    /// Allow create/edit inside the workspace without approval. Shell and MCP still ask.
     #[arg(long)]
     full_auto: bool,
 
@@ -180,13 +181,16 @@ async fn run() -> Result<()> {
         .unwrap_or(16_384);
     let provider = build_provider(provider_config).context("initialize provider")?;
 
-    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("ask");
-    let approval_mode = if cli.full_auto || configured_approval == "workspace-access" {
+    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("strict");
+    let approval_mode = if cli.full_auto {
         ApprovalMode::WorkspaceAccess
-    } else if configured_approval == "ask" {
-        ApprovalMode::Ask
     } else {
-        bail!("agent.approval must be `ask` or `workspace-access`");
+        match configured_approval {
+            "strict" | "ask" | "request-every-time" => ApprovalMode::Strict,
+            "smart" | "auto-review" => ApprovalMode::Smart,
+            "workspace-write" | "workspace-access" => ApprovalMode::WorkspaceAccess,
+            _ => bail!("agent.approval must be `strict`, `smart`, or `workspace-write`"),
+        }
     };
     let skills = Arc::new(willdeep_core::SkillCatalog::discover(
         &workspace,
@@ -199,6 +203,7 @@ async fn run() -> Result<()> {
     );
     let interactive_tui = prompt.is_none() && std::io::stdin().is_terminal() && !cli.no_tui;
     let (tui_tx, tui_rx) = tui::channel();
+    let relay_bridge = mobile::RelayBridge::new();
     let approver: Arc<dyn Approver> = if interactive_tui {
         Arc::new(tui::TuiApprover(tui_tx.clone()))
     } else {
@@ -214,7 +219,10 @@ async fn run() -> Result<()> {
         system_prompt.push_str(&skills.summary());
     }
     let sink: Arc<dyn EventSink> = if interactive_tui {
-        Arc::new(tui::TuiSink(tui_tx.clone()))
+        Arc::new(tui::TuiSink {
+            ui: tui_tx.clone(),
+            relay: relay_bridge.clone(),
+        })
     } else {
         Arc::new(TerminalSink { json: cli.json })
     };
@@ -235,8 +243,18 @@ async fn run() -> Result<()> {
             prompt.as_deref().unwrap_or("New session"),
         )
     });
+    relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
-        return tui::run(Arc::new(agent), session, store, tui_tx, tui_rx).await;
+        return tui::run(
+            Arc::new(agent),
+            session,
+            store,
+            home,
+            skills,
+            relay_bridge,
+            (tui_tx, tui_rx),
+        )
+        .await;
     }
     let prompt = prompt.context("provide a prompt argument or pipe one on stdin")?;
     let history = session.messages.clone();

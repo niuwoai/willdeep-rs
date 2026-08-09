@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --locked --release -p willdeep
+      - name: Package
+        run: tar -C target/${{ matrix.target }}/release -czf willdeep-linux-${{ matrix.arch }}.tar.gz willdeep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: willdeep-linux-${{ matrix.arch }}
+          path: willdeep-linux-${{ matrix.arch }}.tar.gz
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - run: cargo build --locked --release -p willdeep
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path target/release/willdeep.exe -DestinationPath willdeep-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: willdeep-windows-x64
+          path: willdeep-windows-x64.zip
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - run: cargo build --locked --release -p willdeep --target x86_64-apple-darwin
+      - run: cargo build --locked --release -p willdeep --target aarch64-apple-darwin
+      - name: Package universal binary
+        run: |
+          lipo -create target/x86_64-apple-darwin/release/willdeep target/aarch64-apple-darwin/release/willdeep -output willdeep
+          tar -czf willdeep-macos-universal.tar.gz willdeep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: willdeep-macos-universal
+          path: willdeep-macos-universal.tar.gz
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish four platform archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --verify-tag

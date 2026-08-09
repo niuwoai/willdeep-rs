@@ -27,3 +27,31 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  linux-architectures:
+    name: Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: test
+          target: ${{ matrix.target }}
+          args: --locked --workspace
+
+  wsl-smoke:
+    name: WSL ABI smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - name: Build the Linux x86_64 binary consumed by WSL 2
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu -p willdeep
+      - name: Smoke test executable and ELF ABI
+        run: |
+          target/x86_64-unknown-linux-gnu/release/willdeep --version
+          file target/x86_64-unknown-linux-gnu/release/willdeep | grep 'ELF 64-bit LSB'

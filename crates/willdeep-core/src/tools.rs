@@ -24,7 +24,8 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalMode {
-    Ask,
+    Strict,
+    Smart,
     WorkspaceAccess,
 }
 
@@ -250,7 +251,7 @@ impl ToolRegistry {
             "create_file" => self.create_file(parse(call)?).await,
             "edit_file" => self.edit_file(parse(call)?).await,
             name if self.mcp.handles(name) => {
-                self.require_approval(&format!("call MCP tool: {name}"))
+                self.require_approval(&format!("call MCP tool: {name}"), false)
                     .await?;
                 let arguments =
                     call.parsed_arguments()
@@ -442,7 +443,7 @@ impl ToolRegistry {
             .filter(|label| !label.trim().is_empty())
             .map(|label| format!("{label}\ncommand: {}", args.command))
             .unwrap_or_else(|| args.command.clone());
-        self.require_approval(&format!("run command: {description}"))
+        self.require_approval(&format!("run command: {description}"), false)
             .await?;
         let timeout = args
             .timeout_seconds
@@ -471,7 +472,7 @@ impl ToolRegistry {
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
-        self.require_approval(&format!("create file: {}", args.path))
+        self.require_approval(&format!("create file: {}", args.path), true)
             .await?;
         let path = self.resolve_new(&args.path)?;
         if path.exists() {
@@ -495,7 +496,7 @@ impl ToolRegistry {
         if args.old_string == args.new_string {
             return Err(ToolError::IdenticalEdit);
         }
-        self.require_approval(&format!("edit file: {}", args.path))
+        self.require_approval(&format!("edit file: {}", args.path), true)
             .await?;
         let path = self.resolve_existing(&args.path)?;
         let content = tokio::fs::read_to_string(&path).await?;
@@ -518,10 +519,17 @@ impl ToolRegistry {
         Ok(format!("edited {} ({count} replacement(s))", args.path))
     }
 
-    async fn require_approval(&self, description: &str) -> Result<(), ToolError> {
-        if self.approval_mode == ApprovalMode::WorkspaceAccess
-            || self.approver.approve(description).await
-        {
+    async fn require_approval(
+        &self,
+        description: &str,
+        workspace_write: bool,
+    ) -> Result<(), ToolError> {
+        let workspace_write_allowed = workspace_write
+            && matches!(
+                self.approval_mode,
+                ApprovalMode::Smart | ApprovalMode::WorkspaceAccess
+            );
+        if workspace_write_allowed || self.approver.approve(description).await {
             Ok(())
         } else {
             Err(ToolError::ApprovalDenied(description.to_owned()))
@@ -736,7 +744,7 @@ mod tests {
     async fn read_file_matches_swift_line_number_contract() {
         let root = workspace("read");
         std::fs::write(root.join("file.txt"), "one\ntwo\nthree\n").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Ask).expect("registry");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
         let output = registry
             .read_file(ReadArgs {
                 path: "file.txt".to_owned(),
@@ -753,7 +761,7 @@ mod tests {
     #[test]
     fn existing_symlink_escape_is_rejected() {
         let root = workspace("escape");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Ask).expect("registry");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
         let result = registry.resolve_existing("../../etc/passwd");
         assert!(matches!(result, Err(ToolError::OutsideWorkspace(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -777,6 +785,33 @@ mod tests {
             std::fs::read_to_string(root.join("file.txt")).expect("read"),
             "alpha gamma"
         );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn smart_allows_workspace_edit_but_not_shell() {
+        let root = workspace("smart");
+        std::fs::write(root.join("file.txt"), "before").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart).expect("registry");
+
+        registry
+            .edit_file(EditArgs {
+                path: "file.txt".to_owned(),
+                old_string: "before".to_owned(),
+                new_string: "after".to_owned(),
+                replace_all: None,
+            })
+            .await
+            .expect("workspace edit");
+        let command = registry
+            .run_command(CommandArgs {
+                command: "printf should-not-run".to_owned(),
+                timeout_seconds: None,
+                label: None,
+            })
+            .await;
+
+        assert!(matches!(command, Err(ToolError::ApprovalDenied(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Cursor};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,25 +16,35 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::{
     Agent, AgentEvent, Approver, EventSink, Message, MessageAttachment, Session, SessionStore,
+    SkillCatalog,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
+use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 pub enum UiMessage {
     Agent(AgentEvent),
     Approval(String, oneshot::Sender<bool>),
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
 }
-pub struct TuiSink(pub mpsc::UnboundedSender<UiMessage>);
+pub struct TuiSink {
+    pub ui: mpsc::UnboundedSender<UiMessage>,
+    pub relay: RelayBridge,
+}
 #[async_trait]
 impl EventSink for TuiSink {
     async fn emit(&self, event: AgentEvent) {
-        let _ = self.0.send(UiMessage::Agent(event));
+        if let AgentEvent::AssistantText(value) = &event {
+            self.relay.publish_assistant(value);
+        }
+        let _ = self.ui.send(UiMessage::Agent(event));
     }
 }
 pub struct TuiApprover(pub mpsc::UnboundedSender<UiMessage>);
@@ -68,6 +79,10 @@ struct App {
     prompt_rect: Rect,
     prompt_scroll: usize,
     notice: Option<String>,
+    goal: Option<String>,
+    mobile_gateway: Option<RelayGateway>,
+    mobile_qr: Option<String>,
+    mobile_queue: VecDeque<String>,
 }
 
 #[derive(Default)]
@@ -120,8 +135,13 @@ pub async fn run(
     agent: Arc<Agent>,
     mut session: Session,
     store: SessionStore,
-    tx: mpsc::UnboundedSender<UiMessage>,
-    mut rx: mpsc::UnboundedReceiver<UiMessage>,
+    home: PathBuf,
+    skills: Arc<SkillCatalog>,
+    relay_bridge: RelayBridge,
+    ui: (
+        mpsc::UnboundedSender<UiMessage>,
+        mpsc::UnboundedReceiver<UiMessage>,
+    ),
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -132,7 +152,14 @@ pub async fn run(
         EnableMouseCapture
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
-    let result = event_loop(&mut term, agent, &mut session, &store, tx, &mut rx).await;
+    let mut runtime = TuiRuntime {
+        home,
+        skills,
+        relay_bridge,
+        tx: ui.0,
+        rx: ui.1,
+    };
+    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime).await;
     terminal::disable_raw_mode()?;
     execute!(
         term.backend_mut(),
@@ -144,16 +171,24 @@ pub async fn run(
     result
 }
 
+struct TuiRuntime {
+    home: PathBuf,
+    skills: Arc<SkillCatalog>,
+    relay_bridge: RelayBridge,
+    tx: mpsc::UnboundedSender<UiMessage>,
+    rx: mpsc::UnboundedReceiver<UiMessage>,
+}
+
 async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
     session: &mut Session,
     store: &SessionStore,
-    tx: mpsc::UnboundedSender<UiMessage>,
-    rx: &mut mpsc::UnboundedReceiver<UiMessage>,
+    runtime: &mut TuiRuntime,
 ) -> Result<()> {
     let mut app = App::new(transcript(&session.messages));
     let mut events = EventStream::new();
+    let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         draw(term, &mut app)?;
         tokio::select! {
@@ -162,6 +197,7 @@ async fn event_loop(
                 Event::Mouse(mouse) if matches!(mouse.kind,MouseEventKind::Down(_))=>app.handle_mouse(mouse.column,mouse.row),
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
+                    if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if let Some((_,sender))=app.approval.take(){let _=sender.send(matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')));continue;}
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
@@ -173,9 +209,10 @@ async fn event_loop(
                         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
-                            let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));app.running=true;app.tools.reset();
-                            let history=session.messages.clone();let attachments=std::mem::take(&mut app.attachments).into_iter().map(|v|v.message).collect();let user=Message::user_with_attachments(&prompt,attachments);session.messages.push(user.clone());store.save(session)?;
-                            let agent=agent.clone();let tx=tx.clone();tokio::spawn(async move{let _=tx.send(UiMessage::Finished(agent.run_with_history_message(history,user).await));});
+                            let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
+                            if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            if app.handle_slash_command(&prompt,&runtime.skills){continue;}
+                            dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;
                         }
                         KeyCode::Left=>app.input.left(),KeyCode::Right=>app.input.right(),KeyCode::Up=>app.input.up_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Down=>app.input.down_visual(app.prompt_rect.width.saturating_sub(2).max(1) as usize),KeyCode::Home=>app.input.home(),KeyCode::End=>app.input.end(),KeyCode::Backspace=>app.input.backspace(),KeyCode::Delete=>app.input.delete(),
                         KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>app.input.insert(&c.to_string()),_=>{}
@@ -183,7 +220,11 @@ async fn event_loop(
                 }
                 _=>{}
             }},
-            Some(message)=rx.recv()=>match message {UiMessage::Agent(AgentEvent::AssistantText(v))=>app.append_transcript(format!("WillDeep: {v}")),UiMessage::Agent(AgentEvent::ToolRequested(v))=>app.tools.requested(&v.name),UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>app.tools.completed(&call.name,is_error),UiMessage::Agent(_)=>{},UiMessage::Approval(v,s)=>app.approval=Some((v,s)),UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.running=false;}UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.running=false;}}
+            Some(message)=runtime.rx.recv()=>match message {UiMessage::Agent(AgentEvent::AssistantText(v))=>app.append_transcript(format!("WillDeep: {v}")),UiMessage::Agent(AgentEvent::ToolRequested(v))=>app.tools.requested(&v.name),UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>app.tools.completed(&call.name,is_error),UiMessage::Agent(_)=>{},UiMessage::Approval(v,s)=>app.approval=Some((v,s)),UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.running=false;if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}}UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.running=false;}},
+            Some(prompt)=mobile_rx.recv()=>{
+                if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
+                else {app.append_transcript(format!("Phone: {}",prompt.text));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt.text)?;}
+            },
         }
     }
     Ok(())
@@ -207,6 +248,10 @@ impl App {
             prompt_rect: Rect::default(),
             prompt_scroll: 0,
             notice: None,
+            goal: None,
+            mobile_gateway: None,
+            mobile_qr: None,
+            mobile_queue: VecDeque::new(),
         }
     }
     fn max_scroll(&self) -> usize {
@@ -289,6 +334,170 @@ impl App {
             );
         }
     }
+    fn handle_slash_command(&mut self, prompt: &str, skills: &SkillCatalog) -> bool {
+        let value = prompt.trim();
+        if !value.starts_with('/') {
+            return false;
+        }
+        let (command, args) = value.split_once(' ').unwrap_or((value, ""));
+        match command {
+            "/help" => self.append_transcript(
+                "System: /goal <text>|off · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                    .to_owned(),
+            ),
+            "/goal" if args.trim().eq_ignore_ascii_case("off") => {
+                self.goal = None;
+                self.append_transcript("System: Goal mode disabled".to_owned());
+            }
+            "/goal" if !args.trim().is_empty() => {
+                self.goal = Some(args.trim().to_owned());
+                self.append_transcript(format!("System: Goal mode · {}", args.trim()));
+            }
+            "/goal" => self.append_transcript(format!(
+                "System: Goal · {}",
+                self.goal.as_deref().unwrap_or("not set")
+            )),
+            "/skills" => {
+                self.append_transcript(format!("System: Available skills\n{}", skills.summary()))
+            }
+            "/clear" => {
+                self.transcript.clear();
+                self.scroll_to_bottom();
+            }
+            _ => self.append_transcript(format!("Error: unknown command {command}; use /help")),
+        }
+        true
+    }
+    fn handle_mobile_command(
+        &mut self,
+        prompt: &str,
+        home: &std::path::Path,
+        bridge: &RelayBridge,
+        mobile_tx: &mpsc::UnboundedSender<MobilePrompt>,
+        session: &Session,
+    ) -> bool {
+        let value = prompt.trim();
+        if !matches!(
+            value,
+            "/mobile" | "/mobile show" | "/mobile hide" | "/mobile off"
+        ) {
+            return false;
+        }
+        match value {
+            "/mobile off" => {
+                self.mobile_gateway = None;
+                self.mobile_qr = None;
+                self.append_transcript("System: Mobile relay disconnected".to_owned());
+            }
+            "/mobile hide" => self.mobile_qr = None,
+            _ => {
+                if self.mobile_gateway.is_none() {
+                    match RelayGateway::start(
+                        home,
+                        bridge.clone(),
+                        mobile_tx.clone(),
+                        mobile_snapshot(session),
+                    ) {
+                        Ok(gateway) => {
+                            self.append_transcript(format!(
+                                "System: Mobile relay connected · room {}",
+                                gateway.room
+                            ));
+                            self.mobile_gateway = Some(gateway);
+                        }
+                        Err(error) => {
+                            self.append_transcript(format!("Error: start mobile relay: {error:#}"))
+                        }
+                    }
+                }
+                self.mobile_qr = self
+                    .mobile_gateway
+                    .as_ref()
+                    .map(|gateway| gateway.qr.clone());
+            }
+        }
+        true
+    }
+    fn enrich_prompt(&self, prompt: &str, skills: &SkillCatalog) -> String {
+        let mut blocks = Vec::new();
+        if let Some(goal) = &self.goal {
+            blocks.push(format!(
+                "<goal>\n{goal}\n</goal>\nContinue until this goal is genuinely complete."
+            ));
+        }
+        for token in prompt
+            .split_whitespace()
+            .filter(|value| value.starts_with('$'))
+        {
+            let name = token
+                .trim_start_matches('$')
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+            if !name.is_empty()
+                && let Ok(body) = skills.read(name, None)
+            {
+                blocks.push(format!(
+                    "<explicit_skill name=\"{name}\">\n{body}\n</explicit_skill>"
+                ));
+            }
+        }
+        if blocks.is_empty() {
+            prompt.to_owned()
+        } else {
+            format!("{}\n\n{prompt}", blocks.join("\n\n"))
+        }
+    }
+}
+
+fn dispatch_prompt(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    skills: &SkillCatalog,
+    agent: &Arc<Agent>,
+    tx: &mpsc::UnboundedSender<UiMessage>,
+    prompt: String,
+) -> Result<()> {
+    app.running = true;
+    app.tools.reset();
+    let history = session.messages.clone();
+    let attachments = std::mem::take(&mut app.attachments)
+        .into_iter()
+        .map(|value| value.message)
+        .collect();
+    let enriched = app.enrich_prompt(&prompt, skills);
+    let user = Message::user_with_attachments(enriched, attachments);
+    session.messages.push(user.clone());
+    store.save(session)?;
+    let agent = agent.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(UiMessage::Finished(
+            agent.run_with_history_message(history, user).await,
+        ));
+    });
+    Ok(())
+}
+
+fn mobile_snapshot(session: &Session) -> serde_json::Value {
+    serde_json::json!({
+        "id": uuid::Uuid::new_v4(),
+        "type": "state.snapshot",
+        "session_id": session.id,
+        "payload": {
+            "active_session_id": session.id,
+            "sessions": [{
+                "id": session.id,
+                "title": session.title,
+                "workspace_name": session.workspace.file_name().and_then(|value| value.to_str()).unwrap_or("Workspace"),
+                "workspace_path": session.workspace,
+                "message_count": session.messages.len(),
+                "is_active": true,
+                "is_responding": false,
+                "updated_at": session.updated_at,
+            }],
+            "messages": [],
+        }
+    })
 }
 
 fn clipboard_image() -> Result<DraftAttachment> {
@@ -361,9 +570,15 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         } else {
             format!("WillDeep · history ↑{}", app.scroll_from_bottom)
         };
+        let colored = colored_transcript(&app.transcript);
         f.render_widget(
-            Paragraph::new(text)
-                .block(Block::default().title(title).borders(Borders::ALL))
+            Paragraph::new(colored)
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Blue)),
+                )
                 .scroll((offset, 0))
                 .wrap(Wrap { trim: false }),
             areas[0],
@@ -450,8 +665,36 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
             }
         });
         f.render_widget(Paragraph::new(status), areas[4]);
+        if let Some(qr) = &app.mobile_qr {
+            let width = qr.lines().map(UnicodeWidthStr::width).max().unwrap_or(40) as u16 + 4;
+            let height = qr.lines().count() as u16 + 4;
+            let popup = centered_rect(
+                width.min(f.area().width),
+                height.min(f.area().height),
+                f.area(),
+            );
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(qr.clone()).block(
+                    Block::default()
+                        .title("Scan with WillDeep Mobile · Esc hides")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
+                popup,
+            );
+        }
     })?;
     Ok(())
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
 }
 
 pub fn channel() -> (
@@ -459,6 +702,26 @@ pub fn channel() -> (
     mpsc::UnboundedReceiver<UiMessage>,
 ) {
     mpsc::unbounded_channel()
+}
+fn colored_transcript(entries: &[String]) -> Text<'static> {
+    let mut lines = Vec::new();
+    for value in entries {
+        let style = if value.starts_with("You:") {
+            Style::default().fg(Color::Cyan)
+        } else if value.starts_with("WillDeep:") {
+            Style::default().fg(Color::Green)
+        } else if value.starts_with("Error:") {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        lines.extend(
+            value
+                .lines()
+                .map(|line| Line::styled(line.to_owned(), style)),
+        );
+    }
+    Text::from(lines)
 }
 fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);
@@ -471,6 +734,40 @@ fn visual_lines(text: &str, width: usize) -> usize {
                 .div_ceil(width)
         })
         .sum()
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn goal_command_enriches_future_prompts() {
+        let mut app = App::new(Vec::new());
+        let skills = SkillCatalog::default();
+
+        assert!(app.handle_slash_command("/goal ship the CLI", &skills));
+        let enriched = app.enrich_prompt("continue", &skills);
+
+        assert!(enriched.contains("<goal>\nship the CLI\n</goal>"));
+        assert!(enriched.ends_with("continue"));
+        assert!(app.handle_slash_command("/goal off", &skills));
+        assert_eq!(app.enrich_prompt("continue", &skills), "continue");
+    }
+
+    #[test]
+    fn unknown_slash_command_is_handled_locally() {
+        let mut app = App::new(Vec::new());
+        let skills = SkillCatalog::default();
+
+        assert!(app.handle_slash_command("/wat", &skills));
+        assert!(app.transcript.last().unwrap().contains("unknown command"));
+    }
+
+    #[test]
+    fn ordinary_prompt_is_not_treated_as_command() {
+        let mut app = App::new(Vec::new());
+        assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
+    }
 }
 fn transcript(messages: &[Message]) -> Vec<String> {
     messages
