@@ -11,6 +11,9 @@ api = "chat-completions"
 api_base = "https://some.im/v1"
 api_key_env = "SOMEIM_API_KEY"
 model = "deepseek-v4-flash"
+# Text-only some.im models use this model to describe pasted images first.
+vision_model = "qwen3-vl-plus"
+context_window = 128000
 
 [providers.openai-responses]
 provider = "openai-compatible"

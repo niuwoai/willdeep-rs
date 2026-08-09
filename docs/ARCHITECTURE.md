@@ -79,7 +79,13 @@ MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建�
 
 TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 Unicode 显示宽度计算换行、上下移动、点击定位和内部滚动。终端启用 Bracketed Paste，长文本保留为消息附件而不是撑满编辑框。
 
-图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`，Agent Loop 不包含协议分支。
+图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`。some.im 已知纯文本主模型由 Agent 通过同一 API Base/API Key 的 `qwen3-vl-plus`（或 `vision_model` 覆盖值）生成描述，再移除发往主模型的图片负载。
+
+### 上下文与网络工具
+
+Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% 且历史足够长时，Agent 使用当前 Provider 总结较旧历史，构造临时请求视图；会话存档仍保存完整消息。TUI 展示最近一次 Provider Usage、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
+
+`web_search` 调用同一 some.im Origin 的 `/api/v1/customer/web-search`。`web_fetch` 只接受 HTTP(S) 公网目标，在请求前解析 DNS 并拒绝私网、回环、链路本地和文档保留地址；客户端禁用重定向，并限制 3 MiB 响应和最多 100,000 字符。两项网络工具在所有审批模式下都逐次审批。
 
 ### Mobile Relay
 

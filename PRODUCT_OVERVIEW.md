@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-09 | 当前版本：v0.5.0-rc2
+> 最后更新：2026-08-09 | 当前版本：v0.6.0-rc1
 
 ## 项目简介
 
@@ -25,6 +25,10 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
 - 区分角色的 TUI 配色；
 - macOS Universal、Windows x64、Linux AMD64/ARM64 自动构建与 tag 发布。
+- `rg` 优先、内置扫描兜底的跨平台文件搜索；
+- some.im 纯文本模型的 `qwen3-vl-plus` 图片描述降级链路；
+- 受审批保护的网页搜索和公网网页正文读取；
+- 上下文用量、Token、耗时、自动摘要压缩及宽屏后台状态侧栏。
 
 ## 技术栈
 
@@ -64,4 +68,5 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] MCP Streamable HTTP 与 OAuth；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；
+- [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] 多 Agent 与 Goal 编排。

@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -21,12 +22,21 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
+const MAX_WEB_MAX_CHARS: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalMode {
     Strict,
     Smart,
     WorkspaceAccess,
+}
+
+#[derive(Clone, Debug)]
+pub struct WebToolConfig {
+    pub some_im_base_url: String,
+    pub api_key: String,
 }
 
 #[async_trait]
@@ -74,6 +84,8 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
     #[error("command timed out after {0} seconds")]
     CommandTimeout(u64),
+    #[error("network operation failed: {0}")]
+    Network(String),
     #[error(transparent)]
     Skill(#[from] crate::skills::SkillError),
     #[error(transparent)]
@@ -86,6 +98,7 @@ pub struct ToolRegistry {
     approver: Arc<dyn Approver>,
     skills: Arc<SkillCatalog>,
     mcp: Arc<McpRegistry>,
+    web: Option<WebToolConfig>,
 }
 
 impl ToolRegistry {
@@ -106,6 +119,7 @@ impl ToolRegistry {
             approver: Arc::new(DenyApprover),
             skills: Arc::new(SkillCatalog::default()),
             mcp: Arc::new(McpRegistry::default()),
+            web: None,
         })
     }
 
@@ -120,6 +134,10 @@ impl ToolRegistry {
     }
     pub fn with_mcp(mut self, mcp: Arc<McpRegistry>) -> Self {
         self.mcp = mcp;
+        self
+    }
+    pub fn with_web_tools(mut self, config: Option<WebToolConfig>) -> Self {
+        self.web = config;
         self
     }
 
@@ -195,6 +213,16 @@ impl ToolRegistry {
                 json!({"type": "object", "properties": {}, "additionalProperties": false}),
             ),
             definition(
+                "web_search",
+                "Search the public web through the configured some.im managed search. Network access requires approval.",
+                json!({"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","minimum":1,"maximum":20}},"required":["query"],"additionalProperties":false}),
+            ),
+            definition(
+                "web_fetch",
+                "Fetch readable text from a public HTTP(S) URL. Private, loopback, link-local targets and redirects are refused. Requires approval.",
+                json!({"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer","minimum":1,"maximum":100000}},"required":["url"],"additionalProperties":false}),
+            ),
+            definition(
                 "run_command",
                 "Run a shell command in the workspace root and return exit code, stdout, and stderr. Requires approval.",
                 json!({
@@ -247,6 +275,8 @@ impl ToolRegistry {
             "read_file" => self.read_file(parse(call)?).await,
             "list_directory" => self.list_directory(parse(call)?).await,
             "git_status" => self.git_status().await,
+            "web_search" => self.web_search(parse(call)?).await,
+            "web_fetch" => self.web_fetch(parse(call)?).await,
             "run_command" => self.run_command(parse(call)?).await,
             "create_file" => self.create_file(parse(call)?).await,
             "edit_file" => self.edit_file(parse(call)?).await,
@@ -293,6 +323,11 @@ impl ToolRegistry {
         if args.query.is_empty() {
             return Ok("query is empty".to_owned());
         }
+        if let Some(output) =
+            self.search_with_rg(&args.query, true, true, None, None, args.max_results)
+        {
+            return Ok(output);
+        }
         let query = args.query.to_lowercase();
         self.search(None, None, args.max_results, |line| {
             line.to_lowercase().contains(&query)
@@ -313,12 +348,76 @@ impl ToolRegistry {
                     .map_err(|error| ToolError::InvalidGlob(error.to_string()))
             })
             .transpose()?;
+        if let Some(output) = self.search_with_rg(
+            &args.pattern,
+            false,
+            !args.case_sensitive.unwrap_or(false),
+            args.path.as_deref(),
+            args.include.as_deref(),
+            args.max_results,
+        ) {
+            return Ok(output);
+        }
         self.search(
             args.path.as_deref(),
             include.as_ref(),
             args.max_results,
             |line| regex.is_match(line),
         )
+    }
+
+    fn search_with_rg(
+        &self,
+        pattern: &str,
+        fixed_strings: bool,
+        ignore_case: bool,
+        relative_path: Option<&str>,
+        include: Option<&str>,
+        max_results: Option<usize>,
+    ) -> Option<String> {
+        let search_path = match relative_path {
+            Some(path) if !path.is_empty() => {
+                self.resolve_existing(path).ok()?;
+                path
+            }
+            _ => ".",
+        };
+        let limit = max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .clamp(1, MAX_RESULTS);
+        let mut command = std::process::Command::new("rg");
+        command.current_dir(&self.workspace).args([
+            "--line-number",
+            "--no-heading",
+            "--color",
+            "never",
+        ]);
+        if fixed_strings {
+            command.arg("--fixed-strings");
+        }
+        if ignore_case {
+            command.arg("--ignore-case");
+        }
+        if let Some(glob) = include {
+            command.args(["--glob", glob]);
+        }
+        let output = command.args(["--", pattern, search_path]).output().ok()?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return None;
+        }
+        let mut lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .take(limit)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if lines.len() == limit && String::from_utf8_lossy(&output.stdout).lines().count() > limit {
+            lines.push(format!("... truncated at {limit} results"));
+        }
+        Some(if lines.is_empty() {
+            "No matches found.".to_owned()
+        } else {
+            lines.join("\n")
+        })
     }
 
     fn search<F>(
@@ -434,6 +533,102 @@ impl ToolRegistry {
             String::from_utf8_lossy(&branch.stdout).trim(),
             String::from_utf8_lossy(&status.stdout)
         ))
+    }
+
+    async fn web_search(&self, args: WebSearchArgs) -> Result<String, ToolError> {
+        let config = self.web.as_ref().ok_or_else(|| {
+            ToolError::Network("web_search requires a some.im provider".to_owned())
+        })?;
+        let query = args.query.trim();
+        if query.is_empty() {
+            return Err(ToolError::Network("search query is empty".to_owned()));
+        }
+        self.require_approval(&format!("search the public web for: {query}"), false)
+            .await?;
+        let mut endpoint = reqwest::Url::parse(&config.some_im_base_url)
+            .map_err(|error| ToolError::Network(format!("invalid some.im API base: {error}")))?;
+        endpoint.set_path("/api/v1/customer/web-search");
+        endpoint.set_query(None);
+        let response = web_client()?
+            .post(endpoint)
+            .bearer_auth(&config.api_key)
+            .json(&json!({
+                "query": query,
+                "count": args.count.unwrap_or(8).clamp(1, 20),
+                "provider": "auto"
+            }))
+            .send()
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        if !status.is_success() {
+            return Err(ToolError::Network(format!(
+                "some.im web search returned HTTP {status}: {}",
+                truncate_line(&body, 500)
+            )));
+        }
+        format_search_results(&body)
+    }
+
+    async fn web_fetch(&self, args: WebFetchArgs) -> Result<String, ToolError> {
+        let url = reqwest::Url::parse(args.url.trim())
+            .map_err(|error| ToolError::Network(format!("invalid URL: {error}")))?;
+        validate_public_url(&url).await?;
+        self.require_approval(&format!("fetch public URL: {url}"), false)
+            .await?;
+        let response = web_client()?
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        if response.status().is_redirection() {
+            return Err(ToolError::Network(
+                "redirects are refused by web_fetch".to_owned(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(ToolError::Network(format!(
+                "web server returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_WEB_RESPONSE_BYTES as u64)
+        {
+            return Err(ToolError::Network(
+                "response exceeds the 3 MiB limit".to_owned(),
+            ));
+        }
+        let is_html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        if bytes.len() > MAX_WEB_RESPONSE_BYTES {
+            return Err(ToolError::Network(
+                "response exceeds the 3 MiB limit".to_owned(),
+            ));
+        }
+        let raw = String::from_utf8_lossy(&bytes);
+        let text = if is_html {
+            html_to_text(&raw)
+        } else {
+            raw.into_owned()
+        };
+        let limit = args
+            .max_chars
+            .unwrap_or(DEFAULT_WEB_MAX_CHARS)
+            .clamp(1, MAX_WEB_MAX_CHARS);
+        Ok(truncate_chars(&text, limit))
     }
 
     async fn run_command(&self, args: CommandArgs) -> Result<String, ToolError> {
@@ -646,6 +841,171 @@ fn truncate_line(line: &str, max_chars: usize) -> String {
     value
 }
 
+fn web_client() -> Result<reqwest::Client, ToolError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| ToolError::Network(error.to_string()))
+}
+
+async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ToolError::Network(
+            "only HTTP(S) URLs are supported".to_owned(),
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| ToolError::Network("URL has no host".to_owned()))?;
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Err(ToolError::Network(
+            "loopback targets are refused".to_owned(),
+        ));
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| ToolError::Network("URL has no usable port".to_owned()))?;
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| ToolError::Network(format!("cannot resolve host: {error}")))?;
+    let mut found = false;
+    for address in addresses {
+        found = true;
+        if !is_public_ip(address.ip()) {
+            return Err(ToolError::Network(format!(
+                "private, loopback, or link-local target is refused: {}",
+                address.ip()
+            )));
+        }
+    }
+    if !found {
+        return Err(ToolError::Network(
+            "host resolved to no addresses".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(value) => is_public_ipv4(value),
+        IpAddr::V6(value) => is_public_ipv6(value),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || octets[0] == 0
+        || octets[0] >= 224
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113))
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+}
+
+fn html_to_text(html: &str) -> String {
+    let scripts = regex::Regex::new(
+        r"(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<noscript[^>]*>.*?</noscript>",
+    )
+    .expect("valid HTML cleanup regex")
+    .replace_all(html, " ");
+    let breaks = regex::Regex::new(r"(?i)</?(p|div|br|li|h[1-6]|tr|section|article)[^>]*>")
+        .expect("valid HTML block regex")
+        .replace_all(&scripts, "\n");
+    let tags = regex::Regex::new(r"(?s)<[^>]+>")
+        .expect("valid HTML tag regex")
+        .replace_all(&breaks, " ");
+    let decoded = tags
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let whitespace = regex::Regex::new(r"[ \t\r\x0B\x0C]+")
+        .expect("valid whitespace regex")
+        .replace_all(&decoded, " ");
+    regex::Regex::new(r"\n\s*\n+")
+        .expect("valid blank line regex")
+        .replace_all(&whitespace, "\n\n")
+        .trim()
+        .to_owned()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    format!(
+        "{}\n[content truncated]",
+        value.chars().take(max_chars).collect::<String>()
+    )
+}
+
+fn format_search_results(body: &str) -> Result<String, ToolError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| ToolError::Network(format!("invalid search response: {error}")))?;
+    let data = value.get("data").unwrap_or(&value);
+    let items = data
+        .get("results")
+        .or_else(|| data.get("items"))
+        .or_else(|| data.as_array().map(|_| data))
+        .and_then(serde_json::Value::as_array);
+    let Some(items) = items else {
+        return serde_json::to_string_pretty(data)
+            .map_err(|error| ToolError::Network(error.to_string()));
+    };
+    let lines = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let title = item
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Untitled");
+            let url = item
+                .get("url")
+                .or_else(|| item.get("link"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let snippet = item
+                .get("snippet")
+                .or_else(|| item.get("content"))
+                .or_else(|| item.get("description"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            format!(
+                "{}. {title}\n{url}\n{}",
+                index + 1,
+                truncate_line(snippet, 1_000)
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(if lines.is_empty() {
+        "No search results.".to_owned()
+    } else {
+        lines.join("\n\n")
+    })
+}
+
 fn truncate_bytes(value: String) -> String {
     if value.len() <= MAX_COMMAND_OUTPUT_BYTES {
         return value;
@@ -714,6 +1074,18 @@ struct CommandArgs {
     command: String,
     timeout_seconds: Option<u64>,
     label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WebSearchArgs {
+    query: String,
+    count: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct WebFetchArgs {
+    url: String,
+    max_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -813,5 +1185,36 @@ mod tests {
 
         assert!(matches!(command, Err(ToolError::ApprovalDenied(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn search_files_returns_literal_matches_with_rg_or_fallback() {
+        let root = workspace("search");
+        std::fs::write(root.join("sample.rs"), "fn alpha() {}\n").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
+        let output = registry
+            .search_files(SearchArgs {
+                query: "ALPHA".to_owned(),
+                max_results: None,
+            })
+            .expect("search");
+        assert!(output.contains("sample.rs:1:"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn html_cleanup_removes_executable_content() {
+        let text = html_to_text("<h1>Hello &amp; world</h1><script>secret()</script><p>Body</p>");
+        assert!(text.contains("Hello & world"));
+        assert!(text.contains("Body"));
+        assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn private_addresses_are_not_public() {
+        assert!(!is_public_ip("127.0.0.1".parse().expect("IPv4")));
+        assert!(!is_public_ip("10.0.0.1".parse().expect("IPv4")));
+        assert!(!is_public_ip("::1".parse().expect("IPv6")));
+        assert!(is_public_ip("1.1.1.1".parse().expect("IPv4")));
     }
 }

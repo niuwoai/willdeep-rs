@@ -46,6 +46,8 @@ pub struct ProviderProfile {
     pub api_key_env: Option<String>,
     pub model: Option<String>,
     pub max_output_tokens: Option<u32>,
+    pub context_window: Option<u64>,
+    pub vision_model: Option<String>,
 }
 
 pub struct LoadedConfig {

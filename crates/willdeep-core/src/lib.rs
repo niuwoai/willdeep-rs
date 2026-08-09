@@ -12,7 +12,7 @@ pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use session::{Session, SessionStore};
 pub use skills::SkillCatalog;
-pub use tools::{ApprovalMode, Approver, ToolRegistry};
+pub use tools::{ApprovalMode, Approver, ToolRegistry, WebToolConfig};
 pub use types::{Message, MessageAttachment, Role, ToolCall};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

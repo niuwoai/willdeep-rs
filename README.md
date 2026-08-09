@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.5.0-rc2`，支持：
+当前版本为 `0.6.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -10,6 +10,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - some.im 自动识别和显式 Provider 模式；
 - `search_files`、`grep_files`、`read_file`、`list_directory`、`git_status`；
 - `run_command`、`create_file`、`edit_file`；
+- `web_search`、安全公网 `web_fetch`，以及 `rg` 优先的工作区搜索；
 - 工作区路径隔离；
 - `strict`、`smart`、`workspace-write` 三档审批模式；
 - 面向自动化的 NDJSON 事件输出；
@@ -21,6 +22,8 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - `/goal`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用；
 - `/mobile` 二维码入口，通过 `j.niuwoai.com` WebSocket Relay 连接 WillDeep Mobile；
 - GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
+- some.im 纯文本模型通过同一账号下的视觉模型理解图片；
+- 上下文自动摘要压缩、Token/耗时状态和宽屏后台状态栏。
 
 当前暂不包含 Computer Use、Browser Use、多 Agent 与后台 daemon。
 
@@ -56,6 +59,8 @@ api = "chat-completions"
 api_base = "https://some.im/v1"
 api_key_env = "SOMEIM_API_KEY"
 model = "deepseek-v4-flash"
+vision_model = "qwen3-vl-plus"
+context_window = 128000
 
 [providers.openai]
 provider = "openai-compatible"
@@ -125,6 +130,7 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 ```
 
 失败数量不会被隐藏；需要排查时使用 `Ctrl+O` 查看最近明细。
+默认活动区只占一行内容，显示 Thinking、工具调用或上下文压缩阶段；宽终端会在右侧显示 Agent、Mobile Relay、手机队列和工具完成情况。状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
 
 输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
 
@@ -174,6 +180,8 @@ export WILLDEEP_API_BASE="https://api.niuwoai.com/v1"
 ```
 
 some.im 请求使用 Bearer API Key，并附带不含本地路径的 `x-willdeep-session-id` 与 `x-willdeep-workspace-id`。
+
+当 some.im 主模型属于已知纯文本模型且消息包含图片时，WillDeep 会使用同一 API Base、同一 API Key 调用 `qwen3-vl-plus` 描述图片，只把描述文本交给主模型。可用 Profile 的 `vision_model` 覆盖视觉模型。`web_search` 也复用该 some.im 配置；`web_search`、`web_fetch` 在所有审批模式下都需要确认，`web_fetch` 拒绝私网、回环、链路本地地址与 HTTP 跳转。
 
 ### OpenAI-compatible Chat Completions
 

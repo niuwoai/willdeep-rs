@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use willdeep_core::types::Usage;
 use willdeep_core::{
     Agent, AgentEvent, Approver, EventSink, Message, MessageAttachment, Session, SessionStore,
     SkillCatalog,
@@ -83,6 +85,12 @@ struct App {
     mobile_gateway: Option<RelayGateway>,
     mobile_qr: Option<String>,
     mobile_queue: VecDeque<String>,
+    latest_usage: Usage,
+    turn_started: Option<Instant>,
+    last_elapsed: Option<Duration>,
+    context_window: u64,
+    context_tokens: u64,
+    activity_line: String,
 }
 
 #[derive(Default)]
@@ -141,6 +149,7 @@ pub async fn run(
     ui: (
         mpsc::UnboundedSender<UiMessage>,
         mpsc::UnboundedReceiver<UiMessage>,
+        u64,
     ),
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -156,6 +165,7 @@ pub async fn run(
         home,
         skills,
         relay_bridge,
+        context_window: ui.2,
         tx: ui.0,
         rx: ui.1,
     };
@@ -175,6 +185,7 @@ struct TuiRuntime {
     home: PathBuf,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
+    context_window: u64,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
 }
@@ -187,6 +198,7 @@ async fn event_loop(
     runtime: &mut TuiRuntime,
 ) -> Result<()> {
     let mut app = App::new(transcript(&session.messages));
+    app.context_window = runtime.context_window.max(1);
     let mut events = EventStream::new();
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
@@ -220,7 +232,18 @@ async fn event_loop(
                 }
                 _=>{}
             }},
-            Some(message)=runtime.rx.recv()=>match message {UiMessage::Agent(AgentEvent::AssistantText(v))=>app.append_transcript(format!("WillDeep: {v}")),UiMessage::Agent(AgentEvent::ToolRequested(v))=>app.tools.requested(&v.name),UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>app.tools.completed(&call.name,is_error),UiMessage::Agent(_)=>{},UiMessage::Approval(v,s)=>app.approval=Some((v,s)),UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.running=false;if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}}UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.running=false;}},
+            Some(message)=runtime.rx.recv()=>match message {
+                UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line="Answering".to_owned();app.append_transcript(format!("WillDeep: {v}"));},
+                UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.activity_line=format!("Thinking · turn {turn}"),
+                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.activity_line=format!("Using {}",v.name);app.tools.requested(&v.name);},
+                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.activity_line=format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name);app.tools.completed(&call.name,is_error);},
+                UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
+                UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Compressing context".to_owned();},
+                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
+                UiMessage::Approval(v,s)=>app.approval=Some((v,s)),
+                UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();}
+            },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
                 else {app.append_transcript(format!("Phone: {}",prompt.text));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt.text)?;}
@@ -252,7 +275,18 @@ impl App {
             mobile_gateway: None,
             mobile_qr: None,
             mobile_queue: VecDeque::new(),
+            latest_usage: Usage::default(),
+            turn_started: None,
+            last_elapsed: None,
+            context_window: 128_000,
+            context_tokens: 0,
+            activity_line: String::new(),
         }
+    }
+    fn finish_turn(&mut self) {
+        self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
+        self.running = false;
+        self.activity_line = "Ready".to_owned();
     }
     fn max_scroll(&self) -> usize {
         visual_lines(&self.transcript.join("\n"), self.transcript_width)
@@ -458,6 +492,7 @@ fn dispatch_prompt(
     prompt: String,
 ) -> Result<()> {
     app.running = true;
+    app.turn_started = Some(Instant::now());
     app.tools.reset();
     let history = session.messages.clone();
     let attachments = std::mem::take(&mut app.attachments)
@@ -536,16 +571,26 @@ fn encode_clipboard_image(width: usize, height: usize, bytes: Vec<u8>) -> Result
 
 fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     term.draw(|f| {
-        let activity = if app.tools.requested == 0 {
-            0
-        } else if app.tools_expanded {
+        let columns = if f.area().width >= 110 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(76), Constraint::Percentage(24)])
+                .split(f.area())
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(100), Constraint::Length(0)])
+                .split(f.area())
+        };
+        let canvas = columns[0];
+        let activity = if app.tools_expanded && app.tools.requested > 0 {
             8
         } else {
             3
         };
         let attach = if app.attachments.is_empty() { 0 } else { 3 };
-        let input_width = f.area().width.saturating_sub(2).max(1) as usize;
-        let input_lines = visual_lines(app.input.text(), input_width).clamp(1, 6);
+        let input_width = canvas.width.saturating_sub(2).max(1) as usize;
+        let input_lines = visual_lines(app.input.text(), input_width).clamp(3, 6);
         let input_height = (input_lines + 2) as u16;
         let areas = Layout::default()
             .direction(Direction::Vertical)
@@ -556,7 +601,7 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                 Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
-            .split(f.area());
+            .split(canvas);
         let text = app.transcript.join("\n");
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
@@ -586,7 +631,8 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         if activity > 0 {
             let text = if app.tools_expanded {
                 format!(
-                    "{}\n{}",
+                    "{} · {}\n{}",
+                    app.activity_line,
                     app.tools.summary(),
                     app.tools
                         .details
@@ -599,7 +645,11 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                         .join("\n")
                 )
             } else {
-                app.tools.summary()
+                if app.tools.requested == 0 {
+                    app.activity_line.clone()
+                } else {
+                    format!("{} · {}", app.activity_line, app.tools.summary())
+                }
             };
             f.render_widget(
                 Paragraph::new(text).block(
@@ -657,14 +707,35 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
         f.set_cursor_position((cursor_x, cursor_y));
         let status = app.notice.take().unwrap_or_else(|| {
+            let input = app.latest_usage.input_tokens.unwrap_or(0);
+            let output = app.latest_usage.output_tokens.unwrap_or(0);
+            let context_tokens = app.context_tokens.max(input);
+            let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
+            let elapsed = app.turn_started.map(|value| value.elapsed()).or(app.last_elapsed).unwrap_or_default().as_secs_f32();
             if app.running {
-                "Agent running · PgUp/PgDn history · Ctrl+O tools · Ctrl-C exit".to_owned()
+                format!("Running · context {context_pct}% · latest ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+O tools")
             } else {
-                "Enter send · Shift/Alt+Enter newline · Ctrl+Shift+V image · Ctrl+D remove"
-                    .to_owned()
+                format!("Ready · context {context_pct}% · latest ↑{input} ↓{output} · {elapsed:.1}s · Enter send")
             }
         });
         f.render_widget(Paragraph::new(status), areas[4]);
+        if columns[1].width > 0 {
+            let relay = if app.mobile_gateway.is_some() { "connected" } else { "off" };
+            let agent = if app.running { "running" } else { "idle" };
+            let background = format!(
+                "Agent: {agent}\nRelay: {relay}\nPhone queue: {}\nTools: {}/{} complete\nFailed: {}",
+                app.mobile_queue.len(),
+                app.tools.completed,
+                app.tools.requested,
+                app.tools.failed
+            );
+            f.render_widget(
+                Paragraph::new(background)
+                    .block(Block::default().title("Background").borders(Borders::ALL))
+                    .wrap(Wrap { trim: false }),
+                columns[1],
+            );
+        }
         if let Some(qr) = &app.mobile_qr {
             let width = qr.lines().map(UnicodeWidthStr::width).max().unwrap_or(40) as u16 + 4;
             let height = qr.lines().count() as u16 + 4;

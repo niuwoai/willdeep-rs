@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalMode, Approver, EventSink, ToolRegistry, build_provider,
+    Agent, AgentConfig, AgentEvent, ApprovalMode, Approver, EventSink, ToolRegistry, WebToolConfig,
+    build_provider,
 };
 
 mod config;
@@ -174,11 +175,29 @@ async fn run() -> Result<()> {
         .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
     let prompt = read_prompt(&cli.prompt, cli.no_tui)?;
 
-    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model);
+    let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
+        some_im_base_url: base.clone(),
+        api_key: api_key.clone(),
+    });
+    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model.clone());
     provider_config.max_output_tokens = cli
         .max_output_tokens
         .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
         .unwrap_or(16_384);
+    let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
+        let vision_model = profile
+            .and_then(|value| value.vision_model.clone())
+            .unwrap_or_else(|| "qwen3-vl-plus".to_owned());
+        let mut vision_config = provider_config.clone();
+        vision_config.dialect = ApiDialect::ChatCompletions;
+        vision_config.model = vision_model.clone();
+        Some((
+            build_provider(vision_config).context("initialize some.im vision fallback")?,
+            vision_model,
+        ))
+    } else {
+        None
+    };
     let provider = build_provider(provider_config).context("initialize provider")?;
 
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("strict");
@@ -212,7 +231,8 @@ async fn run() -> Result<()> {
     let tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
         .with_skills(skills.clone())
-        .with_mcp(mcp);
+        .with_mcp(mcp)
+        .with_web_tools(web_tools);
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
     if !skills.list().is_empty() {
         system_prompt.push_str("\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill.\n");
@@ -226,15 +246,22 @@ async fn run() -> Result<()> {
     } else {
         Arc::new(TerminalSink { json: cli.json })
     };
-    let agent = Agent::new(
+    let context_window = profile
+        .and_then(|value| value.context_window)
+        .unwrap_or(128_000);
+    let mut agent = Agent::new(
         provider,
         tools,
         AgentConfig {
             max_turns,
             system_prompt,
+            context_window,
         },
     )
     .with_event_sink(sink);
+    if let Some((vision_provider, vision_model)) = image_fallback {
+        agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
+    }
 
     let mut session = resumed.unwrap_or_else(|| {
         willdeep_core::Session::new(
@@ -252,7 +279,7 @@ async fn run() -> Result<()> {
             home,
             skills,
             relay_bridge,
-            (tui_tx, tui_rx),
+            (tui_tx, tui_rx, context_window),
         )
         .await;
     }
@@ -276,6 +303,14 @@ async fn run() -> Result<()> {
         println!("{}", outcome.final_text);
     }
     Ok(())
+}
+
+fn model_accepts_images(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("deepseek") && !lower.contains("vl") {
+        return false;
+    }
+    !lower.starts_with("someim-auto") && !lower.starts_with("someim-coding")
 }
 
 fn resolve_base(
@@ -464,6 +499,14 @@ impl EventSink for TerminalSink {
                     "output_tokens": usage.output_tokens,
                     "total_tokens": usage.total_tokens
                 }),
+                AgentEvent::CompressionStarted { estimated_tokens } => serde_json::json!({
+                    "type": "compression_started",
+                    "estimated_tokens": estimated_tokens
+                }),
+                AgentEvent::CompressionCompleted { estimated_tokens } => serde_json::json!({
+                    "type": "compression_completed",
+                    "estimated_tokens": estimated_tokens
+                }),
             };
             println!("{value}");
             return;
@@ -483,6 +526,12 @@ impl EventSink for TerminalSink {
                 if let Some(total) = usage.total_tokens {
                     eprintln!("[usage] {total} tokens");
                 }
+            }
+            AgentEvent::CompressionStarted { estimated_tokens } => {
+                eprintln!("[context] compressing approximately {estimated_tokens} tokens");
+            }
+            AgentEvent::CompressionCompleted { estimated_tokens } => {
+                eprintln!("[context] compressed to approximately {estimated_tokens} tokens");
             }
             AgentEvent::AssistantText(_) | AgentEvent::TurnStarted { .. } => {}
         }
