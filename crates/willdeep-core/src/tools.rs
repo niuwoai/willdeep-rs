@@ -29,6 +29,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
 const MAX_WEB_MAX_CHARS: usize = 100_000;
+const MAX_WEB_REDIRECTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalMode {
@@ -275,7 +276,7 @@ impl ToolRegistry {
             ),
             definition(
                 "web_fetch",
-                "Fetch readable text from a public HTTP(S) URL. Private, loopback, link-local targets and redirects are refused. Requires approval.",
+                "Fetch readable text from a public HTTP(S) URL. Safe same-host redirects are followed automatically; cross-host redirects require approval. Private, loopback and link-local targets are refused.",
                 json!({"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer","minimum":1,"maximum":100000}},"required":["url"],"additionalProperties":false}),
             ),
             definition(
@@ -637,21 +638,53 @@ impl ToolRegistry {
     }
 
     async fn web_fetch(&self, args: WebFetchArgs) -> Result<String, ToolError> {
-        let url = reqwest::Url::parse(args.url.trim())
+        let mut url = reqwest::Url::parse(args.url.trim())
             .map_err(|error| ToolError::Network(format!("invalid URL: {error}")))?;
         validate_public_url(&url).await?;
         self.require_approval(&format!("fetch public URL: {url}"), false)
             .await?;
-        let response = web_client()?
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| ToolError::Network(error.to_string()))?;
-        if response.status().is_redirection() {
-            return Err(ToolError::Network(
-                "redirects are refused by web_fetch".to_owned(),
-            ));
-        }
+        let client = web_client()?;
+        let mut redirects = 0;
+        let response = loop {
+            let response = client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|error| ToolError::Network(error.to_string()))?;
+            if !response.status().is_redirection() {
+                break response;
+            }
+            if redirects >= MAX_WEB_REDIRECTS {
+                return Err(ToolError::Network(format!(
+                    "redirect limit exceeded ({MAX_WEB_REDIRECTS})"
+                )));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ToolError::Network("redirect response has no valid Location header".to_owned())
+                })?;
+            let next = url
+                .join(location)
+                .map_err(|error| ToolError::Network(format!("invalid redirect target: {error}")))?;
+            validate_public_url(&next).await?;
+            if url.scheme() == "https" && next.scheme() == "http" {
+                return Err(ToolError::Network(
+                    "HTTPS to HTTP redirect downgrade is refused".to_owned(),
+                ));
+            }
+            if !same_hostname(&url, &next) {
+                self.require_approval(
+                    &format!("redirect web_fetch from {url} to different host: {next}"),
+                    false,
+                )
+                .await?;
+            }
+            url = next;
+            redirects += 1;
+        };
         if !response.status().is_success() {
             return Err(ToolError::Network(format!(
                 "web server returned HTTP {}",
@@ -996,6 +1029,12 @@ fn web_client() -> Result<reqwest::Client, ToolError> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| ToolError::Network(error.to_string()))
+}
+
+fn same_hostname(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.host_str()
+        .zip(right.host_str())
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
@@ -1386,6 +1425,15 @@ mod tests {
         assert!(!is_public_ip("10.0.0.1".parse().expect("IPv4")));
         assert!(!is_public_ip("::1".parse().expect("IPv6")));
         assert!(is_public_ip("1.1.1.1".parse().expect("IPv4")));
+    }
+
+    #[test]
+    fn redirect_policy_recognizes_same_hostname_across_https_upgrade() {
+        let http = reqwest::Url::parse("http://example.com/old").expect("http URL");
+        let https = reqwest::Url::parse("https://EXAMPLE.com/new").expect("https URL");
+        let other = reqwest::Url::parse("https://cdn.example.com/new").expect("other URL");
+        assert!(same_hostname(&http, &https));
+        assert!(!same_hostname(&https, &other));
     }
 
     #[tokio::test]

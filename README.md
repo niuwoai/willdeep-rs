@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.8.0-rc1`，支持：
+当前版本为 `0.8.0-rc2`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -212,7 +212,7 @@ export WILLDEEP_API_BASE="https://api.niuwoai.com/v1"
 
 some.im 请求使用 Bearer API Key，并附带不含本地路径的 `x-willdeep-session-id` 与 `x-willdeep-workspace-id`。
 
-当 some.im 主模型属于已知纯文本模型且消息包含图片时，WillDeep 会使用同一 API Base、同一 API Key 调用 `qwen3-vl-plus` 描述图片，只把描述文本交给主模型。可用 Profile 的 `vision_model` 覆盖视觉模型。`web_search` 也复用该 some.im 配置；`web_search`、`web_fetch` 在所有审批模式下都需要确认，`web_fetch` 拒绝私网、回环、链路本地地址与 HTTP 跳转。
+当 some.im 主模型属于已知纯文本模型且消息包含图片时，WillDeep 会使用同一 API Base、同一 API Key 调用 `qwen3-vl-plus` 描述图片，只把描述文本交给主模型。可用 Profile 的 `vision_model` 覆盖视觉模型。`web_search` 也复用该 some.im 配置；`web_search`、`web_fetch` 在所有审批模式下都需要确认。`web_fetch` 拒绝私网、回环和链路本地地址；同 hostname 重定向自动跟随，跨 hostname 重定向重新审批，HTTPS 降级到 HTTP 一律拒绝。
 
 ### OpenAI-compatible Chat Completions
 

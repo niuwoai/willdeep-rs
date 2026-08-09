@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.0-rc2] - 2026-08-09
+
+### Fixed
+
+- `web_fetch` 不再一律拒绝 HTTP 重定向：同 hostname 最多自动跟随 8 跳，跨 hostname 时重新审批；每一跳重新校验公网地址，并拒绝 HTTPS 降级到 HTTP。
+
 ## [0.8.0-rc1] - 2026-08-09
 
 ### Added
