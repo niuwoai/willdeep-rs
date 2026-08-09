@@ -1,0 +1,5 @@
+/target/
+/.willdeep/
+/config.toml
+.env
+*.log

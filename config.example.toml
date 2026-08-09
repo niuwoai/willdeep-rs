@@ -1,0 +1,48 @@
+version = 1
+default_provider = "some-im"
+
+[agent]
+max_turns = 24
+approval = "ask"
+
+[providers.some-im]
+provider = "some-im"
+api = "chat-completions"
+api_base = "https://some.im/v1"
+api_key_env = "SOMEIM_API_KEY"
+model = "deepseek-v4-flash"
+
+[providers.openai-responses]
+provider = "openai-compatible"
+api = "responses"
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5"
+
+[providers.anthropic]
+provider = "anthropic"
+api = "anthropic-messages"
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-4-5"
+max_output_tokens = 16384
+
+# MCP stdio servers are initialized once and exposed as
+# mcp__<server>__<tool>. Put credentials in inherited environment variables;
+# do not write tokens into this file.
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+startup_timeout_seconds = 30
+enabled = false
+
+[mcp_servers.filesystem.env]
+NODE_NO_WARNINGS = "1"
+
+# Additional roots whose immediate child directories contain SKILL.md.
+[skills]
+roots = []
+
+# Direct keys are supported, but api_key_env is preferred. If api_key is
+# present on Unix, WillDeep requires the config file permissions to be 0600.
+# api_key = "<your-key>"
