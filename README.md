@@ -28,13 +28,17 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 
-当前暂不包含 Computer Use、Browser Use、多 Agent 与后台 daemon。
+当前暂不包含 Computer Use、Browser Use 与常驻后台 daemon；子 Agent 与可回传主 Harness 的后台任务已经可用。
 
 ## 构建
 
-要求 Rust 1.94 或更新版本：
+要求 Rust 1.94、Node.js 22 与 Yarn。Web 前端会嵌入最终二进制：
 
 ```bash
+cd web
+yarn install --frozen-lockfile
+yarn build
+cd ..
 cargo build --release
 ```
 
@@ -110,6 +114,27 @@ macOS 会同时发现 Swift WillDeep 的 Project 与历史会话：`willdeep --l
 
 WillDeep 会加载 `~/.willdeep/CLAUDE.md`，以及工作区根的 `PRODUCT_OVERVIEW.md`、`AGENTS.md` 和 `CLAUDE.md`。Agent 可调用 `git_diff`、`list_worktrees`、`create_worktree`；TUI 右栏显示当前项目、分支、变更文件数与 worktree 数。
 
+## Web 模式
+
+本机使用：
+
+```bash
+willdeep --web --workspace /path/to/project
+```
+
+浏览器打开 `http://127.0.0.1:9847`。前端采用 React + Chakra UI + Vite 纯客户端渲染，用户消息立即显示，Harness 阶段与工具进度通过 SSE 返回。
+
+允许多个明确授权的工作区：
+
+```bash
+willdeep --web \
+  --workspace /path/to/main \
+  --web-workspace /path/to/frontend \
+  --web-workspace /path/to/backend
+```
+
+也可用 `--project <名称或UUID>` 一次载入 Swift Project 的全部文件夹。Web 服务只接受启动时 allowlist 内的规范化工作区，不能由请求传入任意目录。当前是单用户模式，不实现应用层鉴权；跨机器访问必须由 Nginx、VPN 或 SSH Tunnel 提供认证与 HTTPS，不应把端口直接暴露到公网。接口和 Computer Use 路线详见 [Xedit 工具能力对照](docs/XEDIT_TOOL_PARITY.md)。
+
 终端中不带 Prompt 启动时会进入 TUI：
 
 ```bash
@@ -139,7 +164,7 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 ```
 
 失败数量不会被隐藏；需要排查时使用 `Ctrl+O` 查看最近明细。
-默认活动区只占一行内容，显示 Thinking、工具调用或上下文压缩阶段；宽终端会在右侧显示 Agent、Mobile Relay、手机队列和工具完成情况。状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
+运行时活动区显示最近三条可验证进度，包括当前轮次、工具调用/完成、上下文压缩和后台结果；不展示或伪造模型私有思维链。宽终端会在右侧显示 Agent、Mobile Relay、手机队列和工具完成情况。状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
 
 输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。输入 `/compress` 会立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存当前会话；历史不足八条时不会消耗模型请求。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
 

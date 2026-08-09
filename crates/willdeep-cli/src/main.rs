@@ -18,6 +18,7 @@ mod mobile;
 mod onboarding;
 mod projects;
 mod tui;
+mod web;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};
 
@@ -63,6 +64,10 @@ struct Cli {
     /// Workspace root available to tools.
     #[arg(long)]
     workspace: Option<PathBuf>,
+
+    /// Additional workspace allowed in Web mode. May be repeated.
+    #[arg(long = "web-workspace")]
+    web_workspaces: Vec<PathBuf>,
 
     /// Allow create/edit inside the workspace without approval. Shell and MCP still ask.
     #[arg(long)]
@@ -111,6 +116,14 @@ struct Cli {
     /// Run the interactive first-use provider setup again.
     #[arg(long)]
     onboarding: bool,
+
+    /// Start the embedded browser UI and JSON API instead of the TUI.
+    #[arg(long)]
+    web: bool,
+
+    /// Web server listen address. Authentication belongs at the reverse proxy.
+    #[arg(long, default_value = "127.0.0.1:9847")]
+    listen: std::net::SocketAddr,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -152,6 +165,36 @@ async fn run() -> Result<()> {
     }
     let loaded = LoadedConfig::load(cli.config.as_deref())?;
     let home = willdeep_home()?;
+    if cli.web {
+        let mut candidates = Vec::new();
+        if let Some(project) = cli.project.as_deref() {
+            candidates.extend(projects::resolve_folders(project)?);
+        }
+        if let Some(workspace) = cli.workspace.clone() {
+            candidates.insert(0, workspace);
+        }
+        candidates.extend(cli.web_workspaces.clone());
+        if candidates.is_empty() {
+            candidates.push(std::env::current_dir()?);
+        }
+        let mut workspaces = Vec::new();
+        for candidate in candidates {
+            let canonical = candidate
+                .canonicalize()
+                .with_context(|| format!("invalid Web workspace: {}", candidate.display()))?;
+            if !workspaces.contains(&canonical) {
+                workspaces.push(canonical);
+            }
+        }
+        return web::serve(web::WebConfig {
+            listen: cli.listen,
+            config_path: cli.config.clone().unwrap_or(config::default_config_path()?),
+            profile: cli.profile.clone(),
+            workspaces,
+            home,
+        })
+        .await;
+    }
     let approval_store = home.join("always-allow.json");
     if cli.list_approvals {
         for rule in load_approval_rules(&approval_store)? {
@@ -424,7 +467,8 @@ async fn run() -> Result<()> {
             serde_json::json!({
                 "type": "completed",
                 "turns": outcome.turns,
-                "text": outcome.final_text
+                "text": outcome.final_text,
+                "session_id": session.id
             })
         );
     } else {

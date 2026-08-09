@@ -1,4 +1,7 @@
 /target/
+/web/dist/
+/web/node_modules/
+/web/*.tsbuildinfo
 /.willdeep/
 /config.toml
 .env

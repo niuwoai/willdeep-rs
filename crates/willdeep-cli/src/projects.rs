@@ -20,6 +20,13 @@ pub fn load() -> Vec<Project> {
 }
 
 pub fn resolve(name_or_id: &str) -> Result<PathBuf> {
+    resolve_folders(name_or_id)?
+        .into_iter()
+        .next()
+        .context("project has no folders")
+}
+
+pub fn resolve_folders(name_or_id: &str) -> Result<Vec<PathBuf>> {
     let project = load()
         .into_iter()
         .find(|project| {
@@ -27,11 +34,10 @@ pub fn resolve(name_or_id: &str) -> Result<PathBuf> {
                 || project.display_name.eq_ignore_ascii_case(name_or_id)
         })
         .with_context(|| format!("project not found: {name_or_id}"))?;
-    project
-        .folder_paths
-        .into_iter()
-        .next()
-        .context("project has no folders")
+    if project.folder_paths.is_empty() {
+        anyhow::bail!("project has no folders");
+    }
+    Ok(project.folder_paths)
 }
 
 fn project_file() -> Option<PathBuf> {

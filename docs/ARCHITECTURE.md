@@ -2,7 +2,7 @@
 
 ## 边界
 
-当前实现以同一个 Agent Runtime 支撑一次性 CLI 与 TUI。Computer Use、Browser Use、daemon 与多 Agent 暂不在范围内。
+当前实现以同一个 Agent Runtime 支撑一次性 CLI、TUI 与内嵌 Web 模式。子 Agent 和后台任务已接入；Computer Use、Browser Use 与常驻 daemon 仍在后续范围内。
 
 ## 调用链
 

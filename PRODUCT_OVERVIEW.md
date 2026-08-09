@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-09 | 当前版本：v0.10.0-rc2
+> 最后更新：2026-08-10 | 当前版本：v0.11.0-rc1
 
 ## 项目简介
 
@@ -40,6 +40,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Swift Project 元数据和历史会话兼容读取；
 - Git diff/worktree 原生工具与 TUI 工作区状态；
 - 全局、项目根 `AGENTS.md` / `CLAUDE.md` 指令加载；
+- React + Chakra UI 纯 CSR、SSE 进度、多工作区切换和并发限制的内嵌 Web 服务；
 
 ## 技术栈
 
@@ -74,10 +75,11 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 
 ## 已知问题与后续
 
-- [ ] SSE 流式增量输出；
+- [ ] Provider 原生 token streaming；当前 SSE 已实时传输 Harness 阶段、工具进度和最终回答。
 - [ ] ACP/Codex App Server/Goose 接入；
 - [ ] MCP Streamable HTTP 与 OAuth；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
+- [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。

@@ -108,6 +108,7 @@ struct App {
     background_tasks: Vec<BackgroundTaskSnapshot>,
     background_notices: VecDeque<String>,
     workspace_status: String,
+    progress_log: VecDeque<String>,
 }
 
 struct AskDialog {
@@ -276,12 +277,12 @@ async fn event_loop(
             }},
             Some(message)=runtime.rx.recv()=>match message {
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line="Answering".to_owned();app.append_transcript(format!("WillDeep: {v}"));},
-                UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.activity_line=format!("Thinking · turn {turn}"),
-                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.activity_line=format!("Using {}",v.name);app.tools.requested(&v.name);},
-                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.activity_line=format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name);app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace);}},
+                UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("Thinking · preparing turn {turn}")),
+                UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.record_progress(format!("Using {}",v.name));app.tools.requested(&v.name);},
+                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{"Failed"}else{"Finished"},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
-                UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Compressing context".to_owned();},
-                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.activity_line="Context compressed".to_owned();},
+                UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress("Compressing context".to_owned());},
+                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress("Context compressed".to_owned());},
                 UiMessage::Approval(v,a,s)=>app.approval=Some((v,a,s)),
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
                 UiMessage::Finished(Ok(outcome))=>{session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
@@ -337,12 +338,25 @@ impl App {
             background_tasks: Vec::new(),
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
+            progress_log: VecDeque::new(),
         }
     }
     fn finish_turn(&mut self) {
         self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
         self.running = false;
         self.activity_line = "Ready".to_owned();
+    }
+    fn record_progress(&mut self, value: String) {
+        self.activity_line = value.clone();
+        let elapsed = self
+            .turn_started
+            .map(|started| started.elapsed().as_secs_f32())
+            .unwrap_or_default();
+        self.progress_log
+            .push_back(format!("{elapsed:>5.1}s · {value}"));
+        while self.progress_log.len() > 12 {
+            self.progress_log.pop_front();
+        }
     }
     fn handle_question_key(&mut self, key: KeyEvent) {
         let Some(dialog) = self.question.as_mut() else {
@@ -613,6 +627,8 @@ fn dispatch_prompt(
     app.running = true;
     app.turn_started = Some(Instant::now());
     app.tools.reset();
+    app.progress_log.clear();
+    app.record_progress("Thinking · understanding your request".to_owned());
     let history = session.messages.clone();
     let attachments = std::mem::take(&mut app.attachments)
         .into_iter()
@@ -640,7 +656,8 @@ fn dispatch_compress(
 ) {
     app.running = true;
     app.turn_started = Some(Instant::now());
-    app.activity_line = "Compressing context".to_owned();
+    app.progress_log.clear();
+    app.record_progress("Compressing context".to_owned());
     let history = session.messages.clone();
     let agent = agent.clone();
     let tx = tx.clone();
@@ -659,7 +676,8 @@ fn dispatch_notification(
 ) -> Result<()> {
     app.running = true;
     app.turn_started = Some(Instant::now());
-    app.activity_line = "Handling background result".to_owned();
+    app.progress_log.clear();
+    app.record_progress("Handling background result".to_owned());
     let history = session.messages.clone();
     let message = Message::user(notice);
     session.messages.push(message.clone());
@@ -746,6 +764,8 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
         let canvas = columns[0];
         let activity = if app.tools_expanded && app.tools.requested > 0 {
             8
+        } else if app.running {
+            5
         } else {
             3
         };
@@ -805,12 +825,12 @@ fn draw(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Res
                         .collect::<Vec<_>>()
                         .join("\n")
                 )
+            } else if app.running {
+                app.progress_log.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join("\n")
+            } else if app.tools.requested == 0 {
+                app.activity_line.clone()
             } else {
-                if app.tools.requested == 0 {
-                    app.activity_line.clone()
-                } else {
-                    format!("{} · {}", app.activity_line, app.tools.summary())
-                }
+                format!("{} · {}", app.activity_line, app.tools.summary())
             };
             f.render_widget(
                 Paragraph::new(text).block(

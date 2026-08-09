@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0-rc1] - 2026-08-10
+
+### Added
+
+- 新增 `--web` 内嵌 Web Server，提供 React + Chakra UI + Vite 纯 CSR 聊天页、健康检查、会话索引和 SSE Chat API。
+- Web 模式支持严格 allowlist 内的多工作区切换；应用层保持单用户无鉴权，认证与 HTTPS 由 Nginx/VPN 等上游负责。
+- 用户消息发送后立即显示；Harness 轮次、工具与压缩阶段通过 SSE 实时更新，TUI 同步显示最近三条可验证工作进度。
+- 新增 Xedit 工具能力对照文档，明确 Rust 内核、Skill/MCP 上层能力及 macOS Computer Use 安全实现路线。
+
+### Changed
+
+- JSON 完成事件增加 `session_id`，Web 客户端可继续同一历史会话；SSE 不发送工具参数、输出或模型私有思维链。
+
 ## [0.10.0-rc2] - 2026-08-09
 
 ### Fixed

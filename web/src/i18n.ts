@@ -1,0 +1,1 @@
+export const zhCN={documentTitle:"WillDeep Web",appName:"WillDeep",webHarness:"Web Harness",workspace:"工作区",session:"历史会话",newSession:"新会话",welcomeTitle:"准备好了，从哪里开始？",welcomeBody:"选择一个工作区，直接描述你想实现、修复或调查的事情。",promptPlaceholder:"描述你想完成的任务…",send:"发送",working:"正在处理",loadFailed:"加载失败",requestFailed:"请求失败",noSessions:"这个工作区还没有会话",emptyReply:"Harness 没有返回文本"} as const;
