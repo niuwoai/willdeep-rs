@@ -225,7 +225,11 @@ async fn event_loop(
     store: &SessionStore,
     runtime: &mut TuiRuntime,
 ) -> Result<()> {
-    let mut app = App::new(transcript(&session.messages));
+    let mut initial_transcript = transcript(&session.messages);
+    if initial_transcript.is_empty() {
+        initial_transcript.push(welcome_message(&session.workspace));
+    }
+    let mut app = App::new(initial_transcript);
     app.workspace_status = workspace_status(&session.workspace);
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
@@ -1080,6 +1084,17 @@ fn transcript(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
+fn welcome_message(workspace: &std::path::Path) -> String {
+    let project = workspace
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("当前工作区");
+    format!(
+        "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,6 +1104,13 @@ mod tests {
         a.requested("read_file");
         a.completed("read_file", true);
         assert!(a.summary().contains("1 failed"));
+    }
+
+    #[test]
+    fn welcome_mentions_workspace_without_entering_model_history() {
+        let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"));
+        assert!(welcome.starts_with("WillDeep:"));
+        assert!(welcome.contains("willdeep-rs"));
     }
     #[test]
     fn long_paste_is_attachment_and_deletable() {
