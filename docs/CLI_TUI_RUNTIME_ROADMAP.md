@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.20.0-rc1
+> 当前实施版本：v0.20.0-rc2
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -106,8 +106,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 6：Workspace 与 Worktree（v0.20.0）
 
-- [-] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、服务端只读策略、默认 Provider 与 Skill/MCP 允许列表已完成，待接入 TUI/Web 工作区选择器。
-- [-] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；Runtime 激活操作不改变已入队任务的规范化根目录，待客户端切换时自动重连视图和 Session。
+- [-] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、服务端只读策略、默认 Provider 与 Skill/MCP 允许列表及 TUI `/workspace` 已完成，待接入 Web 工作区选择器。
+- [x] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；TUI 切换恢复目标 Session/游标并重启事件与状态订阅，跨路径后禁用启动时绑定旧根目录的 Local Harness，Runtime 激活不改变既有任务根目录。
 - [ ] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批。
 - [ ] 孤儿 Worktree 检测与保守清理。
 
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.20.0-rc2（已完成）：TUI 新增 `/workspace list|switch <id>` 并进入 `/` 候选；切换前保存当前 Session 状态，恢复或创建目标 Workspace Session，重建 Runtime 事件跟随、右栏状态、Skills 与移动会话指向。旧 Workspace 后台任务继续运行；为防止复用启动时绑定旧路径的进程内工具，跨 Workspace 后 `/local` 保守拒绝。下一步让 Web 使用 Runtime Workspace 注册表，而非仅使用启动参数白名单。
 
 v0.20.0-rc1（已完成）：新增持久 Workspace 注册表与受 Token 保护的注册、更新、列表、激活、删除 API/CLI；任务和 Session 自动收养目录，默认 Provider、Skill/MCP 允许列表进入 Harness。访问策略只能由 Runtime 注册表注入，客户端字段不参与反序列化；只读策略在审批前阻止 Shell、文件写入、Worktree、MCP 和 Editor 子 Agent。切换默认 Workspace 不修改既有 Task/Session 根目录，删除注册不删除文件或历史。下一步接入 TUI/Web Workspace 切换器与路径边界重建。
 

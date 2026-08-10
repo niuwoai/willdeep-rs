@@ -35,6 +35,7 @@ use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
+mod activity;
 mod agent_commands;
 mod command_catalog;
 mod diff_review_ui;
@@ -44,6 +45,8 @@ mod runtime_ui;
 mod session_commands;
 mod sidebar;
 mod workspace_attention;
+mod workspace_commands;
+use activity::ToolActivity;
 use agent_commands::handle_agent_command;
 use command_catalog::command_candidates;
 use diff_review_ui::*;
@@ -54,6 +57,7 @@ use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::handle_session_command;
 use sidebar::{render_attention_detail, render_sidebar};
 use workspace_attention::workspace_attention;
+use workspace_commands::handle_workspace_command;
 
 pub enum UiMessage {
     Agent(AgentEvent),
@@ -236,68 +240,6 @@ struct AskDialog {
     sender: oneshot::Sender<Option<String>>,
 }
 
-#[derive(Default)]
-struct ToolActivity {
-    requested: usize,
-    completed: usize,
-    failed: usize,
-    counts: BTreeMap<String, usize>,
-    details: Vec<String>,
-}
-impl ToolActivity {
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-    fn requested(&mut self, name: &str) {
-        self.requested += 1;
-        *self.counts.entry(name.to_owned()).or_default() += 1;
-        self.details.push(format!("… {name}"));
-    }
-    fn completed(&mut self, name: &str, is_error: bool) {
-        self.completed += 1;
-        self.failed += usize::from(is_error);
-        let pending = format!("… {name}");
-        if let Some(v) = self.details.iter_mut().rev().find(|v| **v == pending) {
-            *v = format!("{} {name}", if is_error { "✗" } else { "✓" });
-        }
-    }
-    fn summary(&self, language: Language) -> String {
-        let calls = self
-            .counts
-            .iter()
-            .map(|(n, c)| format!("{n}×{c}"))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let progress = if self.completed < self.requested {
-            format!(
-                "{}/{} {}",
-                self.completed,
-                self.requested,
-                language.text("完成", "complete", "完了")
-            )
-        } else {
-            format!(
-                "{} {}",
-                self.requested,
-                language.text("次调用", "calls", "回呼び出し")
-            )
-        };
-        let failed = if self.failed > 0 {
-            format!(
-                " · {} {}",
-                self.failed,
-                language.text("失败", "failed", "失敗")
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{}: {progress}{failed} · {calls}",
-            language.text("工具", "Tools", "ツール")
-        )
-    }
-}
-
 pub async fn run(
     agent: Arc<Agent>,
     mut session: Session,
@@ -330,6 +272,7 @@ pub async fn run(
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
+        local_workspace: session.workspace.clone(),
         tx: ui.0,
         rx: ui.1,
     };
@@ -352,6 +295,7 @@ struct TuiRuntime {
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
+    local_workspace: PathBuf,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
 }
@@ -389,11 +333,11 @@ async fn event_loop(
         mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
     let (runtime_event_tx, mut runtime_event_rx) =
         mpsc::unbounded_channel::<Vec<crate::daemon::RemoteRuntimeEvent>>();
-    let _runtime_event_follower = crate::daemon::start_runtime_event_follower(
+    let mut _runtime_event_follower = crate::daemon::start_runtime_event_follower(
         runtime.home.clone(),
         app.runtime_event_cursor,
         runtime.runtime_submit.workspace.clone(),
-        runtime_event_tx,
+        runtime_event_tx.clone(),
     );
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
@@ -713,6 +657,23 @@ async fn event_loop(
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("会话操作失败","Session action failed","セッション操作に失敗しました")));continue;},
                             }
+                            let previous_workspace=runtime.runtime_submit.workspace.clone();
+                            match handle_workspace_command(&prompt,&mut app,session,store,runtime).await {
+                                Ok(true)=>{
+                                    if runtime.runtime_submit.workspace!=previous_workspace {
+                                        while runtime_event_rx.try_recv().is_ok() {}
+                                        _runtime_event_follower=crate::daemon::start_runtime_event_follower(
+                                            runtime.home.clone(),
+                                            app.runtime_event_cursor,
+                                            runtime.runtime_submit.workspace.clone(),
+                                            runtime_event_tx.clone(),
+                                        );
+                                    }
+                                    continue;
+                                },
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if prompt.trim()=="/diff" {
                                 match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
@@ -744,6 +705,7 @@ async fn event_loop(
                             }
                             if let PromptExecution::Local(local_prompt)=prompt_execution(&prompt) {
                                 if local_prompt.is_empty(){app.append_transcript(format!("System: {}",language.text("用法：/local <任务>","Usage: /local <task>","使用法: /local <タスク>")));continue;}
+                                if session.workspace.canonicalize()?!=runtime.local_workspace.canonicalize()?{app.append_transcript(format!("System: {}",language.text("切换工作区后 /local 已禁用；请使用 Runtime，或从目标目录重新启动 TUI","/local is disabled after switching Workspace; use Runtime or restart the TUI from the target directory","ワークスペース切替後は /local を使用できません。Runtime を使うか対象ディレクトリから TUI を再起動してください")));continue;}
                                 dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,local_prompt)?;
                                 continue;
                             }
@@ -1324,7 +1286,13 @@ impl App {
             PaletteAction::Command(command) => {
                 let suffix = if matches!(
                     command.as_str(),
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session" | "/agent"
+                    "/goal"
+                        | "/mobile"
+                        | "/runtime"
+                        | "/local"
+                        | "/session"
+                        | "/workspace"
+                        | "/agent"
                 ) {
                     " "
                 } else {
@@ -1428,7 +1396,13 @@ impl App {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
                 let suffix = if matches!(
                     command,
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session" | "/agent"
+                    "/goal"
+                        | "/mobile"
+                        | "/runtime"
+                        | "/local"
+                        | "/session"
+                        | "/workspace"
+                        | "/agent"
                 ) {
                     " "
                 } else {
@@ -1774,7 +1748,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {

@@ -406,6 +406,33 @@ pub(super) async fn activate_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn remote_workspaces(home: &Path) -> Result<Vec<RuntimeWorkspace>> {
+    let state = ensure_running(home).await?;
+    authorized_get(&state, "/v1/workspaces").await
+}
+
+pub(crate) async fn activate_remote_workspace(
+    home: &Path,
+    id: uuid::Uuid,
+) -> Result<RuntimeWorkspace> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/workspaces/{id}/activate",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Workspace activation: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
 pub(super) async fn remove_cli(home: &Path, id: uuid::Uuid, yes: bool) -> Result<()> {
     if !yes {
         bail!("Workspace removal requires --yes; files and Sessions are not deleted");

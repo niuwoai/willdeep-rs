@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.20.0-rc2] - 2026-08-11
+
+### Added
+
+- TUI 新增 `/workspace list` 与 `/workspace switch <id>`，并加入 `/` 命令候选；可从 Runtime 注册表查看和切换工作区。
+
+### Changed
+
+- TUI 切换 Workspace 时保存当前 Session 游标与 Inbox 状态，恢复或创建目标 Session，重启 Runtime 事件跟随并刷新状态、Skills 与移动会话；旧 Workspace 后台任务继续运行。
+
+### Security
+
+- 跨 Workspace 切换后禁用仍绑定启动目录的进程内 `/local` Harness，避免旧工具边界被用于新路径；Runtime 模式继续以服务端注册表重建边界。
+
 ## [0.20.0-rc1] - 2026-08-11
 
 ### Added

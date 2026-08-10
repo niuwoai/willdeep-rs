@@ -46,6 +46,7 @@ pub(crate) use tui_bridge::{
     stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
+pub(crate) use workspace_store::{activate_remote_workspace, remote_workspaces};
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,

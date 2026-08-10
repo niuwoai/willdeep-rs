@@ -1,6 +1,6 @@
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 11] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 12] {
     [
         (
             "/help",
@@ -48,6 +48,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "管理、搜索或导出会话",
                 "Manage, search, or export sessions",
                 "セッションの管理・検索・エクスポート",
+            ),
+        ),
+        (
+            "/workspace",
+            language.text(
+                "列出或切换 Runtime 工作区",
+                "List or switch Runtime Workspaces",
+                "Runtime ワークスペースの一覧・切替",
             ),
         ),
         (

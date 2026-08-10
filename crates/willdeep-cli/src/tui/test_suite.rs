@@ -111,6 +111,7 @@ mod tests {
                 model: None,
                 config: None,
             },
+            local_workspace: root.join("workspace"),
             tx,
             rx,
         };
@@ -214,6 +215,15 @@ mod tests {
 
         assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input.text(), "/session ");
+        assert!(app.transcript.is_empty());
+    }
+    #[test]
+    fn command_menu_discovers_workspace_switching() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/work");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/workspace ");
         assert!(app.transcript.is_empty());
     }
     #[test]
