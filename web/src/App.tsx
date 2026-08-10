@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Flex, Heading, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, languageLabels, languages, messages, type Language } from "./i18n";
 
-type Workspace = { path: string; name: string };
+type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
 type Session = { id: string; title: string; workspace: string; updated_at: number; archived: boolean; active: boolean };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
 type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
@@ -196,7 +196,7 @@ export function App() {
     <Box as="aside" w={{ base: "0", md: "282px" }} display={{ base: "none", md: "block" }} borderRight="1px solid" borderColor="#202a35" p="5" bg="#0b1118">
       <Heading size="lg">{t.appName}</Heading><Text color="#718096" mb="8">{t.webHarness}</Text>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.path} value={item.path}>{item.name}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
+      <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.readOnly : item.access === "smart" ? t.smartApproval : t.workspaceWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
       <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} />
       <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" opacity={item.archived ? 0.58 : 1} variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}{item.archived ? ` · ${t.archived}` : ""}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>

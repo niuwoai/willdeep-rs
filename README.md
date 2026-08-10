@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.20.0-rc2`，支持：
+当前版本为 `0.20.0-rc3`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -39,6 +39,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime 持久 Workspace 注册表、默认工作区切换与受 Token 保护的 CRUD API；每个 Workspace 保存独立访问策略、默认 Provider、Skill/MCP 允许列表。
 - Workspace 的 `read-only` 策略由 Runtime 服务端注入，客户端无法自报可写；Shell、文件写入、Worktree 创建、MCP 和 Editor 子 Agent 会在审批前被拒绝。
 - TUI 新增 `/workspace list` 与 `/workspace switch <id>`；切换后重载目标 Session、Workspace 状态、Skills、Runtime 事件跟随和右栏视图，原工作区后台任务继续由 Daemon 运行。
+- Web 工作区选择器读取 Runtime 注册表的名称、当前项和访问模式，同时继续与 `--workspace/--web-workspace` 启动白名单取交集；被移除或未授权的目录不会因浏览器请求重新开放。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
 - Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。
@@ -97,7 +98,7 @@ willdeep daemon stop
 
 本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Daemon 通过短周期心跳续租单实例锁；异常退出后，一次 `daemon start` 会等待旧租约过期并安全接管。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
 
-任务或 Session 首次使用目录时会自动注册 Workspace；也可用 `register-workspace` 显式保存名称、`read-only/workspace-write`、默认 Provider Profile、Skill 与 MCP 允许列表。`activate-workspace` 只改变新客户端使用的默认项，已启动任务继续绑定原规范化根目录。`remove-workspace --yes` 仅移除注册信息，不删除文件、Session 或历史；再次使用该目录时会以保守默认值重新注册。Workspace 策略由 Runtime 在任务入队时覆盖客户端输入：`read-only` 会拒绝所有可写工具和 MCP，非空 Skill/MCP 列表作为允许列表，空列表保持全局配置兼容行为。
+任务或 Session 首次使用目录时会自动注册 Workspace；也可用 `register-workspace` 显式保存名称、`read-only/smart/workspace-write`、默认 Provider Profile、Skill 与 MCP 允许列表。Coding Agent 的默认语义是 `workspace-write`：Workspace 内 `create_file/edit_file` 免审，Shell、MCP、网络和越界访问仍走原审批；`read-only` 仅在用户显式选择时启用。`activate-workspace` 只改变新客户端使用的默认项，已启动任务继续绑定原规范化根目录。`remove-workspace --yes` 仅移除注册信息，不删除文件、Session 或历史。Workspace 策略由 Runtime 在任务入队时覆盖客户端输入，非空 Skill/MCP 列表作为允许列表，空列表保持全局配置兼容行为。
 
 TUI 中输入 `/workspace list` 可查看注册表，输入 `/workspace switch <WORKSPACE_ID>` 可原地切换 Runtime 视图。切换会保存当前 Session 的 Inbox/事件游标，恢复目标 Workspace 最近 Session（没有则创建），重启该 Workspace 的事件跟随并清空旧右栏瞬态；Daemon 中旧 Workspace 的任务不受影响。由于进程内 Local Harness 的工具边界在启动时固定，跨 Workspace 切换后 `/local` 会保守禁用；从目标目录重新启动 TUI 后才可再次使用 `/local`。
 

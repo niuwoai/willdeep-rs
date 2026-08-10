@@ -28,7 +28,7 @@ pub(crate) enum HarnessFrontend {
     Runtime {
         connection: RuntimeConnection,
         sink: Arc<dyn EventSink>,
-        read_only: bool,
+        workspace_access: Option<crate::daemon::WorkspaceAccess>,
         allowed_skills: Vec<String>,
         allowed_mcp_servers: Vec<String>,
     },
@@ -75,7 +75,7 @@ pub(crate) async fn execute_runtime(
         api: None,
         workspace: Some(request.workspace.clone()),
         web_workspaces: Vec::new(),
-        full_auto: request.workspace_access == Some(crate::daemon::WorkspaceAccess::WorkspaceWrite),
+        full_auto: false,
         max_turns: None,
         max_output_tokens: None,
         json: true,
@@ -103,7 +103,7 @@ pub(crate) async fn execute_runtime(
         HarnessFrontend::Runtime {
             connection,
             sink,
-            read_only: request.workspace_access == Some(crate::daemon::WorkspaceAccess::ReadOnly),
+            workspace_access: request.workspace_access,
             allowed_skills: request.workspace_skills.unwrap_or_default(),
             allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
         },
@@ -287,14 +287,18 @@ pub(crate) async fn build(
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
-    let approval_mode = if matches!(
-        &frontend,
+    let runtime_access = match &frontend {
         HarnessFrontend::Runtime {
-            read_only: true,
-            ..
+            workspace_access, ..
+        } => *workspace_access,
+        _ => None,
+    };
+    let approval_mode = if let Some(access) = runtime_access {
+        match access {
+            crate::daemon::WorkspaceAccess::ReadOnly => ApprovalMode::ReadOnly,
+            crate::daemon::WorkspaceAccess::Smart => ApprovalMode::Smart,
+            crate::daemon::WorkspaceAccess::WorkspaceWrite => ApprovalMode::WorkspaceAccess,
         }
-    ) {
-        ApprovalMode::ReadOnly
     } else if cli.full_auto {
         ApprovalMode::WorkspaceAccess
     } else {

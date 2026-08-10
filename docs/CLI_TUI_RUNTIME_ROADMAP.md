@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.20.0-rc2
+> 当前实施版本：v0.20.0-rc3
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -106,7 +106,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 6：Workspace 与 Worktree（v0.20.0）
 
-- [-] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、服务端只读策略、默认 Provider 与 Skill/MCP 允许列表及 TUI `/workspace` 已完成，待接入 Web 工作区选择器。
+- [x] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、TUI 与 Web 选择器共用同一来源，Web 仍受启动路径白名单上界约束。
 - [x] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；TUI 切换恢复目标 Session/游标并重启事件与状态订阅，跨路径后禁用启动时绑定旧根目录的 Local Harness，Runtime 激活不改变既有任务根目录。
 - [ ] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批。
 - [ ] 孤儿 Worktree 检测与保守清理。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.20.0-rc3（已完成）：Web 工作区 API 与选择器改为读取 Runtime 注册表，并与 `--workspace/--web-workspace` 白名单取交集；返回稳定 ID、名称、active 和访问模式，Composer Skills 应用 Workspace 允许列表，新会话优先 Workspace Provider。自动注册采用原子 `ensure`，不会覆盖用户已有策略。按 Coding Agent 语义，允许目录默认 `workspace-write`（文件写入免审），Shell、MCP、网络和越界访问继续审批；`read-only` 仅显式启用。下一步进入子 Agent 专属 Worktree 与 Diff 回流。
 
 v0.20.0-rc2（已完成）：TUI 新增 `/workspace list|switch <id>` 并进入 `/` 候选；切换前保存当前 Session 状态，恢复或创建目标 Workspace Session，重建 Runtime 事件跟随、右栏状态、Skills 与移动会话指向。旧 Workspace 后台任务继续运行；为防止复用启动时绑定旧路径的进程内工具，跨 Workspace 后 `/local` 保守拒绝。下一步让 Web 使用 Runtime Workspace 注册表，而非仅使用启动参数白名单。
 

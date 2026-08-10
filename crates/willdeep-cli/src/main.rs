@@ -316,7 +316,7 @@ async fn run() -> Result<()> {
             harness::HarnessFrontend::Runtime {
                 connection,
                 sink: Arc::new(TerminalSink { json: cli.json }),
-                read_only: true,
+                workspace_access: Some(daemon::WorkspaceAccess::ReadOnly),
                 allowed_skills: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
             }

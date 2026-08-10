@@ -4,6 +4,7 @@ export type Language = (typeof languages)[number];
 const zhCN = {
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "工作区", session: "历史会话", newSession: "新会话", language: "语言",
+  activeWorkspace: "当前", readOnly: "只读", smartApproval: "智能审核", workspaceWrite: "工作区可写",
   languageName: "简体中文", welcomeTitle: "准备好了，从哪里开始？",
   welcomeBody: "选择一个工作区，直接描述你想实现、修复或调查的事情。",
   promptPlaceholder: "描述你想完成的任务…", send: "发送", working: "正在处理",
@@ -23,6 +24,7 @@ export type Messages = typeof zhCN;
 const en: Messages = {
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "Workspace", session: "Sessions", newSession: "New session", language: "Language",
+  activeWorkspace: "Active", readOnly: "Read only", smartApproval: "Smart approval", workspaceWrite: "Workspace write",
   languageName: "English", welcomeTitle: "Ready. Where should we start?",
   welcomeBody: "Choose a workspace and describe what you want to build, fix, or investigate.",
   promptPlaceholder: "Describe the task you want to complete…", send: "Send", working: "Working",
@@ -40,6 +42,7 @@ const en: Messages = {
 const ja: Messages = {
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "ワークスペース", session: "履歴", newSession: "新しいセッション", language: "言語",
+  activeWorkspace: "現在", readOnly: "読み取り専用", smartApproval: "スマート承認", workspaceWrite: "ワークスペース書込",
   languageName: "日本語", welcomeTitle: "準備できました。どこから始めますか？",
   welcomeBody: "ワークスペースを選び、実装、修正、調査したいことを入力してください。",
   promptPlaceholder: "完了したいタスクを入力…", send: "送信", working: "処理中",

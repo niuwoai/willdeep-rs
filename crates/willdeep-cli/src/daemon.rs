@@ -46,7 +46,9 @@ pub(crate) use tui_bridge::{
     stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
-pub(crate) use workspace_store::{activate_remote_workspace, remote_workspaces};
+pub(crate) use workspace_store::{
+    RuntimeWorkspace, activate_remote_workspace, ensure_remote_workspace, remote_workspaces,
+};
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,
@@ -1427,6 +1429,10 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/workspaces",
             get(workspace_store::list_handler).post(workspace_store::register_handler),
+        )
+        .route(
+            "/v1/workspaces/ensure",
+            post(workspace_store::ensure_handler),
         )
         .route(
             "/v1/workspaces/{id}",

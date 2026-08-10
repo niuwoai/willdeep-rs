@@ -7,6 +7,7 @@ const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkspaceAccess {
     ReadOnly,
+    Smart,
     #[default]
     WorkspaceWrite,
 }
@@ -39,6 +40,11 @@ pub(crate) struct RegisterWorkspace {
     pub skills: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct EnsureWorkspace {
+    pub root: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -98,18 +104,6 @@ impl WorkspaceStore {
         Ok(item)
     }
 
-    pub fn active(&self) -> Result<Option<RuntimeWorkspace>> {
-        let state = self.lock()?;
-        let Some(id) = state.active_id else {
-            return Ok(None);
-        };
-        let mut item = state.items.iter().find(|item| item.id == id).cloned();
-        if let Some(item) = item.as_mut() {
-            item.active = true;
-        }
-        Ok(item)
-    }
-
     pub fn register(&self, request: RegisterWorkspace) -> Result<(RuntimeWorkspace, bool)> {
         let root = canonical_directory(&request.root)?;
         let name = normalize_name(request.name, &root)?;
@@ -158,26 +152,32 @@ impl WorkspaceStore {
 
     pub fn ensure_registered(&self, root: &Path) -> Result<RuntimeWorkspace> {
         let root = canonical_directory(root)?;
-        if let Some(mut item) = self
-            .lock()?
-            .items
-            .iter()
-            .find(|item| item.root == root)
-            .cloned()
-        {
-            item.active = self.active()?.is_some_and(|active| active.id == item.id);
+        let mut state = self.lock()?;
+        if let Some(mut item) = state.items.iter().find(|item| item.root == root).cloned() {
+            item.active = state.active_id == Some(item.id);
             return Ok(item);
         }
-        Ok(self
-            .register(RegisterWorkspace {
-                root,
-                name: None,
-                access: WorkspaceAccess::WorkspaceWrite,
-                provider_profile: None,
-                skills: Vec::new(),
-                mcp_servers: Vec::new(),
-            })?
-            .0)
+        let timestamp = now();
+        let id = uuid::Uuid::new_v4();
+        if state.active_id.is_none() {
+            state.active_id = Some(id);
+        }
+        let item = RuntimeWorkspace {
+            schema: WORKSPACE_SCHEMA,
+            id,
+            name: normalize_name(None, &root)?,
+            root,
+            access: WorkspaceAccess::WorkspaceWrite,
+            provider_profile: None,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            created_at: timestamp,
+            updated_at: timestamp,
+            active: state.active_id == Some(id),
+        };
+        state.items.push(item.clone());
+        persist(&self.path, &state)?;
+        Ok(item)
     }
 
     pub fn activate(&self, id: uuid::Uuid) -> Result<Option<RuntimeWorkspace>> {
@@ -263,6 +263,23 @@ pub(super) async fn register_handler(
         Json(workspace),
     )
         .into_response())
+}
+
+pub(super) async fn ensure_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<EnsureWorkspace>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    state
+        .workspaces
+        .ensure_registered(&request.root)
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .map_err(|error| {
+            eprintln!("ensure Runtime Workspace: {error:#}");
+            StatusCode::BAD_REQUEST
+        })
 }
 
 pub(super) async fn get_handler(
@@ -411,6 +428,25 @@ pub(crate) async fn remote_workspaces(home: &Path) -> Result<Vec<RuntimeWorkspac
     authorized_get(&state, "/v1/workspaces").await
 }
 
+pub(crate) async fn ensure_remote_workspace(home: &Path, root: &Path) -> Result<RuntimeWorkspace> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!("http://{}/v1/workspaces/ensure", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&EnsureWorkspace {
+            root: root.to_path_buf(),
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Workspace registration: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
 pub(crate) async fn activate_remote_workspace(
     home: &Path,
     id: uuid::Uuid,
@@ -548,8 +584,10 @@ mod tests {
         let home = temporary_root("workspace-store");
         let first = home.join("first");
         let second = home.join("second");
+        let third = home.join("third");
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(&third).unwrap();
         let path = home.join("workspaces.json");
         let store = WorkspaceStore::open(path.clone()).unwrap();
         let (first_item, created) = store
@@ -576,13 +614,33 @@ mod tests {
             })
             .unwrap();
         assert!(!second_item.active);
+        let third_item = store.ensure_registered(&third).unwrap();
+        assert_eq!(third_item.access, WorkspaceAccess::WorkspaceWrite);
         assert!(store.activate(second_item.id).unwrap().unwrap().active);
         drop(store);
 
         let reopened = WorkspaceStore::open(path).unwrap();
-        assert_eq!(reopened.active().unwrap().unwrap().id, second_item.id);
-        assert_eq!(reopened.list().unwrap().len(), 2);
+        assert_eq!(
+            reopened
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.active)
+                .unwrap()
+                .id,
+            second_item.id
+        );
+        assert_eq!(reopened.list().unwrap().len(), 3);
         reopened.remove(second_item.id).unwrap().unwrap();
-        assert_eq!(reopened.active().unwrap().unwrap().id, first_item.id);
+        assert_eq!(
+            reopened
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.active)
+                .unwrap()
+                .id,
+            first_item.id
+        );
     }
 }

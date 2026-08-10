@@ -105,8 +105,11 @@ struct SessionMessage {
 
 #[derive(Serialize)]
 struct WorkspaceSummary {
+    id: String,
     path: String,
     name: String,
+    active: bool,
+    access: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +131,9 @@ struct ComposerSkill {
 }
 
 pub async fn serve(config: WebConfig) -> Result<()> {
+    for workspace in &config.workspaces {
+        crate::daemon::ensure_remote_workspace(&config.home, workspace).await?;
+    }
     let state = Arc::new(WebState {
         config_path: config.config_path,
         profile: config.profile,
@@ -177,8 +183,8 @@ async fn composer(
     State(state): State<Arc<WebState>>,
     Query(query): Query<ComposerQuery>,
 ) -> Result<Json<ComposerData>, WebError> {
-    let workspace = select_workspace(&state.workspaces, query.workspace.as_deref())?;
-    let catalog = SkillCatalog::discover(workspace, &[]);
+    let workspace = select_workspace(&state, query.workspace.as_deref()).await?;
+    let catalog = SkillCatalog::discover(&workspace.root, &[]).allow_only(&workspace.skills);
     let skills = catalog
         .list()
         .iter()
@@ -220,26 +226,35 @@ async fn server_version_header(request: Request, next: middleware::Next) -> Resp
     response
 }
 
-async fn workspaces(State(state): State<Arc<WebState>>) -> Json<Vec<WorkspaceSummary>> {
-    Json(
-        state
-            .workspaces
-            .iter()
-            .map(|path| WorkspaceSummary {
-                path: path.display().to_string(),
-                name: path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("workspace")
-                    .to_owned(),
-            })
-            .collect(),
-    )
+async fn workspaces(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<Vec<WorkspaceSummary>>, WebError> {
+    let values = registered_web_workspaces(&state)
+        .await?
+        .into_iter()
+        .map(|workspace| WorkspaceSummary {
+            id: workspace.id.to_string(),
+            path: workspace.root.display().to_string(),
+            name: workspace.name,
+            active: workspace.active,
+            access: match workspace.access {
+                crate::daemon::WorkspaceAccess::ReadOnly => "read_only",
+                crate::daemon::WorkspaceAccess::Smart => "smart",
+                crate::daemon::WorkspaceAccess::WorkspaceWrite => "workspace_write",
+            },
+        })
+        .collect();
+    Ok(Json(values))
 }
 
 async fn sessions(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Vec<SessionSummary>>, WebError> {
+    let allowed = registered_web_workspaces(&state)
+        .await?
+        .into_iter()
+        .map(|workspace| workspace.root)
+        .collect::<Vec<_>>();
     let runtime_states = crate::daemon::remote_session_states(&state.home)
         .await
         .map_err(WebError::from_anyhow)?
@@ -250,7 +265,7 @@ async fn sessions(
         .list()
         .map_err(|error| WebError::internal(error.to_string()))?
         .into_iter()
-        .filter(|session| state.workspaces.contains(&session.workspace))
+        .filter(|session| allowed.contains(&session.workspace))
         .map(|session| {
             let (archived, active) = runtime_states
                 .get(&session.id)
@@ -276,7 +291,7 @@ async fn session_detail(
     let session = SessionStore::new(&state.home)
         .load(id)
         .map_err(|_| WebError::bad_request("session was not found"))?;
-    if !state.workspaces.contains(&session.workspace) {
+    if !workspace_allowed(&state, &session.workspace).await? {
         return Err(WebError::bad_request(
             "session workspace is not in the server allowlist",
         ));
@@ -393,7 +408,7 @@ async fn ensure_web_runtime_session(state: &WebState, id: uuid::Uuid) -> Result<
     let session = SessionStore::new(&state.home)
         .load(id)
         .map_err(|_| WebError::bad_request("session was not found"))?;
-    if !state.workspaces.contains(&session.workspace) {
+    if !workspace_allowed(state, &session.workspace).await? {
         return Err(WebError::bad_request(
             "session workspace is not in the server allowlist",
         ));
@@ -426,10 +441,13 @@ async fn chat_stream(
     State(state): State<Arc<WebState>>,
     Json(input): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, WebError> {
-    validate_chat(&state, &input)?;
-    let workspace = select_workspace(&state.workspaces, input.workspace.as_deref())?.clone();
+    let workspace = validate_chat(&state, &input).await?;
+    let profile = workspace
+        .provider_profile
+        .clone()
+        .or_else(|| state.profile.clone());
     let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(run_runtime_turn(state, input, workspace, tx));
+    tokio::spawn(run_runtime_turn(state, input, workspace.root, profile, tx));
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(10))
@@ -437,7 +455,10 @@ async fn chat_stream(
     ))
 }
 
-fn validate_chat(state: &WebState, input: &ChatRequest) -> Result<(), WebError> {
+async fn validate_chat(
+    state: &WebState,
+    input: &ChatRequest,
+) -> Result<crate::daemon::RuntimeWorkspace, WebError> {
     let prompt = input.prompt.trim();
     if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(WebError::bad_request(
@@ -447,29 +468,30 @@ fn validate_chat(state: &WebState, input: &ChatRequest) -> Result<(), WebError> 
     Language::parse(input.language.as_deref())
         .map_err(|error| WebError::bad_request(error.to_string()))?;
     validate_attachments(&input.attachments)?;
-    let workspace = select_workspace(&state.workspaces, input.workspace.as_deref())?;
+    let workspace = select_workspace(state, input.workspace.as_deref()).await?;
     if let Some(raw_id) = input.session_id.as_deref() {
         let id = uuid::Uuid::parse_str(raw_id)
             .map_err(|_| WebError::bad_request("session_id must be a UUID"))?;
         let session = SessionStore::new(&state.home)
             .load(id)
             .map_err(|_| WebError::bad_request("session_id was not found"))?;
-        if session.workspace != *workspace {
+        if session.workspace != workspace.root {
             return Err(WebError::bad_request(
                 "session does not belong to the selected workspace",
             ));
         }
     }
-    Ok(())
+    Ok(workspace)
 }
 
 async fn run_runtime_turn(
     state: Arc<WebState>,
     input: ChatRequest,
     workspace: PathBuf,
+    profile: Option<String>,
     tx: mpsc::Sender<Result<Event, Infallible>>,
 ) {
-    let result = run_runtime_turn_inner(state, input, workspace, &tx).await;
+    let result = run_runtime_turn_inner(state, input, workspace, profile, &tx).await;
     if let Err(error) = result {
         send_event(
             &tx,
@@ -483,6 +505,7 @@ async fn run_runtime_turn_inner(
     state: Arc<WebState>,
     input: ChatRequest,
     workspace: PathBuf,
+    profile: Option<String>,
     tx: &mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<(), WebError> {
     let _slot = state
@@ -499,11 +522,7 @@ async fn run_runtime_turn_inner(
             .load(id)
             .map_err(|_| WebError::bad_request("session_id was not found"))?
     } else {
-        Session::new(
-            workspace.clone(),
-            state.profile.clone(),
-            input.prompt.trim(),
-        )
+        Session::new(workspace.clone(), profile.clone(), input.prompt.trim())
     };
     let event_head = crate::daemon::runtime_event_head(&state.home)
         .await
@@ -522,7 +541,7 @@ async fn run_runtime_turn_inner(
         &state.home,
         session.id,
         &workspace,
-        session.profile.clone(),
+        session.profile.clone().or(profile),
         None,
         Some(state.config_path.clone()),
         session.title.clone(),
@@ -767,17 +786,48 @@ async fn send_event(tx: &mpsc::Sender<Result<Event, Infallible>>, value: serde_j
     }
 }
 
-fn select_workspace<'a>(
-    allowed: &'a [PathBuf],
+async fn registered_web_workspaces(
+    state: &WebState,
+) -> Result<Vec<crate::daemon::RuntimeWorkspace>, WebError> {
+    Ok(crate::daemon::remote_workspaces(&state.home)
+        .await
+        .map_err(WebError::from_anyhow)?
+        .into_iter()
+        .filter(|workspace| state.workspaces.contains(&workspace.root))
+        .collect())
+}
+
+async fn workspace_allowed(
+    state: &WebState,
+    requested: &std::path::Path,
+) -> Result<bool, WebError> {
+    Ok(registered_web_workspaces(state)
+        .await?
+        .iter()
+        .any(|workspace| workspace.root == requested))
+}
+
+async fn select_workspace(
+    state: &WebState,
     requested: Option<&str>,
-) -> Result<&'a PathBuf, WebError> {
+) -> Result<crate::daemon::RuntimeWorkspace, WebError> {
+    select_registered_workspace(registered_web_workspaces(state).await?, requested)
+}
+
+fn select_registered_workspace(
+    allowed: Vec<crate::daemon::RuntimeWorkspace>,
+    requested: Option<&str>,
+) -> Result<crate::daemon::RuntimeWorkspace, WebError> {
     match requested {
         Some(value) => allowed
-            .iter()
-            .find(|path| path.to_string_lossy() == value)
+            .into_iter()
+            .find(|workspace| workspace.root.to_string_lossy() == value)
             .ok_or_else(|| WebError::bad_request("workspace is not in the server allowlist")),
         None => allowed
-            .first()
+            .iter()
+            .find(|workspace| workspace.active)
+            .cloned()
+            .or_else(|| allowed.into_iter().next())
             .ok_or_else(|| WebError::internal("server has no workspace")),
     }
 }
@@ -839,11 +889,43 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace(path: &str, active: bool) -> crate::daemon::RuntimeWorkspace {
+        crate::daemon::RuntimeWorkspace {
+            schema: 1,
+            id: uuid::Uuid::new_v4(),
+            name: path.to_owned(),
+            root: PathBuf::from(path),
+            access: crate::daemon::WorkspaceAccess::Smart,
+            provider_profile: None,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            active,
+        }
+    }
+
     #[test]
     fn workspace_selection_rejects_unknown_paths() {
-        let allowed = vec![PathBuf::from("/workspace/a")];
-        assert!(select_workspace(&allowed, Some("/workspace/b")).is_err());
-        assert_eq!(select_workspace(&allowed, None).unwrap(), &allowed[0]);
+        let allowed = vec![workspace("/workspace/a", false)];
+        assert!(select_registered_workspace(allowed.clone(), Some("/workspace/b")).is_err());
+        assert_eq!(
+            select_registered_workspace(allowed, None).unwrap().root,
+            PathBuf::from("/workspace/a")
+        );
+    }
+
+    #[test]
+    fn workspace_selection_prefers_the_active_allowed_registration() {
+        let allowed = vec![
+            workspace("/workspace/a", false),
+            workspace("/workspace/b", true),
+        ];
+        assert_eq!(
+            select_registered_workspace(allowed, None).unwrap().root,
+            PathBuf::from("/workspace/b")
+        );
     }
     #[test]
     fn embedded_frontend_exists() {

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.20.0-rc3] - 2026-08-11
+
+### Added
+
+- Web Workspace API/选择器返回 Runtime 注册表中的稳定 ID、名称、active 状态和 `read-only/smart/workspace-write` 模式；Composer Skills 使用 Workspace 允许列表。
+
+### Changed
+
+- Web 可见 Workspace 是 Runtime 注册项与 `--workspace/--web-workspace` 启动白名单的交集；新 Web Session 优先使用 Workspace 默认 Provider。
+- Coding Workspace 自动注册默认 `workspace-write`，即目录内文件写入免审；Shell、MCP、网络与越界访问继续使用现有审批状态机，`read-only` 仅显式启用。
+
+### Security
+
+- 新增原子 Workspace `ensure` API：只在目录尚未注册时创建默认项，绝不覆盖已有访问策略、Provider、Skills 或 MCP 设置；浏览器请求不能扩大服务启动时的路径上界。
+
 ## [0.20.0-rc2] - 2026-08-11
 
 ### Added
