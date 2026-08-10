@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0-rc1] - 2026-08-10
+
+### Added
+
+- Core 新增统一 Runtime 状态、Attention 来源与分组模型，覆盖审批、提问、后台 Shell、子 Agent、Worktree 和 Diff 审查。
+- 后台任务状态可映射为统一的工作中、失败、完成和取消状态，并支持按人工介入优先级排序与父级状态聚合。
+- TUI 右栏新增 Attention Inbox，按“需要你处理”“正在工作”“最近完成”聚合审批、提问、失败任务、后台 Shell 和子 Agent。
+
 ## [0.14.0-rc4] - 2026-08-10
 
 ### Fixed

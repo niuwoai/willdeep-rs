@@ -25,9 +25,10 @@ use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::types::Usage;
 use willdeep_core::{
-    Agent, AgentEvent, ApprovalDecision, Approver, BackgroundTaskRegistry, BackgroundTaskSnapshot,
-    BackgroundTaskStatus, EventSink, Message, MessageAttachment, Session, SessionStore,
-    SkillCatalog, UserQuestion,
+    Agent, AgentEvent, ApprovalDecision, Approver, AttentionItem, AttentionSection,
+    AttentionSource, BackgroundTaskRegistry, BackgroundTaskSnapshot, BackgroundTaskStatus,
+    EventSink, Message, MessageAttachment, RuntimeStatus, Session, SessionStore, SkillCatalog,
+    UserQuestion, rollup_status, sort_attention_items,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
@@ -567,6 +568,22 @@ impl App {
             FocusPane::Chat => FocusPane::Sidebar,
             FocusPane::Sidebar => FocusPane::Prompt,
         };
+    }
+    fn attention_items(&self) -> Vec<AttentionItem> {
+        let mut items = Vec::new();
+        if let Some((description, _, _)) = &self.approval {
+            items.push(AttentionItem::approval(description.clone()));
+        }
+        if let Some(dialog) = &self.question {
+            items.push(AttentionItem::question(dialog.request.question.clone()));
+        }
+        items.extend(
+            self.background_tasks
+                .iter()
+                .map(AttentionItem::from_background),
+        );
+        sort_attention_items(&mut items);
+        items
     }
     fn sidebar_toggle(&mut self) {
         self.sidebar_expanded[self.sidebar_selected] =
@@ -2437,6 +2454,45 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
     }
 }
 
+fn runtime_status_label(status: RuntimeStatus, language: Language) -> &'static str {
+    match status {
+        RuntimeStatus::Idle => language.text("空闲", "idle", "待機"),
+        RuntimeStatus::Working => language.text("工作中", "working", "作業中"),
+        RuntimeStatus::Blocked => language.text("已阻塞", "blocked", "ブロック中"),
+        RuntimeStatus::WaitingApproval => language.text("等待审批", "waiting approval", "承認待ち"),
+        RuntimeStatus::WaitingAnswer => language.text("等待回答", "waiting answer", "回答待ち"),
+        RuntimeStatus::Failed => language.text("失败", "failed", "失敗"),
+        RuntimeStatus::Done => language.text("已完成", "done", "完了"),
+        RuntimeStatus::Cancelled => language.text("已取消", "cancelled", "キャンセル済み"),
+        RuntimeStatus::Unknown => language.text("未知", "unknown", "不明"),
+    }
+}
+
+fn attention_source_label(source: AttentionSource, language: Language) -> &'static str {
+    match source {
+        AttentionSource::Approval => language.text("审批", "Approval", "承認"),
+        AttentionSource::Question => language.text("提问", "Question", "質問"),
+        AttentionSource::BackgroundShell => {
+            language.text("后台命令", "Background shell", "バックグラウンドシェル")
+        }
+        AttentionSource::Subagent => language.text("子 Agent", "Subagent", "サブエージェント"),
+        AttentionSource::Worktree => language.text("Worktree", "Worktree", "Worktree"),
+        AttentionSource::DiffReview => language.text("Diff 审查", "Diff review", "Diff レビュー"),
+    }
+}
+
+fn attention_style(status: RuntimeStatus) -> Style {
+    let color = match status {
+        RuntimeStatus::WaitingApproval | RuntimeStatus::WaitingAnswer => Color::Yellow,
+        RuntimeStatus::Blocked | RuntimeStatus::Failed => Color::LightRed,
+        RuntimeStatus::Working => Color::LightBlue,
+        RuntimeStatus::Done => Color::LightGreen,
+        RuntimeStatus::Cancelled => Color::DarkGray,
+        RuntimeStatus::Idle | RuntimeStatus::Unknown => Color::Gray,
+    };
+    Style::default().fg(color)
+}
+
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
@@ -2457,16 +2513,19 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     } else {
         app.language.text("关闭", "off", "オフ")
     };
-    let agent = if app.running {
-        app.language.text("运行中", "running", "実行中")
-    } else {
-        app.language.text("空闲", "idle", "待機中")
-    };
+    let attention = app.attention_items();
+    let agent_status = rollup_status(
+        std::iter::once(if app.running {
+            RuntimeStatus::Working
+        } else {
+            RuntimeStatus::Idle
+        })
+        .chain(attention.iter().map(|item| item.status)),
+    );
     let titles = [
         app.language.text("工作区", "Workspace", "ワークスペース"),
+        app.language.text("需要关注", "Attention Inbox", "要確認"),
         app.language.text("运行状态", "Runtime", "実行状態"),
-        app.language
-            .text("后台任务", "Background tasks", "バックグラウンドタスク"),
         app.language
             .text("移动中继", "Mobile relay", "モバイルリレー"),
     ];
@@ -2502,10 +2561,70 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                     .lines()
                     .map(|line| Line::raw(format!("  {line}"))),
             ),
+            1 if attention.is_empty() => lines.push(Line::raw(format!(
+                "  {}",
+                app.language
+                    .text("目前无需处理", "Nothing needs attention", "対応事項なし")
+            ))),
             1 => {
+                for (group, heading) in [
+                    (
+                        AttentionSection::NeedsYou,
+                        app.language.text("需要你处理", "Needs you", "対応が必要"),
+                    ),
+                    (
+                        AttentionSection::Working,
+                        app.language.text("正在工作", "Working", "作業中"),
+                    ),
+                    (
+                        AttentionSection::Recent,
+                        app.language.text("最近完成", "Recent", "最近完了"),
+                    ),
+                ] {
+                    let grouped = attention
+                        .iter()
+                        .filter(|item| item.status.section() == Some(group))
+                        .take(8)
+                        .collect::<Vec<_>>();
+                    if grouped.is_empty() {
+                        continue;
+                    }
+                    lines.push(Line::styled(
+                        format!("  {heading} · {}", grouped.len()),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    for item in grouped {
+                        if let Some(task_index) = app
+                            .background_tasks
+                            .iter()
+                            .position(|task| task.id == item.id)
+                        {
+                            logical_hits.push((lines.len(), SidebarHit::Task(task_index)));
+                        }
+                        let elapsed = item
+                            .elapsed_millis
+                            .map(|millis| format!(" · {:.1}s", millis as f64 / 1000.0))
+                            .unwrap_or_default();
+                        lines.push(Line::styled(
+                            format!(
+                                "    {} · {}{elapsed}",
+                                attention_source_label(item.source, app.language),
+                                runtime_status_label(item.status, app.language),
+                            ),
+                            attention_style(item.status),
+                        ));
+                        lines.push(Line::styled(
+                            format!("      {}", item.title),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                }
+            }
+            2 => {
                 lines.push(Line::raw(format!(
-                    "  {}: {agent}",
-                    app.language.text("智能体", "Agent", "エージェント")
+                    "  {}: {}",
+                    app.language.text("智能体", "Agent", "エージェント"),
+                    runtime_status_label(agent_status, app.language)
                 )));
                 lines.push(Line::raw(format!(
                     "  {}: {}/{}",
@@ -2519,29 +2638,6 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                     app.language.text("失败", "Failed", "失敗"),
                     app.tools.failed
                 )));
-            }
-            2 if app.background_tasks.is_empty() => lines.push(Line::raw(format!(
-                "  {}",
-                app.language.text(
-                    "没有后台任务",
-                    "No background tasks",
-                    "バックグラウンドタスクなし"
-                )
-            ))),
-            2 => {
-                for (task_index, task) in app.background_tasks.iter().take(8).enumerate() {
-                    logical_hits.push((lines.len(), SidebarHit::Task(task_index)));
-                    lines.push(Line::raw(format!(
-                        "  {} · {:?} · {:.1}s",
-                        task.id,
-                        task.status,
-                        task.elapsed_millis as f64 / 1000.0
-                    )));
-                    lines.push(Line::styled(
-                        format!("    {}", task.label),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
             }
             3 => {
                 lines.push(Line::raw(format!(
@@ -3364,6 +3460,55 @@ mod tests {
     fn wrapped_question_offsets_mouse_option_rows() {
         assert_eq!(question_option_row(10, "123456789", 4, 0), 15);
         assert_eq!(question_option_row(10, "123456789", 4, 1), 16);
+    }
+    #[test]
+    fn attention_inbox_merges_human_gates_and_background_work() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let (approval_sender, _approval_receiver) = oneshot::channel();
+        app.approval = Some(("Run release".to_owned(), true, approval_sender));
+        let (question_sender, _question_receiver) = oneshot::channel();
+        app.question = Some(AskDialog {
+            request: UserQuestion {
+                question: "Choose target".to_owned(),
+                options: vec!["A".to_owned()],
+                multi_select: false,
+            },
+            selected: 0,
+            checked: vec![false],
+            answer: PromptEditor::default(),
+            sender: question_sender,
+        });
+        app.background_tasks.extend([
+            BackgroundTaskSnapshot {
+                id: "job_failed".to_owned(),
+                kind: willdeep_core::BackgroundTaskKind::Shell,
+                label: "Tests".to_owned(),
+                status: BackgroundTaskStatus::Failed,
+                elapsed_millis: 50,
+                exit_code: Some(1),
+                output_bytes: 10,
+            },
+            BackgroundTaskSnapshot {
+                id: "agent_working".to_owned(),
+                kind: willdeep_core::BackgroundTaskKind::Subagent,
+                label: "Scout".to_owned(),
+                status: BackgroundTaskStatus::Running,
+                elapsed_millis: 20,
+                exit_code: None,
+                output_bytes: 0,
+            },
+        ]);
+
+        let items = app.attention_items();
+        assert_eq!(
+            items.iter().map(|item| item.status).collect::<Vec<_>>(),
+            vec![
+                RuntimeStatus::WaitingApproval,
+                RuntimeStatus::WaitingAnswer,
+                RuntimeStatus::Failed,
+                RuntimeStatus::Working,
+            ]
+        );
     }
     #[test]
     fn mouse_click_inserts_command_candidate() {

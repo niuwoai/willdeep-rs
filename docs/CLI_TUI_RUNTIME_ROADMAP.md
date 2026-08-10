@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.14.0-rc4
+> 当前实施版本：v0.15.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -42,8 +42,8 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ### 阶段 1：Attention Inbox（v0.15.0）
 
-- [ ] 统一 `idle/working/blocked/waiting_approval/waiting_answer/failed/done/cancelled/unknown` 状态。
-- [ ] 右栏增加“需要你处理”“正在工作”“最近完成”。
+- [x] 统一 `idle/working/blocked/waiting_approval/waiting_answer/failed/done/cancelled/unknown` 状态。
+- [x] 右栏增加“需要你处理”“正在工作”“最近完成”。
 - [ ] 审批、ask_user、失败任务、阻塞子 Agent、Worktree 冲突和待审 Diff 统一进入 Inbox。
 - [ ] 支持允许、拒绝、回答、重试、停止、标记已读和精确跳转。
 - [ ] Agent → 会话 → Workspace 的状态优先级聚合。
@@ -172,4 +172,4 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.14.0-rc4：阶段 0 已完成，三态焦点、聊天搜索、命令面板以及命令、技能、审批、提问等高频弹层均支持一致的键盘和鼠标交互。下一批进入阶段 1 Attention Inbox。
+v0.15.0-rc1：阶段 1 已建立 Core 共享状态、Attention 分组、后台任务映射与父级优先级聚合，并在 TUI 右栏展示“需要你处理”“正在工作”“最近完成”；下一步补齐条目动作、已读状态与精确跳转。

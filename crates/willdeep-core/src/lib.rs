@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod attention;
 pub mod background;
 pub mod mcp;
 pub mod prompt;
@@ -10,6 +11,10 @@ pub mod tools;
 pub mod types;
 
 pub use agent::{Agent, AgentConfig, AgentError, AgentEvent, AgentOutcome, EventSink};
+pub use attention::{
+    AttentionItem, AttentionSection, AttentionSource, RuntimeStatus, rollup_status,
+    sort_attention_items,
+};
 pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,
     BackgroundTaskStatus,
