@@ -568,11 +568,6 @@ mod tests {
         persisted.runtime_managed = true;
         store.save(&mut persisted).unwrap();
         let mut visible = persisted.clone();
-        persisted.messages = vec![
-            Message::user("question"),
-            Message::assistant("answer", Vec::new()),
-        ];
-        store.save(&mut persisted).unwrap();
         let mut app = App::new(Vec::new(), Language::En);
         let task_id = uuid::Uuid::new_v4();
         let output = crate::daemon::RemoteRuntimeEvent {
@@ -595,8 +590,16 @@ mod tests {
             visible: true,
         };
 
-        runtime_ui::apply_runtime_events(&mut app, vec![output, terminal], &mut visible, &store)
-            .unwrap();
+        runtime_ui::apply_runtime_events(&mut app, vec![output], &mut visible, &store).unwrap();
+        assert!(visible.messages.is_empty());
+        assert!(store.load(visible.id).unwrap().messages.is_empty());
+
+        persisted.messages = vec![
+            Message::user("question"),
+            Message::assistant("answer", Vec::new()),
+        ];
+        store.save(&mut persisted).unwrap();
+        runtime_ui::apply_runtime_events(&mut app, vec![terminal], &mut visible, &store).unwrap();
         assert_eq!(
             transcript(&visible.messages),
             vec!["You: question", "WillDeep: answer"]
@@ -838,5 +841,21 @@ mod tests {
 
         app.handle_mouse(5, 1, &registry, &skills);
         assert_eq!(app.input.text(), "/compress");
+    }
+
+    #[test]
+    fn ordinary_prompts_default_to_runtime_with_explicit_local_escape() {
+        assert_eq!(
+            prompt_execution("fix the tests"),
+            PromptExecution::Runtime("fix the tests".to_owned())
+        );
+        assert_eq!(
+            prompt_execution("/runtime inspect logs"),
+            PromptExecution::Runtime("inspect logs".to_owned())
+        );
+        assert_eq!(
+            prompt_execution("/local inspect process"),
+            PromptExecution::Local("inspect process".to_owned())
+        );
     }
 }

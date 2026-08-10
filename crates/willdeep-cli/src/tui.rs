@@ -175,6 +175,35 @@ enum FocusPane {
     Sidebar,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PromptExecution {
+    Runtime(String),
+    Local(String),
+}
+
+fn prompt_execution(prompt: &str) -> PromptExecution {
+    let value = prompt.trim();
+    if value == "/local" || value.starts_with("/local ") {
+        return PromptExecution::Local(
+            value
+                .strip_prefix("/local")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    if value == "/runtime" || value.starts_with("/runtime ") {
+        return PromptExecution::Runtime(
+            value
+                .strip_prefix("/runtime")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    PromptExecution::Runtime(prompt.to_owned())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarHit {
     Section(usize),
@@ -538,33 +567,19 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
-                            if prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ") {
-                                let remote_prompt=prompt.trim().strip_prefix("/runtime").unwrap_or_default().trim().to_owned();
-                                let attachments:Vec<MessageAttachment>=std::mem::take(&mut app.attachments).into_iter().map(|value|value.message).collect();
-                                let remote_prompt=app.enrich_prompt(&remote_prompt,&runtime.skills);
-                                let event_head=crate::daemon::runtime_event_head(&runtime.home).await.unwrap_or(app.runtime_event_cursor);
-                                match crate::daemon::ensure_runtime_session(&runtime.home,session.id,&session.workspace,session.profile.clone(),Some(runtime.runtime_submit.config.clone().unwrap_or_else(||runtime.home.join("config.toml"))),session.title.clone()).await {
-                                    Ok(remote_session)=>{
-                                        session.runtime_managed=true;
-                                        if app.runtime_event_cursor==0 {
-                                            app.runtime_event_cursor=event_head;
-                                            session.runtime_event_cursor=event_head;
-                                        }
-                                        // Persist ownership before scheduling the Turn. A very fast
-                                        // Harness must never be overwritten by this client's stale history.
-                                        store.save(session)?;
-                                        match crate::daemon::submit_runtime_turn(&runtime.home,remote_session.id,remote_prompt,attachments).await {
-                                            Ok(turn)=>app.append_transcript(format!("System: {} {} · Agent {}",language.text("已提交 Runtime 轮次","Runtime turn submitted","Runtime ターンを送信しました"),turn.id,remote_session.root_agent_id)),
-                                            Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
-                                        }
-                                    },
-                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("绑定 Runtime 会话失败","Bind Runtime session failed","Runtime セッションの接続に失敗"))),
-                                }
+                            if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
+                            if let PromptExecution::Local(local_prompt)=prompt_execution(&prompt) {
+                                if local_prompt.is_empty(){app.append_transcript(format!("System: {}",language.text("用法：/local <任务>","Usage: /local <task>","使用法: /local <タスク>")));continue;}
+                                dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,local_prompt)?;
                                 continue;
                             }
-                            if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
-                            if app.handle_slash_command(&prompt,&runtime.skills){continue;}
-                            dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;
+                            let runtime_alias=prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ");
+                            if !runtime_alias&&app.handle_slash_command(&prompt,&runtime.skills){continue;}
+                            let PromptExecution::Runtime(remote_prompt)=prompt_execution(&prompt) else {unreachable!("local prompts were handled above")};
+                            match runtime_ui::submit_turn(&mut app,session,store,runtime,remote_prompt).await {
+                                Ok(submitted)=>app.append_transcript(format!("System: {} {} · Agent {}",language.text("已提交 Runtime 轮次","Runtime turn submitted","Runtime ターンを送信しました"),submitted.turn_id,submitted.root_agent_id)),
+                                Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
+                            }
                         }
                         KeyCode::Left=>app.edit_input(|input| input.left()),KeyCode::Right=>app.edit_input(|input| input.right()),
                         KeyCode::Up=>{let width=app.prompt_rect.width.saturating_sub(2).max(1) as usize;app.edit_input(|input| input.up_visual(width));},
@@ -1093,7 +1108,10 @@ impl App {
         };
         match &palette.items[item_index].action {
             PaletteAction::Command(command) => {
-                let suffix = if matches!(command.as_str(), "/goal" | "/mobile" | "/runtime") {
+                let suffix = if matches!(
+                    command.as_str(),
+                    "/goal" | "/mobile" | "/runtime" | "/local"
+                ) {
                     " "
                 } else {
                     ""
@@ -1194,7 +1212,7 @@ impl App {
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
-                let suffix = if matches!(command, "/goal" | "/mobile" | "/runtime") {
+                let suffix = if matches!(command, "/goal" | "/mobile" | "/runtime" | "/local") {
                     " "
                 } else {
                     ""
@@ -1539,7 +1557,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: /goal <text>|off · /compress · /runtime <task> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -2512,7 +2530,7 @@ fn approval_content(description: &str, always: bool, language: Language) -> Vec<
     content
 }
 
-fn command_candidates(language: Language) -> [(&'static str, &'static str); 7] {
+fn command_candidates(language: Language) -> [(&'static str, &'static str); 8] {
     [
         (
             "/help",
@@ -2544,6 +2562,14 @@ fn command_candidates(language: Language) -> [(&'static str, &'static str); 7] {
                 "提交可分离的 Runtime 任务",
                 "Submit a detachable Runtime task",
                 "切り離し可能な Runtime タスクを送信",
+            ),
+        ),
+        (
+            "/local",
+            language.text(
+                "仅本轮使用进程内 Harness",
+                "Use the in-process Harness for one turn",
+                "このターンだけプロセス内 Harness を使用",
             ),
         ),
         (

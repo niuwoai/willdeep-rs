@@ -1,5 +1,51 @@
 use super::*;
 
+pub(super) struct SubmittedRuntimeTurn {
+    pub turn_id: uuid::Uuid,
+    pub root_agent_id: uuid::Uuid,
+}
+
+pub(super) async fn submit_turn(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &TuiRuntime,
+    prompt: String,
+) -> Result<SubmittedRuntimeTurn> {
+    let attachments: Vec<MessageAttachment> = std::mem::take(&mut app.attachments)
+        .into_iter()
+        .map(|value| value.message)
+        .collect();
+    let prompt = app.enrich_prompt(&prompt, &runtime.skills);
+    let event_head = crate::daemon::runtime_event_head(&runtime.home)
+        .await
+        .unwrap_or(app.runtime_event_cursor);
+    let remote_session = crate::daemon::ensure_runtime_session(
+        &runtime.home,
+        session.id,
+        &session.workspace,
+        session.profile.clone(),
+        runtime.runtime_submit.config.clone(),
+        session.title.clone(),
+    )
+    .await?;
+    session.runtime_managed = true;
+    if app.runtime_event_cursor == 0 {
+        app.runtime_event_cursor = event_head;
+        session.runtime_event_cursor = event_head;
+    }
+    // Persist ownership before scheduling the Turn. A very fast Harness must
+    // never be overwritten by this client's stale history.
+    store.save(session)?;
+    let turn =
+        crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
+            .await?;
+    Ok(SubmittedRuntimeTurn {
+        turn_id: turn.id,
+        root_agent_id: remote_session.root_agent_id,
+    })
+}
+
 pub(super) fn apply_runtime_events(
     app: &mut App,
     mut events: Vec<crate::daemon::RemoteRuntimeEvent>,
@@ -8,7 +54,6 @@ pub(super) fn apply_runtime_events(
 ) -> Result<()> {
     events.sort_by_key(|event| event.sequence);
     let mut advanced = false;
-    let mut reload_runtime_session = false;
     for event in events {
         if event.sequence <= app.runtime_event_cursor {
             continue;
@@ -19,21 +64,11 @@ pub(super) fn apply_runtime_events(
         {
             session.messages.push(message);
         }
-        if event.visible
-            && session.runtime_managed
-            && matches!(
-                event.kind.as_str(),
-                "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.interrupted"
-            )
-            && runtime_event_session_id(&event.message) == Some(session.id)
-        {
-            reload_runtime_session = true;
-        }
         app.runtime_event_cursor = event.sequence;
         advanced = true;
     }
     if advanced {
-        if reload_runtime_session {
+        if session.runtime_managed {
             let attention_read = session.attention_read.clone();
             let mut latest = store.load(session.id)?;
             latest.attention_read.extend(attention_read);
@@ -46,14 +81,6 @@ pub(super) fn apply_runtime_events(
         store.save(session)?;
     }
     Ok(())
-}
-
-fn runtime_event_session_id(message: &str) -> Option<uuid::Uuid> {
-    message.split_whitespace().find_map(|field| {
-        field
-            .strip_prefix("session_id=")
-            .and_then(|value| uuid::Uuid::parse_str(value).ok())
-    })
 }
 
 fn apply_runtime_event(

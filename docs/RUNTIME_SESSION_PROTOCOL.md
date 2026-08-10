@@ -122,7 +122,7 @@ turn.retry_queued
 1. [x] 持久 RuntimeSession/RuntimeTurn 与受保护读写 API、CLI。
 2. [x] Turn 幂等提交、串行队列、取消、恢复和 Task 关联。
 3. [x] TUI `/runtime` 改为 Session Turn，并支持多轮与现有 Core Session 幂等收养。
-4. [ ] 普通 TUI Prompt 默认走 Runtime，保留显式本地兼容模式。
+4. [x] 普通 TUI Prompt 默认走 Runtime，保留 `/local <任务>` 显式单轮本地兼容模式。
 5. [ ] Web、移动端和 Swift App 接入同一协议。
 6. [ ] Runtime 内原生持有 Harness，移除每 Turn 启动独立 CLI 进程的过渡实现。
 

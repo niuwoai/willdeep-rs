@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc1
+> 当前实施版本：v0.17.0-rc2
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -73,7 +73,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 - [x] 按 `RUNTIME_SESSION_PROTOCOL.md` 建立稳定 Session / Root Agent / Turn / Execution Task 身份与持久状态机。
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
-- [-] TUI 与 Web 改用统一 Runtime Session/Turn；TUI `/runtime` 已完成现有 Session 幂等收养、多轮提交和终态历史同步，普通 Prompt 默认迁移与 Web 尚待完成；当前仍保留每 Turn 启动独立 CLI Harness 的过渡执行层。
+- [-] TUI 与 Web 改用统一 Runtime Session/Turn；TUI 普通 Prompt 与 `/runtime` 已完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 尚待完成，当前仍保留每 Turn 启动独立 CLI Harness 的过渡执行层。
 - [ ] 会话选择器以及 `sessions/resume/rename/fork/archive/delete/export`。
 - [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
 - [ ] 从指定轮次 Fork，并可切换模型或 Provider。
@@ -221,12 +221,12 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.17.0-rc1：TUI `/runtime` 已迁移到长期 Runtime Session/Turn。Runtime 幂等收养现有 Core Session，保持 ID、历史和稳定 Root Agent；TUI 在调度前先持久化托管权与游标，即时显示输入但不与后台 Harness 双写消息，并在 Turn 终态重新同步唯一 Core Session 历史。模拟 Provider 进程级 E2E 验证已有一轮会话被原 ID 收养后连续完成第二轮，角色顺序无重复、Root Agent 唯一且重复收养幂等。下一步让普通 TUI Prompt 默认走 Runtime，并把 Web 接入同一 Session/Turn API。
+v0.17.0-rc2：TUI 普通 Prompt 默认提交到长期 Runtime Session/Turn，`/runtime` 复用同一路径，新增 `/local <任务>` 作为单轮进程内兼容入口；命令候选、面板与帮助同步说明。真实 PTY + 模拟 Provider E2E 验证无前缀 Prompt 生成 Completed Turn、唯一 Root Agent 和完整 `system/user/assistant` 历史；并据此修复中间事件用 TUI 旧快照覆盖 Harness 历史的竞态。下一步把 Web 接入相同 Session/Turn API，并逐步移除每 Turn 子进程过渡层。
 
 ## 6. 建议执行顺序
 
-1. 完成并发布 `v0.17.0-rc1`：TUI `/runtime` 迁移到长期 Session/Turn，幂等收养现有历史并消除双写。
-2. 让普通 TUI Prompt 默认走 Runtime，将 Web 迁移到同一 Session/Turn，并逐步把交互式主 Harness 迁入 Runtime 原生生命周期。
+1. 完成并发布 `v0.17.0-rc2`：普通 TUI Prompt 默认走 Runtime，保留 `/local` 单轮兼容模式。
+2. 将 Web 迁移到同一 Session/Turn，并逐步把交互式主 Harness 迁入 Runtime 原生生命周期。
 3. 将剩余后台 Shell、审批、MCP 和附件迁入统一生命周期。
 4. 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 5. 完成异常退出、守护进程重启和客户端重连的端到端测试。

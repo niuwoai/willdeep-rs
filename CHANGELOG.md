@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.17.0-rc2] - 2026-08-10
+
+### Added
+
+- TUI 新增 `/local <任务>`，可显式让单轮任务使用原进程内 Harness，作为 Runtime 迁移期兼容入口。
+
+### Changed
+
+- TUI 普通 Prompt 默认进入当前长期 Runtime Session 的持久 Turn；`/runtime` 保留为明确别名，并与普通输入复用同一提交状态机。
+- 命令候选、命令面板和帮助文案明确展示默认 Runtime 与 `/local` 行为。
+
+### Fixed
+
+- Runtime 托管 Session 收到中间事件时先重载 Core 历史，仅合并游标与已读状态，防止 TUI 内存旧快照覆盖后台 Harness 刚保存的消息。
+
 ## [0.17.0-rc1] - 2026-08-10
 
 ### Added
