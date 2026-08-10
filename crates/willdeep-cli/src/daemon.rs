@@ -217,6 +217,30 @@ pub enum DaemonAction {
         #[arg(long, value_enum, default_value_t = diff_review::DiffArea::Combined)]
         area: diff_review::DiffArea,
     },
+    /// Save a decision for one file in an exact Diff snapshot.
+    DiffReview {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum)]
+        decision: diff_review::ReviewDecision,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Safely revert one file from an exact Diff snapshot.
+    DiffRevert {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum, default_value_t = diff_review::DiffArea::Combined)]
+        area: diff_review::DiffArea,
+    },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
     /// List approvals and questions currently blocking Runtime tasks.
@@ -256,6 +280,7 @@ struct DaemonLock {
 
 #[derive(Clone)]
 struct ServerState {
+    home: PathBuf,
     token: String,
     started_at: u64,
     shutdown: Arc<Notify>,
@@ -264,6 +289,7 @@ struct ServerState {
     agents: Arc<AgentStore>,
     agent_commands: Arc<AgentCommandStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
+    diff_review_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -422,7 +448,7 @@ struct TaskManager {
 pub async fn handle(action: DaemonAction) -> Result<()> {
     let home = crate::config::willdeep_home()?;
     match action {
-        DaemonAction::Start => start(&home).await,
+        DaemonAction::Start => start(&home, true).await,
         DaemonAction::Status => status(&home).await,
         DaemonAction::Stop => stop(&home).await,
         DaemonAction::Logs { lines, follow } => logs(&home, lines, follow).await,
@@ -522,6 +548,19 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             path,
             area,
         } => diff_review::content_cli(&home, workspace, snapshot, path, area).await,
+        DaemonAction::DiffReview {
+            workspace,
+            snapshot,
+            path,
+            decision,
+            note,
+        } => diff_review::review_cli(&home, workspace, snapshot, path, decision, note).await,
+        DaemonAction::DiffRevert {
+            workspace,
+            snapshot,
+            path,
+            area,
+        } => diff_review::revert_cli(&home, workspace, snapshot, path, area).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -706,7 +745,7 @@ async fn ensure_running(home: &Path) -> Result<DaemonState> {
     {
         return Ok(state);
     }
-    start(home).await?;
+    start(home, false).await?;
     load_state(&path)
 }
 
@@ -915,16 +954,18 @@ impl willdeep_core::Approver for RuntimeApprover {
     }
 }
 
-async fn start(home: &Path) -> Result<()> {
+async fn start(home: &Path, announce: bool) -> Result<()> {
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.directory)?;
     if let Ok(state) = load_state(&paths.state)
         && probe(&state).await.is_ok()
     {
-        println!(
-            "WillDeep Runtime Daemon is already running (pid {}).",
-            state.pid
-        );
+        if announce {
+            println!(
+                "WillDeep Runtime Daemon is already running (pid {}).",
+                state.pid
+            );
+        }
         return Ok(());
     }
     let lock = match acquire_daemon_lock(&paths.lock) {
@@ -936,10 +977,12 @@ async fn start(home: &Path) -> Result<()> {
                 if let Ok(state) = load_state(&paths.state)
                     && probe(&state).await.is_ok()
                 {
-                    println!(
-                        "WillDeep Runtime Daemon is already running (pid {}).",
-                        state.pid
-                    );
+                    if announce {
+                        println!(
+                            "WillDeep Runtime Daemon is already running (pid {}).",
+                            state.pid
+                        );
+                    }
                     return Ok(());
                 }
                 match acquire_daemon_lock(&paths.lock) {
@@ -975,10 +1018,12 @@ async fn start(home: &Path) -> Result<()> {
         if let Ok(state) = load_state(&paths.state)
             && probe(&state).await.is_ok()
         {
-            println!(
-                "WillDeep Runtime Daemon started (pid {}, {}).",
-                state.pid, state.address
-            );
+            if announce {
+                println!(
+                    "WillDeep Runtime Daemon started (pid {}, {}).",
+                    state.pid, state.address
+                );
+            }
             lock_cleanup.disarm();
             return Ok(());
         }
@@ -1136,6 +1181,7 @@ async fn run(home: &Path) -> Result<()> {
     })?);
     tasks.report_herdr_state().await;
     let server_state = Arc::new(ServerState {
+        home: home.to_path_buf(),
         token: state.token,
         started_at,
         shutdown: shutdown_signal.clone(),
@@ -1144,6 +1190,7 @@ async fn run(home: &Path) -> Result<()> {
         agents: agents.clone(),
         agent_commands: agent_commands.clone(),
         sessions: sessions.clone(),
+        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
@@ -1203,6 +1250,11 @@ async fn run(home: &Path) -> Result<()> {
         )
         .route("/v1/diffs", get(diff_review::snapshot_handler))
         .route("/v1/diffs/{id}/content", get(diff_review::content_handler))
+        .route(
+            "/v1/diffs/{id}/reviews",
+            get(diff_review::reviews_handler).post(diff_review::review_handler),
+        )
+        .route("/v1/diffs/{id}/revert", post(diff_review::revert_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route(
             "/v1/sessions",

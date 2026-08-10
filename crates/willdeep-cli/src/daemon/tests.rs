@@ -39,6 +39,7 @@ fn authorization_requires_exact_local_token() {
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
     let state = ServerState {
+        home: root.clone(),
         token: "expected".to_owned(),
         started_at: 0,
         shutdown: Arc::new(Notify::new()),
@@ -65,6 +66,7 @@ fn authorization_requires_exact_local_token() {
             session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root)
                 .unwrap(),
         ),
+        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     assert_eq!(
         authorize(&state, &HeaderMap::new()),

@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc2
+> 当前实施版本：v0.19.0-rc4
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -98,7 +98,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [-] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；当前已完成 Workspace 内容指纹快照和文件级状态，待绑定 Turn/Agent。
 - [x] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；支持 Combined/Staged/Unstaged 范围切换和 Unicode 宽度安全双栏。
-- [ ] 接受、打回、请求重改、标记已审和安全撤销单文件。
+- [x] 接受、打回、请求重改、标记已审和安全撤销单文件；撤销绑定精确快照、TUI 二次确认，未跟踪/新增内容进入可恢复回收区。
 - [ ] 测试命令、退出码、失败摘要与变更集绑定。
 - [ ] Commit Preview、敏感文件检查、Tag 和推送目标确认。
 
@@ -223,7 +223,11 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.19.0-rc2（已完成）：TUI Diff Review 加入 Unified/Side-by-side 双视图、Combined/Staged/Unstaged 范围切换、当前文件搜索、高亮和前后跳转；Diff 与通用渲染逻辑拆分后主 TUI 文件降至 3000 行以内。下一步实现审查决策与不覆盖用户修改的单文件安全撤销。
+v0.19.0-rc4（已完成）：修复 TUI/Web 隐式启动 Runtime 时启动提示穿透 Ratatui、污染 Prompt 区域；提交确认和 Turn/Agent/Runtime ID 不再进入聊天记录，AI 完成消息只显示真实返回内容。显式 `daemon start` 仍保留控制台反馈。下一步绑定测试结果与变更集。
+
+v0.19.0-rc3（已完成）：Runtime/CLI/TUI 加入持久审查决策和精确快照安全撤销；TUI 支持接受、打回、请求修改、标记已审及撤销二次确认，未跟踪/新增内容移入 Recovery，冲突文件拒绝自动撤销。
+
+v0.19.0-rc2（已完成）：TUI Diff Review 加入 Unified/Side-by-side 双视图、Combined/Staged/Unstaged 范围切换、当前文件搜索、高亮和前后跳转；Diff 与通用渲染逻辑拆分后主 TUI 文件降至 3000 行以内。
 
 v0.19.0-rc1（已完成）：Diff Review Center 首批加入带内容指纹的 Workspace 快照、受 Token 保护的 Runtime/CLI 文件 Diff API，以及 TUI `/diff` 文件导航、滚动和 Unified Diff 着色；路径穿越、符号链接逃逸、陈旧快照和超大输出均保守拒绝或限制。
 

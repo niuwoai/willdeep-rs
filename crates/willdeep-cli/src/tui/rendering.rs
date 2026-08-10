@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
 pub(super) fn colored_transcript(entries: &[String], search_query: Option<&str>) -> Text<'static> {
     let mut lines = Vec::new();
     for value in entries {

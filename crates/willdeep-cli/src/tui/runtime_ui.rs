@@ -1,17 +1,12 @@
 use super::*;
 
-pub(super) struct SubmittedRuntimeTurn {
-    pub turn_id: uuid::Uuid,
-    pub root_agent_id: uuid::Uuid,
-}
-
 pub(super) async fn submit_turn(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,
     runtime: &TuiRuntime,
     prompt: String,
-) -> Result<SubmittedRuntimeTurn> {
+) -> Result<()> {
     let attachments: Vec<MessageAttachment> = std::mem::take(&mut app.attachments)
         .into_iter()
         .map(|value| value.message)
@@ -38,13 +33,9 @@ pub(super) async fn submit_turn(
     // Persist ownership before scheduling the Turn. A very fast Harness must
     // never be overwritten by this client's stale history.
     store.save(session)?;
-    let turn =
-        crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
-            .await?;
-    Ok(SubmittedRuntimeTurn {
-        turn_id: turn.id,
-        root_agent_id: remote_session.root_agent_id,
-    })
+    crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
+        .await?;
+    Ok(())
 }
 
 pub(super) fn apply_runtime_events(
@@ -135,8 +126,7 @@ fn apply_runtime_event(
 }
 
 fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
-    let (task, payload) = message.split_once(' ')?;
-    let task = task.strip_prefix("task_id=").unwrap_or(task);
+    let (_task, payload) = message.split_once(' ')?;
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return None;
     };
@@ -250,12 +240,8 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         }
         Some("completed") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
-                let short = task.get(..8).unwrap_or(task);
-                app.append_transcript(format!("WillDeep [Runtime {short}]: {text}"));
-                return Some(Message::assistant(
-                    format!("[Runtime {short}] {text}"),
-                    Vec::new(),
-                ));
+                app.append_transcript(format!("WillDeep: {text}"));
+                return Some(Message::assistant(text, Vec::new()));
             }
         }
         _ => {}

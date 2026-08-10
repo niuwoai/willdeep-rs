@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(restored.messages.len(), 1);
         assert_eq!(
             transcript(&restored.messages),
-            vec!["WillDeep: [Runtime 12345678] restored answer"]
+            vec!["WillDeep: restored answer"]
         );
         std::fs::remove_dir_all(root).unwrap();
     }

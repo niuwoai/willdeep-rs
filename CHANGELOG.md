@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.0-rc4] - 2026-08-10
+
+### Fixed
+
+- 修复 TUI/Web 隐式启动 Runtime Daemon 时，启动状态直接写入终端 stdout 并穿透 Ratatui、显示在 Prompt 区域的问题；只有显式 `daemon start` 保留控制台提示。
+- TUI Runtime 提交确认改为底部短暂状态，不再向聊天区写入 Turn/Agent ID；AI 完成消息移除 Runtime ID 前缀，只展示模型真实返回内容。
+
+## [0.19.0-rc3] - 2026-08-10
+
+### Added
+
+- Runtime 新增持久 Diff Review 记录，支持 Accepted、Rejected、Changes Requested、Reviewed；CLI 新增 `daemon diff-review`，TUI 使用 A/D/C/M 保存并显示文件审查状态。
+- 新增 `POST /v1/diffs/{id}/revert`、CLI `daemon diff-revert` 与 TUI `R` 二次确认，可按 Combined/Staged/Unstaged 安全撤销单文件。
+
+### Security
+
+- 审查和撤销必须匹配当前 Workspace 的精确内容快照；文件在打开后发生任何变化都会以冲突拒绝操作。
+- 未跟踪文件及 HEAD 中不存在的新增内容不会直接删除，而会原子移动到 `runtime/recovery` 可恢复目录；冲突文件拒绝自动撤销。
+
 ## [0.19.0-rc2] - 2026-08-10
 
 ### Added

@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.19.0-rc2`，支持：
+当前版本为 `0.19.0-rc4`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -30,6 +30,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime 持久保存子 Agent 的有界最终报告；CLI `daemon agent` 与 TUI 详情层可审计查看，运行中后台 Agent 可通过 `daemon instruct-agent` 或 TUI `/agent instruct` 接收补充指令。
 - Runtime 提供带内容指纹的 Workspace Diff 快照与文件内容 API；CLI 可脚本化查询，TUI `/diff` 可浏览文件、增删统计和着色 Unified Diff。
 - TUI Diff Review 支持 Unified/Side-by-side 切换、Combined/Staged/Unstaged 范围切换，以及当前文件内搜索和前后匹配跳转。
+- Diff Review 支持接受、打回、请求修改和标记已审；安全撤销要求精确快照并二次确认，未跟踪内容移入可恢复回收区。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
 - Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。

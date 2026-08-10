@@ -10,6 +10,8 @@ pub(super) struct DiffReviewState {
     pub search: Option<PromptEditor>,
     pub search_matches: Vec<usize>,
     pub search_selected: usize,
+    pub reviews: BTreeMap<String, crate::daemon::diff_review::ReviewDecision>,
+    pub confirm_revert: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

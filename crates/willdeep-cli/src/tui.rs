@@ -474,8 +474,16 @@ async fn event_loop(
                     if app.diff_review.is_some(){
                         let mut close=false;
                         let mut open_file=None;
+                        let mut review_action=None;
+                        let mut revert_action=None;
                         if let Some(review)=app.diff_review.as_mut(){
-                            if review.search.is_some() {
+                            if review.confirm_revert {
+                                if matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')) {
+                                    revert_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),review.area));
+                                }
+                                review.confirm_revert=false;
+                                if revert_action.is_none(){app.notice=Some(language.text("已取消撤销","Revert cancelled","取り消しをキャンセルしました").to_owned());}
+                            } else if review.search.is_some() {
                                 match key.code {
                                     KeyCode::Esc => review.search = None,
                                     KeyCode::Enter if !review.search_matches.is_empty() => {
@@ -499,8 +507,7 @@ async fn event_loop(
                                     _ => {}
                                 }
                                 continue;
-                            }
-                            match key.code {
+                            } else {match key.code {
                                 KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;},
                                 KeyCode::Esc=>close=true,
                                 KeyCode::Up if review.content.is_none()=>review.selected=review.selected.checked_sub(1).unwrap_or(review.snapshot.files.len().saturating_sub(1)),
@@ -523,19 +530,41 @@ async fn event_loop(
                                     review.search_selected=review.search_selected.checked_sub(1).unwrap_or(review.search_matches.len()-1);
                                     review.scroll=review.search_matches[review.search_selected];
                                 },
+                                KeyCode::Char('a')|KeyCode::Char('A') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Accepted)),
+                                KeyCode::Char('d')|KeyCode::Char('D') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Rejected)),
+                                KeyCode::Char('c')|KeyCode::Char('C') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::ChangesRequested)),
+                                KeyCode::Char('m')|KeyCode::Char('M') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Reviewed)),
+                                KeyCode::Char('r')|KeyCode::Char('R') if review.content.is_some()=>review.confirm_revert=true,
                                 KeyCode::Up=>review.scroll=review.scroll.saturating_sub(1),
                                 KeyCode::Down=>review.scroll=review.scroll.saturating_add(1),
                                 KeyCode::PageUp=>review.scroll=review.scroll.saturating_sub(10),
                                 KeyCode::PageDown=>review.scroll=review.scroll.saturating_add(10),
                                 KeyCode::Home=>review.scroll=0,
                                 _=>{}
-                            }
+                            }}
                         }
                         if close{app.diff_review=None;continue;}
                         if let Some((snapshot_id,path,area))=open_file{
                             match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,area).await{
                                 Ok(content)=>if let Some(review)=app.diff_review.as_mut(){review.content=Some((path,content));review.scroll=0;review.search_matches.clear();review.search_selected=0;},
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("打开 Diff 失败","Open Diff failed","Diff を開けませんでした"))),
+                            }
+                        }
+                        if let Some((snapshot_id,path,decision))=review_action{
+                            let request=crate::daemon::diff_review::ReviewRequest{workspace:session.workspace.clone(),path:path.clone(),decision,note:None};
+                            match crate::daemon::diff_review::remote_review(&runtime.home,&snapshot_id,&request).await{
+                                Ok(record)=>{if let Some(review)=app.diff_review.as_mut(){review.reviews.insert(path,record.decision);}app.notice=Some(language.text("审查决定已保存","Review decision saved","レビュー結果を保存しました").to_owned());},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("保存审查决定失败","Save review decision failed","レビュー結果を保存できませんでした"))),
+                            }
+                        }
+                        if let Some((snapshot_id,path,area))=revert_action{
+                            let request=crate::daemon::diff_review::RevertRequest{workspace:session.workspace.clone(),path,area};
+                            match crate::daemon::diff_review::remote_revert(&runtime.home,&snapshot_id,&request).await{
+                                Ok(result)=>match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await{
+                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("撤销成功，但刷新 Diff 失败","Reverted, but refresh failed","取り消しましたが更新に失敗しました"))),
+                                },
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("安全撤销失败","Safe revert failed","安全な取り消しに失敗しました"))),
                             }
                         }
                         continue;
@@ -665,17 +694,22 @@ async fn event_loop(
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if prompt.trim()=="/diff" {
                                 match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
-                                    Ok(snapshot)=>app.diff_review=Some(DiffReviewState{
-                                        snapshot,
-                                        selected:0,
-                                        content:None,
-                                        scroll:0,
-                                        area:crate::daemon::diff_review::DiffArea::Combined,
-                                        view:DiffViewMode::Unified,
-                                        search:None,
-                                        search_matches:Vec::new(),
-                                        search_selected:0,
-                                    }),
+                                    Ok(snapshot)=>{
+                                        let reviews=crate::daemon::diff_review::remote_reviews(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default().into_iter().map(|record|(record.path,record.decision)).collect();
+                                        app.diff_review=Some(DiffReviewState{
+                                            snapshot,
+                                            selected:0,
+                                            content:None,
+                                            scroll:0,
+                                            area:crate::daemon::diff_review::DiffArea::Combined,
+                                            view:DiffViewMode::Unified,
+                                            search:None,
+                                            search_matches:Vec::new(),
+                                            search_selected:0,
+                                            reviews,
+                                            confirm_revert:false,
+                                        });
+                                    },
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
                                 }
                                 continue;
@@ -689,7 +723,7 @@ async fn event_loop(
                             if !runtime_alias&&app.handle_slash_command(&prompt,&runtime.skills){continue;}
                             let PromptExecution::Runtime(remote_prompt)=prompt_execution(&prompt) else {unreachable!("local prompts were handled above")};
                             match runtime_ui::submit_turn(&mut app,session,store,runtime,remote_prompt).await {
-                                Ok(submitted)=>app.append_transcript(format!("System: {} {} · Agent {}",language.text("已提交 Runtime 轮次","Runtime turn submitted","Runtime ターンを送信しました"),submitted.turn_id,submitted.root_agent_id)),
+                                Ok(())=>app.notice=Some(language.text("AI 正在处理…","AI is working…","AI が処理しています…").to_owned()),
                                 Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
                             }
                         }
@@ -2455,6 +2489,9 @@ fn draw(
                 f.area(),
             );
             let title = if let Some((path, _)) = &review.content {
+                if review.confirm_revert {
+                    format!("⚠ Revert {path} ({:?})? Y confirm · any key cancel",review.area)
+                } else {
                 let area = match review.area {
                     crate::daemon::diff_review::DiffArea::Combined => "Combined",
                     crate::daemon::diff_review::DiffArea::Staged => "Staged",
@@ -2472,7 +2509,8 @@ fn draw(
                         review.search_matches.len()
                     )
                 });
-                format!("Diff · {path} · {area} · {view}{search} · V view · S scope · / search · Esc")
+                format!("Diff · {path} · {area} · {view}{search} · A accept · D reject · C changes · M reviewed · R revert · V/S/ search · Esc")
+                }
             } else {
                 format!(
                     "Diff Review · {} files · +{} -{} · ↑/↓ Enter · Esc",
@@ -2521,14 +2559,21 @@ fn draw(
                         } else {
                             Style::default().fg(Color::Gray)
                         };
+                        let decision = review.reviews.get(&file.path).map_or("", |decision| match decision {
+                            crate::daemon::diff_review::ReviewDecision::Accepted => " [accepted]",
+                            crate::daemon::diff_review::ReviewDecision::Rejected => " [rejected]",
+                            crate::daemon::diff_review::ReviewDecision::ChangesRequested => " [changes]",
+                            crate::daemon::diff_review::ReviewDecision::Reviewed => " [reviewed]",
+                        });
                         Line::styled(
                             format!(
-                                "{marker} {:?} [{stage}] +{} -{} {}{}",
+                                "{marker} {:?} [{stage}] +{} -{} {}{}{}",
                                 file.kind,
                                 file.additions,
                                 file.deletions,
                                 file.path,
-                                if file.binary { " [binary]" } else { "" }
+                                if file.binary { " [binary]" } else { "" },
+                                decision
                             ),
                             style,
                         )
@@ -2941,15 +2986,6 @@ fn help_content(language: Language) -> &'static str {
         Language::Ja => {
             "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
-    }
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width: width.min(area.width),
-        height: height.min(area.height),
     }
 }
 

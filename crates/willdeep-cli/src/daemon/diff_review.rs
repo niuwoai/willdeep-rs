@@ -41,13 +41,58 @@ pub(crate) struct DiffSnapshot {
     pub has_conflicts: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, clap::ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DiffArea {
     Staged,
     Unstaged,
     #[default]
     Combined,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, clap::ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewDecision {
+    Accepted,
+    Rejected,
+    ChangesRequested,
+    Reviewed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct DiffReviewRecord {
+    pub id: uuid::Uuid,
+    pub snapshot_id: String,
+    pub workspace: PathBuf,
+    pub path: String,
+    pub decision: ReviewDecision,
+    pub note: Option<String>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReviewRequest {
+    pub workspace: PathBuf,
+    pub path: String,
+    pub decision: ReviewDecision,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RevertRequest {
+    pub workspace: PathBuf,
+    pub path: String,
+    #[serde(default)]
+    pub area: DiffArea,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RevertResult {
+    pub previous_snapshot_id: String,
+    pub current_snapshot_id: String,
+    pub path: String,
+    pub recovery_path: Option<PathBuf>,
 }
 
 pub(super) async fn snapshot_cli(home: &Path, workspace: PathBuf) -> Result<()> {
@@ -121,6 +166,57 @@ pub(super) async fn content_cli(
     Ok(())
 }
 
+pub(super) async fn review_cli(
+    home: &Path,
+    workspace: PathBuf,
+    snapshot_id: String,
+    path: String,
+    decision: ReviewDecision,
+    note: Option<String>,
+) -> Result<()> {
+    let record = remote_review(
+        home,
+        &snapshot_id,
+        &ReviewRequest {
+            workspace,
+            path,
+            decision,
+            note,
+        },
+    )
+    .await?;
+    println!("{}\t{:?}\t{}", record.id, record.decision, record.path);
+    Ok(())
+}
+
+pub(super) async fn revert_cli(
+    home: &Path,
+    workspace: PathBuf,
+    snapshot_id: String,
+    path: String,
+    area: DiffArea,
+) -> Result<()> {
+    let result = remote_revert(
+        home,
+        &snapshot_id,
+        &RevertRequest {
+            workspace,
+            path,
+            area,
+        },
+    )
+    .await?;
+    println!(
+        "{}\t{}\trecovery={}",
+        result.current_snapshot_id,
+        result.path,
+        result
+            .recovery_path
+            .map_or_else(|| "none".to_owned(), |path| path.display().to_string())
+    );
+    Ok(())
+}
+
 fn area_name(area: DiffArea) -> &'static str {
     match area {
         DiffArea::Staged => "staged",
@@ -178,6 +274,75 @@ pub(crate) async fn remote_content(
         .to_owned())
 }
 
+pub(crate) async fn remote_review(
+    home: &Path,
+    snapshot_id: &str,
+    request: &ReviewRequest,
+) -> Result<DiffReviewRecord> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/diffs/{snapshot_id}/reviews",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(request)
+        .send()
+        .await?;
+    if response.status() == StatusCode::CONFLICT {
+        bail!("Diff snapshot changed; reopen /diff before reviewing");
+    }
+    if !response.status().is_success() {
+        bail!("Runtime rejected Diff review: {}", response.text().await?);
+    }
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn remote_reviews(
+    home: &Path,
+    workspace: &Path,
+    snapshot_id: &str,
+) -> Result<Vec<DiffReviewRecord>> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .get(format!(
+            "http://{}/v1/diffs/{snapshot_id}/reviews",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&[("workspace", workspace.display().to_string())])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!("Runtime rejected Diff reviews: {}", response.text().await?);
+    }
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn remote_revert(
+    home: &Path,
+    snapshot_id: &str,
+    request: &RevertRequest,
+) -> Result<RevertResult> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/diffs/{snapshot_id}/revert",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(request)
+        .send()
+        .await?;
+    if response.status() == StatusCode::CONFLICT {
+        bail!("Diff snapshot changed; reopen /diff before reverting");
+    }
+    if !response.status().is_success() {
+        bail!("Runtime rejected Diff revert: {}", response.text().await?);
+    }
+    Ok(response.json().await?)
+}
+
 #[derive(Deserialize)]
 pub(super) struct DiffQuery {
     workspace: PathBuf,
@@ -228,6 +393,117 @@ pub(super) async fn content_handler(
         "content": content,
     }))
     .into_response())
+}
+
+pub(super) async fn reviews_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &query.workspace).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    let records = load_reviews(&review_store_path(&state.home))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|record| record.snapshot_id == snapshot_id && record.workspace == workspace)
+        .collect::<Vec<_>>();
+    Ok(Json(records).into_response())
+}
+
+pub(super) async fn review_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Json(mut request): Json<ReviewRequest>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &request.workspace).await?;
+    let current = exact_snapshot(&workspace, &snapshot_id)?;
+    if !current.files.iter().any(|file| file.path == request.path) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    request.note = normalize_review_note(request.note)?;
+    let record = DiffReviewRecord {
+        id: uuid::Uuid::new_v4(),
+        snapshot_id,
+        workspace,
+        path: request.path,
+        decision: request.decision,
+        note: request.note,
+        created_at: now(),
+    };
+    let _guard = state.diff_review_lock.lock().await;
+    let path = review_store_path(&state.home);
+    let mut records = load_reviews(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    records.retain(|existing| {
+        !(existing.snapshot_id == record.snapshot_id
+            && existing.workspace == record.workspace
+            && existing.path == record.path)
+    });
+    records.push(record.clone());
+    write_json_atomic(&path, &records).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(record)).into_response())
+}
+
+pub(super) async fn revert_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Json(request): Json<RevertRequest>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &request.workspace).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    let current = exact_snapshot(&workspace, &snapshot_id)?;
+    let file = current
+        .files
+        .iter()
+        .find(|file| file.path == request.path)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if file.kind == DiffFileKind::Unmerged {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let recovery_path = safe_revert(&state.home, &workspace, file, request.area, &snapshot_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = snapshot(&workspace).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(RevertResult {
+        previous_snapshot_id: snapshot_id,
+        current_snapshot_id: updated.id,
+        path: request.path,
+        recovery_path,
+    })
+    .into_response())
+}
+
+fn exact_snapshot(workspace: &Path, snapshot_id: &str) -> Result<DiffSnapshot, StatusCode> {
+    let current = snapshot(workspace).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if current.id != snapshot_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(current)
+}
+
+fn normalize_review_note(note: Option<String>) -> Result<Option<String>, StatusCode> {
+    let note = note
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if note.as_ref().is_some_and(|value| value.len() > 4096) {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(note)
+}
+
+fn review_store_path(home: &Path) -> PathBuf {
+    home.join("runtime/diff-reviews.json")
+}
+
+fn load_reviews(path: &Path) -> Result<Vec<DiffReviewRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
 async fn authorized_workspace(
@@ -416,7 +692,72 @@ fn snapshot_id(workspace: &Path, status: &[u8]) -> Result<String> {
     Ok(format!("diff-{:016x}", hasher.finish()))
 }
 
-fn file_diff(workspace: &Path, path: &str, area: DiffArea) -> Result<String> {
+fn safe_revert(
+    home: &Path,
+    workspace: &Path,
+    file: &DiffFile,
+    area: DiffArea,
+    snapshot_id: &str,
+) -> Result<Option<PathBuf>> {
+    safe_workspace_path(workspace, &file.path)?;
+    if let Some(old_path) = &file.old_path {
+        safe_workspace_path(workspace, old_path)?;
+    }
+    let paths = std::iter::once(file.path.as_str())
+        .chain(file.old_path.as_deref())
+        .collect::<Vec<_>>();
+    if matches!(area, DiffArea::Staged | DiffArea::Combined) && file.staged {
+        reset_index(workspace, &paths, snapshot(workspace)?.head.is_some())?;
+    }
+    if area == DiffArea::Staged {
+        return Ok(None);
+    }
+
+    let recovery_root = home
+        .join("runtime/recovery")
+        .join(format!("{snapshot_id}-{}", uuid::Uuid::new_v4().simple()));
+    let mut recovered = false;
+    for path in paths {
+        if tracked_in_head(workspace, path) {
+            git(
+                workspace,
+                &["restore", "--worktree", "--source=HEAD", "--", path],
+            )?;
+            continue;
+        }
+        let source = safe_workspace_path(workspace, path)?;
+        if !source.exists() {
+            continue;
+        }
+        let destination = recovery_root.join(path);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&source, &destination)?;
+        recovered = true;
+    }
+    Ok(recovered.then_some(recovery_root))
+}
+
+fn reset_index(workspace: &Path, paths: &[&str], has_head: bool) -> Result<()> {
+    let mut args = if has_head {
+        vec!["restore", "--staged", "--source=HEAD", "--"]
+    } else {
+        vec!["rm", "--cached", "--ignore-unmatch", "--"]
+    };
+    args.extend_from_slice(paths);
+    git(workspace, &args).map(|_| ())
+}
+
+fn tracked_in_head(workspace: &Path, path: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-e", &format!("HEAD:{path}")])
+        .current_dir(workspace)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn safe_workspace_path(workspace: &Path, path: &str) -> Result<PathBuf> {
     let relative = Path::new(path);
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
@@ -435,6 +776,11 @@ fn file_diff(workspace: &Path, path: &str, area: DiffArea) -> Result<String> {
     if !safe_path.starts_with(&root) {
         bail!("Diff path escapes Workspace");
     }
+    Ok(safe_path)
+}
+
+fn file_diff(workspace: &Path, path: &str, area: DiffArea) -> Result<String> {
+    let safe_path = safe_workspace_path(workspace, path)?;
     let mut output = Vec::new();
     if matches!(area, DiffArea::Staged | DiffArea::Combined) {
         output.extend(git(
@@ -548,6 +894,82 @@ mod tests {
         let error = file_diff(&root, "../outside.txt", DiffArea::Combined)
             .expect_err("parent traversal must fail");
         assert!(error.to_string().contains("escapes Workspace"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn safe_revert_requires_exact_content_and_restores_tracked_file() {
+        let root = std::env::temp_dir().join(format!("willdeep-revert-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "test@willdeep.invalid"],
+        );
+        run_git(&workspace, &["config", "user.name", "WillDeep Test"]);
+        std::fs::write(workspace.join("tracked.txt"), "original\n").expect("seed");
+        run_git(&workspace, &["add", "tracked.txt"]);
+        run_git(&workspace, &["commit", "-m", "seed"]);
+        std::fs::write(workspace.join("tracked.txt"), "staged\n").expect("staged");
+        run_git(&workspace, &["add", "tracked.txt"]);
+        std::fs::write(workspace.join("tracked.txt"), "unstaged\n").expect("unstaged");
+
+        let before = snapshot(&workspace).expect("snapshot");
+        let file = before
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .expect("tracked change");
+        let recovery = safe_revert(&home, &workspace, file, DiffArea::Combined, &before.id)
+            .expect("safe revert");
+
+        assert!(recovery.is_none());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(snapshot(&workspace).unwrap().files.is_empty());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn safe_revert_moves_untracked_file_to_recovery() {
+        let root = std::env::temp_dir().join(format!("willdeep-revert-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        run_git(&workspace, &["init"]);
+        std::fs::write(workspace.join("draft.txt"), "recover me\n").expect("draft");
+
+        let before = snapshot(&workspace).expect("snapshot");
+        let file = before.files.first().expect("untracked file");
+        let recovery = safe_revert(&home, &workspace, file, DiffArea::Combined, &before.id)
+            .expect("safe revert")
+            .expect("recovery path");
+
+        assert!(!workspace.join("draft.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(recovery.join("draft.txt")).unwrap(),
+            "recover me\n"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn exact_snapshot_rejects_changes_made_after_review_opened() {
+        let root = std::env::temp_dir().join(format!("willdeep-stale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        run_git(&root, &["init"]);
+        std::fs::write(root.join("draft.txt"), "first\n").expect("first");
+        let opened = snapshot(&root).expect("opened snapshot");
+        std::fs::write(root.join("draft.txt"), "second\n").expect("changed");
+
+        assert_eq!(
+            exact_snapshot(&root, &opened.id).expect_err("stale snapshot must fail"),
+            StatusCode::CONFLICT
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
