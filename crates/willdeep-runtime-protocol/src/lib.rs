@@ -48,6 +48,8 @@ pub enum ObjectKind {
     Question,
     Artifact,
     Event,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,6 +60,8 @@ pub enum TransportKind {
     Ndjson,
     UnixSocket,
     WindowsNamedPipe,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,6 +84,8 @@ pub enum Capability {
     AttachmentImage,
     SkillDiscover,
     McpTools,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -868,6 +874,76 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    fn decode_fixture<T: serde::de::DeserializeOwned>(
+        responses: &serde_json::Map<String, serde_json::Value>,
+        name: &str,
+    ) {
+        let value = responses
+            .get(name)
+            .unwrap_or_else(|| panic!("missing {name} fixture"));
+        let _: ApiResponse<T> = serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("invalid {name} fixture: {error}"));
+    }
+
+    #[test]
+    fn public_api_fixture_decodes_every_stable_object_without_secrets() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/public-api-v1.json")).unwrap();
+        assert_eq!(fixture["fixture_version"], "1");
+        assert_eq!(fixture["protocol_version"], PROTOCOL_VERSION);
+        let serialized = serde_json::to_string(&fixture).unwrap();
+        for forbidden in ["api_key", "authorization", "x-willdeep-token"] {
+            assert!(!serialized.to_ascii_lowercase().contains(forbidden));
+        }
+        let responses = fixture["responses"].as_object().unwrap();
+        decode_fixture::<RuntimeCapabilities>(responses, "runtime");
+        decode_fixture::<RuntimeWorkspace>(responses, "workspace");
+        decode_fixture::<RuntimeSession>(responses, "session");
+        decode_fixture::<RuntimeAgent>(responses, "agent");
+        decode_fixture::<RuntimeTurn>(responses, "turn");
+        decode_fixture::<RuntimeTool>(responses, "tool");
+        decode_fixture::<RuntimeTask>(responses, "task");
+        decode_fixture::<PendingApproval>(responses, "approval");
+        decode_fixture::<PendingQuestion>(responses, "question");
+        decode_fixture::<RuntimeArtifact>(responses, "artifact");
+        decode_fixture::<RuntimeEvent>(responses, "event");
+        assert_eq!(responses.len(), 11);
+    }
+
+    #[test]
+    fn capability_response_tolerates_future_object_capability_and_transport_values() {
+        let mut value = serde_json::to_value(ApiResponse::ok(
+            RuntimeCapabilities::current("test"),
+            "test",
+            None,
+        ))
+        .unwrap();
+        let data = value["data"].as_object_mut().unwrap();
+        data.get_mut("objects")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("future_object"));
+        data.get_mut("capabilities")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("future_capability"));
+        data.get_mut("transports")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("future_transport"));
+
+        let decoded: ApiResponse<RuntimeCapabilities> = serde_json::from_value(value).unwrap();
+        let ApiResponse::Ok { data, .. } = decoded else {
+            panic!("expected a successful capabilities response");
+        };
+        assert_eq!(data.objects.last(), Some(&ObjectKind::Unknown));
+        assert_eq!(data.capabilities.last(), Some(&Capability::Unknown));
+        assert_eq!(data.transports.last(), Some(&TransportKind::Unknown));
+    }
 
     #[test]
     fn operation_names_are_unique_and_namespaced() {

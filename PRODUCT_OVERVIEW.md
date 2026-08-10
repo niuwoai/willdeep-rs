@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc14
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc15
 
 ## 项目简介
 
@@ -23,6 +23,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 临时单行思考摘要，以及 Web 单行工作状态、逐轮工具轨迹与停止生成；
 - Web/TUI 独立聊天历史滚动与 TUI 常用 Markdown 终端渲染；
 - Rust Runtime Client 为 Tool 与 Artifact 观察提供类型化方法，并通过本地 Socket 往返测试约束协议操作与 DTO；
+- 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
 - TUI 可切换终端原生文本选择与复制模式；
 - TUI 全局快捷键帮助、Prompt/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；

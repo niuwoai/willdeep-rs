@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc15] - 2026-08-11
+
+### Added
+
+- 新增 `public-api-v1.json` 跨语言兼容夹具，覆盖 Runtime 的 11 类稳定公共对象及统一响应信封，供 Swift、Android 和第三方客户端做解码契约测试。
+- 协议测试逐类反序列化兼容夹具，并确认示例不包含 API Key、认证头或 Runtime Token。
+
+### Changed
+
+- Object、Capability 和 Transport 能力枚举遇到未来新增值时降级为 `unknown`，旧客户端不会因新服务器增加能力而拒绝整个能力响应。
+
 ## [0.21.0-rc14] - 2026-08-11
 
 ### Added

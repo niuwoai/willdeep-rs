@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc14
+> 当前实现版本：v0.21.0-rc15
 
 ## 1. 目标
 
@@ -90,7 +90,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc14",
+    "server_version": "0.21.0-rc15",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +108,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc14"
+    "server_version": "0.21.0-rc15"
   }
 }
 ```
@@ -145,4 +145,16 @@ diff.revert
 5. [-] Rust Client Library；已覆盖全部公开对象、统一调用、能力协商、NDJSON、Unix Socket 和 Windows Named Pipe；继续补强高级类型化便捷方法；
 6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session/Turn，Web Session/Turn，以及 CLI Session/Turn 管理已迁移；Session 收养从 Runtime 私有存储恢复配置引用；其他 CLI 兼容命令继续迁移；
 7. [x] Unix Socket 与 Windows Named Pipe；
-8. [ ] Swift FFI、移动端和自动化兼容验证。
+8. [-] Swift FFI、移动端和自动化兼容验证；已提供覆盖全部 11 类公开对象的固定 JSON decoder 夹具，客户端适配层与端到端双读待完成。
+
+## 9. 跨语言兼容夹具
+
+[`public-api-v1.json`](../crates/willdeep-runtime-protocol/fixtures/public-api-v1.json) 是协议 `1.0` 的固定 decoder contract fixture。它包含统一响应信封和 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 十一类公开对象，不包含认证凭据、Prompt、工具参数、输出正文或本机路径。
+
+Swift、Android 和第三方客户端应在 CI 中逐项解码 `responses`，并至少断言：
+
+1. `protocol_version` 的主版本受支持；
+2. 未知的可选能力和操作不会导致整个能力响应解码失败；
+3. UUID、可空字段、snake_case 枚举和 64 位时间/序号保持精度；
+4. `status=error` 与 `status=ok` 使用显式分支处理；
+5. 夹具更新需要与 Rust 协议测试、版本号和 Changelog 同批提交。
