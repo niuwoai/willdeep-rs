@@ -142,6 +142,11 @@ struct Cli {
 
 #[derive(Clone, Debug, Subcommand)]
 enum CliCommand {
+    /// Create, validate, or inspect the TOML configuration.
+    Config {
+        #[command(subcommand)]
+        action: config::ConfigAction,
+    },
     /// Manage the persistent local Runtime Daemon.
     Daemon {
         #[command(subcommand)]
@@ -217,6 +222,7 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Some(command) = cli.command.clone() {
         return match command {
+            CliCommand::Config { action } => config::handle(action, cli.config.as_deref()),
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Api {
                 operation,

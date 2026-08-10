@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
-> 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc21
+> 最后更新：2026-08-11
+> 当前实施版本：v0.21.0-rc22
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc22（已完成）：新增 `willdeep config init/check/show`。Init 以私有权限创建示例配置且拒绝覆盖；Check 复用严格 TOML、版本、Provider/Subagent/MCP 与敏感文件权限校验；Show 只输出验证后的配置并强制脱敏内联 API Key。`agent.spawn` 设计审计确认不能把调用方的 `target_file` 直接视为已批准写目标，公开创建能力须接入结构化目标授权后再开放编辑型 Profile。
+
 v0.21.0-rc21（已完成）：稳定 Worktree Review/Merge/Audit/Quarantine 请求与返回 DTO，并将四个此前只列入能力清单、尚未由统一 Dispatch 实现的操作正式接入；Merge/Quarantine 纳入持久幂等。Rust Client 增加对应类型化方法，CLI/TUI bridge 从旧专用 HTTP 端点迁移。`ApiResponse::into_result()` 与标准 `ApiError` 统一成功/错误信封解包，避免各模块复制逻辑。下一步审计阶段 7 所有宣称支持的操作是否真实 Dispatch，并补 `agent.spawn`。
 
 v0.21.0-rc20（已完成）：Rust Runtime Client 新增 Diff Snapshot/Content/Reviews/Review/Verifications/Record Verification/Attributions/Commit Preview/Revert 全套类型化方法；审查、记录验证和撤销显式要求幂等 Request ID。TUI/CLI Diff bridge 的全部统一 API 调用迁移到这些方法，不再手写操作名和返回类型。下一步稳定 Worktree Review/Merge/Audit/Quarantine 公共 DTO 和 Client，并在 Web 展示 Workspace Change Artifact 详情。
@@ -426,7 +428,8 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 - [ ] Bash、Zsh、Fish、PowerShell 补全和 man page。
 - [x] TOML Provider/Profile、API Base、API Key 环境变量引用和 some.im 区分。
 - [ ] 多 Provider 能力、视觉回退、审批、Workspace、Runtime、Web、移动网关和分层覆盖配置。
-- [ ] `config init/check/show`，系统 Keychain/Secret Service，严格避免密钥进入仓库或日志。
+- [x] `config init/check/show`，严格校验并脱敏输出，避免密钥进入仓库或日志。
+- [ ] 系统 Keychain/Secret Service 凭据存储。
 - [x] Skills 名称/描述发现、按需正文读取和 `$` 触发。
 - [ ] Skills 分层、版本、参数、权限、安装、更新、禁用和执行审计。
 - [x] `/compress` 手动压缩。

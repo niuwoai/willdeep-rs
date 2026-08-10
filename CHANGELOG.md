@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc22] - 2026-08-11
+
+### Added
+
+- 新增 `willdeep config init/check/show`，支持安全生成、严格校验和脱敏展示 TOML 配置。
+
+### Security
+
+- `config init` 使用私有文件权限且拒绝覆盖；`config show` 永不输出内联 API Key 的原值。
+- 明确公开 `agent.spawn` 不能把客户端传入路径直接视为已审批写目标；编辑型 Profile 待结构化目标授权链完成后再开放。
+
 ## [0.21.0-rc21] - 2026-08-11
 
 ### Added

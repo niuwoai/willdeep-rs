@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc21`，支持：
+当前版本为 `0.21.0-rc22`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -267,6 +267,17 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 
 输入 `/help` 可查看本地命令；`/goal <目标>` 会为后续消息持续注入目标约束，`/goal off` 关闭。输入 `/compress` 会立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存当前会话；历史不足八条时不会消耗模型请求。Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`，`/skills` 可查看当前目录发现的技能。用户消息、助手回复、系统状态和错误使用不同颜色显示。
 
+配置文件可通过 CLI 创建、校验和脱敏查看；`--config` 应放在 `config` 子命令之前：
+
+```bash
+willdeep config init
+willdeep config check
+willdeep config show
+willdeep --config ./config.toml config check
+```
+
+`config init` 使用私有权限创建示例文件且不会覆盖已有配置；`config show` 会把内联 `api_key` 替换为 `[REDACTED]`。生产配置推荐只使用 `api_key_env`。
+
 TUI 会按终端能力渐进渲染常用 Markdown：标题、粗体、行内代码、引用、列表、代码块和链接；原始会话内容仍以 Markdown 文本保存。
 
 输入 `/mobile` 会连接 `wss://j.niuwoai.com/ws/broadcast/<room>` 并弹出配对二维码；使用 WillDeep Mobile 扫码后可从手机向当前 CLI 会话发消息。`Esc` 或 `/mobile hide` 只隐藏二维码，`/mobile show` 再次显示，`/mobile off` 断开 Relay。CLI 使用独立于 Swift App 的 room/token，凭据保存在 `~/.willdeep/mobile-relay.toml`；Unix 权限为 `0600`，不会写入仓库。CLI 不监听本地端口。
@@ -316,7 +327,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc21` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc22` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 
