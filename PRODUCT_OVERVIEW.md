@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.18.0-rc3
+> 最后更新：2026-08-10 | 当前版本：v0.19.0-rc1
 
 ## 项目简介
 
@@ -52,6 +52,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 子 Agent Profile 支持 Token 总预算、执行超时和连续失败熔断；成功任务自动复位失败计数，Runtime 持久化策略快照，TUI 同行显示当前/最大轮次、已用/预算 Token 和时限；
 - 子 Agent 结束时将最多 64 KiB 的报告随结构化生命周期写入 Runtime Agent；CLI 单 Agent 详情与 TUI Enter 详情层可查看，报告不会进入公开候选接口；
 - 运行中的后台子 Agent 支持追加父级指令；Core 在下一次 Provider 请求前注入并在结束竞态时继续下一轮，Runtime 命令正文投递后立即清除，仅保留脱敏命令审计；
+- Runtime 为已注册 Workspace 生成包含 HEAD、文件状态、暂存/未暂存范围、二进制标记、增删统计和内容指纹的 Diff 快照；读取文件 Diff 必须携带当前快照 ID，变更后拒绝陈旧审查结果；
+- CLI `daemon diff-snapshot`、`daemon diff-file` 与 TUI `/diff` 共用受 Token 保护的 Review API；TUI 支持文件导航、滚动和 Unified Diff 语法着色；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 转发 Runtime 事件，真实停止 Turn，并可加载持久历史会话；浏览器断开不再杀死后台 Harness；

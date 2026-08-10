@@ -27,6 +27,7 @@ const LOCK_RECOVERY_ATTEMPTS: usize = 120;
 
 mod agent_control;
 mod agent_store;
+pub(crate) mod diff_review;
 mod event_stream;
 mod herdr;
 mod session_store;
@@ -199,6 +200,22 @@ pub enum DaemonAction {
         id: uuid::Uuid,
         #[arg(value_name = "INSTRUCTION", num_args = 1.., trailing_var_arg = true)]
         instruction: Vec<String>,
+    },
+    /// Capture a structured Diff snapshot for a Runtime Workspace.
+    DiffSnapshot {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Show one file from an exact Diff snapshot.
+    DiffFile {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum, default_value_t = diff_review::DiffArea::Combined)]
+        area: diff_review::DiffArea,
     },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
@@ -496,6 +513,15 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::InstructAgent { id, instruction } => {
             agent_control::instruct_agent(&home, id, instruction.join(" ")).await
         }
+        DaemonAction::DiffSnapshot { workspace } => {
+            diff_review::snapshot_cli(&home, workspace).await
+        }
+        DaemonAction::DiffFile {
+            workspace,
+            snapshot,
+            path,
+            area,
+        } => diff_review::content_cli(&home, workspace, snapshot, path, area).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -1175,6 +1201,8 @@ async fn run(home: &Path) -> Result<()> {
             "/v1/agents/{id}/instructions",
             post(agent_control::instruct_agent_handler),
         )
+        .route("/v1/diffs", get(diff_review::snapshot_handler))
+        .route("/v1/diffs/{id}/content", get(diff_review::content_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route(
             "/v1/sessions",

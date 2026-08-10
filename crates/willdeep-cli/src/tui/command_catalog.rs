@@ -1,6 +1,6 @@
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 10] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 11] {
     [
         (
             "/help",
@@ -56,6 +56,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "查看或控制子 Agent",
                 "Inspect or control child Agents",
                 "子 Agent の表示・操作",
+            ),
+        ),
+        (
+            "/diff",
+            language.text(
+                "打开 Diff Review Center",
+                "Open Diff Review Center",
+                "Diff Review Center を開く",
             ),
         ),
         (

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0-rc1] - 2026-08-10
+
+### Added
+
+- 新增 Workspace Diff 快照模型，记录 HEAD、文件新增/修改/删除/重命名/冲突/未跟踪状态、暂存与未暂存范围、二进制标记、增删统计及内容指纹。
+- Runtime 新增受 Token 保护的 `GET /v1/diffs` 和 `GET /v1/diffs/{id}/content`；CLI 提供 `daemon diff-snapshot`、`daemon diff-file`，TUI `/diff` 提供文件导航、滚动和 Unified Diff 着色。
+
+### Security
+
+- Diff API 只允许访问已注册 Session/Task 的规范化 Workspace；文件内容请求必须匹配当前快照 ID，变更后返回冲突，且拒绝绝对路径、父目录穿越与符号链接逃逸。
+- 单文件 Diff 输出限制为 512 KiB，并在 UTF-8 边界安全截断；Runtime API 不暴露 Provider 凭据或未请求的文件正文。
+
 ## [0.18.0-rc3] - 2026-08-10
 
 ### Added

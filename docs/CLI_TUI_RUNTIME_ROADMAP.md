@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.18.0-rc3
+> 当前实施版本：v0.19.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -96,8 +96,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 5：Diff 与 Review Center（v0.19.0）
 
-- [ ] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更。
-- [ ] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航。
+- [-] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；当前已完成 Workspace 内容指纹快照和文件级状态，待绑定 Turn/Agent。
+- [-] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；当前已完成 Unified Diff、着色、滚动和文件导航。
 - [ ] 接受、打回、请求重改、标记已审和安全撤销单文件。
 - [ ] 测试命令、退出码、失败摘要与变更集绑定。
 - [ ] Commit Preview、敏感文件检查、Tag 和推送目标确认。
@@ -223,7 +223,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.18.0-rc3（已完成）：Agent Mission Control 第二批加入有界结果报告持久化、CLI/TUI 独立 Agent 详情、运行中追加指令，以及补充指令正文投递后清除的脱敏审计。下一步进入 Diff Review Center 与多 Workspace 安全操作。
+v0.19.0-rc1（已完成）：Diff Review Center 首批加入带内容指纹的 Workspace 快照、受 Token 保护的 Runtime/CLI 文件 Diff API，以及 TUI `/diff` 文件导航、滚动和 Unified Diff 着色；路径穿越、符号链接逃逸、陈旧快照和超大输出均保守拒绝或限制。下一步补齐 Turn/Agent 绑定、Side-by-side、搜索和审查决策。
+
+v0.18.0-rc3（已完成）：Agent Mission Control 第二批加入有界结果报告持久化、CLI/TUI 独立 Agent 详情、运行中追加指令，以及补充指令正文投递后清除的脱敏审计。
 
 v0.18.0-rc2（已完成）：Agent Mission Control 首批加入 Profile Token 总预算、执行超时、连续失败熔断，以及 Runtime/TUI 策略快照展示。
 
@@ -237,7 +239,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
 5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [x] 实现 Agent Mission Control、预算限制、失败熔断、独立详情、补充指令和结果回流。
-7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
+7. [-] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并；已完成内容指纹快照、统一 API/CLI 与首版 TUI Unified Review。
 8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
 9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
 10. [-] Herdr 首批状态上报已完成；继续补齐 Pane 关联、跳转、Workflow、插件和 Computer Use。

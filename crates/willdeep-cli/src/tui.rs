@@ -134,6 +134,7 @@ struct App {
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_agent_selected: usize,
     agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
+    diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
@@ -221,6 +222,13 @@ enum SidebarHit {
 struct TaskDetail {
     snapshot: BackgroundTaskSnapshot,
     output: String,
+}
+
+struct DiffReviewState {
+    snapshot: crate::daemon::diff_review::DiffSnapshot,
+    selected: usize,
+    content: Option<(String, String)>,
+    scroll: usize,
 }
 
 #[derive(Default)]
@@ -466,6 +474,33 @@ async fn event_loop(
                     }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
                     if app.agent_detail.is_some(){if key.code==KeyCode::Esc{app.agent_detail=None;}continue;}
+                    if app.diff_review.is_some(){
+                        let mut close=false;
+                        let mut open_file=None;
+                        if let Some(review)=app.diff_review.as_mut(){
+                            match key.code {
+                                KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;},
+                                KeyCode::Esc=>close=true,
+                                KeyCode::Up if review.content.is_none()=>review.selected=review.selected.checked_sub(1).unwrap_or(review.snapshot.files.len().saturating_sub(1)),
+                                KeyCode::Down if review.content.is_none()&&!review.snapshot.files.is_empty()=>review.selected=(review.selected+1)%review.snapshot.files.len(),
+                                KeyCode::Enter if review.content.is_none()=>open_file=review.snapshot.files.get(review.selected).map(|file|(review.snapshot.id.clone(),file.path.clone())),
+                                KeyCode::Up=>review.scroll=review.scroll.saturating_sub(1),
+                                KeyCode::Down=>review.scroll=review.scroll.saturating_add(1),
+                                KeyCode::PageUp=>review.scroll=review.scroll.saturating_sub(10),
+                                KeyCode::PageDown=>review.scroll=review.scroll.saturating_add(10),
+                                KeyCode::Home=>review.scroll=0,
+                                _=>{}
+                            }
+                        }
+                        if close{app.diff_review=None;continue;}
+                        if let Some((snapshot_id,path))=open_file{
+                            match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,crate::daemon::diff_review::DiffArea::Combined).await{
+                                Ok(content)=>if let Some(review)=app.diff_review.as_mut(){review.content=Some((path,content));review.scroll=0;},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("打开 Diff 失败","Open Diff failed","Diff を開けませんでした"))),
+                            }
+                        }
+                        continue;
+                    }
                     if app.attention_detail.is_some(){if key.code==KeyCode::Esc{app.attention_detail=None;}continue;}
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
@@ -589,6 +624,13 @@ async fn event_loop(
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("会话操作失败","Session action failed","セッション操作に失敗しました")));continue;},
                             }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
+                            if prompt.trim()=="/diff" {
+                                match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
+                                    Ok(snapshot)=>app.diff_review=Some(DiffReviewState{snapshot,selected:0,content:None,scroll:0}),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
+                                }
+                                continue;
+                            }
                             if let PromptExecution::Local(local_prompt)=prompt_execution(&prompt) {
                                 if local_prompt.is_empty(){app.append_transcript(format!("System: {}",language.text("用法：/local <任务>","Usage: /local <task>","使用法: /local <タスク>")));continue;}
                                 dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,local_prompt)?;
@@ -687,6 +729,7 @@ impl App {
             runtime_agents: Vec::new(),
             runtime_agent_selected: 0,
             agent_detail: None,
+            diff_review: None,
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
@@ -2356,6 +2399,84 @@ fn draw(
                 popup,
             );
         }
+        if let Some(review) = &mut app.diff_review {
+            let popup = centered_rect(
+                f.area().width.saturating_sub(4).min(120),
+                f.area().height.saturating_sub(4).min(40),
+                f.area(),
+            );
+            let title = if let Some((path, _)) = &review.content {
+                format!("Diff · {path} · ↑/↓/PgUp/PgDn · Esc")
+            } else {
+                format!(
+                    "Diff Review · {} files · +{} -{} · ↑/↓ Enter · Esc",
+                    review.snapshot.files.len(),
+                    review.snapshot.additions,
+                    review.snapshot.deletions
+                )
+            };
+            let lines = if let Some((_, content)) = &review.content {
+                let lines = diff_review_lines(content);
+                let viewport = popup.height.saturating_sub(2) as usize;
+                review.scroll = review
+                    .scroll
+                    .min(lines.len().saturating_sub(viewport.max(1)));
+                lines
+            } else {
+                review
+                    .snapshot
+                    .files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| {
+                        let marker = if index == review.selected { "▶" } else { " " };
+                        let stage = match (file.staged, file.unstaged) {
+                            (true, true) => "S+U",
+                            (true, false) => "S",
+                            (false, true) => "U",
+                            (false, false) => "-",
+                        };
+                        let style = if index == review.selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::LightCyan)
+                        } else if file.binary {
+                            Style::default().fg(Color::Magenta)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        };
+                        Line::styled(
+                            format!(
+                                "{marker} {:?} [{stage}] +{} -{} {}{}",
+                                file.kind,
+                                file.additions,
+                                file.deletions,
+                                file.path,
+                                if file.binary { " [binary]" } else { "" }
+                            ),
+                            style,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .title(title)
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(if review.snapshot.has_conflicts {
+                                Color::Red
+                            } else {
+                                Color::LightCyan
+                            })),
+                    )
+                    .scroll((review.scroll.min(u16::MAX as usize) as u16, 0))
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
+        }
         if let Some(agent) = &app.agent_detail {
             let content = format!(
                 "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {:?}\n{}: {}/{}\n{}: {}/{}\n{}: {}s\n{}: {}\n\n{}",
@@ -2754,6 +2875,26 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         width: width.min(area.width),
         height: height.min(area.height),
     }
+}
+
+fn diff_review_lines(content: &str) -> Vec<Line<'static>> {
+    content
+        .lines()
+        .map(|line| {
+            let color = if line.starts_with("+++") || line.starts_with("---") {
+                Color::Cyan
+            } else if line.starts_with('+') {
+                Color::Green
+            } else if line.starts_with('-') {
+                Color::Red
+            } else if line.starts_with("@@") {
+                Color::Yellow
+            } else {
+                Color::Gray
+            };
+            Line::styled(line.to_owned(), Style::default().fg(color))
+        })
+        .collect()
 }
 
 pub fn channel() -> (
