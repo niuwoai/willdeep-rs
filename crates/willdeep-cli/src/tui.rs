@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use base64::Engine;
 use crossterm::event::{
@@ -35,12 +35,16 @@ use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
+mod command_catalog;
 mod dispatch;
 mod runtime_ui;
+mod session_commands;
 mod sidebar;
 mod workspace_attention;
+use command_catalog::command_candidates;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
 use runtime_ui::open_remote_gate;
+use session_commands::handle_session_command;
 use sidebar::render_sidebar;
 use workspace_attention::workspace_attention;
 
@@ -568,6 +572,11 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            match handle_session_command(&prompt,&mut app,session,store,runtime).await {
+                                Ok(true)=>continue,
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("会话操作失败","Session action failed","セッション操作に失敗しました")));continue;},
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if let PromptExecution::Local(local_prompt)=prompt_execution(&prompt) {
                                 if local_prompt.is_empty(){app.append_transcript(format!("System: {}",language.text("用法：/local <任务>","Usage: /local <task>","使用法: /local <タスク>")));continue;}
@@ -1111,7 +1120,7 @@ impl App {
             PaletteAction::Command(command) => {
                 let suffix = if matches!(
                     command.as_str(),
-                    "/goal" | "/mobile" | "/runtime" | "/local"
+                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
                 ) {
                     " "
                 } else {
@@ -1213,7 +1222,10 @@ impl App {
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
-                let suffix = if matches!(command, "/goal" | "/mobile" | "/runtime" | "/local") {
+                let suffix = if matches!(
+                    command,
+                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
+                ) {
                     " "
                 } else {
                     ""
@@ -1558,7 +1570,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -2529,63 +2541,6 @@ fn approval_content(description: &str, always: bool, language: Language) -> Vec<
     ]);
     content.push(Line::from(actions));
     content
-}
-
-fn command_candidates(language: Language) -> [(&'static str, &'static str); 8] {
-    [
-        (
-            "/help",
-            language.text("查看帮助", "Show help", "ヘルプを表示"),
-        ),
-        (
-            "/goal",
-            language.text("设置持续目标", "Set persistent goal", "継続目標を設定"),
-        ),
-        (
-            "/compress",
-            language.text(
-                "压缩会话上下文",
-                "Compress conversation context",
-                "会話コンテキストを圧縮",
-            ),
-        ),
-        (
-            "/mobile",
-            language.text(
-                "管理手机中继",
-                "Manage mobile relay",
-                "モバイルリレーを管理",
-            ),
-        ),
-        (
-            "/runtime",
-            language.text(
-                "提交可分离的 Runtime 任务",
-                "Submit a detachable Runtime task",
-                "切り離し可能な Runtime タスクを送信",
-            ),
-        ),
-        (
-            "/local",
-            language.text(
-                "仅本轮使用进程内 Harness",
-                "Use the in-process Harness for one turn",
-                "このターンだけプロセス内 Harness を使用",
-            ),
-        ),
-        (
-            "/skills",
-            language.text(
-                "查看可用技能",
-                "List available skills",
-                "利用可能なスキルを表示",
-            ),
-        ),
-        (
-            "/clear",
-            language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
-        ),
-    ]
 }
 
 fn fuzzy_score(query: &str, value: &str) -> Option<usize> {

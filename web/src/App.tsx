@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Button, Container, Flex, Heading, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
+import { Box, Button, Container, Flex, Heading, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, languageLabels, languages, messages, type Language } from "./i18n";
 
 type Workspace = { path: string; name: string };
-type Session = { id: string; title: string; workspace: string; updated_at: number };
+type Session = { id: string; title: string; workspace: string; updated_at: number; archived: boolean; active: boolean };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
 type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
@@ -12,9 +12,14 @@ type ComposerSkill = { identifier: string; name: string; description: string };
 type ComposerData = { commands: string[]; skills: ComposerSkill[] };
 const defaultCommands = ["/help", "/goal", "/compress", "/skills", "/clear"];
 
-async function json<T>(url: string): Promise<T> {
-  const response = await fetch(url); const value = await response.json();
+async function json<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init); const value = await response.json();
   if (!response.ok) throw new Error(value.error ?? response.statusText); return value as T;
+}
+
+async function mutate(url: string, init: RequestInit) {
+  const response = await fetch(url, init);
+  if (!response.ok) throw new Error((await response.text()) || response.statusText);
 }
 
 function nextId(prefix: string) { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
@@ -23,6 +28,7 @@ export function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage); const t = messages[language];
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
+  const [sessionSearch, setSessionSearch] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]); const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [goal, setGoal] = useState("");
@@ -39,7 +45,8 @@ export function App() {
   useEffect(() => { if (!workspace) return; json<Session[]>("/api/sessions").then(setSessions).catch((reason: Error) => setError(`${t.loadFailed}: ${reason.message}`)); json<ComposerData>(`/api/composer?workspace=${encodeURIComponent(workspace)}`).then(setComposer).catch((reason: Error) => setError(`${t.loadFailed}: ${reason.message}`)); setSessionId(""); setChat([]); }, [workspace, t.loadFailed]);
   useEffect(() => { if (followBottomRef.current) endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat, activity]);
 
-  const visibleSessions = useMemo(() => sessions.filter((item) => item.workspace === workspace), [sessions, workspace]);
+  const visibleSessions = useMemo(() => { const query = sessionSearch.trim().toLowerCase(); return sessions.filter((item) => item.workspace === workspace && (!query || item.title.toLowerCase().includes(query))); }, [sessions, workspace, sessionSearch]);
+  const selectedSession = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId]);
   const commandMatches = useMemo(() => prompt.startsWith("/") ? composer.commands.filter((item) => item.startsWith(prompt.split(/\s/)[0])).slice(0, 6) : [], [prompt, composer.commands]);
   const skillQuery = prompt.match(/(?:^|\s)\$([\w-]*)$/)?.[1]?.toLowerCase();
   const skillMatches = useMemo(() => skillQuery === undefined ? [] : composer.skills.filter((skill) => `${skill.identifier} ${skill.name} ${skill.description}`.toLowerCase().includes(skillQuery)).slice(0, 8), [skillQuery, composer.skills]);
@@ -85,6 +92,43 @@ export function App() {
     }
   }
 
+  async function refreshSessions() {
+    setSessions(await json<Session[]>("/api/sessions"));
+  }
+
+  async function renameSelectedSession() {
+    if (!selectedSession) return;
+    const title = window.prompt(t.renamePrompt, selectedSession.title)?.trim(); if (!title) return;
+    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}/rename`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function forkSelectedSession() {
+    if (!selectedSession) return;
+    const title = window.prompt(t.forkPrompt, `${selectedSession.title}`)?.trim(); if (!title) return;
+    try { const fork = await json<{ id: string }>(`/api/sessions/${encodeURIComponent(selectedSession.id)}/fork`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); await loadSession(fork.id); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function toggleArchiveSelectedSession() {
+    if (!selectedSession) return;
+    const action = selectedSession.archived ? "unarchive" : "archive";
+    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}/${action}`, { method: "POST" }); await refreshSessions(); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function deleteSelectedSession() {
+    if (!selectedSession || !window.confirm(t.deleteConfirm)) return;
+    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: selectedSession.id }) }); setSessionId(""); setChat([]); await refreshSessions(); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function exportSelectedSession() {
+    if (!selectedSession) return;
+    try { const value = await json<unknown>(`/api/sessions/${encodeURIComponent(selectedSession.id)}/export`); const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `willdeep-session-${selectedSession.id}.json`; anchor.click(); URL.revokeObjectURL(url); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
   function attachImage(file: File) {
     const reader = new FileReader(); reader.onload = () => {
       const url = String(reader.result); const image = new Image(); image.onload = () => {
@@ -103,6 +147,7 @@ export function App() {
 
   async function send() {
     const typed = prompt.trim();
+    if (selectedSession?.archived) { setError(`${t.requestFailed}: ${t.archived}`); return; }
     if (typed === "/clear") { setChat([]); setPrompt(""); return; }
     if (typed === "/help") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: t.helpText }]); setPrompt(""); return; }
     if (typed === "/skills") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: composer.skills.length ? composer.skills.map((skill) => `$${skill.identifier} · ${skill.name}\n${skill.description}`).join("\n\n") : t.noSkills }]); setPrompt(""); return; }
@@ -141,7 +186,7 @@ export function App() {
       }
       updateRun(runId, (steps) => steps.map((step) => step.status === "active" ? { ...step, status: "done" } : step));
       setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: answer || t.emptyReply }]);
-      json<Session[]>("/api/sessions").then(setSessions).catch(() => undefined);
+      refreshSessions().catch(() => undefined);
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(`${t.requestFailed}: ${reason instanceof Error ? reason.message : String(reason)}`);
     } finally { if (abortRef.current === controller) abortRef.current = null; if (activeRunRef.current === runId) activeRunRef.current = null; activeTurnRef.current = null; pendingStopRef.current = false; setBusy(false); setActivity(""); }
@@ -153,7 +198,9 @@ export function App() {
       <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.path} value={item.path}>{item.name}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
-      <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>
+      <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} />
+      <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" opacity={item.archived ? 0.58 : 1} variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}{item.archived ? ` · ${t.archived}` : ""}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>
+      {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.renameSession} aria-label={t.renameSession} disabled={busy || selectedSession.active} onClick={() => void renameSelectedSession()}>R</Button><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={selectedSession.archived ? t.unarchiveSession : t.archiveSession} aria-label={selectedSession.archived ? t.unarchiveSession : t.archiveSession} disabled={busy || selectedSession.active} onClick={() => void toggleArchiveSelectedSession()}>{selectedSession.archived ? "↥" : "▣"}</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button><Button size="xs" variant="ghost" colorPalette="red" title={t.deleteSession} aria-label={t.deleteSession} disabled={busy || selectedSession.active} onClick={() => void deleteSelectedSession()}>×</Button></Flex>}
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="6" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
@@ -167,7 +214,7 @@ export function App() {
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
         <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" _focus={{ boxShadow: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
         <Text className="send-hint">{t.sendHint}</Text>
-        <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && !prompt.trim() && !attachments.length}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
+        <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && ((!prompt.trim() && !attachments.length) || selectedSession?.archived)}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
       </Box>
     </Container>
   </Flex>;

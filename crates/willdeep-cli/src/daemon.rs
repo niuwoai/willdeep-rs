@@ -36,9 +36,11 @@ use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    ensure_runtime_session, resolve_remote_approval, retry_remote_agent, runtime_event_head,
-    runtime_events, runtime_snapshot, start_runtime_event_follower, stop_remote_agent,
-    stop_remote_turn, submit_runtime_turn,
+    delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
+    remote_session_states, rename_remote_session, resolve_remote_approval, retry_remote_agent,
+    runtime_event_head, runtime_events, runtime_snapshot, search_remote_sessions,
+    set_remote_session_archived, start_runtime_event_follower, stop_remote_agent, stop_remote_turn,
+    submit_runtime_turn,
 };
 
 struct RuntimeEventSink {
@@ -117,6 +119,39 @@ pub enum DaemonAction {
     Sessions,
     /// Show one persistent Runtime Session.
     Session { id: uuid::Uuid },
+    /// Search persistent Runtime Sessions by title or message text.
+    SearchSessions {
+        #[arg(value_name = "QUERY", num_args = 1.., trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+    /// Rename a persistent Runtime Session.
+    RenameSession {
+        id: uuid::Uuid,
+        #[arg(value_name = "TITLE", num_args = 1.., trailing_var_arg = true)]
+        title: Vec<String>,
+    },
+    /// Fork a stable Session snapshot without copying its Turn history.
+    ForkSession {
+        id: uuid::Uuid,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Archive an inactive Runtime Session.
+    ArchiveSession { id: uuid::Uuid },
+    /// Restore an archived Runtime Session to Idle.
+    UnarchiveSession { id: uuid::Uuid },
+    /// Export a Runtime Session as a credential-free JSON snapshot.
+    ExportSession {
+        id: uuid::Uuid,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Permanently delete an inactive Runtime Session and its local history.
+    DeleteSession {
+        id: uuid::Uuid,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Queue a user Turn in a persistent Runtime Session.
     SubmitTurn {
         session_id: uuid::Uuid,
@@ -358,6 +393,27 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         } => session_store::create_session_cli(&home, workspace, profile, config, title).await,
         DaemonAction::Sessions => session_store::list_sessions_cli(&home).await,
         DaemonAction::Session { id } => session_store::show_session_cli(&home, id).await,
+        DaemonAction::SearchSessions { query } => {
+            session_store::search_sessions_cli(&home, query).await
+        }
+        DaemonAction::RenameSession { id, title } => {
+            session_store::rename_session_cli(&home, id, title).await
+        }
+        DaemonAction::ForkSession { id, title } => {
+            session_store::fork_session_cli(&home, id, title).await
+        }
+        DaemonAction::ArchiveSession { id } => {
+            session_store::archive_session_cli(&home, id, false).await
+        }
+        DaemonAction::UnarchiveSession { id } => {
+            session_store::archive_session_cli(&home, id, true).await
+        }
+        DaemonAction::ExportSession { id, output } => {
+            session_store::export_session_cli(&home, id, output).await
+        }
+        DaemonAction::DeleteSession { id, yes } => {
+            session_store::delete_session_cli(&home, id, yes).await
+        }
         DaemonAction::SubmitTurn {
             session_id,
             request_id,
@@ -1026,7 +1082,34 @@ async fn run(home: &Path) -> Result<()> {
             "/v1/sessions",
             get(session_store::sessions_handler).post(session_store::create_session_handler),
         )
-        .route("/v1/sessions/{id}", get(session_store::session_handler))
+        .route(
+            "/v1/sessions/search",
+            get(session_store::search_sessions_handler),
+        )
+        .route(
+            "/v1/sessions/{id}",
+            get(session_store::session_handler).delete(session_store::delete_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/rename",
+            post(session_store::rename_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/fork",
+            post(session_store::fork_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/archive",
+            post(session_store::archive_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/unarchive",
+            post(session_store::unarchive_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/export",
+            get(session_store::export_session_handler),
+        )
         .route(
             "/v1/sessions/{id}/turns",
             get(session_store::turns_handler).post(session_store::create_turn_handler),

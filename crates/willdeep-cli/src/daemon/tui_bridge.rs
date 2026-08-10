@@ -62,6 +62,141 @@ pub(crate) struct RemoteRuntimeTurn {
     pub id: uuid::Uuid,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteSessionState {
+    pub id: uuid::Uuid,
+    pub archived: bool,
+    pub active: bool,
+}
+
+pub(crate) async fn remote_session_states(home: &Path) -> Result<Vec<RemoteSessionState>> {
+    let state = ensure_running(home).await?;
+    let sessions: Vec<session_store::RuntimeSession> =
+        authorized_get(&state, "/v1/sessions").await?;
+    Ok(sessions
+        .into_iter()
+        .map(|session| RemoteSessionState {
+            id: session.id,
+            archived: session.status == session_store::RuntimeSessionStatus::Archived,
+            active: session.active_turn_id.is_some(),
+        })
+        .collect())
+}
+
+pub(crate) async fn rename_remote_session(
+    home: &Path,
+    id: uuid::Uuid,
+    title: String,
+) -> Result<()> {
+    post_remote_session_action(
+        home,
+        id,
+        "rename",
+        Some(&session_store::RenameRuntimeSession { title }),
+    )
+    .await
+}
+
+pub(crate) async fn fork_remote_session(
+    home: &Path,
+    id: uuid::Uuid,
+    title: Option<String>,
+) -> Result<uuid::Uuid> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!("http://{}/v1/sessions/{id}/fork", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&session_store::ForkRuntimeSession { title })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!("Runtime rejected Session fork: {}", response.text().await?);
+    }
+    Ok(response.json::<session_store::RuntimeSession>().await?.id)
+}
+
+pub(crate) async fn set_remote_session_archived(
+    home: &Path,
+    id: uuid::Uuid,
+    archived: bool,
+) -> Result<()> {
+    post_remote_session_action::<()>(
+        home,
+        id,
+        if archived { "archive" } else { "unarchive" },
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn delete_remote_session(home: &Path, id: uuid::Uuid) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .delete(format!("http://{}/v1/sessions/{id}", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&session_store::DeleteRuntimeSession { confirmation: id })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session deletion: {}",
+            response.text().await?
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn export_remote_session(
+    home: &Path,
+    id: uuid::Uuid,
+) -> Result<serde_json::Value> {
+    let state = ensure_running(home).await?;
+    authorized_get(&state, &format!("/v1/sessions/{id}/export")).await
+}
+
+pub(crate) async fn search_remote_sessions(home: &Path, query: &str) -> Result<serde_json::Value> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .get(format!("http://{}/v1/sessions/search", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&[("q", query)])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session search: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
+async fn post_remote_session_action<T: Serialize + ?Sized>(
+    home: &Path,
+    id: uuid::Uuid,
+    action: &str,
+    body: Option<&T>,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let request = client()
+        .post(format!(
+            "http://{}/v1/sessions/{id}/{action}",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token);
+    let response = match body {
+        Some(body) => request.json(body).send().await?,
+        None => request.send().await?,
+    };
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session {action}: {}",
+            response.text().await?
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_runtime_session(
     home: &Path,
     id: uuid::Uuid,

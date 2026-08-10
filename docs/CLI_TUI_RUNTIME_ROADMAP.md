@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc5
+> 当前实施版本：v0.17.0-rc6
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -76,10 +76,10 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 按 `RUNTIME_SESSION_PROTOCOL.md` 建立稳定 Session / Root Agent / Turn / Execution Task 身份与持久状态机。
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
 - [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
-- [ ] 会话选择器以及 `sessions/resume/rename/fork/archive/delete/export`。
+- [-] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 原地切换会话待完成。
 - [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
 - [ ] 从指定轮次 Fork，并可切换模型或 Provider。
-- [ ] 按标题、Workspace、内容、状态、模型和时间搜索。
+- [-] 受 Token CLI/TUI 已支持标题与消息内容搜索，Web 支持当前 Workspace 标题筛选；Workspace、状态、模型和时间组合筛选待完成。
 - [ ] 安全的自动标题与会话数据迁移版本。
 
 验收：任意会话可恢复、Fork、归档和导出，安全策略与系统 Prompt 始终使用当前版本。
@@ -223,14 +223,14 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc5（已完成）：Runtime 单实例锁改为心跳租约，异常退出后一次启动请求即可等待并接管；遗留 Running/Waiting Task、Turn、Agent 与 Pending Interaction 统一收敛，恢复事件可从旧游标续传；优雅停止先取消 Harness 再关闭 Server，等待审批时不再死锁。真实进程 E2E 已覆盖强杀 Running Harness、租约接管、Task/Turn Interrupted 事件续传，以及 Pending Approval 下 1 秒内停止。
+v0.17.0-rc6（已完成）：Runtime/CLI/TUI/Web 已接入 Session Rename、完整快照 Fork、Archive/Unarchive、精确确认 Delete、安全 Export 和 Search；活跃/排队保护、Fork 隔离、导出脱敏和生命周期事件已由 Store 测试及真实 CLI/Web E2E 验证。TUI Session 命令与候选目录完成拆分，主文件低于 3000 行。
 
 ## 6. 建议执行顺序
 
 1. [x] 发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
 2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
 3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
-4. [ ] 实现完整会话恢复、重命名、Fork、归档、删除、导出与搜索。
+4. [-] 已实现完整会话 Rename、快照 Fork、归档、删除、导出和基础全文搜索；下一步完成指定 Turn Fork、TUI 原地切换与组合筛选。
 5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
 7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。

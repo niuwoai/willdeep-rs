@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -59,6 +60,28 @@ struct SessionSummary {
     title: String,
     workspace: String,
     updated_at: u64,
+    archived: bool,
+    active: bool,
+}
+
+#[derive(Deserialize)]
+struct RenameSessionRequest {
+    title: String,
+}
+
+#[derive(Default, Deserialize)]
+struct ForkSessionRequest {
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteSessionRequest {
+    confirmation: uuid::Uuid,
+}
+
+#[derive(Serialize)]
+struct ForkSessionResponse {
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -111,7 +134,15 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/health", get(health))
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/sessions", get(sessions))
-        .route("/api/sessions/{id}", get(session_detail))
+        .route(
+            "/api/sessions/{id}",
+            get(session_detail).delete(delete_session),
+        )
+        .route("/api/sessions/{id}/rename", post(rename_session))
+        .route("/api/sessions/{id}/fork", post(fork_session))
+        .route("/api/sessions/{id}/archive", post(archive_session))
+        .route("/api/sessions/{id}/unarchive", post(unarchive_session))
+        .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces))
         .route("/api/composer", get(composer))
@@ -203,16 +234,30 @@ async fn workspaces(State(state): State<Arc<WebState>>) -> Json<Vec<WorkspaceSum
 async fn sessions(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Vec<SessionSummary>>, WebError> {
+    let runtime_states = crate::daemon::remote_session_states(&state.home)
+        .await
+        .map_err(WebError::from_anyhow)?
+        .into_iter()
+        .map(|session| (session.id, (session.archived, session.active)))
+        .collect::<HashMap<_, _>>();
     let values = SessionStore::new(&state.home)
         .list()
         .map_err(|error| WebError::internal(error.to_string()))?
         .into_iter()
         .filter(|session| state.workspaces.contains(&session.workspace))
-        .map(|session| SessionSummary {
-            id: session.id.to_string(),
-            title: session.title,
-            workspace: session.workspace.display().to_string(),
-            updated_at: session.updated_at,
+        .map(|session| {
+            let (archived, active) = runtime_states
+                .get(&session.id)
+                .copied()
+                .unwrap_or((false, false));
+            SessionSummary {
+                id: session.id.to_string(),
+                title: session.title,
+                workspace: session.workspace.display().to_string(),
+                updated_at: session.updated_at,
+                archived,
+                active,
+            }
         })
         .collect();
     Ok(Json(values))
@@ -250,6 +295,107 @@ async fn session_detail(
         id: session.id.to_string(),
         messages,
     }))
+}
+
+async fn rename_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<RenameSessionRequest>,
+) -> Result<StatusCode, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::rename_remote_session(&state.home, id, request.title)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn fork_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<ForkSessionRequest>,
+) -> Result<(StatusCode, Json<ForkSessionResponse>), WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    let fork_id = crate::daemon::fork_remote_session(&state.home, id, request.title)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ForkSessionResponse {
+            id: fork_id.to_string(),
+        }),
+    ))
+}
+
+async fn archive_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::set_remote_session_archived(&state.home, id, true)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unarchive_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::set_remote_session_archived(&state.home, id, false)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteSessionRequest>,
+) -> Result<StatusCode, WebError> {
+    if request.confirmation != id {
+        return Err(WebError::bad_request(
+            "session deletion confirmation does not match target",
+        ));
+    }
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::delete_remote_session(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn export_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::export_remote_session(&state.home, id)
+        .await
+        .map(Json)
+        .map_err(WebError::from_anyhow)
+}
+
+async fn ensure_web_runtime_session(state: &WebState, id: uuid::Uuid) -> Result<(), WebError> {
+    let session = SessionStore::new(&state.home)
+        .load(id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !state.workspaces.contains(&session.workspace) {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    crate::daemon::ensure_runtime_session(
+        &state.home,
+        session.id,
+        &session.workspace,
+        session.profile,
+        Some(state.config_path.clone()),
+        session.title,
+    )
+    .await
+    .map_err(WebError::from_anyhow)?;
+    Ok(())
 }
 
 async fn stop_turn(

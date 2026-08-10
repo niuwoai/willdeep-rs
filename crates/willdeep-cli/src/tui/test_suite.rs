@@ -124,6 +124,15 @@ mod tests {
         assert!(app.transcript.is_empty());
     }
     #[test]
+    fn command_menu_discovers_session_management() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/sess");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/session ");
+        assert!(app.transcript.is_empty());
+    }
+    #[test]
     fn sidebar_navigation_wraps_and_toggles_sections() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         app.sidebar_move(-1);

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.17.0-rc6] - 2026-08-10
+
+### Added
+
+- Runtime Session 新增 Rename、完整消息快照 Fork、Archive/Unarchive、Delete、JSON Export 和标题/消息 Search 的受 Token API 与 CLI。
+- TUI 新增 `/session rename|fork|archive|unarchive|search|export|delete`，命令面板可发现；Web 会话侧栏新增本地标题筛选以及重命名、分叉、归档、导出和删除操作。
+- Session 生命周期操作发布 `session.renamed/forked/archived/unarchived/deleted` 持久事件。
+
+### Changed
+
+- 将 TUI Session 命令和命令候选拆分为独立模块，使主 TUI 文件重新低于 3000 行上限。
+
+### Security
+
+- Rename、Fork、Archive 和 Delete 拒绝活跃或仍有排队 Turn 的 Session，避免与 Harness 消息写入竞争；Delete 要求精确 ID 二次确认，TUI 禁止删除当前打开会话。
+- Fork 不复制 Turn、Task、Interaction、事件游标或 Inbox 已读状态；Export 不包含队列私密 Prompt、附件副本、Runtime Token、Provider 凭据和内部游标。
+- Web Session 操作只允许作用于配置的 Workspace；未认证 Web 不新增消息摘要全文搜索端点，全文搜索保留在受 Runtime Token 保护的 CLI/TUI。
+
 ## [0.17.0-rc5] - 2026-08-10
 
 ### Fixed

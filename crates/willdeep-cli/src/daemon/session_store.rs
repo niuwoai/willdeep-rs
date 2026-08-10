@@ -1,6 +1,11 @@
 use super::*;
 
 const RUNTIME_SESSION_SCHEMA: u32 = 1;
+const SESSION_EXPORT_SCHEMA: u32 = 1;
+const MAX_SESSION_TITLE_CHARS: usize = 200;
+const MAX_SEARCH_QUERY_CHARS: usize = 200;
+const MAX_SEARCH_RESULTS: usize = 100;
+const MAX_SEARCH_SNIPPET_CHARS: usize = 160;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +90,59 @@ pub(crate) struct CreateRuntimeTurn {
     pub prompt: String,
     #[serde(default)]
     pub attachments: Vec<willdeep_core::MessageAttachment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RenameRuntimeSession {
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ForkRuntimeSession {
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct DeleteRuntimeSession {
+    pub confirmation: uuid::Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RuntimeSessionExport {
+    schema: u32,
+    app_version: String,
+    exported_at: u64,
+    session: RuntimeSession,
+    core: ExportedCoreSession,
+    turns: Vec<RuntimeTurn>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ExportedCoreSession {
+    id: uuid::Uuid,
+    title: String,
+    workspace: PathBuf,
+    profile: Option<String>,
+    created_at: u64,
+    updated_at: u64,
+    messages: Vec<willdeep_core::Message>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RuntimeSessionSearchResult {
+    id: uuid::Uuid,
+    title: String,
+    workspace: PathBuf,
+    status: RuntimeSessionStatus,
+    updated_at: u64,
+    message_count: usize,
+    snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct SessionSearchQuery {
+    q: String,
 }
 
 pub(super) struct ClaimedRuntimeTurn {
@@ -224,6 +282,212 @@ impl RuntimeSessionStore {
 
     pub fn get(&self, id: uuid::Uuid) -> Result<Option<RuntimeSession>> {
         Ok(self.lock()?.get(&id).cloned())
+    }
+
+    pub fn rename(&self, id: uuid::Uuid, title: String) -> Result<RuntimeSession> {
+        self.ensure_manageable(id)?;
+        let title = normalized_title(title)?;
+        let mut core = self
+            .core
+            .load(id)
+            .with_context(|| format!("load Core Session {id}"))?;
+        core.title = title;
+        self.core.save(&mut core)?;
+        let mut sessions = self.lock()?;
+        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
+        session.updated_at = now();
+        let result = session.clone();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(result)
+    }
+
+    pub fn fork(&self, id: uuid::Uuid, title: Option<String>) -> Result<RuntimeSession> {
+        self.ensure_manageable(id)?;
+        let source = self.get(id)?.context("Runtime Session not found")?;
+        let mut core = self
+            .core
+            .load(id)
+            .with_context(|| format!("load Core Session {id}"))?;
+        let timestamp = now();
+        core.id = uuid::Uuid::new_v4();
+        core.title = match title {
+            Some(title) => normalized_title(title)?,
+            None => default_fork_title(&core.title),
+        };
+        core.created_at = timestamp;
+        core.updated_at = timestamp;
+        core.attention_read.clear();
+        core.runtime_event_cursor = 0;
+        core.runtime_managed = true;
+        core.swift_source = None;
+        self.core.save(&mut core)?;
+        let fork = RuntimeSession {
+            schema: RUNTIME_SESSION_SCHEMA,
+            id: core.id,
+            root_agent_id: uuid::Uuid::new_v4(),
+            workspace: source.workspace,
+            profile: source.profile,
+            config: source.config,
+            status: RuntimeSessionStatus::Idle,
+            active_turn_id: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            last_error: None,
+        };
+        let mut sessions = self.lock()?;
+        sessions.insert(fork.id, fork.clone());
+        if let Err(error) = persist_sessions(&self.path, &sessions) {
+            sessions.remove(&fork.id);
+            let _ = self.core.delete(fork.id);
+            return Err(error);
+        }
+        Ok(fork)
+    }
+
+    pub fn archive(&self, id: uuid::Uuid) -> Result<RuntimeSession> {
+        self.ensure_manageable(id)?;
+        self.set_archived(id, true)
+    }
+
+    pub fn unarchive(&self, id: uuid::Uuid) -> Result<RuntimeSession> {
+        self.set_archived(id, false)
+    }
+
+    pub fn delete(&self, id: uuid::Uuid, confirmation: uuid::Uuid) -> Result<()> {
+        if confirmation != id {
+            bail!("Session deletion confirmation does not match target");
+        }
+        self.ensure_manageable(id)?;
+        let mut sessions = self.lock()?;
+        let removed_session = sessions.remove(&id).context("Runtime Session not found")?;
+        let mut turns = self.turns_lock()?;
+        let removed_turns = turns
+            .extract_if(|_, turn| turn.metadata.session_id == id)
+            .collect::<HashMap<_, _>>();
+        if let Err(error) = persist_sessions(&self.path, &sessions)
+            .and_then(|_| persist_turns(&self.turns_path, &turns))
+        {
+            sessions.insert(id, removed_session);
+            turns.extend(removed_turns);
+            let _ = persist_sessions(&self.path, &sessions);
+            let _ = persist_turns(&self.turns_path, &turns);
+            return Err(error);
+        }
+        if let Err(error) = self.core.delete(id) {
+            sessions.insert(id, removed_session);
+            turns.extend(removed_turns);
+            persist_sessions(&self.path, &sessions)?;
+            persist_turns(&self.turns_path, &turns)?;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    pub fn export(&self, id: uuid::Uuid) -> Result<RuntimeSessionExport> {
+        let session = self.get(id)?.context("Runtime Session not found")?;
+        let core = self
+            .core
+            .load(id)
+            .with_context(|| format!("load Core Session {id}"))?;
+        let turns = self.list_turns(id)?;
+        Ok(RuntimeSessionExport {
+            schema: SESSION_EXPORT_SCHEMA,
+            app_version: willdeep_core::VERSION.to_owned(),
+            exported_at: now(),
+            session,
+            core: ExportedCoreSession {
+                id: core.id,
+                title: core.title,
+                workspace: core.workspace,
+                profile: core.profile,
+                created_at: core.created_at,
+                updated_at: core.updated_at,
+                messages: core.messages,
+            },
+            turns,
+        })
+    }
+
+    pub fn search(&self, query: String) -> Result<Vec<RuntimeSessionSearchResult>> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            bail!("Session search query must not be empty");
+        }
+        if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+            bail!("Session search query is too long");
+        }
+        let mut results = Vec::new();
+        for session in self.list()? {
+            let Ok(core) = self.core.load(session.id) else {
+                continue;
+            };
+            let title_matches = core.title.to_lowercase().contains(&query);
+            let matching_message = core
+                .messages
+                .iter()
+                .find(|message| message.content.to_lowercase().contains(&query));
+            if !title_matches && matching_message.is_none() {
+                continue;
+            }
+            results.push(RuntimeSessionSearchResult {
+                id: session.id,
+                title: core.title,
+                workspace: session.workspace,
+                status: session.status,
+                updated_at: session.updated_at.max(core.updated_at),
+                message_count: core.messages.len(),
+                snippet: matching_message.map(|message| bounded_snippet(&message.content)),
+            });
+            if results.len() >= MAX_SEARCH_RESULTS {
+                break;
+            }
+        }
+        results.sort_by_key(|result| std::cmp::Reverse(result.updated_at));
+        Ok(results)
+    }
+
+    fn ensure_manageable(&self, id: uuid::Uuid) -> Result<()> {
+        let sessions = self.lock()?;
+        let session = sessions.get(&id).context("Runtime Session not found")?;
+        if session.active_turn_id.is_some()
+            || matches!(
+                session.status,
+                RuntimeSessionStatus::Queued
+                    | RuntimeSessionStatus::Running
+                    | RuntimeSessionStatus::WaitingApproval
+                    | RuntimeSessionStatus::WaitingAnswer
+            )
+        {
+            bail!("Runtime Session is active");
+        }
+        let turns = self.turns_lock()?;
+        if turns.values().any(|turn| {
+            turn.metadata.session_id == id && turn.metadata.status == RuntimeTurnStatus::Queued
+        }) {
+            bail!("Runtime Session has queued Turns");
+        }
+        Ok(())
+    }
+
+    fn set_archived(&self, id: uuid::Uuid, archived: bool) -> Result<RuntimeSession> {
+        let mut sessions = self.lock()?;
+        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
+        if archived && session.status == RuntimeSessionStatus::Archived {
+            return Ok(session.clone());
+        }
+        if !archived && session.status != RuntimeSessionStatus::Archived {
+            bail!("Runtime Session is not archived");
+        }
+        session.status = if archived {
+            RuntimeSessionStatus::Archived
+        } else {
+            RuntimeSessionStatus::Idle
+        };
+        session.updated_at = now();
+        session.last_error = None;
+        let result = session.clone();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(result)
     }
 
     pub fn enqueue_turn(
@@ -545,6 +809,37 @@ impl RuntimeSessionStore {
     }
 }
 
+fn normalized_title(title: String) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        bail!("Session title must not be empty");
+    }
+    if title.chars().count() > MAX_SESSION_TITLE_CHARS {
+        bail!("Session title must not exceed {MAX_SESSION_TITLE_CHARS} characters");
+    }
+    Ok(title)
+}
+
+fn default_fork_title(source: &str) -> String {
+    const SUFFIX: &str = " (fork)";
+    let prefix_limit = MAX_SESSION_TITLE_CHARS.saturating_sub(SUFFIX.chars().count());
+    let mut title = source.chars().take(prefix_limit).collect::<String>();
+    title.push_str(SUFFIX);
+    title
+}
+
+fn bounded_snippet(content: &str) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut snippet = compact
+        .chars()
+        .take(MAX_SEARCH_SNIPPET_CHARS)
+        .collect::<String>();
+    if compact.chars().count() > MAX_SEARCH_SNIPPET_CHARS {
+        snippet.push('…');
+    }
+    snippet
+}
+
 pub(super) async fn sessions_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -603,6 +898,129 @@ pub(super) async fn session_handler(
         .map(Json)
         .map(IntoResponse::into_response)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+pub(super) async fn search_sessions_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionSearchQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let results = state.sessions.search(query.q).map_err(|error| {
+        eprintln!("search Runtime Sessions: {error:#}");
+        StatusCode::BAD_REQUEST
+    })?;
+    Ok(Json(results).into_response())
+}
+
+pub(super) async fn rename_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<RenameRuntimeSession>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let session = state.sessions.rename(id, request.title).map_err(|error| {
+        eprintln!("rename Runtime Session: {error:#}");
+        StatusCode::BAD_REQUEST
+    })?;
+    state
+        .events
+        .append("session.renamed", format!("session_id={id}"))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(session).into_response())
+}
+
+pub(super) async fn fork_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<ForkRuntimeSession>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let session = state.sessions.fork(id, request.title).map_err(|error| {
+        eprintln!("fork Runtime Session: {error:#}");
+        StatusCode::BAD_REQUEST
+    })?;
+    state
+        .events
+        .append(
+            "session.forked",
+            format!(
+                "source_session_id={id} session_id={} agent_id={}",
+                session.id, session.root_agent_id
+            ),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(session)).into_response())
+}
+
+pub(super) async fn archive_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let session = state.sessions.archive(id).map_err(|error| {
+        eprintln!("archive Runtime Session: {error:#}");
+        StatusCode::BAD_REQUEST
+    })?;
+    state
+        .events
+        .append("session.archived", format!("session_id={id}"))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(session).into_response())
+}
+
+pub(super) async fn unarchive_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let session = state.sessions.unarchive(id).map_err(|error| {
+        eprintln!("unarchive Runtime Session: {error:#}");
+        StatusCode::BAD_REQUEST
+    })?;
+    state
+        .events
+        .append("session.unarchived", format!("session_id={id}"))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(session).into_response())
+}
+
+pub(super) async fn export_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let export = state.sessions.export(id).map_err(|error| {
+        eprintln!("export Runtime Session: {error:#}");
+        StatusCode::NOT_FOUND
+    })?;
+    Ok(Json(export).into_response())
+}
+
+pub(super) async fn delete_session_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<DeleteRuntimeSession>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    state
+        .sessions
+        .delete(id, request.confirmation)
+        .map_err(|error| {
+            eprintln!("delete Runtime Session: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
+    state
+        .events
+        .append("session.deleted", format!("session_id={id}"))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub(super) async fn create_turn_handler(
@@ -782,6 +1200,145 @@ pub(super) async fn show_session_cli(home: &Path, id: uuid::Uuid) -> Result<()> 
     Ok(())
 }
 
+pub(super) async fn search_sessions_cli(home: &Path, query: Vec<String>) -> Result<()> {
+    let query = query.join(" ");
+    if query.trim().is_empty() {
+        bail!("Session search query must not be empty");
+    }
+    let state = ensure_running(home).await?;
+    let response = client()
+        .get(format!("http://{}/v1/sessions/search", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&[("q", query)])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session search: {}",
+            response.text().await?
+        );
+    }
+    let results: Vec<RuntimeSessionSearchResult> = response.json().await?;
+    for result in results {
+        println!(
+            "{}\t{:?}\tmessages={}\t{}\t{}\t{}",
+            result.id,
+            result.status,
+            result.message_count,
+            result.title,
+            result.workspace.display(),
+            result.snippet.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn rename_session_cli(
+    home: &Path,
+    id: uuid::Uuid,
+    title: Vec<String>,
+) -> Result<()> {
+    let title = title.join(" ");
+    let session: RuntimeSession =
+        post_session_action(home, id, "rename", Some(&RenameRuntimeSession { title })).await?;
+    print_session(&session);
+    Ok(())
+}
+
+pub(super) async fn fork_session_cli(
+    home: &Path,
+    id: uuid::Uuid,
+    title: Option<String>,
+) -> Result<()> {
+    let session: RuntimeSession =
+        post_session_action(home, id, "fork", Some(&ForkRuntimeSession { title })).await?;
+    print_session(&session);
+    Ok(())
+}
+
+pub(super) async fn archive_session_cli(
+    home: &Path,
+    id: uuid::Uuid,
+    unarchive: bool,
+) -> Result<()> {
+    let action = if unarchive { "unarchive" } else { "archive" };
+    let session: RuntimeSession =
+        post_session_action::<(), RuntimeSession>(home, id, action, None).await?;
+    print_session(&session);
+    Ok(())
+}
+
+pub(super) async fn export_session_cli(
+    home: &Path,
+    id: uuid::Uuid,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let export: RuntimeSessionExport =
+        authorized_get(&state, &format!("/v1/sessions/{id}/export")).await?;
+    let data = serde_json::to_vec_pretty(&export)?;
+    if let Some(output) = output {
+        if let Some(parent) = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&output, data)?;
+        println!("{}", output.display());
+    } else {
+        println!("{}", String::from_utf8(data)?);
+    }
+    Ok(())
+}
+
+pub(super) async fn delete_session_cli(home: &Path, id: uuid::Uuid, yes: bool) -> Result<()> {
+    if !yes {
+        bail!("Session deletion is permanent; repeat with --yes for Session {id}");
+    }
+    let state = ensure_running(home).await?;
+    let response = client()
+        .delete(format!("http://{}/v1/sessions/{id}", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&DeleteRuntimeSession { confirmation: id })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session deletion: {}",
+            response.text().await?
+        );
+    }
+    println!("deleted\t{id}");
+    Ok(())
+}
+
+async fn post_session_action<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
+    home: &Path,
+    id: uuid::Uuid,
+    action: &str,
+    body: Option<&T>,
+) -> Result<R> {
+    let state = ensure_running(home).await?;
+    let request = client()
+        .post(format!(
+            "http://{}/v1/sessions/{id}/{action}",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token);
+    let response = match body {
+        Some(body) => request.json(body).send().await?,
+        None => request.send().await?,
+    };
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session {action}: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
 pub(super) async fn submit_turn_cli(
     home: &Path,
     session_id: uuid::Uuid,
@@ -925,6 +1482,113 @@ fn persist_turns(path: &Path, turns: &HashMap<uuid::Uuid, StoredRuntimeTurn>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manages_session_snapshot_lifecycle_without_exporting_private_queue_data() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-session-management-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: Some("mock".to_owned()),
+                config: Some(root.join("config.toml")),
+                title: Some("Original title".to_owned()),
+            })
+            .unwrap();
+        let core_store = willdeep_core::SessionStore::new(&root);
+        let mut core = core_store.load(session.id).unwrap();
+        core.messages
+            .push(willdeep_core::Message::user("needle in durable history"));
+        core.attention_read.insert("job-private".to_owned());
+        core.runtime_event_cursor = 42;
+        core_store.save(&mut core).unwrap();
+
+        store
+            .rename(session.id, "  Renamed   session  ".to_owned())
+            .unwrap();
+        assert_eq!(
+            core_store.load(session.id).unwrap().title,
+            "Renamed session"
+        );
+        let title_results = store.search("renamed".to_owned()).unwrap();
+        assert_eq!(title_results.len(), 1);
+        assert_eq!(title_results[0].id, session.id);
+        let message_results = store.search("needle".to_owned()).unwrap();
+        assert_eq!(message_results.len(), 1);
+        assert!(
+            message_results[0]
+                .snippet
+                .as_deref()
+                .unwrap()
+                .contains("needle")
+        );
+
+        let (queued, _) = store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "private queued prompt".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(store.archive(session.id).is_err());
+        assert!(store.fork(session.id, None).is_err());
+        assert!(store.delete(session.id, session.id).is_err());
+        store.request_cancel(queued.id).unwrap();
+
+        assert_eq!(
+            store.archive(session.id).unwrap().status,
+            RuntimeSessionStatus::Archived
+        );
+        assert!(
+            store
+                .enqueue_turn(
+                    session.id,
+                    CreateRuntimeTurn {
+                        request_id: uuid::Uuid::new_v4(),
+                        prompt: "blocked while archived".to_owned(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.unarchive(session.id).unwrap().status,
+            RuntimeSessionStatus::Idle
+        );
+
+        let fork = store
+            .fork(session.id, Some("Forked snapshot".to_owned()))
+            .unwrap();
+        assert_ne!(fork.id, session.id);
+        assert_ne!(fork.root_agent_id, session.root_agent_id);
+        assert!(store.list_turns(fork.id).unwrap().is_empty());
+        let fork_core = core_store.load(fork.id).unwrap();
+        assert_eq!(fork_core.title, "Forked snapshot");
+        assert_eq!(fork_core.messages.len(), core.messages.len());
+        assert_eq!(fork_core.messages[0].content, core.messages[0].content);
+        assert!(fork_core.attention_read.is_empty());
+        assert_eq!(fork_core.runtime_event_cursor, 0);
+
+        let export = store.export(session.id).unwrap();
+        let export_json = serde_json::to_string(&export).unwrap();
+        assert!(export_json.contains("needle in durable history"));
+        assert!(!export_json.contains("private queued prompt"));
+        assert!(!export_json.contains("job-private"));
+        assert!(store.delete(fork.id, session.id).is_err());
+        store.delete(fork.id, fork.id).unwrap();
+        assert!(store.get(fork.id).unwrap().is_none());
+        assert!(core_store.load(fork.id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn creates_matching_core_session_and_recovers_active_state() {

@@ -2,7 +2,7 @@
 
 > 状态：实施中
 > 首个目标版本：v0.17.0
-> 最后更新：2026-08-10
+> 最后更新：2026-08-10（v0.17.0-rc6 会话管理）
 
 ## 1. 目标
 
@@ -63,7 +63,14 @@ Runtime Session（长期存在）
 ```text
 POST /v1/sessions
 GET  /v1/sessions
+GET  /v1/sessions/search?q={query}
 GET  /v1/sessions/{session_id}
+POST /v1/sessions/{session_id}/rename
+POST /v1/sessions/{session_id}/fork
+POST /v1/sessions/{session_id}/archive
+POST /v1/sessions/{session_id}/unarchive
+GET  /v1/sessions/{session_id}/export
+DELETE /v1/sessions/{session_id}
 POST /v1/sessions/{session_id}/turns
 GET  /v1/sessions/{session_id}/turns
 GET  /v1/turns/{turn_id}
@@ -72,6 +79,17 @@ POST /v1/turns/{turn_id}/retry
 ```
 
 创建 Turn 必须提供客户端生成的 `request_id`。同一 Session 内重复提交相同 `request_id` 返回原 Turn，不再次运行模型或工具。
+
+### 3.1 会话管理语义
+
+- 标题和消息正文仍以 Core `SessionStore` 为唯一来源；Runtime 元数据不得复制标题或消息。
+- Rename 只更新 Core 标题，并同步推进 Runtime `updated_at`；标题去除首尾空白后必须为 1–200 个字符。
+- Fork 创建新的 Session ID 与 Root Agent ID，复制当前 Core 消息、Workspace、Profile 和配置引用，但不复制 Turn、Task、Interaction、事件游标和 Inbox 已读状态。
+- Archive 禁止新 Turn，但不删除历史；Unarchive 恢复为 Idle。活跃或仍有 Queued Turn 的 Session 不允许归档。
+- Delete 永久删除 Runtime Session、所属 Turn 元数据和本地 Core Session 文件；API 请求体必须携带与路径一致的 Session ID 确认。活跃或仍有 Queued Turn 的 Session 不允许删除。
+- Export 返回带 schema/version 的 JSON 快照，包含 Runtime 元数据、Core 消息和 Turn 审计元数据；不得包含已排队的私密 Prompt、附件副本、Runtime Token 或 Provider 凭据。
+- Search 在本地受 Token 控制面执行，只匹配标题和已持久化 Core 消息；查询、结果数量和摘要长度必须有上限。
+- Rename、Fork、Archive 与 Delete 在读取或改写 Core 快照前必须确认 Session 没有活跃 Turn，也没有 Queued Turn，防止与 Harness 写入竞争。
 
 ## 4. 串行与并发规则
 
@@ -124,7 +142,9 @@ turn.retry_queued
 3. [x] TUI `/runtime` 改为 Session Turn，并支持多轮与现有 Core Session 幂等收养。
 4. [x] 普通 TUI Prompt 默认走 Runtime，保留 `/local <任务>` 显式单轮本地兼容模式。
 5. [ ] Web、移动端和 Swift App 接入同一协议。
-6. [ ] Runtime 内原生持有 Harness，移除每 Turn 启动独立 CLI 进程的过渡实现。
+6. [x] Runtime 内原生持有 Harness，移除每 Turn 启动独立 CLI 进程的过渡实现。
+7. [x] 完成 Rename、完整快照 Fork、Archive、Delete、Export、Search 的 Runtime API、CLI 与 TUI/Web 客户端入口。
+8. [ ] 扩展到指定 Turn Fork、TUI 原地切换、模型/Provider 切换和组合搜索。
 
 ## 9. 验收条件
 

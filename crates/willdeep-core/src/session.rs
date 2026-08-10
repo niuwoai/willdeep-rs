@@ -125,6 +125,14 @@ impl SessionStore {
         std::fs::rename(&temporary, self.path(session.id))?;
         Ok(())
     }
+    pub fn delete(&self, id: Uuid) -> Result<bool, SessionError> {
+        let path = self.path(id);
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(path)?;
+        Ok(true)
+    }
     fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
@@ -270,6 +278,9 @@ mod tests {
                 .attention_read
                 .contains("job_123")
         );
+        assert!(store.delete(session.id).unwrap());
+        assert!(!store.delete(session.id).unwrap());
+        assert!(store.load(session.id).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
