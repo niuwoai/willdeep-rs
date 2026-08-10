@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc12`，支持：
+当前版本为 `0.21.0-rc13`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -316,7 +316,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc12` 已覆盖全部 11 类公开对象 DTO。Tool Activity 按 Session、Turn、Task 与 Agent 持久归属；Workspace Change Artifact 由真实 Diff Attribution 生成，通过 `artifact.list/get` 暴露稳定来源快照和变更数量，具体路径与内容仍须通过受授权的精确 Diff API 获取。Session 收养的私有配置路径由 Runtime 从 Core Session 恢复。本机客户端优先使用 Unix Socket 或 Windows Named Pipe。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc13` 已覆盖全部 11 类公开对象 DTO。Tool Activity 和 Workspace Change Artifact 已被 TUI 与 Web 直接消费；Web 通过受启动 Workspace 白名单约束的 Activity API 每两秒刷新工具、运行项、产物和最近状态。具体变化路径与内容仍须通过受授权的精确 Diff API 获取。本机客户端优先使用 Unix Socket 或 Windows Named Pipe。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

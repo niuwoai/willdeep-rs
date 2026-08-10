@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc13] - 2026-08-11
+
+### Added
+
+- Web 新增 `/api/runtime/activity`，仅允许查询启动时白名单中的 Workspace，并返回统一 Runtime Tool/Artifact DTO。
+- React 侧栏每两秒刷新工具总数、运行数、产物数和最近工具状态，新增完整中英日文案。
+
+### Security
+
+- Web Activity 的 Workspace 选择通过 Runtime 注册表与 Web 启动白名单双重校验；浏览器不能借查询参数枚举其他本机 Workspace。
+
 ## [0.21.0-rc12] - 2026-08-11
 
 ### Added

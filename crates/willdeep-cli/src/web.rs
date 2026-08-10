@@ -113,6 +113,17 @@ struct WorkspaceSummary {
 }
 
 #[derive(Deserialize)]
+struct RuntimeActivityQuery {
+    workspace: String,
+}
+
+#[derive(Serialize)]
+struct RuntimeActivitySummary {
+    tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
+    artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
+}
+
+#[derive(Deserialize)]
 struct ComposerQuery {
     workspace: Option<String>,
 }
@@ -157,6 +168,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces))
+        .route("/api/runtime/activity", get(runtime_activity))
         .route("/api/composer", get(composer))
         .route("/", get(index))
         .route("/{*path}", get(asset))
@@ -245,6 +257,20 @@ async fn workspaces(
         })
         .collect();
     Ok(Json(values))
+}
+
+async fn runtime_activity(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RuntimeActivityQuery>,
+) -> Result<Json<RuntimeActivitySummary>, WebError> {
+    let workspace = select_workspace(&state, Some(&query.workspace)).await?;
+    let snapshot = crate::daemon::runtime_snapshot(&state.home, &workspace.root)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(Json(RuntimeActivitySummary {
+        tools: snapshot.tools,
+        artifacts: snapshot.artifacts,
+    }))
 }
 
 async fn sessions(

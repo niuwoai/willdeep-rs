@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc12
+> 当前实施版本：v0.21.0-rc13
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc13（已完成）：Web 新增受 Runtime 注册表与启动 Workspace 白名单双重约束的 Activity API，React 侧栏每两秒直接消费 Tool/Artifact DTO，展示工具总数、运行数、产物数和最近工具状态；新增文案全部覆盖中英日。下一步继续 Rust Client 类型化便捷方法、Web 详情交互，以及 Swift/移动端兼容验证。
 
 v0.21.0-rc12（已完成）：新增稳定 Artifact DTO 与 `artifact.list/get`。工具窗口内经内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session/Turn/Task/Agent、来源快照和变更项数量；公开元数据不泄露 Workspace、文件名或内容，具体读取继续走 Workspace 授权与精确快照保护的 Diff API。11 类 Runtime 公共对象 DTO 至此全部完成。TUI Runtime 快照和右栏已直接消费 Tool/Artifact 查询，显示工作区工具、运行项、产物与最近状态。下一步迁移 Web 展示，并继续 Rust Client 类型化便捷方法。
 
