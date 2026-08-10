@@ -33,6 +33,7 @@ mod herdr;
 mod session_store;
 pub(crate) mod tui_bridge;
 mod workspace_store;
+mod worktree_maintenance;
 mod worktree_review;
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
@@ -226,6 +227,16 @@ pub enum DaemonAction {
         id: uuid::Uuid,
         #[arg(long)]
         review: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Audit managed, missing, reviewable, merged and unknown child Worktrees.
+    WorktreesAudit,
+    /// Move an exact clean or merged Worktree into recoverable quarantine.
+    QuarantineAgentWorktree {
+        id: uuid::Uuid,
+        #[arg(long)]
+        snapshot: String,
         #[arg(long)]
         yes: bool,
     },
@@ -646,6 +657,10 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::AgentWorktreeReview { id } => worktree_review::review_cli(&home, id).await,
         DaemonAction::MergeAgentWorktree { id, review, yes } => {
             worktree_review::merge_cli(&home, id, review, yes).await
+        }
+        DaemonAction::WorktreesAudit => worktree_maintenance::audit_cli(&home).await,
+        DaemonAction::QuarantineAgentWorktree { id, snapshot, yes } => {
+            worktree_maintenance::quarantine_cli(&home, id, snapshot, yes).await
         }
         DaemonAction::CreateSession {
             workspace,
@@ -1473,6 +1488,14 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/agents/{id}/worktree-merge",
             post(worktree_review::merge_handler),
+        )
+        .route(
+            "/v1/worktrees/audit",
+            get(worktree_maintenance::audit_handler),
+        )
+        .route(
+            "/v1/agents/{id}/worktree-quarantine",
+            post(worktree_maintenance::quarantine_handler),
         )
         .route(
             "/v1/workspaces",

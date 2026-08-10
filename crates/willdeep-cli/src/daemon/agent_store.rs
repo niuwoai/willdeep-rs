@@ -30,6 +30,14 @@ pub(crate) struct RuntimeAgent {
     pub worktree_branch: Option<String>,
     #[serde(default)]
     pub dedicated_worktree: bool,
+    #[serde(default)]
+    pub worktree_merged_review_id: Option<String>,
+    #[serde(default)]
+    pub worktree_merged_child_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub worktree_merged_at: Option<u64>,
+    #[serde(default)]
+    pub worktree_quarantined_at: Option<u64>,
     pub profile: Option<String>,
     pub status: RuntimeAgentStatus,
     pub current_turn: u64,
@@ -106,6 +114,10 @@ impl AgentStore {
             root_workspace: None,
             worktree_branch: None,
             dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
             profile,
             status,
             current_turn: 0,
@@ -142,6 +154,10 @@ impl AgentStore {
             agent.root_workspace = None;
             agent.worktree_branch = None;
             agent.dedicated_worktree = false;
+            agent.worktree_merged_review_id = None;
+            agent.worktree_merged_child_snapshot_id = None;
+            agent.worktree_merged_at = None;
+            agent.worktree_quarantined_at = None;
             agent.profile = profile;
             agent.status = status;
             agent.current_turn = 0;
@@ -171,6 +187,10 @@ impl AgentStore {
             root_workspace: None,
             worktree_branch: None,
             dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
             profile,
             status,
             current_turn: 0,
@@ -223,6 +243,30 @@ impl AgentStore {
                 agent.current_tool = None;
             }
         })
+    }
+
+    pub fn mark_worktree_merged(
+        &self,
+        id: uuid::Uuid,
+        review_id: String,
+        child_snapshot_id: String,
+    ) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime agent not found")?;
+        agent.worktree_merged_review_id = Some(review_id);
+        agent.worktree_merged_child_snapshot_id = Some(child_snapshot_id);
+        agent.worktree_merged_at = Some(now());
+        agent.updated_at = now();
+        persist_agents(&self.path, &agents)
+    }
+
+    pub fn mark_worktree_quarantined(&self, id: uuid::Uuid, path: PathBuf) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime agent not found")?;
+        agent.workspace = path;
+        agent.worktree_quarantined_at = Some(now());
+        agent.updated_at = now();
+        persist_agents(&self.path, &agents)
     }
 
     pub fn apply_harness_event(&self, task_id: uuid::Uuid, line: &str) -> Result<()> {
@@ -321,6 +365,10 @@ impl AgentStore {
                 .get("dedicated_worktree")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
+            agent.worktree_merged_review_id = None;
+            agent.worktree_merged_child_snapshot_id = None;
+            agent.worktree_merged_at = None;
+            agent.worktree_quarantined_at = None;
             agent.status = RuntimeAgentStatus::Running;
             agent.current_turn = 0;
             agent.current_tool = None;
@@ -369,6 +417,10 @@ impl AgentStore {
                     .get("dedicated_worktree")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
+                worktree_merged_review_id: None,
+                worktree_merged_child_snapshot_id: None,
+                worktree_merged_at: None,
+                worktree_quarantined_at: None,
                 profile: value
                     .get("profile")
                     .and_then(|value| value.as_str())

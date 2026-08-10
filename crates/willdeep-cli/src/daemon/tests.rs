@@ -170,13 +170,13 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn authorization_requires_exact_local_token() {
+#[tokio::test]
+async fn authorization_requires_exact_local_token() {
     let root = std::env::temp_dir().join(format!("willdeep-daemon-auth-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
-    let state = ServerState {
+    let state = Arc::new(ServerState {
         home: root.clone(),
         token: "expected".to_owned(),
         started_at: 0,
@@ -208,7 +208,7 @@ fn authorization_requires_exact_local_token() {
             workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
         ),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
-    };
+    });
     assert_eq!(
         authorize(&state, &HeaderMap::new()),
         Err(StatusCode::UNAUTHORIZED)
@@ -216,6 +216,22 @@ fn authorization_requires_exact_local_token() {
     let mut headers = HeaderMap::new();
     headers.insert(TOKEN_HEADER, HeaderValue::from_static("expected"));
     assert_eq!(authorize(&state, &headers), Ok(()));
+    assert_eq!(
+        worktree_review::review_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            AxumPath(uuid::Uuid::new_v4()),
+        )
+        .await
+        .unwrap_err(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        worktree_maintenance::audit_handler(State(state), HeaderMap::new())
+            .await
+            .unwrap_err(),
+        StatusCode::UNAUTHORIZED
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

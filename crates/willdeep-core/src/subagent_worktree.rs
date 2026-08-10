@@ -206,6 +206,74 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
+    #[tokio::test]
+    async fn two_dedicated_worktrees_isolate_parallel_edits_from_each_other_and_root() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-parallel-worktrees-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let repository = root.join("repository");
+        std::fs::create_dir_all(&repository).expect("repository");
+        git(&repository, &["init"]);
+        std::fs::write(repository.join("tracked.txt"), "root\n").expect("tracked file");
+        git(&repository, &["add", "tracked.txt"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=WillDeep Test",
+                "-c",
+                "user.email=willdeep@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let manager = SubagentWorktreeManager::new(root.join("managed"));
+        let first = manager
+            .prepare(
+                &repository,
+                uuid::Uuid::new_v4(),
+                SubagentWorktreePolicy::Dedicated,
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .prepare(
+                &repository,
+                uuid::Uuid::new_v4(),
+                SubagentWorktreePolicy::Dedicated,
+            )
+            .await
+            .unwrap();
+        std::fs::write(first.workspace.join("tracked.txt"), "first\n").unwrap();
+        std::fs::write(second.workspace.join("tracked.txt"), "second\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repository.join("tracked.txt")).unwrap(),
+            "root\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.workspace.join("tracked.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("tracked.txt")).unwrap(),
+            "second\n"
+        );
+        for prepared in [first, second] {
+            git(
+                &repository,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    prepared.workspace.to_str().unwrap(),
+                ],
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn git(repository: &Path, args: &[&str]) {
         let output = StdCommand::new("git")
             .args(args)

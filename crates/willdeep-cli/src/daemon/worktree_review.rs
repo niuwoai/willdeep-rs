@@ -127,8 +127,10 @@ fn print_review(review: &WorktreeReview) {
 
 pub(crate) async fn review_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Json<WorktreeReview>, StatusCode> {
+    authorize(&state, &headers)?;
     let agent = state
         .tasks
         .agents
@@ -140,9 +142,11 @@ pub(crate) async fn review_handler(
 
 pub(crate) async fn merge_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
     Json(request): Json<WorktreeMergeRequest>,
 ) -> Result<Json<WorktreeMergeResult>, StatusCode> {
+    authorize(&state, &headers)?;
     let _guard = MERGE_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
@@ -169,6 +173,11 @@ pub(crate) async fn merge_handler(
     }
     let patch = tracked_patch(&current.worktree).map_err(review_error_status)?;
     apply_patch(&current.root_workspace, &patch).map_err(review_error_status)?;
+    state
+        .tasks
+        .agents
+        .mark_worktree_merged(id, current.id.clone(), current.child_snapshot_id.clone())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let updated = diff_review::snapshot(&current.root_workspace)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = state.events.append(
@@ -258,7 +267,7 @@ fn review(agent: &RuntimeAgent) -> Result<WorktreeReview> {
     })
 }
 
-fn tracked_patch(worktree: &Path) -> Result<Vec<u8>> {
+pub(super) fn tracked_patch(worktree: &Path) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args(["diff", "--binary", "--full-index", "HEAD", "--"])
         .current_dir(worktree)
@@ -426,6 +435,10 @@ mod tests {
                 root_workspace: Some(self.repository.clone()),
                 worktree_branch: Some("willdeep/agent-test".to_owned()),
                 dedicated_worktree: true,
+                worktree_merged_review_id: None,
+                worktree_merged_child_snapshot_id: None,
+                worktree_merged_at: None,
+                worktree_quarantined_at: None,
                 profile: Some("editor".to_owned()),
                 status: RuntimeAgentStatus::Completed,
                 current_turn: 1,

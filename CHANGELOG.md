@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.20.0-rc6] - 2026-08-11
+
+### Added
+
+- 新增受 Token 保护的 Worktree 审计 API/CLI `worktrees-audit`，区分 Active、Reviewable、Merged、Clean、Quarantined、Missing 和无 Agent 记录的 Unknown 状态。
+- 新增 `quarantine-agent-worktree --snapshot <ID> --yes`：把符合条件的完整 Git Worktree 移入 Runtime Recovery，并持久记录新路径和隔离时间。
+
+### Changed
+
+- 保守清理不调用 `git worktree remove`、不删除文件或分支，改用 `git worktree move` 保留完整目录与 Git 关联；状态持久化失败时尝试移回原路径。
+
+### Security
+
+- Worktree Review、合并、审计与隔离 Handler 均显式校验 Runtime Token；隔离还要求终态 Agent、WillDeep 托管直系目录、精确 Child 快照、显式 `--yes`，且仅允许干净或已精确合并且无冲突/未跟踪内容的 Worktree。
+
 ## [0.20.0-rc5] - 2026-08-11
 
 ### Added
