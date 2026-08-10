@@ -736,7 +736,7 @@ impl EventSink for TerminalSink {
                 background,
                 ..
             } => eprintln!("[subagent] started id={id} profile={profile} background={background}"),
-            AgentEvent::SubagentCompleted { id, status } => {
+            AgentEvent::SubagentCompleted { id, status, .. } => {
                 eprintln!("[subagent] finished id={id} status={status:?}")
             }
             AgentEvent::SubagentTurnStarted { id, turn } => {
@@ -816,7 +816,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "token_budget": token_budget,
             "timeout_seconds": timeout_seconds
         }),
-        AgentEvent::SubagentCompleted { id, status } => serde_json::json!({
+        AgentEvent::SubagentCompleted { id, status, report } => serde_json::json!({
             "type": "subagent_completed",
             "id": id,
             "status": match status {
@@ -824,7 +824,8 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
                 SubagentLifecycleStatus::Blocked => "blocked",
                 SubagentLifecycleStatus::Cancelled => "cancelled",
                 SubagentLifecycleStatus::Failed => "failed",
-            }
+            },
+            "report": report
         }),
         AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
             "type": "subagent_turn_started",

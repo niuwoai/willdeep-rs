@@ -38,10 +38,10 @@ use event_stream::EventLog;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
-    remote_session_states, rename_remote_session, resolve_remote_approval, retry_remote_agent,
-    runtime_event_head, runtime_events, runtime_snapshot, search_remote_sessions,
-    set_remote_session_archived, start_runtime_event_follower, stop_remote_agent, stop_remote_turn,
-    submit_runtime_turn,
+    instruct_remote_agent, remote_session_states, rename_remote_session, resolve_remote_approval,
+    retry_remote_agent, runtime_event_head, runtime_events, runtime_snapshot,
+    search_remote_sessions, set_remote_session_archived, start_runtime_event_follower,
+    stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
 
 struct RuntimeEventSink {
@@ -194,6 +194,12 @@ pub enum DaemonAction {
     StopAgent { id: uuid::Uuid },
     /// Retry a terminal background child Agent.
     RetryAgent { id: uuid::Uuid },
+    /// Add instructions to a running background child Agent.
+    InstructAgent {
+        id: uuid::Uuid,
+        #[arg(value_name = "INSTRUCTION", num_args = 1.., trailing_var_arg = true)]
+        instruction: Vec<String>,
+    },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
     /// List approvals and questions currently blocking Runtime tasks.
@@ -487,6 +493,9 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::RetryAgent { id } => {
             agent_control::control_agent(&home, id, agent_control::AgentCommandKind::Retry).await
         }
+        DaemonAction::InstructAgent { id, instruction } => {
+            agent_control::instruct_agent(&home, id, instruction.join(" ")).await
+        }
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -631,6 +640,21 @@ async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     let agent: agent_store::RuntimeAgent =
         authorized_get(&state, &format!("/v1/agents/{id}")).await?;
     print_agent(&agent);
+    println!(
+        "policy\tmax_turns={}\ttoken_budget={}\ttimeout_seconds={}",
+        agent
+            .max_turns
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .token_budget
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .timeout_seconds
+            .map_or_else(|| "-".to_owned(), |value| value.to_string())
+    );
+    if let Some(report) = &agent.report {
+        println!("report\n{report}");
+    }
     Ok(())
 }
 
@@ -690,7 +714,7 @@ fn print_task(task: &RuntimeTask) {
 
 fn print_agent(agent: &agent_store::RuntimeAgent) {
     println!(
-        "{}\t{:?}\ttask={}\tparent={}\tprofile={}\tlabel={}\tmode={}\tturn={}\ttool={}\ttokens={}\t{}",
+        "{}\t{:?}\ttask={}\tparent={}\tprofile={}\tlabel={}\tmode={}\tturn={}/{}\ttool={}\ttokens={}/{}\ttimeout={}\t{}",
         agent.id,
         agent.status,
         agent.task_id,
@@ -705,10 +729,19 @@ fn print_agent(agent: &agent_store::RuntimeAgent) {
             "foreground"
         },
         agent.current_turn,
+        agent
+            .max_turns
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
         agent.current_tool.as_deref().unwrap_or("-"),
         agent
             .total_tokens
             .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string()),
+        agent
+            .token_budget
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .timeout_seconds
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
         agent.workspace.display()
     );
 }
@@ -1137,6 +1170,10 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/agents/{id}/retry",
             post(agent_control::retry_agent_handler),
+        )
+        .route(
+            "/v1/agents/{id}/instructions",
+            post(agent_control::instruct_agent_handler),
         )
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route(

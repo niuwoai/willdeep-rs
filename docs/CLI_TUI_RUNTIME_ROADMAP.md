@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.18.0-rc2
+> 当前实施版本：v0.18.0-rc3
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,7 +223,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.18.0-rc2（进行中）：Agent Mission Control 首批加入 Profile Token 总预算、执行超时、连续失败熔断，以及 Runtime/TUI 策略快照展示。下一步继续补齐独立 Agent 详情、补充指令和父 Harness 结果回流审计。
+v0.18.0-rc3（已完成）：Agent Mission Control 第二批加入有界结果报告持久化、CLI/TUI 独立 Agent 详情、运行中追加指令，以及补充指令正文投递后清除的脱敏审计。下一步进入 Diff Review Center 与多 Workspace 安全操作。
+
+v0.18.0-rc2（已完成）：Agent Mission Control 首批加入 Profile Token 总预算、执行超时、连续失败熔断，以及 Runtime/TUI 策略快照展示。
 
 v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架构边界文档、`integrations herdr status` 诊断命令，以及 Runtime Task → Herdr Pane 的去重、非阻塞聚合状态上报。Herdr 未安装或上报失败不影响 Harness。
 
@@ -234,7 +236,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
 4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
 5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
-6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
+6. [x] 实现 Agent Mission Control、预算限制、失败熔断、独立详情、补充指令和结果回流。
 7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
 8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
 9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。

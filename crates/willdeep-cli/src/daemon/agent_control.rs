@@ -5,6 +5,7 @@ use super::*;
 pub(crate) enum AgentCommandKind {
     Stop,
     Retry,
+    Instruct,
 }
 
 pub(super) async fn control_agent(
@@ -16,6 +17,7 @@ pub(super) async fn control_agent(
     let action = match kind {
         AgentCommandKind::Stop => "stop",
         AgentCommandKind::Retry => "retry",
+        AgentCommandKind::Instruct => "instruct",
     };
     let response = client()
         .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
@@ -36,12 +38,48 @@ pub(super) async fn control_agent(
     Ok(())
 }
 
+pub(super) async fn instruct_agent(home: &Path, id: uuid::Uuid, message: String) -> Result<()> {
+    let message = message.trim();
+    if message.is_empty() || message.len() > 16 * 1024 {
+        bail!("Agent instruction must contain 1 to 16384 bytes");
+    }
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/agents/{id}/instructions",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&AgentInstructionRequest {
+            message: message.to_owned(),
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Agent instruction: {}",
+            response.text().await?
+        );
+    }
+    let command: AgentCommand = response.json().await?;
+    println!(
+        "agent_command\tid={}\tagent={}\taction=instruct\tstatus={:?}",
+        command.id, command.agent_id, command.status
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct AgentInstructionRequest {
+    pub message: String,
+}
+
 pub(super) async fn stop_agent_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop).await
+    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop, None).await
 }
 
 pub(super) async fn retry_agent_handler(
@@ -49,7 +87,26 @@ pub(super) async fn retry_agent_handler(
     headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry).await
+    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry, None).await
+}
+
+pub(super) async fn instruct_agent_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<AgentInstructionRequest>,
+) -> Result<Response, StatusCode> {
+    if request.message.trim().is_empty() || request.message.len() > 16 * 1024 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    enqueue_agent_command(
+        &state,
+        &headers,
+        id,
+        AgentCommandKind::Instruct,
+        Some(request.message.trim().to_owned()),
+    )
+    .await
 }
 
 async fn enqueue_agent_command(
@@ -57,6 +114,7 @@ async fn enqueue_agent_command(
     headers: &HeaderMap,
     id: uuid::Uuid,
     kind: AgentCommandKind,
+    message: Option<String>,
 ) -> Result<Response, StatusCode> {
     authorize(state, headers)?;
     let agent = state
@@ -90,13 +148,14 @@ async fn enqueue_agent_command(
                 | RuntimeAgentStatus::Cancelled
                 | RuntimeAgentStatus::Interrupted
         ),
+        AgentCommandKind::Instruct => agent.status == RuntimeAgentStatus::Running,
     };
     if !valid_status {
         return Err(StatusCode::CONFLICT);
     }
     let command = state
         .agent_commands
-        .enqueue(agent.task_id, agent.id, kind)
+        .enqueue(agent.task_id, agent.id, kind, message)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .events
@@ -170,6 +229,8 @@ pub(crate) struct AgentCommand {
     pub created_at: u64,
     pub resolved_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -253,6 +314,14 @@ fn apply_command(
         AgentCommandKind::Retry if background.retry_agent(command.agent_id).is_some() => {
             (true, None)
         }
+        AgentCommandKind::Instruct
+            if command
+                .message
+                .clone()
+                .is_some_and(|message| background.instruct_agent(command.agent_id, message)) =>
+        {
+            (true, None)
+        }
         AgentCommandKind::Stop => (
             false,
             Some("Agent is not an active background task in this Harness".to_owned()),
@@ -260,6 +329,10 @@ fn apply_command(
         AgentCommandKind::Retry => (
             false,
             Some("Agent has no retriable terminal background task in this Harness".to_owned()),
+        ),
+        AgentCommandKind::Instruct => (
+            false,
+            Some("Agent is not running or cannot accept instructions".to_owned()),
         ),
     }
 }
@@ -278,6 +351,7 @@ impl AgentCommandStore {
                 command.status = AgentCommandStatus::Rejected;
                 command.resolved_at = Some(now());
                 command.error = Some("Runtime restarted before command was applied".to_owned());
+                command.message = None;
                 changed = true;
             }
         }
@@ -295,12 +369,14 @@ impl AgentCommandStore {
         task_id: uuid::Uuid,
         agent_id: uuid::Uuid,
         kind: AgentCommandKind,
+        message: Option<String>,
     ) -> Result<AgentCommand> {
         let mut commands = self.lock()?;
         if let Some(existing) = commands.values().find(|command| {
             command.task_id == task_id
                 && command.agent_id == agent_id
                 && command.kind == kind
+                && command.message == message
                 && command.status == AgentCommandStatus::Pending
         }) {
             return Ok(existing.clone());
@@ -314,6 +390,7 @@ impl AgentCommandStore {
             created_at: now(),
             resolved_at: None,
             error: None,
+            message,
         };
         commands.insert(command.id, command.clone());
         persist_commands(&self.path, &commands)?;
@@ -356,6 +433,7 @@ impl AgentCommandStore {
         };
         command.resolved_at = Some(now());
         command.error = resolution.error;
+        command.message = None;
         let command = command.clone();
         persist_commands(&self.path, &commands)?;
         Ok(Some(command))
@@ -399,10 +477,10 @@ mod tests {
         let task_id = uuid::Uuid::new_v4();
         let agent_id = uuid::Uuid::new_v4();
         let first = store
-            .enqueue(task_id, agent_id, AgentCommandKind::Stop)
+            .enqueue(task_id, agent_id, AgentCommandKind::Stop, None)
             .unwrap();
         let duplicate = store
-            .enqueue(task_id, agent_id, AgentCommandKind::Stop)
+            .enqueue(task_id, agent_id, AgentCommandKind::Stop, None)
             .unwrap();
         assert_eq!(first.id, duplicate.id);
         assert_eq!(
@@ -426,6 +504,29 @@ mod tests {
 
         let reopened = AgentCommandStore::open(path).unwrap();
         assert!(reopened.pending_for_task(task_id).unwrap().is_empty());
+
+        let store = AgentCommandStore::open(root.join("instruction-commands.json")).unwrap();
+        let instruction = store
+            .enqueue(
+                task_id,
+                agent_id,
+                AgentCommandKind::Instruct,
+                Some("inspect tests too".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(instruction.message.as_deref(), Some("inspect tests too"));
+        let resolved = store
+            .resolve(
+                task_id,
+                instruction.id,
+                ResolveAgentCommand {
+                    applied: true,
+                    error: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(resolved.message.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

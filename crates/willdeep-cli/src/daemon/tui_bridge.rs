@@ -44,6 +44,7 @@ pub(crate) struct RemoteAgent {
     pub max_turns: Option<u64>,
     pub token_budget: Option<u64>,
     pub timeout_seconds: Option<u64>,
+    pub report: Option<String>,
 }
 
 #[derive(Clone)]
@@ -572,6 +573,14 @@ pub(crate) async fn retry_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()
     control_remote_agent(home, id, "retry").await
 }
 
+pub(crate) async fn instruct_remote_agent(
+    home: &Path,
+    id: uuid::Uuid,
+    message: String,
+) -> Result<()> {
+    super::agent_control::instruct_agent(home, id, message).await
+}
+
 async fn control_remote_agent(home: &Path, id: uuid::Uuid, action: &str) -> Result<()> {
     let state = ensure_running(home).await?;
     let response = client()
@@ -624,6 +633,7 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
         max_turns: agent.max_turns,
         token_budget: agent.token_budget,
         timeout_seconds: agent.timeout_seconds,
+        report: agent.report,
     }
 }
 

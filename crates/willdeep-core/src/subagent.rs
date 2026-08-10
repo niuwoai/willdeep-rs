@@ -7,7 +7,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, EventSink, SubagentLifecycleStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInstructionInbox, EventSink,
+    SubagentLifecycleStatus,
 };
 use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
@@ -184,15 +185,19 @@ impl SubagentCatalog {
             let runner_sink = self.sink.clone();
             let failures = self.failures.clone();
             let lifecycle_sink = self.sink.clone();
+            let lifecycle_background = self.background.clone();
             let lifecycle_profile = profile_id.clone();
             let lifecycle_label = label.clone();
             let lifecycle_max_turns = profile.max_turns;
             let lifecycle_token_budget = profile.token_budget;
             let lifecycle_timeout_seconds = profile.timeout_seconds;
+            let instruction_inbox = Arc::new(AgentInstructionInbox::default());
+            let runner_instruction_inbox = instruction_inbox.clone();
             let id = self.background.start_retriable_with_lifecycle(
                 agent_id,
                 BackgroundTaskKind::Subagent,
                 format!("{label} · {profile_id}"),
+                instruction_inbox,
                 move || {
                     let workspace = workspace.clone();
                     let profile = profile.clone();
@@ -201,6 +206,7 @@ impl SubagentCatalog {
                     let approved_target = approved_target.clone();
                     let sink = runner_sink.clone();
                     let failures = failures.clone();
+                    let instruction_inbox = runner_instruction_inbox.clone();
                     async move {
                         let result = run_profile(
                             workspace,
@@ -209,6 +215,7 @@ impl SubagentCatalog {
                             approved_target,
                             sink.clone(),
                             agent_id,
+                            Some(instruction_inbox),
                         )
                         .await;
                         record_profile_result(&failures, &profile_id, &result);
@@ -217,6 +224,7 @@ impl SubagentCatalog {
                 },
                 move |snapshot| {
                     let sink = lifecycle_sink.clone();
+                    let background = lifecycle_background.clone();
                     let profile = lifecycle_profile.clone();
                     let label = lifecycle_label.clone();
                     async move {
@@ -235,6 +243,7 @@ impl SubagentCatalog {
                             sink.emit(AgentEvent::SubagentCompleted {
                                 id: agent_id,
                                 status: background_lifecycle_status(&snapshot.status),
+                                report: background.output(&snapshot.id, 200),
                             })
                             .await;
                         }
@@ -263,6 +272,7 @@ impl SubagentCatalog {
                 approved_target,
                 self.sink.clone(),
                 agent_id,
+                None,
             )
             .await;
             record_profile_result(&self.failures, &profile_id, &result);
@@ -270,6 +280,12 @@ impl SubagentCatalog {
                 .emit(AgentEvent::SubagentCompleted {
                     id: agent_id,
                     status: subagent_lifecycle_status(&result),
+                    report: result
+                        .as_ref()
+                        .ok()
+                        .cloned()
+                        .or_else(|| result.as_ref().err().map(ToString::to_string))
+                        .map(bounded_report),
                 })
                 .await;
             result
@@ -324,6 +340,7 @@ async fn run_profile(
     approved_target: Option<PathBuf>,
     lifecycle_sink: Arc<dyn EventSink>,
     agent_id: uuid::Uuid,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 ) -> Result<String, AgentError> {
     let approval = if approved_target.is_some() {
         ApprovalMode::WorkspaceAccess
@@ -339,7 +356,7 @@ async fn run_profile(
         profile.capability_prompt
     );
     let timeout_seconds = profile.timeout_seconds;
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         profile.provider,
         tools,
         AgentConfig {
@@ -353,6 +370,9 @@ async fn run_profile(
         id: agent_id,
         parent: lifecycle_sink,
     }));
+    if let Some(inbox) = instruction_inbox {
+        agent = agent.with_instruction_inbox(inbox);
+    }
     let run = Box::pin(agent.run(prompt));
     let outcome = if let Some(seconds) = timeout_seconds {
         tokio::time::timeout(Duration::from_secs(seconds), run)
@@ -380,6 +400,18 @@ fn record_profile_result(
         let count = failures.entry(profile.to_owned()).or_default();
         *count = count.saturating_add(1);
     }
+}
+
+fn bounded_report(value: String) -> String {
+    const MAX_REPORT_BYTES: usize = 64 * 1024;
+    if value.len() <= MAX_REPORT_BYTES {
+        return value;
+    }
+    let mut boundary = MAX_REPORT_BYTES;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}\n[report truncated]", &value[..boundary])
 }
 
 pub fn builtin_profiles(
@@ -566,7 +598,7 @@ mod tests {
             _ => None,
         });
         let completed = events.iter().find_map(|event| match event {
-            AgentEvent::SubagentCompleted { id, status } => Some((*id, *status)),
+            AgentEvent::SubagentCompleted { id, status, .. } => Some((*id, *status)),
             _ => None,
         });
         assert_eq!(

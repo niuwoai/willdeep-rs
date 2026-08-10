@@ -37,6 +37,8 @@ pub(crate) struct RuntimeAgent {
     pub token_budget: Option<u64>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub report: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,
@@ -105,6 +107,7 @@ impl AgentStore {
             max_turns: None,
             token_budget: None,
             timeout_seconds: None,
+            report: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -137,6 +140,7 @@ impl AgentStore {
             agent.max_turns = None;
             agent.token_budget = None;
             agent.timeout_seconds = None;
+            agent.report = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -162,6 +166,7 @@ impl AgentStore {
             max_turns: None,
             token_budget: None,
             timeout_seconds: None,
+            report: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -302,6 +307,7 @@ impl AgentStore {
             agent.timeout_seconds = value
                 .get("timeout_seconds")
                 .and_then(|value| value.as_u64());
+            agent.report = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -343,6 +349,7 @@ impl AgentStore {
                 timeout_seconds: value
                     .get("timeout_seconds")
                     .and_then(|value| value.as_u64()),
+                report: None,
                 created_at: timestamp,
                 updated_at: timestamp,
                 completed_at: None,
@@ -371,6 +378,10 @@ impl AgentStore {
         };
         agent.updated_at = now();
         agent.completed_at = Some(now());
+        agent.report = value
+            .get("report")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
         persist_agents(&self.path, &agents)
     }
 

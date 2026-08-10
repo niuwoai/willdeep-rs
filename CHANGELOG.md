@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.18.0-rc3] - 2026-08-10
+
+### Added
+
+- 子 Agent 完成事件携带最多 64 KiB 的成功报告或失败原因，Runtime Agent Store 持久化结果；CLI 单 Agent 详情和 TUI Enter 详情层可查看状态、策略、实时用量与报告。
+- 新增 `willdeep daemon instruct-agent <AGENT_ID> <INSTRUCTION>`、受 Token 保护的 `POST /v1/agents/{id}/instructions`，以及 TUI `/agent instruct <AGENT_ID> <INSTRUCTION>`。
+- Core 新增子 Agent 指令收件箱，在下一次模型请求前注入父级补充指令；补充指令与模型结束发生竞态时继续下一轮，不丢指令。
+
+### Changed
+
+- CLI Agent 列表显示当前/最大轮次、已用/预算 Token 与执行时限；单 Agent 查询额外打印策略和最终报告。
+
+### Security
+
+- 追加指令限制为 1–16384 字节且只允许发送给当前 Harness 内运行中的后台子 Agent；命令应用、拒绝或 Runtime 重启后立即清除正文，事件审计不记录正文。
+- Agent 报告采用 UTF-8 边界安全截断，并只通过本地受 Token Runtime API 暴露。
+
 ## [0.18.0-rc2] - 2026-08-10
 
 ### Added

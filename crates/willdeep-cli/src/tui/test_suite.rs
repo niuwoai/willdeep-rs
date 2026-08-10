@@ -337,6 +337,7 @@ mod tests {
                 max_turns: None,
                 token_budget: None,
                 timeout_seconds: None,
+                report: None,
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -352,6 +353,7 @@ mod tests {
                 max_turns: Some(8),
                 token_budget: Some(32_000),
                 timeout_seconds: Some(300),
+                report: Some("found src/main.rs".to_owned()),
             });
         let backend = ratatui::backend::TestBackend::new(80, 32);
         let mut terminal = Terminal::new(backend).unwrap();

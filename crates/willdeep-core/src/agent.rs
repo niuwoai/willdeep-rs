@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -13,6 +14,32 @@ pub struct AgentConfig {
     pub system_prompt: String,
     pub context_window: u64,
     pub token_budget: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct AgentInstructionInbox {
+    pending: Mutex<VecDeque<String>>,
+}
+
+impl AgentInstructionInbox {
+    pub fn push(&self, instruction: String) -> bool {
+        let instruction = instruction.trim();
+        if instruction.is_empty() || instruction.len() > 16 * 1024 {
+            return false;
+        }
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.push_back(instruction.to_owned());
+        true
+    }
+
+    fn drain(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .map(|mut pending| pending.drain(..).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +73,7 @@ pub enum AgentEvent {
     SubagentCompleted {
         id: uuid::Uuid,
         status: SubagentLifecycleStatus,
+        report: Option<String>,
     },
     SubagentTurnStarted {
         id: uuid::Uuid,
@@ -116,6 +144,7 @@ pub struct Agent {
     sink: Arc<dyn EventSink>,
     image_fallback: Option<(Arc<dyn Provider>, String)>,
     subagents: Option<Arc<SubagentCatalog>>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 }
 
 impl Agent {
@@ -127,6 +156,7 @@ impl Agent {
             sink: Arc::new(NoopSink),
             image_fallback: None,
             subagents: None,
+            instruction_inbox: None,
         }
     }
 
@@ -146,6 +176,11 @@ impl Agent {
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.sink = sink;
+        self
+    }
+
+    pub fn with_instruction_inbox(mut self, inbox: Arc<AgentInstructionInbox>) -> Self {
+        self.instruction_inbox = Some(inbox);
         self
     }
 
@@ -192,6 +227,7 @@ impl Agent {
         let mut compressed: Option<(usize, String)> = None;
         let mut used_tokens = 0_u64;
         for turn in 1..=self.config.max_turns {
+            self.append_pending_instructions(&mut messages);
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
             let completion = self
@@ -226,6 +262,9 @@ impl Agent {
                     return Err(AgentError::EmptyResponse);
                 }
                 messages.push(Message::assistant(&content, Vec::new()));
+                if self.append_pending_instructions(&mut messages) {
+                    continue;
+                }
                 return Ok(AgentOutcome {
                     final_text: content,
                     turns: turn,
@@ -253,6 +292,22 @@ impl Agent {
             }
         }
         Err(AgentError::MaxTurns(self.config.max_turns))
+    }
+
+    fn append_pending_instructions(&self, messages: &mut Vec<Message>) -> bool {
+        let instructions = self
+            .instruction_inbox
+            .as_ref()
+            .map(|inbox| inbox.drain())
+            .unwrap_or_default();
+        if instructions.is_empty() {
+            return false;
+        }
+        messages.push(Message::user(format!(
+            "Additional instructions from the parent Agent:\n\n{}",
+            instructions.join("\n\n")
+        )));
+        true
     }
 
     fn execute_tool<'a>(
@@ -415,6 +470,41 @@ mod tests {
 
     struct UsageProvider;
 
+    struct InstructionProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        inbox: Arc<AgentInstructionInbox>,
+    }
+
+    #[async_trait]
+    impl Provider for InstructionProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                assert!(self.inbox.push("also inspect tests".to_owned()));
+            } else {
+                assert!(messages.iter().any(|message| {
+                    message.content.contains("also inspect tests")
+                        && message.role == crate::types::Role::User
+                }));
+            }
+            Ok(Completion {
+                content: if call == 0 {
+                    "first answer"
+                } else {
+                    "revised answer"
+                }
+                .to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+            })
+        }
+    }
+
     #[async_trait]
     impl Provider for UsageProvider {
         async fn complete(
@@ -497,6 +587,31 @@ mod tests {
                 used: 1_100
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn parent_instruction_prevents_early_finish_and_continues_next_turn() {
+        let inbox = Arc::new(AgentInstructionInbox::default());
+        let provider = Arc::new(InstructionProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            inbox: inbox.clone(),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            registry("instructions"),
+            AgentConfig {
+                max_turns: 3,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_instruction_inbox(inbox);
+
+        let outcome = agent.run("inspect source").await.expect("continued run");
+        assert_eq!(outcome.final_text, "revised answer");
+        assert_eq!(outcome.turns, 2);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -11,7 +11,8 @@ pub mod tools;
 pub mod types;
 
 pub use agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentOutcome, EventSink, SubagentLifecycleStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInstructionInbox, AgentOutcome, EventSink,
+    SubagentLifecycleStatus,
 };
 pub use attention::{
     AttentionItem, AttentionSection, AttentionSource, RuntimeScopeKind, RuntimeStatus,

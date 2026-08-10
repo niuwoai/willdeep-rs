@@ -7,6 +7,8 @@ use std::time::Instant;
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
+use crate::agent::AgentInstructionInbox;
+
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 type TaskFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
@@ -59,11 +61,22 @@ struct TaskRecord {
     cancel: watch::Sender<bool>,
     retry: Option<TaskLauncher>,
     lifecycle: Option<TaskLifecycleHook>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 }
 
 struct RegistryState {
     tasks: Vec<TaskRecord>,
     pending: VecDeque<BackgroundTaskEvent>,
+}
+
+struct LaunchSpec {
+    agent_id: Option<uuid::Uuid>,
+    kind: BackgroundTaskKind,
+    label: String,
+    future: TaskFuture,
+    retry: Option<TaskLauncher>,
+    lifecycle: Option<TaskLifecycleHook>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 }
 
 #[derive(Clone)]
@@ -153,7 +166,7 @@ impl BackgroundTaskRegistry {
     }
 
     pub fn retry(&self, id: &str) -> Option<String> {
-        let (agent_id, kind, label, launcher, lifecycle) = {
+        let (agent_id, kind, label, launcher, lifecycle, instruction_inbox) = {
             let state = self.inner.lock().expect("background registry");
             let task = state.tasks.iter().find(|task| task.snapshot.id == id)?;
             if task.snapshot.status == BackgroundTaskStatus::Running {
@@ -165,10 +178,19 @@ impl BackgroundTaskRegistry {
                 task.snapshot.label.clone(),
                 task.retry.clone()?,
                 task.lifecycle.clone(),
+                task.instruction_inbox.clone(),
             )
         };
         let future = launcher();
-        Some(self.launch(agent_id, kind, label, future, Some(launcher), lifecycle))
+        Some(self.launch(LaunchSpec {
+            agent_id,
+            kind,
+            label,
+            future,
+            retry: Some(launcher),
+            lifecycle,
+            instruction_inbox,
+        }))
     }
 
     pub fn retry_agent(&self, agent_id: uuid::Uuid) -> Option<String> {
@@ -186,6 +208,21 @@ impl BackgroundTaskRegistry {
         self.retry(&id)
     }
 
+    pub fn instruct_agent(&self, agent_id: uuid::Uuid, instruction: String) -> bool {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| {
+                task.snapshot.agent_id == Some(agent_id)
+                    && task.snapshot.status == BackgroundTaskStatus::Running
+            })
+            .and_then(|task| task.instruction_inbox.as_ref())
+            .is_some_and(|inbox| inbox.push(instruction))
+    }
+
     /// Internal lifecycle entry. Callers must complete their own approval
     /// before registering work; no command-launch API is publicly exported.
     pub(crate) fn start_retriable<F, Fut>(
@@ -200,7 +237,15 @@ impl BackgroundTaskRegistry {
     {
         let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
         let future = launcher();
-        self.launch(None, kind, label, future, Some(launcher), None)
+        self.launch(LaunchSpec {
+            agent_id: None,
+            kind,
+            label,
+            future,
+            retry: Some(launcher),
+            lifecycle: None,
+            instruction_inbox: None,
+        })
     }
 
     pub(crate) fn start_retriable_with_lifecycle<F, Fut, H, HFut>(
@@ -208,6 +253,7 @@ impl BackgroundTaskRegistry {
         agent_id: uuid::Uuid,
         kind: BackgroundTaskKind,
         label: String,
+        instruction_inbox: Arc<AgentInstructionInbox>,
         launcher: F,
         lifecycle: H,
     ) -> String
@@ -220,25 +266,27 @@ impl BackgroundTaskRegistry {
         let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
         let lifecycle: TaskLifecycleHook = Arc::new(move |snapshot| Box::pin(lifecycle(snapshot)));
         let future = launcher();
-        self.launch(
-            Some(agent_id),
+        self.launch(LaunchSpec {
+            agent_id: Some(agent_id),
             kind,
             label,
             future,
-            Some(launcher),
-            Some(lifecycle),
-        )
+            retry: Some(launcher),
+            lifecycle: Some(lifecycle),
+            instruction_inbox: Some(instruction_inbox),
+        })
     }
 
-    fn launch(
-        &self,
-        agent_id: Option<uuid::Uuid>,
-        kind: BackgroundTaskKind,
-        label: String,
-        future: TaskFuture,
-        retry: Option<TaskLauncher>,
-        lifecycle: Option<TaskLifecycleHook>,
-    ) -> String {
+    fn launch(&self, spec: LaunchSpec) -> String {
+        let LaunchSpec {
+            agent_id,
+            kind,
+            label,
+            future,
+            retry,
+            lifecycle,
+            instruction_inbox,
+        } = spec;
         let prefix = if kind == BackgroundTaskKind::Shell {
             "job"
         } else {
@@ -270,6 +318,7 @@ impl BackgroundTaskRegistry {
                 cancel,
                 retry,
                 lifecycle: lifecycle.clone(),
+                instruction_inbox,
             });
         let registry = self.clone();
         let task_id = id.clone();
@@ -453,6 +502,7 @@ mod tests {
             cancelled_agent_id,
             BackgroundTaskKind::Subagent,
             "cancelled agent".to_owned(),
+            Arc::new(AgentInstructionInbox::default()),
             || async { std::future::pending::<TaskResult>().await },
             move |snapshot| {
                 let tx = lifecycle_tx.clone();
@@ -481,6 +531,7 @@ mod tests {
             retried_agent_id,
             BackgroundTaskKind::Subagent,
             "retried agent".to_owned(),
+            Arc::new(AgentInstructionInbox::default()),
             move || {
                 let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
                 async move {

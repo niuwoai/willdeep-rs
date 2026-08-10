@@ -35,12 +35,14 @@ use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
+mod agent_commands;
 mod command_catalog;
 mod dispatch;
 mod runtime_ui;
 mod session_commands;
 mod sidebar;
 mod workspace_attention;
+use agent_commands::handle_agent_command;
 use command_catalog::command_candidates;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
 use runtime_ui::open_remote_gate;
@@ -131,6 +133,7 @@ struct App {
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_agent_selected: usize,
+    agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
@@ -462,6 +465,7 @@ async fn event_loop(
                         let _=sender.send(decision);continue;
                     }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
+                    if app.agent_detail.is_some(){if key.code==KeyCode::Esc{app.agent_detail=None;}continue;}
                     if app.attention_detail.is_some(){if key.code==KeyCode::Esc{app.attention_detail=None;}continue;}
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
@@ -516,6 +520,8 @@ async fn event_loop(
                             KeyCode::Enter=>{
                                 if let Some(gate)=app.selected_remote_gate(){
                                     open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                                }else if app.sidebar_selected==2 {
+                                    app.agent_detail=app.selected_runtime_agent();
                                 }else{app.sidebar_activate(&runtime.background_tasks);}
                             },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
@@ -572,6 +578,11 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            match handle_agent_command(&prompt,&mut app,runtime).await {
+                                Ok(true)=>continue,
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("Agent 操作失败","Agent action failed","Agent 操作に失敗しました")));continue;},
+                            }
                             match handle_session_command(&prompt,&mut app,session,store,runtime).await {
                                 Ok(true)=>continue,
                                 Ok(false)=>{},
@@ -609,7 +620,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
                 UiMessage::Agent(AgentEvent::SubagentStarted{id,profile,background,..})=>app.record_progress(format!("{} {} · {profile} · {}",language.text("子 Agent 已启动","Subagent started","サブエージェント開始"),id.to_string().get(..8).unwrap_or("agent"),if background{language.text("后台","background","バックグラウンド")}else{language.text("前台","foreground","フォアグラウンド")})),
-                UiMessage::Agent(AgentEvent::SubagentCompleted{id,status})=>app.record_progress(format!("{} {} · {status:?}",language.text("子 Agent 已结束","Subagent finished","サブエージェント完了"),id.to_string().get(..8).unwrap_or("agent"))),
+                UiMessage::Agent(AgentEvent::SubagentCompleted{id,status,..})=>app.record_progress(format!("{} {} · {status:?}",language.text("子 Agent 已结束","Subagent finished","サブエージェント完了"),id.to_string().get(..8).unwrap_or("agent"))),
                 UiMessage::Agent(AgentEvent::SubagentTurnStarted{id,turn})=>app.record_progress(format!("{} {} · {} {turn}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("轮次","turn","ターン"))),
                 UiMessage::Agent(AgentEvent::SubagentToolRequested{id,name})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("正在使用","using","使用中"))),
                 UiMessage::Agent(AgentEvent::SubagentToolCompleted{id,name,is_error})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),if is_error{language.text("失败","failed","失敗")}else{language.text("已完成","finished","完了")})),
@@ -675,6 +686,7 @@ impl App {
             runtime_gates: Vec::new(),
             runtime_agents: Vec::new(),
             runtime_agent_selected: 0,
+            agent_detail: None,
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
@@ -1147,7 +1159,7 @@ impl App {
             PaletteAction::Command(command) => {
                 let suffix = if matches!(
                     command.as_str(),
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
+                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session" | "/agent"
                 ) {
                     " "
                 } else {
@@ -1251,7 +1263,7 @@ impl App {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
                 let suffix = if matches!(
                     command,
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
+                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session" | "/agent"
                 ) {
                     " "
                 } else {
@@ -1597,7 +1609,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -2340,6 +2352,51 @@ fn draw(
                             .border_style(Style::default().fg(Color::Yellow)),
                     )
                     .scroll((app.task_detail_scroll.min(u16::MAX as usize) as u16, 0))
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
+        }
+        if let Some(agent) = &app.agent_detail {
+            let content = format!(
+                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {:?}\n{}: {}/{}\n{}: {}/{}\n{}: {}s\n{}: {}\n\n{}",
+                app.language.text("Agent", "Agent", "エージェント"),
+                agent.id,
+                app.language.text("父级", "Parent", "親"),
+                agent.parent_id.map_or_else(|| "—".to_owned(), |id| id.to_string()),
+                app.language.text("Profile", "Profile", "プロファイル"),
+                agent.profile.as_deref().unwrap_or("—"),
+                app.language.text("标签", "Label", "ラベル"),
+                agent.label.as_deref().unwrap_or("—"),
+                app.language.text("状态", "Status", "状態"),
+                agent.status,
+                app.language.text("轮次", "Turns", "ターン"),
+                agent.current_turn,
+                agent.max_turns.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+                app.language.text("Token", "Tokens", "トークン"),
+                agent.total_tokens.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+                agent.token_budget.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+                app.language.text("时限", "Timeout", "タイムアウト"),
+                agent.timeout_seconds.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+                app.language.text("当前工具", "Current tool", "現在のツール"),
+                agent.current_tool.as_deref().unwrap_or("—"),
+                agent.report.as_deref().unwrap_or_else(|| app.language.text("尚无结果报告", "No result report yet", "結果レポートはまだありません"))
+            );
+            let popup = centered_rect(
+                f.area().width.min(92),
+                (visual_lines(&content, f.area().width.min(90) as usize) as u16 + 2)
+                    .min(f.area().height)
+                    .max(1),
+                f.area(),
+            );
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .title(app.language.text("Agent 详情 · Esc 关闭", "Agent details · Esc close", "Agent 詳細 · Esc で閉じる"))
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::LightCyan)),
+                    )
                     .wrap(Wrap { trim: false }),
                 popup,
             );
