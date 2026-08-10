@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.19.0-rc6
+> 最后更新：2026-08-10 | 当前版本：v0.19.0-rc7
 
 ## 项目简介
 
@@ -62,6 +62,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime Verification API、CLI `daemon diff-verifications` 与 TUI Diff Review 可查询绑定结果；普通 Shell 和疑似包含 API Key、Token、Secret、Password 的命令不会持久化；
 - Runtime Commit Preview API、CLI `daemon diff-commit-preview` 与 TUI Diff Review 的 `P` 面板共用精确快照；预览提交消息、分支、暂存/未暂存文件、脱敏 Remote、推送目标与可选 Tag，并在敏感文件/凭据、冲突、空暂存区、Detached HEAD 或无效目标时返回阻断原因；该阶段只预览，不执行 Commit、Tag 或 Push；
 - Runtime TUI 对话记录只保留用户输入与 AI 最终回复；轮次、Task/Agent ID、工具和排队状态保留在活动状态层，不污染聊天历史；
+- Runtime 在 `create_file`、`edit_file`、Shell、Worktree、Computer Use 和 MCP 等潜在写工具的调用窗口前后采集工作区内容指纹，持久记录 `Session → Turn → Task → Agent → Tool → Paths`；主 Agent 与子 Agent 使用各自身份，已有脏文件只有在窗口内真实变化时才归属；
+- Diff Attribution API、CLI `daemon diff-attributions` 和 TUI Diff Review 沿快照链显示文件最近责任 Agent 与工具；记录采用 Tool Window 置信度，共享工作区并发的强隔离由后续独立 Worktree 阶段完成；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 转发 Runtime 事件，真实停止 Turn，并可加载持久历史会话；浏览器断开不再杀死后台 Harness；

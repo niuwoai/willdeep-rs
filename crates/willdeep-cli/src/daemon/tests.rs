@@ -1,4 +1,5 @@
 use super::*;
+use willdeep_core::EventSink;
 
 fn test_agent_store(root: &Path) -> Arc<AgentStore> {
     Arc::new(AgentStore::open(root.join("agents.json")).unwrap())
@@ -12,6 +13,15 @@ fn test_runtime_session_store(root: &Path) -> Arc<session_store::RuntimeSessionS
 
 fn test_turn_scheduler() -> tokio::sync::mpsc::UnboundedSender<uuid::Uuid> {
     tokio::sync::mpsc::unbounded_channel().0
+}
+
+fn initialize_git_workspace(root: &Path) {
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[test]
@@ -29,6 +39,73 @@ fn state_round_trips_without_exposing_token_in_logs() {
     };
     write_state(&path, &state).unwrap();
     assert_eq!(load_state(&path).unwrap(), state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-runtime-attribution-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    initialize_git_workspace(&workspace);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v4();
+    let turn_id = uuid::Uuid::new_v4();
+    let root_agent_id = uuid::Uuid::new_v4();
+    let child_agent_id = uuid::Uuid::new_v4();
+    let sink = RuntimeEventSink {
+        task_id,
+        session_id: Some(session_id),
+        turn_id: Some(turn_id),
+        root_agent_id,
+        home: root.clone(),
+        workspace: workspace.clone(),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: test_agent_store(&root),
+        diff_baselines: AsyncMutex::new(HashMap::new()),
+    };
+
+    sink.emit(willdeep_core::AgentEvent::SubagentToolRequested {
+        id: child_agent_id,
+        name: "edit_file".to_owned(),
+    })
+    .await;
+    std::fs::write(workspace.join("child.txt"), "child change\n").unwrap();
+    sink.emit(willdeep_core::AgentEvent::SubagentToolCompleted {
+        id: child_agent_id,
+        name: "edit_file".to_owned(),
+        is_error: false,
+    })
+    .await;
+    let root_call = willdeep_core::ToolCall {
+        id: "root-write".to_owned(),
+        name: "create_file".to_owned(),
+        arguments: "{}".to_owned(),
+    };
+    sink.emit(willdeep_core::AgentEvent::ToolRequested(root_call.clone()))
+        .await;
+    std::fs::write(workspace.join("root.txt"), "root change\n").unwrap();
+    sink.emit(willdeep_core::AgentEvent::ToolCompleted {
+        call: root_call,
+        output: "created".to_owned(),
+        is_error: false,
+    })
+    .await;
+
+    let records: Vec<diff_review::DiffAttributionRecord> = serde_json::from_slice(
+        &std::fs::read(root.join("runtime/diff-attributions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].agent_id, child_agent_id);
+    assert_eq!(records[0].session_id, Some(session_id));
+    assert_eq!(records[0].turn_id, Some(turn_id));
+    assert_eq!(records[0].paths, vec!["child.txt"]);
+    assert_eq!(records[1].agent_id, root_agent_id);
+    assert_eq!(records[1].paths, vec!["root.txt"]);
     std::fs::remove_dir_all(root).unwrap();
 }
 

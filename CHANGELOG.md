@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.19.0-rc7] - 2026-08-10
+
+### Added
+
+- Runtime 在主 Agent 与子 Agent 的潜在写工具调用前后采集工作区内容指纹，持久绑定 Session、Turn、Task、Agent、Tool 和真实变化路径。
+- 新增受 Token 保护的 Diff Attribution API、CLI `daemon diff-attributions`，TUI Diff Review 显示每个文件最近的责任 Agent 与工具，并沿连续快照链保留多次工具变更。
+
+### Fixed
+
+- 归属计算只比较工具窗口前后发生变化的路径，不再把调用开始前已经存在且未变化的脏文件误算给当前 Agent。
+
+### Security
+
+- Diff Attribution 仅持久化内容指纹、结构化 ID、工具名和相对路径，不持久化文件正文、工具参数或凭据。
+
 ## [0.19.0-rc6] - 2026-08-10
 
 ### Added

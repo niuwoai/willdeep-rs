@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Component;
+use std::sync::OnceLock;
 
 use super::*;
 
 const MAX_DIFF_BYTES: usize = 512 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DiffFileKind {
     Added,
@@ -18,7 +19,7 @@ pub(crate) enum DiffFileKind {
     Untracked,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub(crate) struct DiffFile {
     pub path: String,
     pub old_path: Option<String>,
@@ -40,6 +41,43 @@ pub(crate) struct DiffSnapshot {
     pub deletions: u64,
     pub has_conflicts: bool,
 }
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AttributionConfidence {
+    ToolWindow,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct DiffAttributionRecord {
+    pub id: uuid::Uuid,
+    pub before_snapshot_id: String,
+    pub after_snapshot_id: String,
+    pub workspace: PathBuf,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub tool: String,
+    pub paths: Vec<String>,
+    pub confidence: AttributionConfidence,
+    pub created_at: u64,
+}
+
+pub(crate) struct DiffCapture {
+    snapshot: DiffSnapshot,
+    fingerprints: BTreeMap<String, u64>,
+}
+
+pub(crate) struct AttributionContext {
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub tool: String,
+}
+
+static ATTRIBUTION_STORE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, clap::ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -306,6 +344,16 @@ pub(super) async fn verifications_cli(
     Ok(())
 }
 
+pub(super) async fn attributions_cli(
+    home: &Path,
+    workspace: PathBuf,
+    snapshot_id: String,
+) -> Result<()> {
+    let records = remote_attributions(home, &workspace, &snapshot_id).await?;
+    println!("{}", serde_json::to_string_pretty(&records)?);
+    Ok(())
+}
+
 pub(super) async fn commit_preview_cli(
     home: &Path,
     workspace: PathBuf,
@@ -447,6 +495,33 @@ pub(crate) async fn remote_verifications(
     if !response.status().is_success() {
         bail!(
             "Runtime rejected Diff verifications: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn remote_attributions(
+    home: &Path,
+    workspace: &Path,
+    snapshot_id: &str,
+) -> Result<Vec<DiffAttributionRecord>> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .get(format!(
+            "http://{}/v1/diffs/{snapshot_id}/attributions",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&[("workspace", workspace.display().to_string())])
+        .send()
+        .await?;
+    if response.status() == StatusCode::CONFLICT {
+        bail!("Diff snapshot changed; reopen /diff before reading attribution");
+    }
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Diff attribution: {}",
             response.text().await?
         );
     }
@@ -706,6 +781,25 @@ pub(super) async fn verifications_handler(
     Ok(Json(records).into_response())
 }
 
+pub(super) async fn attributions_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &query.workspace).await?;
+    exact_snapshot(&workspace, &snapshot_id)?;
+    let _guard = attribution_store_lock().lock().await;
+    let records = attribution_lineage(
+        load_attributions(&attribution_store_path(&state.home))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        &workspace,
+        &snapshot_id,
+    );
+    Ok(Json(records).into_response())
+}
+
 pub(super) async fn verification_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -787,6 +881,50 @@ fn load_reviews(path: &Path) -> Result<Vec<DiffReviewRecord>> {
 
 fn verification_store_path(home: &Path) -> PathBuf {
     home.join("runtime/diff-verifications.json")
+}
+
+fn attribution_store_lock() -> &'static tokio::sync::Mutex<()> {
+    ATTRIBUTION_STORE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn attribution_store_path(home: &Path) -> PathBuf {
+    home.join("runtime/diff-attributions.json")
+}
+
+fn load_attributions(path: &Path) -> Result<Vec<DiffAttributionRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn attribution_lineage(
+    records: Vec<DiffAttributionRecord>,
+    workspace: &Path,
+    snapshot_id: &str,
+) -> Vec<DiffAttributionRecord> {
+    let mut frontier = BTreeSet::from([snapshot_id.to_owned()]);
+    let mut visited = BTreeSet::new();
+    let mut lineage = Vec::new();
+    loop {
+        let next = records
+            .iter()
+            .filter(|record| {
+                record.workspace == workspace
+                    && frontier.contains(&record.after_snapshot_id)
+                    && visited.insert(record.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if next.is_empty() {
+            break;
+        }
+        frontier.clear();
+        frontier.extend(next.iter().map(|record| record.before_snapshot_id.clone()));
+        lineage.extend(next);
+    }
+    lineage.reverse();
+    lineage
 }
 
 fn load_verifications(path: &Path) -> Result<Vec<DiffVerificationRecord>> {
@@ -1085,6 +1223,88 @@ pub(crate) fn snapshot(workspace: &Path) -> Result<DiffSnapshot> {
         deletions,
         has_conflicts,
     })
+}
+
+pub(crate) fn capture(workspace: &Path) -> Result<DiffCapture> {
+    let snapshot = snapshot(workspace)?;
+    let mut fingerprints = BTreeMap::new();
+    for file in &snapshot.files {
+        let mut hasher = DefaultHasher::new();
+        file.hash(&mut hasher);
+        git(
+            workspace,
+            &["diff", "--binary", "--no-ext-diff", "--", &file.path],
+        )?
+        .hash(&mut hasher);
+        git(
+            workspace,
+            &[
+                "diff",
+                "--cached",
+                "--binary",
+                "--no-ext-diff",
+                "--",
+                &file.path,
+            ],
+        )?
+        .hash(&mut hasher);
+        if file.kind == DiffFileKind::Untracked {
+            std::fs::read(workspace.join(&file.path))?.hash(&mut hasher);
+        }
+        fingerprints.insert(file.path.clone(), hasher.finish());
+    }
+    Ok(DiffCapture {
+        snapshot,
+        fingerprints,
+    })
+}
+
+pub(crate) async fn record_tool_attribution(
+    home: &Path,
+    before: DiffCapture,
+    workspace: &Path,
+    context: AttributionContext,
+) -> Result<Option<DiffAttributionRecord>> {
+    let after = capture(workspace)?;
+    if before.snapshot.id == after.snapshot.id {
+        return Ok(None);
+    }
+    let mut paths = before
+        .fingerprints
+        .keys()
+        .chain(after.fingerprints.keys())
+        .filter(|path| before.fingerprints.get(*path) != after.fingerprints.get(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let record = DiffAttributionRecord {
+        id: uuid::Uuid::new_v4(),
+        before_snapshot_id: before.snapshot.id,
+        after_snapshot_id: after.snapshot.id,
+        workspace: workspace.to_path_buf(),
+        session_id: context.session_id,
+        turn_id: context.turn_id,
+        task_id: context.task_id,
+        agent_id: context.agent_id,
+        tool: context.tool,
+        paths,
+        confidence: AttributionConfidence::ToolWindow,
+        created_at: now(),
+    };
+    let _guard = attribution_store_lock().lock().await;
+    let path = attribution_store_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut records = load_attributions(&path)?;
+    records.push(record.clone());
+    records.drain(..records.len().saturating_sub(1000));
+    write_json_atomic(&path, &records)?;
+    Ok(Some(record))
 }
 
 fn enrich_untracked(workspace: &Path, files: &mut BTreeMap<String, DiffFile>) {
@@ -1552,5 +1772,82 @@ mod tests {
         assert!(!valid_release_tag("1.2.3"));
         assert!(!valid_release_tag("v1.2"));
         assert!(!valid_release_tag("v1.2.3;push"));
+    }
+
+    #[tokio::test]
+    async fn tool_attribution_records_only_paths_changed_inside_the_tool_window() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-attribution-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "test@willdeep.invalid"],
+        );
+        run_git(&workspace, &["config", "user.name", "WillDeep Test"]);
+        std::fs::write(workspace.join("existing.txt"), "base\n").expect("base");
+        run_git(&workspace, &["add", "existing.txt"]);
+        run_git(&workspace, &["commit", "-m", "base"]);
+        std::fs::write(workspace.join("existing.txt"), "dirty before tool\n")
+            .expect("preexisting dirty change");
+        let before = capture(&workspace).expect("before capture");
+        std::fs::write(workspace.join("created-by-agent.txt"), "new\n")
+            .expect("agent-created file");
+        let session_id = uuid::Uuid::new_v4();
+        let turn_id = uuid::Uuid::new_v4();
+        let task_id = uuid::Uuid::new_v4();
+        let agent_id = uuid::Uuid::new_v4();
+
+        let record = record_tool_attribution(
+            &home,
+            before,
+            &workspace,
+            AttributionContext {
+                session_id: Some(session_id),
+                turn_id: Some(turn_id),
+                task_id,
+                agent_id,
+                tool: "create_file".to_owned(),
+            },
+        )
+        .await
+        .expect("record attribution")
+        .expect("changed workspace");
+
+        assert_eq!(record.paths, vec!["created-by-agent.txt"]);
+        assert_eq!(record.session_id, Some(session_id));
+        assert_eq!(record.turn_id, Some(turn_id));
+        assert_eq!(record.task_id, task_id);
+        assert_eq!(record.agent_id, agent_id);
+        assert_eq!(record.tool, "create_file");
+        let second_before = capture(&workspace).expect("second capture");
+        std::fs::write(workspace.join("second.txt"), "second\n").expect("second file");
+        let second = record_tool_attribution(
+            &home,
+            second_before,
+            &workspace,
+            AttributionContext {
+                session_id: Some(session_id),
+                turn_id: Some(turn_id),
+                task_id,
+                agent_id,
+                tool: "edit_file".to_owned(),
+            },
+        )
+        .await
+        .expect("second attribution")
+        .expect("second changed workspace");
+        let stored = load_attributions(&attribution_store_path(&home)).expect("load records");
+        assert_eq!(
+            attribution_lineage(stored, &workspace, &second.after_snapshot_id)
+                .iter()
+                .map(|record| record.paths.clone())
+                .collect::<Vec<_>>(),
+            vec![vec!["created-by-agent.txt"], vec!["second.txt"]]
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

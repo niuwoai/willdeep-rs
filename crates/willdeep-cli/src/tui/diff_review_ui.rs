@@ -13,6 +13,7 @@ pub(super) struct DiffReviewState {
     pub reviews: BTreeMap<String, crate::daemon::diff_review::ReviewDecision>,
     pub confirm_revert: bool,
     pub verifications: Vec<crate::daemon::diff_review::DiffVerificationRecord>,
+    pub attributions: Vec<crate::daemon::diff_review::DiffAttributionRecord>,
     pub commit_preview: Option<crate::daemon::diff_review::CommitPreview>,
     pub preview_draft: Option<CommitPreviewDraft>,
 }
@@ -242,15 +243,28 @@ pub(super) fn diff_snapshot_lines(review: &DiffReviewState) -> Vec<Line<'static>
                             }
                             crate::daemon::diff_review::ReviewDecision::Reviewed => " [reviewed]",
                         });
+                let attribution = review
+                    .attributions
+                    .iter()
+                    .rev()
+                    .find(|record| record.paths.iter().any(|path| path == &file.path))
+                    .map_or_else(String::new, |record| {
+                        format!(
+                            " [agent:{} · {}]",
+                            record.agent_id.to_string().get(..8).unwrap_or("agent"),
+                            record.tool
+                        )
+                    });
                 Line::styled(
                     format!(
-                        "{marker} {:?} [{stage}] +{} -{} {}{}{}",
+                        "{marker} {:?} [{stage}] +{} -{} {}{}{}{}",
                         file.kind,
                         file.additions,
                         file.deletions,
                         file.path,
                         if file.binary { " [binary]" } else { "" },
-                        decision
+                        decision,
+                        attribution
                     ),
                     style,
                 )

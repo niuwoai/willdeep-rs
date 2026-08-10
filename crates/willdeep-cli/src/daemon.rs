@@ -47,13 +47,92 @@ pub(crate) use tui_bridge::{
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,
+    session_id: Option<uuid::Uuid>,
+    turn_id: Option<uuid::Uuid>,
+    root_agent_id: uuid::Uuid,
+    home: PathBuf,
+    workspace: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    diff_baselines: AsyncMutex<HashMap<String, diff_review::DiffCapture>>,
+}
+
+impl RuntimeEventSink {
+    async fn observe_diff(&self, event: &willdeep_core::AgentEvent) {
+        use willdeep_core::AgentEvent;
+        let requested = match event {
+            AgentEvent::ToolRequested(call) => Some((
+                format!("root:{}", call.id),
+                self.root_agent_id,
+                call.name.clone(),
+            )),
+            AgentEvent::SubagentToolRequested { id, name } => {
+                Some((format!("child:{id}"), *id, name.clone()))
+            }
+            _ => None,
+        };
+        if let Some((key, _, tool)) = requested {
+            if !tool_may_modify_workspace(&tool) {
+                return;
+            }
+            if let Ok(capture) = diff_review::capture(&self.workspace) {
+                self.diff_baselines.lock().await.insert(key, capture);
+            }
+            return;
+        }
+        let completed = match event {
+            AgentEvent::ToolCompleted { call, .. } => Some((
+                format!("root:{}", call.id),
+                self.root_agent_id,
+                call.name.clone(),
+            )),
+            AgentEvent::SubagentToolCompleted { id, name, .. } => {
+                Some((format!("child:{id}"), *id, name.clone()))
+            }
+            _ => None,
+        };
+        let Some((key, agent_id, tool)) = completed else {
+            return;
+        };
+        if !tool_may_modify_workspace(&tool) {
+            return;
+        }
+        let Some(before) = self.diff_baselines.lock().await.remove(&key) else {
+            return;
+        };
+        if let Err(error) = diff_review::record_tool_attribution(
+            &self.home,
+            before,
+            &self.workspace,
+            diff_review::AttributionContext {
+                session_id: self.session_id,
+                turn_id: self.turn_id,
+                task_id: self.task_id,
+                agent_id,
+                tool,
+            },
+        )
+        .await
+        {
+            eprintln!(
+                "record Diff attribution for task {}: {error:#}",
+                self.task_id
+            );
+        }
+    }
+}
+
+fn tool_may_modify_workspace(name: &str) -> bool {
+    matches!(
+        name,
+        "create_file" | "edit_file" | "run_command" | "create_worktree" | "computer_use"
+    ) || name.starts_with("mcp__")
 }
 
 #[async_trait]
 impl willdeep_core::EventSink for RuntimeEventSink {
     async fn emit(&self, event: willdeep_core::AgentEvent) {
+        self.observe_diff(&event).await;
         let line = crate::agent_event_json(event).to_string();
         if self
             .agents
@@ -232,6 +311,13 @@ pub enum DaemonAction {
     },
     /// List test verifications bound to an exact Diff snapshot.
     DiffVerifications {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+    },
+    /// List Turn, Task, Agent, and Tool attribution for an exact Diff snapshot.
+    DiffAttributions {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
@@ -579,6 +665,10 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             workspace,
             snapshot,
         } => diff_review::verifications_cli(&home, workspace, snapshot).await,
+        DaemonAction::DiffAttributions {
+            workspace,
+            snapshot,
+        } => diff_review::attributions_cli(&home, workspace, snapshot).await,
         DaemonAction::DiffCommitPreview {
             workspace,
             snapshot,
@@ -1290,6 +1380,10 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/diffs/{id}/verifications",
             get(diff_review::verifications_handler).post(diff_review::verification_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/attributions",
+            get(diff_review::attributions_handler),
         )
         .route(
             "/v1/diffs/{id}/commit-preview",
@@ -2080,8 +2174,14 @@ impl TaskManager {
         };
         let sink: Arc<dyn willdeep_core::EventSink> = Arc::new(RuntimeEventSink {
             task_id: id,
+            session_id: task.session_id,
+            turn_id: task.turn_id,
+            root_agent_id: agent.id,
+            home: self.home.clone(),
+            workspace: request.workspace.clone(),
             events: self.events.clone(),
             agents: self.agents.clone(),
+            diff_baselines: AsyncMutex::new(HashMap::new()),
         });
         tokio::spawn(async move {
             let execution = crate::harness::execute_runtime(&home, request, connection, sink);

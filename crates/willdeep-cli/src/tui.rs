@@ -559,7 +559,7 @@ async fn event_loop(
                             let request=crate::daemon::diff_review::RevertRequest{workspace:session.workspace.clone(),path,area};
                             match crate::daemon::diff_review::remote_revert(&runtime.home,&snapshot_id,&request).await{
                                 Ok(result)=>match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await{
-                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();review.verifications.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
+                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();review.verifications.clear();review.attributions.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
                                     Err(error)=>app.notice=Some(format!("{}: {error}",language.text("撤销成功，但刷新 Diff 失败","Reverted, but refresh failed","取り消しましたが更新に失敗しました"))),
                                 },
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("安全撤销失败","Safe revert failed","安全な取り消しに失敗しました"))),
@@ -702,6 +702,7 @@ async fn event_loop(
                                     Ok(snapshot)=>{
                                         let reviews=crate::daemon::diff_review::remote_reviews(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default().into_iter().map(|record|(record.path,record.decision)).collect();
                                         let verifications=crate::daemon::diff_review::remote_verifications(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default();
+                                        let attributions=crate::daemon::diff_review::remote_attributions(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default();
                                         app.diff_review=Some(DiffReviewState{
                                             snapshot,
                                             selected:0,
@@ -715,6 +716,7 @@ async fn event_loop(
                                             reviews,
                                             confirm_revert:false,
                                             verifications,
+                                            attributions,
                                             commit_preview:None,
                                             preview_draft:None,
                                         });
@@ -2534,11 +2536,12 @@ fn draw(
                 }
             } else {
                 format!(
-                    "Diff Review · {} files · +{} -{} · {} checks · ↑/↓ Enter · P Commit Preview · Esc",
+                    "Diff Review · {} files · +{} -{} · {} checks · {} agents · ↑/↓ Enter · P Commit Preview · Esc",
                     review.snapshot.files.len(),
                     review.snapshot.additions,
                     review.snapshot.deletions,
-                    review.verifications.len()
+                    review.verifications.len(),
+                    review.attributions.iter().map(|record|record.agent_id).collect::<BTreeSet<_>>().len()
                 )
             };
             let lines = if let Some(preview) = &review.commit_preview {

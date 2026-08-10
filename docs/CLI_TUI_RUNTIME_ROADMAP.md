@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc6
+> 当前实施版本：v0.19.0-rc7
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -96,7 +96,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 5：Diff 与 Review Center（v0.19.0）
 
-- [-] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；当前已完成 Workspace 内容指纹快照和文件级状态，待绑定 Turn/Agent。
+- [x] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；潜在写工具按主/子 Agent 分别采集前后内容指纹，持久绑定 Session、Turn、Task、Agent、Tool 和真实变化路径，并可沿快照链查询。
 - [x] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；支持 Combined/Staged/Unstaged 范围切换和 Unicode 宽度安全双栏。
 - [x] 接受、打回、请求重改、标记已审和安全撤销单文件；撤销绑定精确快照、TUI 二次确认，未跟踪/新增内容进入可恢复回收区。
 - [x] 测试命令、退出码、失败摘要与变更集绑定；前后台测试自动绑定精确快照，摘要有界且敏感命令拒绝记录。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.19.0-rc7（已完成）：Runtime 在主/子 Agent 的潜在写工具调用窗口前后采集内容指纹，新增持久 Diff Attribution 链和受保护 API/CLI；TUI Diff Review 在文件行展示最近责任 Agent 与工具。预先存在但窗口内未变化的脏文件不会被误归属。阶段 5 已完成，下一步进入多 Workspace/Worktree 注册、切换和权限隔离。
 
 v0.19.0-rc6（已完成）：Runtime/CLI/TUI 加入只读 Commit Preview，基于精确 Diff 快照展示提交消息、分支、暂存状态、脱敏 Remote、推送目标和可选 Tag；敏感文件/凭据、冲突、空暂存区、Detached HEAD 与无效目标会阻断确认。同时增加聊天纯净度回归测试，确保轮次和内部 ID 不进入对话区。下一步完成 Diff 的 Turn/Agent 归属绑定。
 
