@@ -162,6 +162,8 @@ struct WebInput {
     prompt: String,
     #[serde(default)]
     attachments: Vec<willdeep_core::MessageAttachment>,
+    #[serde(default)]
+    runtime: Option<daemon::RuntimeConnection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -388,7 +390,11 @@ async fn run() -> Result<()> {
     let interactive_tui = prompt.is_none() && std::io::stdin().is_terminal() && !cli.no_tui;
     let (tui_tx, tui_rx) = tui::channel();
     let relay_bridge = mobile::RelayBridge::new();
-    let approver: Arc<dyn Approver> = if interactive_tui {
+    let runtime_approver =
+        daemon::runtime_approver(web_input.as_ref().and_then(|input| input.runtime.as_ref()))?;
+    let approver: Arc<dyn Approver> = if let Some(approver) = runtime_approver {
+        approver
+    } else if interactive_tui {
         Arc::new(tui::TuiApprover(tui_tx.clone()))
     } else {
         Arc::new(TerminalApprover(language))

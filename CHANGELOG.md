@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.0-rc3] - 2026-08-10
+
+### Added
+
+- Runtime 托管 Harness 遇到工具审批或 `ask_user` 时进入持久 Pending Interaction，不再因无终端 stdin 而直接拒绝。
+- 新增 `daemon pending/resolve/answer`：支持 Allow once、Deny、Always allow，以及候选外自由输入；解决后原 Harness 在同一任务中继续。
+- Runtime Task 新增 WaitingApproval 与 WaitingAnswer 状态，创建、解决、取消和最终执行顺序写入可续传事件流。
+
+### Security
+
+- Runtime 控制 Token 仅通过启动时私有 stdin 消息传入 Harness 内存，不再放入子进程环境，Shell 和 MCP 子进程不会继承该凭据。
+- Interaction 类型与解决类型严格匹配；不可 Always Allow 的审批不能通过伪造解决请求升级权限。
+
+### Changed
+
+- 将 Daemon 单元测试拆入独立模块，生产实现保持在 2000 行以内。
+
 ## [0.16.0-rc2] - 2026-08-10
 
 ### Added

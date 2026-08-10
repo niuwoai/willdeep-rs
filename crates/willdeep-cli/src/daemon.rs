@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use axum::extract::{Path as AxumPath, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
@@ -59,6 +60,20 @@ pub enum DaemonAction {
     Task { id: uuid::Uuid },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
+    /// List approvals and questions currently blocking Runtime tasks.
+    Pending,
+    /// Resolve a pending Runtime approval.
+    Resolve {
+        id: uuid::Uuid,
+        #[arg(value_enum)]
+        decision: ApprovalArg,
+    },
+    /// Answer a pending Runtime question.
+    Answer {
+        id: uuid::Uuid,
+        #[arg(value_name = "ANSWER", num_args = 1.., trailing_var_arg = true)]
+        answer: Vec<String>,
+    },
     /// Internal foreground server entry used by `daemon start`.
     #[command(hide = true)]
     Run,
@@ -112,6 +127,8 @@ enum RuntimeTaskStatus {
     Queued,
     Running,
     Cancelling,
+    WaitingApproval,
+    WaitingAnswer,
     Completed,
     Failed,
     Cancelled,
@@ -140,13 +157,85 @@ struct SubmitTask {
     config: Option<PathBuf>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RuntimeConnection {
+    url: String,
+    token: String,
+    task_id: uuid::Uuid,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ApprovalArg {
+    AllowOnce,
+    Deny,
+    AlwaysAllow,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum InteractionKind {
+    Approval {
+        description: String,
+        always_allow_available: bool,
+    },
+    Question {
+        question: String,
+        options: Vec<String>,
+        multi_select: bool,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+enum InteractionResolution {
+    AllowOnce,
+    Deny,
+    AlwaysAllow,
+    Answer(Option<String>),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InteractionStatus {
+    Pending,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct RuntimeInteraction {
+    id: uuid::Uuid,
+    task_id: uuid::Uuid,
+    kind: InteractionKind,
+    status: InteractionStatus,
+    resolution: Option<InteractionResolution>,
+    created_at: u64,
+    resolved_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreateInteraction {
+    kind: InteractionKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ResolveInteraction {
+    resolution: InteractionResolution,
+}
+
 struct TaskManager {
     path: PathBuf,
     executable: PathBuf,
     events: Arc<EventLog>,
+    runtime_url: String,
+    runtime_token: String,
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
     persistence: AsyncMutex<()>,
     cancellations: Mutex<HashMap<uuid::Uuid, Arc<Notify>>>,
+    interactions_path: PathBuf,
+    interactions: RwLock<HashMap<uuid::Uuid, RuntimeInteraction>>,
+    interaction_waiters:
+        Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<InteractionResolution>>>,
 }
 
 pub async fn handle(action: DaemonAction) -> Result<()> {
@@ -165,6 +254,9 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Tasks => list_tasks(&home).await,
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
+        DaemonAction::Pending => list_pending(&home).await,
+        DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
+        DaemonAction::Answer { id, answer } => answer_pending(&home, id, answer).await,
         DaemonAction::Run => run(&home).await,
     }
 }
@@ -321,6 +413,149 @@ fn print_task(task: &RuntimeTask) {
             .map_or_else(|| "-".to_owned(), |code| code.to_string()),
         task.workspace.display()
     );
+}
+
+async fn list_pending(home: &Path) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let interactions: Vec<RuntimeInteraction> = authorized_get(&state, "/v1/interactions").await?;
+    for interaction in interactions {
+        match &interaction.kind {
+            InteractionKind::Approval { description, .. } => println!(
+                "{}\tapproval\ttask={}\t{}",
+                interaction.id, interaction.task_id, description
+            ),
+            InteractionKind::Question { question, .. } => println!(
+                "{}\tquestion\ttask={}\t{}",
+                interaction.id, interaction.task_id, question
+            ),
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_pending(home: &Path, id: uuid::Uuid, decision: ApprovalArg) -> Result<()> {
+    let resolution = match decision {
+        ApprovalArg::AllowOnce => InteractionResolution::AllowOnce,
+        ApprovalArg::Deny => InteractionResolution::Deny,
+        ApprovalArg::AlwaysAllow => InteractionResolution::AlwaysAllow,
+    };
+    resolve_interaction(home, id, resolution).await
+}
+
+async fn answer_pending(home: &Path, id: uuid::Uuid, answer: Vec<String>) -> Result<()> {
+    let answer = answer.join(" ");
+    if answer.trim().is_empty() {
+        bail!("answer must not be empty");
+    }
+    resolve_interaction(home, id, InteractionResolution::Answer(Some(answer))).await
+}
+
+async fn resolve_interaction(
+    home: &Path,
+    id: uuid::Uuid,
+    resolution: InteractionResolution,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/interactions/{id}/resolve",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&ResolveInteraction { resolution })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected interaction resolution: {}",
+            response.text().await?
+        );
+    }
+    let interaction: RuntimeInteraction = response.json().await?;
+    println!(
+        "resolved\tid={}\ttask={}\tstatus={:?}",
+        interaction.id, interaction.task_id, interaction.status
+    );
+    Ok(())
+}
+
+struct RuntimeApprover {
+    url: String,
+    token: String,
+    task_id: uuid::Uuid,
+    client: reqwest::Client,
+}
+
+pub fn runtime_approver(
+    connection: Option<&RuntimeConnection>,
+) -> Result<Option<Arc<dyn willdeep_core::Approver>>> {
+    let Some(connection) = connection else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(RuntimeApprover {
+        url: connection.url.clone(),
+        token: connection.token.clone(),
+        task_id: connection.task_id,
+        client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .build()?,
+    })))
+}
+
+impl RuntimeApprover {
+    async fn interact(&self, kind: InteractionKind) -> Result<InteractionResolution> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/v1/tasks/{}/interactions",
+                self.url, self.task_id
+            ))
+            .header(TOKEN_HEADER, &self.token)
+            .json(&CreateInteraction { kind })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            bail!("Runtime interaction failed: HTTP {}", response.status());
+        }
+        Ok(response.json().await?)
+    }
+}
+
+#[async_trait]
+impl willdeep_core::Approver for RuntimeApprover {
+    async fn approve(
+        &self,
+        description: &str,
+        always_allow_available: bool,
+    ) -> willdeep_core::ApprovalDecision {
+        match self
+            .interact(InteractionKind::Approval {
+                description: description.to_owned(),
+                always_allow_available,
+            })
+            .await
+        {
+            Ok(InteractionResolution::AllowOnce) => willdeep_core::ApprovalDecision::AllowOnce,
+            Ok(InteractionResolution::AlwaysAllow) if always_allow_available => {
+                willdeep_core::ApprovalDecision::AlwaysAllow
+            }
+            _ => willdeep_core::ApprovalDecision::Deny,
+        }
+    }
+
+    async fn ask_user(&self, request: willdeep_core::UserQuestion) -> Option<String> {
+        match self
+            .interact(InteractionKind::Question {
+                question: request.question,
+                options: request.options,
+                multi_select: request.multi_select,
+            })
+            .await
+        {
+            Ok(InteractionResolution::Answer(answer)) => answer,
+            _ => None,
+        }
+    }
 }
 
 async fn start(home: &Path) -> Result<()> {
@@ -515,8 +750,11 @@ async fn run(home: &Path) -> Result<()> {
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let tasks = Arc::new(TaskManager::open(
         paths.tasks.clone(),
+        paths.interactions.clone(),
         std::env::current_exe()?,
         events.clone(),
+        format!("http://{address}"),
+        state.token.clone(),
     )?);
     let server_state = Arc::new(ServerState {
         token: state.token,
@@ -531,6 +769,15 @@ async fn run(home: &Path) -> Result<()> {
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
+        .route(
+            "/v1/tasks/{id}/interactions",
+            post(create_interaction_handler),
+        )
+        .route("/v1/interactions", get(interactions_handler))
+        .route(
+            "/v1/interactions/{id}/resolve",
+            post(resolve_interaction_handler),
+        )
         .route("/v1/shutdown", post(shutdown_handler))
         .layer(middleware::from_fn(server_version_header))
         .with_state(server_state);
@@ -673,6 +920,56 @@ async fn stop_task_handler(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+async fn interactions_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    Ok(Json(state.tasks.pending_interactions().await).into_response())
+}
+
+async fn create_interaction_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<uuid::Uuid>,
+    Json(request): Json<CreateInteraction>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let receiver = state
+        .tasks
+        .create_interaction(task_id, request.kind)
+        .await
+        .map_err(|error| {
+            eprintln!("create Runtime interaction: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
+    receiver
+        .await
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .map_err(|_| StatusCode::GONE)
+}
+
+async fn resolve_interaction_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<ResolveInteraction>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    state
+        .tasks
+        .resolve_interaction(id, request.resolution)
+        .await
+        .map_err(|error| {
+            eprintln!("resolve Runtime interaction: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
     if headers
         .get(TOKEN_HEADER)
@@ -738,6 +1035,7 @@ struct DaemonPaths {
     events: PathBuf,
     tasks: PathBuf,
     lock: PathBuf,
+    interactions: PathBuf,
 }
 
 impl DaemonPaths {
@@ -749,6 +1047,7 @@ impl DaemonPaths {
             events: directory.join("events.ndjson"),
             tasks: directory.join("tasks.json"),
             lock: directory.join("daemon.lock"),
+            interactions: directory.join("interactions.json"),
             directory,
         }
     }
@@ -790,8 +1089,16 @@ impl EventLog {
 }
 
 impl TaskManager {
-    fn open(path: PathBuf, executable: PathBuf, events: Arc<EventLog>) -> Result<Self> {
+    fn open(
+        path: PathBuf,
+        interactions_path: PathBuf,
+        executable: PathBuf,
+        events: Arc<EventLog>,
+        runtime_url: String,
+        runtime_token: String,
+    ) -> Result<Self> {
         let mut tasks = load_tasks(&path)?;
+        let mut interactions = load_interactions(&interactions_path)?;
         let mut recovered = false;
         for task in tasks.values_mut() {
             if matches!(
@@ -809,13 +1116,33 @@ impl TaskManager {
         if recovered {
             persist_tasks(&path, &tasks)?;
         }
+        let mut interactions_recovered = false;
+        for interaction in interactions.values_mut() {
+            if interaction.status == InteractionStatus::Pending {
+                interaction.status = InteractionStatus::Cancelled;
+                interaction.resolution = Some(match &interaction.kind {
+                    InteractionKind::Approval { .. } => InteractionResolution::Deny,
+                    InteractionKind::Question { .. } => InteractionResolution::Answer(None),
+                });
+                interaction.resolved_at = Some(now());
+                interactions_recovered = true;
+            }
+        }
+        if interactions_recovered {
+            persist_interactions(&interactions_path, &interactions)?;
+        }
         Ok(Self {
             path,
             executable,
             events,
+            runtime_url,
+            runtime_token,
             tasks: RwLock::new(tasks),
             persistence: AsyncMutex::new(()),
             cancellations: Mutex::new(HashMap::new()),
+            interactions_path,
+            interactions: RwLock::new(interactions),
+            interaction_waiters: Mutex::new(HashMap::new()),
         })
     }
 
@@ -833,6 +1160,124 @@ impl TaskManager {
 
     async fn get(&self, id: uuid::Uuid) -> Option<RuntimeTask> {
         self.tasks.read().await.get(&id).cloned()
+    }
+
+    async fn pending_interactions(&self) -> Vec<RuntimeInteraction> {
+        let mut interactions = self
+            .interactions
+            .read()
+            .await
+            .values()
+            .filter(|item| item.status == InteractionStatus::Pending)
+            .cloned()
+            .collect::<Vec<_>>();
+        interactions.sort_by_key(|item| item.created_at);
+        interactions
+    }
+
+    async fn create_interaction(
+        &self,
+        task_id: uuid::Uuid,
+        kind: InteractionKind,
+    ) -> Result<tokio::sync::oneshot::Receiver<InteractionResolution>> {
+        let status = match &kind {
+            InteractionKind::Approval { .. } => RuntimeTaskStatus::WaitingApproval,
+            InteractionKind::Question { .. } => RuntimeTaskStatus::WaitingAnswer,
+        };
+        let interaction = RuntimeInteraction {
+            id: uuid::Uuid::new_v4(),
+            task_id,
+            kind,
+            status: InteractionStatus::Pending,
+            resolution: None,
+            created_at: now(),
+            resolved_at: None,
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let _persistence = self.persistence.lock().await;
+        let task_snapshot = {
+            let mut tasks = self.tasks.write().await;
+            let task = tasks.get_mut(&task_id).context("Runtime task not found")?;
+            if !matches!(task.status, RuntimeTaskStatus::Running) {
+                bail!("Runtime task is not running");
+            }
+            task.status = status;
+            tasks.clone()
+        };
+        let interaction_snapshot = {
+            let mut interactions = self.interactions.write().await;
+            interactions.insert(interaction.id, interaction.clone());
+            interactions.clone()
+        };
+        persist_tasks(&self.path, &task_snapshot)?;
+        persist_interactions(&self.interactions_path, &interaction_snapshot)?;
+        self.interaction_waiters
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime interaction waiter lock poisoned"))?
+            .insert(interaction.id, sender);
+        self.events.append(
+            match &interaction.kind {
+                InteractionKind::Approval { .. } => "task.waiting_approval",
+                InteractionKind::Question { .. } => "task.waiting_answer",
+            },
+            format!(
+                "task_id={} interaction_id={}",
+                interaction.task_id, interaction.id
+            ),
+        )?;
+        Ok(receiver)
+    }
+
+    async fn resolve_interaction(
+        &self,
+        id: uuid::Uuid,
+        resolution: InteractionResolution,
+    ) -> Result<Option<RuntimeInteraction>> {
+        let _persistence = self.persistence.lock().await;
+        let (interaction, interaction_snapshot) = {
+            let mut interactions = self.interactions.write().await;
+            let Some(interaction) = interactions.get_mut(&id) else {
+                return Ok(None);
+            };
+            if interaction.status != InteractionStatus::Pending {
+                bail!("Runtime interaction is no longer pending");
+            }
+            validate_resolution(&interaction.kind, &resolution)?;
+            interaction.status = InteractionStatus::Resolved;
+            interaction.resolution = Some(resolution.clone());
+            interaction.resolved_at = Some(now());
+            (interaction.clone(), interactions.clone())
+        };
+        let task_snapshot = {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(&interaction.task_id)
+                && matches!(
+                    task.status,
+                    RuntimeTaskStatus::WaitingApproval | RuntimeTaskStatus::WaitingAnswer
+                )
+            {
+                task.status = RuntimeTaskStatus::Running;
+            }
+            tasks.clone()
+        };
+        persist_interactions(&self.interactions_path, &interaction_snapshot)?;
+        persist_tasks(&self.path, &task_snapshot)?;
+        let sender = self
+            .interaction_waiters
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime interaction waiter lock poisoned"))?
+            .remove(&id);
+        if let Some(sender) = sender {
+            let _ = sender.send(resolution);
+        }
+        self.events.append(
+            "task.interaction_resolved",
+            format!(
+                "task_id={} interaction_id={}",
+                interaction.task_id, interaction.id
+            ),
+        )?;
+        Ok(Some(interaction))
     }
 
     async fn submit(self: &Arc<Self>, mut request: SubmitTask) -> Result<RuntimeTask> {
@@ -892,10 +1337,14 @@ impl TaskManager {
         };
         let pid = child.id();
         let mut stdin = child.stdin.take().context("open Runtime task stdin")?;
-        let input = serde_json::to_vec(&serde_json::json!({
-            "prompt": request.prompt,
-            "attachments": []
-        }))?;
+        let input = runtime_harness_input(
+            request.prompt,
+            RuntimeConnection {
+                url: self.runtime_url.clone(),
+                token: self.runtime_token.clone(),
+                task_id: id,
+            },
+        )?;
         if let Err(error) = stdin.write_all(&input).await {
             let _ = child.kill().await;
             self.finish(id, RuntimeTaskStatus::Failed, None, Some(error.to_string()))
@@ -1058,7 +1507,54 @@ impl TaskManager {
                 error.unwrap_or_default()
             ),
         )?;
+        drop(_persistence);
+        self.cancel_task_interactions(id).await?;
         Ok(())
+    }
+
+    async fn cancel_task_interactions(&self, task_id: uuid::Uuid) -> Result<()> {
+        let pending = self
+            .interactions
+            .read()
+            .await
+            .values()
+            .filter(|item| item.task_id == task_id && item.status == InteractionStatus::Pending)
+            .map(|item| {
+                let resolution = match &item.kind {
+                    InteractionKind::Approval { .. } => InteractionResolution::Deny,
+                    InteractionKind::Question { .. } => InteractionResolution::Answer(None),
+                };
+                (item.id, resolution)
+            })
+            .collect::<Vec<_>>();
+        for (id, resolution) in pending {
+            let _ = self.resolve_interaction(id, resolution).await;
+        }
+        Ok(())
+    }
+}
+
+fn runtime_harness_input(prompt: String, runtime: RuntimeConnection) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&serde_json::json!({
+        "prompt": prompt,
+        "attachments": [],
+        "runtime": runtime
+    }))?)
+}
+
+fn validate_resolution(kind: &InteractionKind, resolution: &InteractionResolution) -> Result<()> {
+    match (kind, resolution) {
+        (InteractionKind::Approval { .. }, InteractionResolution::AllowOnce)
+        | (InteractionKind::Approval { .. }, InteractionResolution::Deny)
+        | (InteractionKind::Question { .. }, InteractionResolution::Answer(_)) => Ok(()),
+        (
+            InteractionKind::Approval {
+                always_allow_available: true,
+                ..
+            },
+            InteractionResolution::AlwaysAllow,
+        ) => Ok(()),
+        _ => bail!("resolution does not match the pending interaction"),
     }
 }
 
@@ -1098,6 +1594,26 @@ fn persist_tasks(path: &Path, tasks: &HashMap<uuid::Uuid, RuntimeTask>) -> Resul
     let mut tasks = tasks.values().cloned().collect::<Vec<_>>();
     tasks.sort_by_key(|task| task.created_at);
     write_json_atomic(path, &tasks)
+}
+
+fn load_interactions(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeInteraction>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let interactions: Vec<RuntimeInteraction> = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(interactions
+        .into_iter()
+        .map(|interaction| (interaction.id, interaction))
+        .collect())
+}
+
+fn persist_interactions(
+    path: &Path,
+    interactions: &HashMap<uuid::Uuid, RuntimeInteraction>,
+) -> Result<()> {
+    let mut interactions = interactions.values().cloned().collect::<Vec<_>>();
+    interactions.sort_by_key(|interaction| interaction.created_at);
+    write_json_atomic(path, &interactions)
 }
 
 fn read_events(path: &Path, after: u64, limit: usize) -> Result<Vec<RuntimeEvent>> {
@@ -1273,168 +1789,4 @@ fn now() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_round_trips_without_exposing_token_in_logs() {
-        let root = std::env::temp_dir().join(format!("willdeep-daemon-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.json");
-        let state = DaemonState {
-            schema: STATE_SCHEMA,
-            version: "1.2.3".to_owned(),
-            pid: 42,
-            address: "127.0.0.1:9847".parse().unwrap(),
-            token: "private-token".to_owned(),
-            started_at: 10,
-        };
-        write_state(&path, &state).unwrap();
-        assert_eq!(load_state(&path).unwrap(), state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn authorization_requires_exact_local_token() {
-        let root =
-            std::env::temp_dir().join(format!("willdeep-daemon-auth-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
-        let state = ServerState {
-            token: "expected".to_owned(),
-            started_at: 0,
-            shutdown: Arc::new(Notify::new()),
-            events: events.clone(),
-            tasks: Arc::new(
-                TaskManager::open(root.join("tasks.json"), PathBuf::from("willdeep"), events)
-                    .unwrap(),
-            ),
-        };
-        assert_eq!(
-            authorize(&state, &HeaderMap::new()),
-            Err(StatusCode::UNAUTHORIZED)
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert(TOKEN_HEADER, HeaderValue::from_static("expected"));
-        assert_eq!(authorize(&state, &headers), Ok(()));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn event_log_assigns_sequences_and_resumes_after_cursor() {
-        let root = std::env::temp_dir().join(format!("willdeep-events-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("events.ndjson");
-        let log = EventLog::open(path.clone()).unwrap();
-        assert_eq!(log.append("first", "one").unwrap().sequence, 1);
-        assert_eq!(log.append("second", "two").unwrap().sequence, 2);
-        assert_eq!(log.read_after(1, 10).unwrap()[0].kind, "second");
-        drop(log);
-
-        let reopened = EventLog::open(path).unwrap();
-        assert_eq!(reopened.append("third", "three").unwrap().sequence, 3);
-        assert_eq!(reopened.read_after(0, 2).unwrap().len(), 2);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn task_store_marks_active_tasks_interrupted_after_restart() {
-        let root = std::env::temp_dir().join(format!("willdeep-tasks-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("tasks.json");
-        let id = uuid::Uuid::new_v4();
-        let task = RuntimeTask {
-            id,
-            status: RuntimeTaskStatus::Running,
-            workspace: root.clone(),
-            profile: None,
-            pid: Some(10),
-            created_at: 1,
-            started_at: Some(2),
-            completed_at: None,
-            exit_code: None,
-            error: None,
-        };
-        persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
-        let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
-        let manager = TaskManager::open(path, PathBuf::from("willdeep"), events).unwrap();
-        let recovered = manager.tasks.blocking_read();
-        assert_eq!(recovered[&id].status, RuntimeTaskStatus::Interrupted);
-        assert!(recovered[&id].completed_at.is_some());
-        drop(recovered);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn daemon_lock_is_exclusive_and_owned_cleanup_is_safe() {
-        let root = std::env::temp_dir().join(format!("willdeep-lock-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.lock");
-        let first = acquire_daemon_lock(&path).unwrap();
-        assert!(acquire_daemon_lock(&path).is_err());
-        remove_owned_lock(&path, "not-the-owner");
-        assert!(path.exists());
-        remove_owned_lock(&path, &first.token);
-        assert!(acquire_daemon_lock(&path).is_ok());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn daemon_lock_recovers_after_stale_lease() {
-        let root =
-            std::env::temp_dir().join(format!("willdeep-stale-lock-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.lock");
-        write_json_atomic(
-            &path,
-            &DaemonLock {
-                token: "stale".to_owned(),
-                created_at: 0,
-            },
-        )
-        .unwrap();
-        assert_ne!(acquire_daemon_lock(&path).unwrap().token, "stale");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn concurrent_task_updates_persist_a_complete_snapshot() {
-        let root = std::env::temp_dir().join(format!(
-            "willdeep-concurrent-tasks-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("tasks.json");
-        let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
-        let manager =
-            Arc::new(TaskManager::open(path.clone(), PathBuf::from("willdeep"), events).unwrap());
-        let mut updates = Vec::new();
-        for index in 0..20 {
-            let manager = manager.clone();
-            let workspace = root.clone();
-            updates.push(tokio::spawn(async move {
-                let id = uuid::Uuid::new_v4();
-                manager
-                    .insert_and_persist(RuntimeTask {
-                        id,
-                        status: RuntimeTaskStatus::Completed,
-                        workspace,
-                        profile: None,
-                        pid: None,
-                        created_at: index,
-                        started_at: Some(index),
-                        completed_at: Some(index),
-                        exit_code: Some(0),
-                        error: None,
-                    })
-                    .await
-                    .unwrap();
-            }));
-        }
-        for update in updates {
-            update.await.unwrap();
-        }
-        assert_eq!(load_tasks(&path).unwrap().len(), 20);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
+mod tests;
