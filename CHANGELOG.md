@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.0-rc5] - 2026-08-10
+
+### Fixed
+
+- 修复 Runtime 在等待审批或 `ask_user` 时重启，只取消 Interaction 却让 Task 永久停留在 Waiting 状态的问题；所有遗留 Running、Cancelling 和 Waiting Task 现在统一收敛为 Interrupted。
+- 修复 `/v1/shutdown` 先等待 HTTP Handler 退出、后取消 Harness，导致 Pending Interaction 与优雅停止互相等待的问题；现在先异步取消并收敛 Harness，再关闭 Server。
+- 修复 Daemon 异常退出后首次 `start` 等待时间短于陈旧锁期限、必然无法接管的问题；单实例锁现在由活 Daemon 定期续租，启动方会持续等待并安全接管过期租约。
+- 清除恢复任务中的遗留 PID，并为恢复的 Task、Turn 和 Pending Interaction 补写持久事件，使 TUI/Web 从旧游标重连后能观察中断与取消状态。
+
 ## [0.17.0-rc4] - 2026-08-10
 
 ### Added

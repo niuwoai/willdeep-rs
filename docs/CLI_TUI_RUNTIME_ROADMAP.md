@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc4
+> 当前实施版本：v0.17.0-rc5
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,13 +223,13 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc4（已完成）：CLI/Runtime 已共用 Harness Factory 与非交互执行入口；TaskManager 直接持有 Harness Future，Agent 事件直写 Runtime EventLog，每 Turn 子进程与 stdout/stderr 转写层已移除。真实进程 E2E 已覆盖完成、立即取消、`ask_user` 跨 CLI 恢复和审批跨 CLI 恢复，Task PID 保持为空。
+v0.17.0-rc5（已完成）：Runtime 单实例锁改为心跳租约，异常退出后一次启动请求即可等待并接管；遗留 Running/Waiting Task、Turn、Agent 与 Pending Interaction 统一收敛，恢复事件可从旧游标续传；优雅停止先取消 Harness 再关闭 Server，等待审批时不再死锁。真实进程 E2E 已覆盖强杀 Running Harness、租约接管、Task/Turn Interrupted 事件续传，以及 Pending Approval 下 1 秒内停止。
 
 ## 6. 建议执行顺序
 
 1. [x] 发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
 2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
-3. [ ] 完成异常退出、守护进程重启、孤儿资源清理和客户端重连的端到端测试。
+3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
 4. [ ] 实现完整会话恢复、重命名、Fork、归档、删除、导出与搜索。
 5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
@@ -253,7 +253,7 @@ v0.17.0-rc4（已完成）：CLI/Runtime 已共用 Harness Factory 与非交互�
 - [x] Web 使用相同 Session/Turn、历史和事件；浏览器只提交与观察，不再持有独立 Harness 生命周期。
 - [ ] Headless CLI 使用相同 Runtime。
 - [x] Harness 从每 Turn 子进程过渡为 Daemon 内原生 Future；异常退出明确收敛为 Interrupted。
-- [ ] 清理孤儿任务，保护 Session 并发写入，提供状态、版本和能力诊断。
+- [-] 已清理重启后的孤儿 Task/Interaction/PID 并补写恢复事件；Session 并发写保护、能力诊断和更细粒度资源审计待完成。
 
 ### 7.2 Web 客户端
 

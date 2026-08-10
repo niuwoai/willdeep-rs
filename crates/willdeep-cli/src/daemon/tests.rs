@@ -253,13 +253,13 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
         error: None,
     };
     persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
-    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let manager = TaskManager::open(TaskManagerOptions {
         path,
         interactions_path: root.join("interactions.json"),
         home: root.clone(),
-        events,
+        events: events.clone(),
         agents,
         sessions: test_runtime_session_store(&root),
         turn_scheduler: test_turn_scheduler(),
@@ -269,8 +269,106 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     .unwrap();
     let recovered = manager.tasks.blocking_read();
     assert_eq!(recovered[&id].status, RuntimeTaskStatus::Interrupted);
+    assert_eq!(recovered[&id].pid, None);
     assert!(recovered[&id].completed_at.is_some());
     drop(recovered);
+    let recovered_events = events.read_after(0, 10).unwrap();
+    assert_eq!(recovered_events.len(), 1);
+    assert_eq!(recovered_events[0].kind, "task.interrupted");
+    assert!(
+        recovered_events[0]
+            .message
+            .contains(&format!("task_id={id}"))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-waiting-task-recovery-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let interaction_id = uuid::Uuid::new_v4();
+    let tasks_path = root.join("tasks.json");
+    let interactions_path = root.join("interactions.json");
+    persist_tasks(
+        &tasks_path,
+        &HashMap::from([(
+            task_id,
+            RuntimeTask {
+                id: task_id,
+                session_id: None,
+                turn_id: None,
+                agent_id: None,
+                event_start_sequence: 0,
+                status: RuntimeTaskStatus::WaitingApproval,
+                workspace: root.clone(),
+                profile: None,
+                pid: None,
+                created_at: 1,
+                started_at: Some(2),
+                completed_at: None,
+                exit_code: None,
+                error: None,
+            },
+        )]),
+    )
+    .unwrap();
+    persist_interactions(
+        &interactions_path,
+        &HashMap::from([(
+            interaction_id,
+            RuntimeInteraction {
+                id: interaction_id,
+                task_id,
+                kind: InteractionKind::Approval {
+                    description: "test approval".to_owned(),
+                    always_allow_available: true,
+                },
+                status: InteractionStatus::Pending,
+                resolution: None,
+                created_at: 3,
+                resolved_at: None,
+            },
+        )]),
+    )
+    .unwrap();
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: tasks_path,
+        interactions_path: interactions_path.clone(),
+        home: root.clone(),
+        events: events.clone(),
+        agents: test_agent_store(&root),
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        manager.tasks.blocking_read()[&task_id].status,
+        RuntimeTaskStatus::Interrupted
+    );
+    let interactions = load_interactions(&interactions_path).unwrap();
+    assert_eq!(
+        interactions[&interaction_id].status,
+        InteractionStatus::Cancelled
+    );
+    let kinds = events
+        .read_after(0, 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec!["task.interrupted", "task.interaction_cancelled"]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -293,11 +391,12 @@ fn task_recovery_preserves_the_session_root_agent_id() {
         })
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
+    let turn_id = uuid::Uuid::new_v4();
     let path = root.join("tasks.json");
     let task = RuntimeTask {
         id: task_id,
         session_id: Some(session.id),
-        turn_id: None,
+        turn_id: Some(turn_id),
         agent_id: Some(session.root_agent_id),
         event_start_sequence: 0,
         status: RuntimeTaskStatus::Running,
@@ -312,11 +411,12 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     };
     persist_tasks(&path, &HashMap::from([(task_id, task)])).unwrap();
     let agents = test_agent_store(&root);
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let manager = TaskManager::open(TaskManagerOptions {
         path,
         interactions_path: root.join("interactions.json"),
         home: root.clone(),
-        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        events: events.clone(),
         agents: agents.clone(),
         sessions,
         turn_scheduler: test_turn_scheduler(),
@@ -331,6 +431,15 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     );
     assert_eq!(agents.list().unwrap().len(), 1);
     assert_eq!(agents.list().unwrap()[0].id, session.root_agent_id);
+    assert_eq!(
+        events
+            .read_after(0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>(),
+        vec!["task.interrupted", "turn.interrupted"]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -362,6 +471,21 @@ fn daemon_lock_recovers_after_stale_lease() {
     )
     .unwrap();
     assert_ne!(acquire_daemon_lock(&path).unwrap().token, "stale");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn daemon_lock_heartbeat_refreshes_only_the_owner_lease() {
+    let root =
+        std::env::temp_dir().join(format!("willdeep-lock-heartbeat-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("daemon.lock");
+    let lock = acquire_daemon_lock(&path).unwrap();
+    assert!(refresh_daemon_lock(&path, "not-the-owner").is_err());
+    refresh_daemon_lock(&path, &lock.token).unwrap();
+    let refreshed = load_daemon_lock(&path).unwrap();
+    assert_eq!(refreshed.token, lock.token);
+    assert!(refreshed.created_at >= lock.created_at);
     std::fs::remove_dir_all(root).unwrap();
 }
 

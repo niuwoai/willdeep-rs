@@ -3,6 +3,7 @@
 > 状态：已于 v0.17.0-rc4 实施
 > 目标版本：v0.17.0-rc4
 > 上位协议：`RUNTIME_SESSION_PROTOCOL.md`
+> 生命周期加固：v0.17.0-rc5 已加入心跳租约、异常接管、Waiting 状态收敛、恢复事件补偿和 Pending Interaction 优雅停止。
 
 ## 1. 目标
 

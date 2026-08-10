@@ -22,6 +22,8 @@ const STATE_SCHEMA: u32 = 1;
 const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
+const LOCK_HEARTBEAT_SECONDS: u64 = 2;
+const LOCK_RECOVERY_ATTEMPTS: usize = 120;
 
 mod agent_control;
 mod agent_store;
@@ -750,11 +752,11 @@ async fn start(home: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    remove_stale_state(&paths.state)?;
     let lock = match acquire_daemon_lock(&paths.lock) {
         Ok(lock) => lock,
-        Err(error) => {
-            for _ in 0..50 {
+        Err(mut error) => {
+            let mut recovered_lock = None;
+            for _ in 0..LOCK_RECOVERY_ATTEMPTS {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if let Ok(state) = load_state(&paths.state)
                     && probe(&state).await.is_ok()
@@ -765,10 +767,20 @@ async fn start(home: &Path) -> Result<()> {
                     );
                     return Ok(());
                 }
+                match acquire_daemon_lock(&paths.lock) {
+                    Ok(lock) => {
+                        recovered_lock = Some(lock);
+                        break;
+                    }
+                    Err(next_error) => error = next_error,
+                }
             }
-            return Err(error).context("another Runtime Daemon start is in progress");
+            recovered_lock
+                .ok_or(error)
+                .context("another Runtime Daemon owns a live lease or did not finish starting")?
         }
     };
+    remove_stale_state(&paths.state)?;
     let mut lock_cleanup = OwnedLockCleanup::new(paths.lock.clone(), lock.token.clone());
     let stdout = append_log(&paths.log)?;
     let stderr = stdout.try_clone()?;
@@ -926,6 +938,7 @@ async fn run(home: &Path) -> Result<()> {
         lock_path: paths.lock.clone(),
         lock_token,
     };
+    let lock_heartbeat = spawn_lock_heartbeat(paths.lock.clone(), cleanup.lock_token.clone());
     let shutdown_signal = Arc::new(Notify::new());
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
@@ -1061,6 +1074,7 @@ async fn run(home: &Path) -> Result<()> {
         .context("run Runtime Daemon control server")?;
     tasks.cancel_all().await;
     events.append("daemon.stopped", format!("pid={}", std::process::id()))?;
+    lock_heartbeat.abort();
     drop(cleanup);
     eprintln!("WillDeep Runtime Daemon stopped");
     Ok(())
@@ -1100,7 +1114,12 @@ async fn shutdown_handler(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
-    state.shutdown.notify_one();
+    let tasks = state.tasks.clone();
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tasks.cancel_all().await;
+        shutdown.notify_one();
+    });
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -1381,17 +1400,22 @@ impl TaskManager {
         let mut tasks = load_tasks(&path)?;
         let mut interactions = load_interactions(&interactions_path)?;
         let mut recovered = false;
+        let mut recovered_tasks = Vec::new();
         for task in tasks.values_mut() {
             if matches!(
                 task.status,
                 RuntimeTaskStatus::Queued
                     | RuntimeTaskStatus::Running
                     | RuntimeTaskStatus::Cancelling
+                    | RuntimeTaskStatus::WaitingApproval
+                    | RuntimeTaskStatus::WaitingAnswer
             ) {
                 task.status = RuntimeTaskStatus::Interrupted;
+                task.pid = None;
                 task.completed_at = Some(now());
                 task.error = Some("Runtime restarted while task was active".to_owned());
                 recovered = true;
+                recovered_tasks.push(task.clone());
             }
             let agent = if let Some(session_id) = task.session_id {
                 let session = sessions
@@ -1421,6 +1445,7 @@ impl TaskManager {
             persist_tasks(&path, &tasks)?;
         }
         let mut interactions_recovered = false;
+        let mut recovered_interactions = Vec::new();
         for interaction in interactions.values_mut() {
             if interaction.status == InteractionStatus::Pending {
                 interaction.status = InteractionStatus::Cancelled;
@@ -1430,10 +1455,42 @@ impl TaskManager {
                 });
                 interaction.resolved_at = Some(now());
                 interactions_recovered = true;
+                recovered_interactions.push((interaction.id, interaction.task_id));
             }
         }
         if interactions_recovered {
             persist_interactions(&interactions_path, &interactions)?;
+        }
+        for task in &recovered_tasks {
+            let error = task.error.as_deref().unwrap_or_default();
+            events.append(
+                "task.interrupted",
+                format!(
+                    "task_id={} session_id={} turn_id={} exit_code=none error={error}",
+                    task.id,
+                    task.session_id
+                        .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                    task.turn_id
+                        .map_or_else(|| "none".to_owned(), |id| id.to_string())
+                ),
+            )?;
+            if let (Some(session_id), Some(turn_id)) = (task.session_id, task.turn_id) {
+                events.append(
+                    "turn.interrupted",
+                    format!(
+                        "session_id={session_id} turn_id={turn_id} task_id={} exit_code=none error={error}",
+                        task.id
+                    ),
+                )?;
+            }
+        }
+        for (interaction_id, task_id) in recovered_interactions {
+            events.append(
+                "task.interaction_cancelled",
+                format!(
+                    "task_id={task_id} interaction_id={interaction_id} reason=runtime_restarted"
+                ),
+            )?;
         }
         Ok(Self {
             path,
@@ -1837,6 +1894,7 @@ impl TaskManager {
             match status {
                 RuntimeTaskStatus::Completed => "task.completed",
                 RuntimeTaskStatus::Cancelled => "task.cancelled",
+                RuntimeTaskStatus::Interrupted => "task.interrupted",
                 _ => "task.failed",
             },
             format!(
@@ -2064,6 +2122,29 @@ fn acquire_daemon_lock(path: &Path) -> Result<DaemonLock> {
     let data = serde_json::to_vec_pretty(&lock)?;
     write_private(path, &data).context("acquire Runtime Daemon single-instance lock")?;
     Ok(lock)
+}
+
+fn spawn_lock_heartbeat(path: PathBuf, token: String) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(LOCK_HEARTBEAT_SECONDS));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = refresh_daemon_lock(&path, &token) {
+                eprintln!("refresh Runtime Daemon lease: {error:#}");
+                break;
+            }
+        }
+    })
+}
+
+fn refresh_daemon_lock(path: &Path, token: &str) -> Result<()> {
+    let mut lock = load_daemon_lock(path)?;
+    if lock.token != token {
+        bail!("Runtime Daemon lease ownership changed");
+    }
+    lock.created_at = now();
+    write_json_atomic(path, &lock)
 }
 
 fn load_daemon_lock(path: &Path) -> Result<DaemonLock> {

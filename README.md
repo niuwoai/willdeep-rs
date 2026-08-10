@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.17.0-rc4`，支持：
+当前版本为 `0.17.0-rc5`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -69,13 +69,13 @@ willdeep detach
 willdeep daemon stop
 ```
 
-本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
+本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Daemon 通过短周期心跳续租单实例锁；异常退出后，一次 `daemon start` 会等待旧租约过期并安全接管。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
 
 Runtime 事件按递增序号写入私有 NDJSON 日志。`GET /v1/events/stream?after=<序号>` 使用 SSE 先分页补齐持久事件，再实时推送新事件；慢客户端落后广播窗口时自动从日志追赶并按序号去重。TUI 默认使用该实时通道，连接旧 Daemon 时回退到轮询接口。`attach --after <序号>` 同样按游标补读并持续跟随；按 `Ctrl+C` 只断开当前客户端，Daemon 继续运行。
 
 `daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 保留在 Runtime 内存与受保护的 Session/Turn 存储中，不会出现在进程参数中。Daemon 直接调度进程内 Harness Future；任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复，`daemon cancel` 可停止仍在运行的任务。
 
-`daemon create-session` 创建长期 Runtime Session，并同时建立同 ID 的 Core Session 和生命周期稳定的 Root Agent。`submit-turn` 使用客户端 `request_id` 幂等入队；同一 Session 的 Turn 严格串行，不同 Session 可并发。成功 Turn 写入 Core Session 后会清除队列中的私密 Prompt/附件副本；`stop-turn` 可取消排队中或运行中的 Turn。Daemon 重启后排队项继续调度，遗留活动项明确标记为 Interrupted。
+`daemon create-session` 创建长期 Runtime Session，并同时建立同 ID 的 Core Session 和生命周期稳定的 Root Agent。`submit-turn` 使用客户端 `request_id` 幂等入队；同一 Session 的 Turn 严格串行，不同 Session 可并发。成功 Turn 写入 Core Session 后会清除队列中的私密 Prompt/附件副本；`stop-turn` 可取消排队中或运行中的 Turn。Daemon 重启后排队项继续调度，遗留 Running/Waiting 活动项明确标记为 Interrupted，并向事件日志补写可续传的 Task/Turn 中断事件。
 
 TUI 的普通 Prompt 默认幂等收养当前 Core Session，并把输入作为该长期 Session 的新 Turn；`/runtime <任务>` 是相同路径的明确别名，`/local <任务>` 仅让单轮使用旧进程内 Harness。重新进入同一 TUI 会话后继续复用原 Root Agent 和历史上下文。用户输入立即显示，消息文件只由后台 Harness 写入，Turn 结束时 TUI 从唯一 Core Session 历史同步，避免前后台双写产生重复或丢消息。
 
