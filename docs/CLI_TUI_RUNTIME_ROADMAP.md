@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc13
+> 当前实施版本：v0.21.0-rc14
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc14（已完成）：共享 Rust Runtime Client 新增 `tools/tool/artifacts/artifact` 类型化便捷方法；调用方不再手写 Tool/Artifact 操作名、通用 JSON 参数和返回 DTO。Unix Socket 真实往返测试验证 Token、稳定操作名、过滤参数和响应解码。下一步扩展 Session/Agent/Turn/审批等高频类型化方法，并为 Swift/移动端生成可验证的协议兼容夹具。
 
 v0.21.0-rc13（已完成）：Web 新增受 Runtime 注册表与启动 Workspace 白名单双重约束的 Activity API，React 侧栏每两秒直接消费 Tool/Artifact DTO，展示工具总数、运行数、产物数和最近工具状态；新增文案全部覆盖中英日。下一步继续 Rust Client 类型化便捷方法、Web 详情交互，以及 Swift/移动端兼容验证。
 

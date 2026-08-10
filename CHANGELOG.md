@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0-rc14] - 2026-08-11
+
+### Added
+
+- Rust Runtime Client 新增 Tool 与 Artifact 的列表、单项类型化查询方法，调用方不再手写操作名和返回 DTO。
+- 新增 Unix Socket 真实往返测试，验证类型化 Tool 查询携带 Runtime Token、稳定过滤参数并正确解码公共 DTO。
+
 ## [0.21.0-rc13] - 2026-08-11
 
 ### Added

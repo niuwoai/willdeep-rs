@@ -4,7 +4,10 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use willdeep_runtime_protocol::{ApiRequest, ApiResponse, RuntimeCapabilities};
+use willdeep_runtime_protocol::{
+    ApiRequest, ApiResponse, IdParams, ListArtifactsParams, ListToolsParams, RuntimeArtifact,
+    RuntimeCapabilities, RuntimeTool,
+};
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
 const REQUEST_ID_HEADER: &str = "x-willdeep-request-id";
@@ -132,6 +135,34 @@ impl RuntimeClient {
                 .await?,
         )
         .await
+    }
+
+    pub async fn tools(
+        &self,
+        params: &ListToolsParams,
+    ) -> Result<ApiResponse<Vec<RuntimeTool>>, ClientError> {
+        self.call("tool.list", params, None).await
+    }
+
+    pub async fn tool(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<ApiResponse<Option<RuntimeTool>>, ClientError> {
+        self.call("tool.get", &IdParams { id }, None).await
+    }
+
+    pub async fn artifacts(
+        &self,
+        params: &ListArtifactsParams,
+    ) -> Result<ApiResponse<Vec<RuntimeArtifact>>, ClientError> {
+        self.call("artifact.list", params, None).await
+    }
+
+    pub async fn artifact(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<ApiResponse<Option<RuntimeArtifact>>, ClientError> {
+        self.call("artifact.get", &IdParams { id }, None).await
     }
 
     pub async fn stream_events(
@@ -284,6 +315,94 @@ mod tests {
         let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
         let response: serde_json::Value = client.get_json("/v1/health").await.unwrap();
         assert_eq!(response["status"], "ok");
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn typed_tool_list_uses_the_stable_operation_and_decodes_dto() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = std::path::Path::new("/private/tmp")
+            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let task_id = uuid::Uuid::new_v4();
+        let agent_id = uuid::Uuid::new_v4();
+        let tool_id = uuid::Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(length, 0, "request ended before its JSON body arrived");
+                request.extend_from_slice(&chunk[..length]);
+                let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let header_end = request
+                .windows(4)
+                .position(|value| value == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            assert!(headers.starts_with("POST /v1/api HTTP/1.1"));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("x-willdeep-token: secret")
+            );
+            let request: ApiRequest = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert_eq!(request.operation, "tool.list");
+            assert_eq!(request.params["task_id"], task_id.to_string());
+
+            let body = serde_json::to_string(&ApiResponse::ok(
+                vec![RuntimeTool {
+                    id: tool_id,
+                    session_id: None,
+                    turn_id: None,
+                    task_id,
+                    agent_id,
+                    name: "read_file".to_owned(),
+                    status: willdeep_runtime_protocol::ToolStatus::Completed,
+                    started_at_ms: 10,
+                    completed_at_ms: Some(20),
+                }],
+                "test",
+                Some(request.request_id),
+            ))
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
+        let response = client
+            .tools(&ListToolsParams {
+                task_id: Some(task_id),
+                ..ListToolsParams::default()
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ApiResponse::Ok { data, .. } if data[0].id == tool_id));
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
