@@ -14,6 +14,9 @@ use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
 };
 use crate::provider::Provider;
+use crate::subagent_worktree::{
+    PreparedSubagentWorkspace, SubagentWorktreeManager, SubagentWorktreePolicy,
+};
 use crate::tools::{ApprovalMode, ToolError, ToolRegistry};
 
 #[derive(Clone)]
@@ -29,6 +32,7 @@ pub struct SubagentProfile {
     pub timeout_seconds: Option<u64>,
     pub max_consecutive_failures: usize,
     pub requires_write_target: bool,
+    pub worktree: SubagentWorktreePolicy,
 }
 
 #[derive(Clone)]
@@ -38,6 +42,7 @@ pub struct SubagentCatalog {
     background: Arc<BackgroundTaskRegistry>,
     sink: Arc<dyn EventSink>,
     failures: Arc<Mutex<BTreeMap<String, usize>>>,
+    worktrees: Option<SubagentWorktreeManager>,
 }
 
 struct SubagentNoopSink;
@@ -103,11 +108,17 @@ impl SubagentCatalog {
             background,
             sink: Arc::new(SubagentNoopSink),
             failures: Arc::new(Mutex::new(BTreeMap::new())),
+            worktrees: None,
         }
     }
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.sink = sink;
+        self
+    }
+
+    pub fn with_worktree_root(mut self, root: impl AsRef<Path>) -> Self {
+        self.worktrees = Some(SubagentWorktreeManager::new(root.as_ref().to_path_buf()));
         self
     }
 
@@ -162,11 +173,9 @@ impl SubagentCatalog {
             .label
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| args.prompt.chars().take(48).collect());
-        let workspace = self.workspace.clone();
         let prompt = args.prompt;
         let profile_id = profile.id.clone();
         let background = args.run_in_background.unwrap_or(false);
-        let agent_id = uuid::Uuid::new_v4();
         if background {
             let running = self
                 .background
@@ -182,6 +191,12 @@ impl SubagentCatalog {
                     "at most 3 background subagents may run concurrently".to_owned(),
                 ));
             }
+        }
+        let agent_id = uuid::Uuid::new_v4();
+        let prepared = self.prepare_workspace(agent_id, profile.worktree).await?;
+        let approved_target = remap_approved_target(approved_target, &prepared)?;
+        let workspace = prepared.workspace.clone();
+        if background {
             let runner_sink = self.sink.clone();
             let failures = self.failures.clone();
             let lifecycle_sink = self.sink.clone();
@@ -191,6 +206,10 @@ impl SubagentCatalog {
             let lifecycle_max_turns = profile.max_turns;
             let lifecycle_token_budget = profile.token_budget;
             let lifecycle_timeout_seconds = profile.timeout_seconds;
+            let lifecycle_workspace = prepared.workspace.clone();
+            let lifecycle_root_workspace = prepared.root_workspace.clone();
+            let lifecycle_worktree_branch = prepared.branch.clone();
+            let lifecycle_dedicated_worktree = prepared.dedicated;
             let instruction_inbox = Arc::new(AgentInstructionInbox::default());
             let runner_instruction_inbox = instruction_inbox.clone();
             let id = self.background.start_retriable_with_lifecycle(
@@ -227,6 +246,9 @@ impl SubagentCatalog {
                     let background = lifecycle_background.clone();
                     let profile = lifecycle_profile.clone();
                     let label = lifecycle_label.clone();
+                    let workspace = lifecycle_workspace.clone();
+                    let root_workspace = lifecycle_root_workspace.clone();
+                    let worktree_branch = lifecycle_worktree_branch.clone();
                     async move {
                         if snapshot.status == BackgroundTaskStatus::Running {
                             sink.emit(AgentEvent::SubagentStarted {
@@ -237,6 +259,10 @@ impl SubagentCatalog {
                                 max_turns: lifecycle_max_turns,
                                 token_budget: lifecycle_token_budget,
                                 timeout_seconds: lifecycle_timeout_seconds,
+                                workspace,
+                                root_workspace,
+                                worktree_branch,
+                                dedicated_worktree: lifecycle_dedicated_worktree,
                             })
                             .await;
                         } else {
@@ -263,6 +289,10 @@ impl SubagentCatalog {
                     max_turns: profile.max_turns,
                     token_budget: profile.token_budget,
                     timeout_seconds: profile.timeout_seconds,
+                    workspace: prepared.workspace.clone(),
+                    root_workspace: prepared.root_workspace.clone(),
+                    worktree_branch: prepared.branch.clone(),
+                    dedicated_worktree: prepared.dedicated,
                 })
                 .await;
             let result = run_profile(
@@ -291,6 +321,45 @@ impl SubagentCatalog {
             result
         }
     }
+
+    async fn prepare_workspace(
+        &self,
+        agent_id: uuid::Uuid,
+        policy: SubagentWorktreePolicy,
+    ) -> Result<PreparedSubagentWorkspace, AgentError> {
+        if policy == SubagentWorktreePolicy::Shared {
+            return Ok(PreparedSubagentWorkspace {
+                workspace: self.workspace.clone(),
+                root_workspace: self.workspace.clone(),
+                branch: None,
+                dedicated: false,
+            });
+        }
+        let manager = self.worktrees.as_ref().ok_or_else(|| {
+            AgentError::Subagent("dedicated subagent worktree root is not configured".to_owned())
+        })?;
+        manager.prepare(&self.workspace, agent_id, policy).await
+    }
+}
+
+fn remap_approved_target(
+    target: Option<PathBuf>,
+    prepared: &PreparedSubagentWorkspace,
+) -> Result<Option<PathBuf>, AgentError> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    if !prepared.dedicated {
+        return Ok(Some(target));
+    }
+    let relative = target.strip_prefix(&prepared.root_workspace).map_err(|_| {
+        AgentError::Subagent(format!(
+            "approved editor target {} is outside root workspace {}",
+            target.display(),
+            prepared.root_workspace.display()
+        ))
+    })?;
+    Ok(Some(prepared.workspace.join(relative)))
 }
 
 fn background_lifecycle_status(status: &BackgroundTaskStatus) -> SubagentLifecycleStatus {
@@ -430,6 +499,7 @@ pub fn builtin_profiles(
                 prompt: "Your trade is LOCATION. Report exact paths and line numbers; do not redesign.",
                 max_turns: 8,
                 requires_write_target: false,
+                worktree: SubagentWorktreePolicy::Shared,
             },
         ),
         profile(
@@ -442,6 +512,7 @@ pub fn builtin_profiles(
                 prompt: "Your trade is READING. Answer with specific evidence and say which parts you read.",
                 max_turns: 8,
                 requires_write_target: false,
+                worktree: SubagentWorktreePolicy::Shared,
             },
         ),
         profile(
@@ -460,6 +531,7 @@ pub fn builtin_profiles(
                 prompt: "Your trade is INVESTIGATION. Follow evidence across files and state what you could not confirm.",
                 max_turns: 12,
                 requires_write_target: false,
+                worktree: SubagentWorktreePolicy::Shared,
             },
         ),
         profile(
@@ -472,6 +544,7 @@ pub fn builtin_profiles(
                 prompt: "Your trade is EDITING EXACTLY ONE FILE. Read it first, make a minimal exact edit, and touch no other path.",
                 max_turns: 6,
                 requires_write_target: true,
+                worktree: SubagentWorktreePolicy::Dedicated,
             },
         ),
     ]
@@ -484,6 +557,7 @@ struct ProfileSpec<'a> {
     prompt: &'a str,
     max_turns: usize,
     requires_write_target: bool,
+    worktree: SubagentWorktreePolicy,
 }
 
 fn profile(
@@ -503,6 +577,7 @@ fn profile(
         timeout_seconds: Some(300),
         max_consecutive_failures: 3,
         requires_write_target: spec.requires_write_target,
+        worktree: spec.worktree,
     }
 }
 
@@ -635,5 +710,21 @@ mod tests {
             .await;
         assert!(matches!(result, Err(AgentError::Subagent(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn approved_editor_target_maps_to_the_same_relative_worktree_path() {
+        let root = PathBuf::from("/workspace/project");
+        let prepared = PreparedSubagentWorkspace {
+            workspace: PathBuf::from("/managed/agent"),
+            root_workspace: root.clone(),
+            branch: Some("willdeep/agent-test".to_owned()),
+            dedicated: true,
+        };
+        let mapped = remap_approved_target(Some(root.join("src/lib.rs")), &prepared)
+            .expect("map target")
+            .expect("target");
+        assert_eq!(mapped, PathBuf::from("/managed/agent/src/lib.rs"));
+        assert!(remap_approved_target(Some(PathBuf::from("/elsewhere/file")), &prepared).is_err());
     }
 }

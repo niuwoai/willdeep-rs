@@ -63,6 +63,7 @@ pub struct SubagentProfileSettings {
     pub token_budget: Option<u64>,
     pub timeout_seconds: Option<u64>,
     pub max_consecutive_failures: Option<usize>,
+    pub worktree: Option<String>,
 }
 
 pub struct LoadedConfig {
@@ -182,6 +183,13 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             .is_some_and(|value| !(1..=20).contains(&value))
         {
             bail!("subagents.{name}.max_consecutive_failures must be between 1 and 20");
+        }
+        if subagent
+            .worktree
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "shared" | "dedicated"))
+        {
+            bail!("subagents.{name}.worktree must be shared or dedicated");
         }
         if let Some(provider) = &subagent.provider_profile
             && !file.providers.contains_key(provider)

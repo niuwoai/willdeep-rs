@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.20.0-rc3
+> 最后更新：2026-08-11 | 当前版本：v0.20.0-rc4
 
 ## 项目简介
 
@@ -69,6 +69,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 在任务入队时以服务端注册表覆盖客户端 Workspace 策略；只读 Workspace 在审批前阻止 Shell、文件写入、Worktree、MCP 与 Editor 子 Agent，默认 Provider 和非空 Skill/MCP 允许列表进入同一 Harness；
 - TUI `/workspace list|switch <id>` 接入 Runtime 注册表；切换保存/恢复 Workspace 专属 Session 与事件游标，重启事件订阅、状态和 Skill 视图，不取消旧 Workspace 后台任务；启动时绑定旧路径的 `/local` 在跨 Workspace 后保守禁用；
 - Web 工作区 API/选择器改读 Runtime 注册表，并与服务启动时的路径白名单取交集；展示当前项与 read-only/smart/workspace-write 模式，Composer Skills 使用 Workspace 允许列表；默认 Workspace 内文件写入免审，Shell/MCP/网络仍按审批策略执行；
+- 内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；已审批目标按根工作区相对路径映射，Runtime 持久显示实际目录、根目录和分支，Diff 归因在 Child Worktree 内采集，任务结束后保留供审查；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 转发 Runtime 事件，真实停止 Turn，并可加载持久历史会话；浏览器断开不再杀死后台 Harness；

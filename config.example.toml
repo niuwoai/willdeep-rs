@@ -55,6 +55,8 @@ max_turns = 12
 provider_profile = "some-im"
 model = "glm-5"
 max_turns = 6
+# Writing profiles default to a dedicated, reviewable Git worktree.
+worktree = "dedicated"
 
 # MCP stdio servers are initialized once and exposed as
 # mcp__<server>__<tool>. Put credentials in inherited environment variables;

@@ -69,6 +69,10 @@ pub enum AgentEvent {
         max_turns: usize,
         token_budget: Option<u64>,
         timeout_seconds: Option<u64>,
+        workspace: std::path::PathBuf,
+        root_workspace: std::path::PathBuf,
+        worktree_branch: Option<String>,
+        dedicated_worktree: bool,
     },
     SubagentCompleted {
         id: uuid::Uuid,

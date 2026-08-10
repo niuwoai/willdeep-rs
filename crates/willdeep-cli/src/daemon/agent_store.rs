@@ -24,6 +24,12 @@ pub(crate) struct RuntimeAgent {
     #[serde(default)]
     pub background: bool,
     pub workspace: PathBuf,
+    #[serde(default)]
+    pub root_workspace: Option<PathBuf>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub dedicated_worktree: bool,
     pub profile: Option<String>,
     pub status: RuntimeAgentStatus,
     pub current_turn: u64,
@@ -97,6 +103,9 @@ impl AgentStore {
             label: Some("root".to_owned()),
             background: false,
             workspace,
+            root_workspace: None,
+            worktree_branch: None,
+            dedicated_worktree: false,
             profile,
             status,
             current_turn: 0,
@@ -130,6 +139,9 @@ impl AgentStore {
         if let Some(agent) = agents.get_mut(&id) {
             agent.task_id = task_id;
             agent.workspace = workspace;
+            agent.root_workspace = None;
+            agent.worktree_branch = None;
+            agent.dedicated_worktree = false;
             agent.profile = profile;
             agent.status = status;
             agent.current_turn = 0;
@@ -156,6 +168,9 @@ impl AgentStore {
             label: Some("root".to_owned()),
             background: false,
             workspace,
+            root_workspace: None,
+            worktree_branch: None,
+            dedicated_worktree: false,
             profile,
             status,
             current_turn: 0,
@@ -296,6 +311,16 @@ impl AgentStore {
                 .get("background")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(agent.background);
+            agent.workspace = event_path(value, "workspace").unwrap_or(agent.workspace.clone());
+            agent.root_workspace = event_path(value, "root_workspace");
+            agent.worktree_branch = value
+                .get("worktree_branch")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            agent.dedicated_worktree = value
+                .get("dedicated_worktree")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
             agent.status = RuntimeAgentStatus::Running;
             agent.current_turn = 0;
             agent.current_tool = None;
@@ -333,7 +358,17 @@ impl AgentStore {
                     .get("background")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
-                workspace: parent.workspace,
+                workspace: event_path(value, "workspace")
+                    .unwrap_or_else(|| parent.workspace.clone()),
+                root_workspace: event_path(value, "root_workspace").or(Some(parent.workspace)),
+                worktree_branch: value
+                    .get("worktree_branch")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                dedicated_worktree: value
+                    .get("dedicated_worktree")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
                 profile: value
                     .get("profile")
                     .and_then(|value| value.as_str())
@@ -425,6 +460,14 @@ impl AgentStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime agent store lock poisoned"))
     }
+}
+
+fn event_path(value: &serde_json::Value, field: &str) -> Option<PathBuf> {
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn load_agents(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeAgent>> {

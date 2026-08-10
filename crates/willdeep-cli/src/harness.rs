@@ -429,10 +429,17 @@ pub(crate) async fn build(
             if let Some(max_failures) = settings.max_consecutive_failures {
                 subagent.max_consecutive_failures = max_failures;
             }
+            if let Some(worktree) = settings.worktree.as_deref() {
+                subagent.worktree = match worktree {
+                    "dedicated" => willdeep_core::SubagentWorktreePolicy::Dedicated,
+                    _ => willdeep_core::SubagentWorktreePolicy::Shared,
+                };
+            }
         }
     }
     let subagents = Arc::new(
         SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
+            .with_worktree_root(home.join("worktrees").join("subagents"))
             .with_event_sink(sink.clone()),
     );
     let mut agent = Agent::new(

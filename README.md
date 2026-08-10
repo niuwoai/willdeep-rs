@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.20.0-rc3`，支持：
+当前版本为 `0.20.0-rc4`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -308,7 +308,7 @@ enabled = true
 | `deep` | 跨文件深入调查 | search/grep/read/list/git status |
 | `editor` | 修改一个明确目标文件 | read/edit |
 
-子 Agent 看不到父对话、不能询问用户、不能继续派生。`editor` 必须提供 `target_file`，主 Harness 会对 canonicalize 后的现有文件单独请求批准；批准后的子 Agent 仍只能修改这一个文件。
+子 Agent 看不到父对话、不能询问用户、不能继续派生。`editor` 必须提供 `target_file`，主 Harness 会对 canonicalize 后的现有文件单独请求批准；批准后会创建专属 `willdeep/agent-<id>` Git Worktree，并把目标文件映射到隔离目录，子 Agent 仍只能修改这一个文件。Worktree 在任务结束后保留供审查，不会自动删除。
 
 各工种可绑定不同模型：
 
@@ -322,6 +322,10 @@ context_window = 128000
 [subagents.deep]
 # 省略绑定时继承当前会话模型
 max_turns = 12
+
+[subagents.editor]
+# 可显式改为 shared；内置 editor 默认为 dedicated
+worktree = "dedicated"
 ```
 
 ## ask_user 与审批

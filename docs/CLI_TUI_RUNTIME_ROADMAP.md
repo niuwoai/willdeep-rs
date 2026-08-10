@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.20.0-rc3
+> 当前实施版本：v0.20.0-rc4
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -108,7 +108,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [x] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、TUI 与 Web 选择器共用同一来源，Web 仍受启动路径白名单上界约束。
 - [x] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；TUI 切换恢复目标 Session/游标并重启事件与状态订阅，跨路径后禁用启动时绑定旧根目录的 Local Harness，Runtime 激活不改变既有任务根目录。
-- [ ] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批。
+- [-] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批；Editor 已默认使用专属分支和 Worktree，Runtime 生命周期及 Diff 归因已绑定真实 Child 路径，结构化 Diff 回传与合并审批待完成。
 - [ ] 孤儿 Worktree 检测与保守清理。
 
 验收：多 Workspace 不突破隔离，多 Agent 能安全并行修改。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.20.0-rc4（已完成）：内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；已审批目标按根工作区相对路径安全映射，Runtime Child Agent 持久记录实际 Workspace、根 Workspace、分支和隔离模式，写工具 Diff 归因改在 Child Worktree 内采集。`[subagents.<profile>].worktree` 可显式选择 `shared` 或 `dedicated`；任务结束不自动删除 Worktree。下一步实现结构化 Diff 回流、冲突预检和合并审批。
 
 v0.20.0-rc3（已完成）：Web 工作区 API 与选择器改为读取 Runtime 注册表，并与 `--workspace/--web-workspace` 白名单取交集；返回稳定 ID、名称、active 和访问模式，Composer Skills 应用 Workspace 允许列表，新会话优先 Workspace Provider。自动注册采用原子 `ensure`，不会覆盖用户已有策略。按 Coding Agent 语义，允许目录默认 `workspace-write`（文件写入免审），Shell、MCP、网络和越界访问继续审批；`read-only` 仅显式启用。下一步进入子 Agent 专属 Worktree 与 Diff 回流。
 

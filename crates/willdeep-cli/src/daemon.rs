@@ -59,12 +59,20 @@ struct RuntimeEventSink {
     workspace: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
-    diff_baselines: AsyncMutex<HashMap<String, diff_review::DiffCapture>>,
+    diff_baselines: AsyncMutex<HashMap<String, (PathBuf, diff_review::DiffCapture)>>,
+    child_workspaces: AsyncMutex<HashMap<uuid::Uuid, PathBuf>>,
 }
 
 impl RuntimeEventSink {
     async fn observe_diff(&self, event: &willdeep_core::AgentEvent) {
         use willdeep_core::AgentEvent;
+        if let AgentEvent::SubagentStarted { id, workspace, .. } = event {
+            self.child_workspaces
+                .lock()
+                .await
+                .insert(*id, workspace.clone());
+            return;
+        }
         let requested = match event {
             AgentEvent::ToolRequested(call) => Some((
                 format!("root:{}", call.id),
@@ -76,12 +84,16 @@ impl RuntimeEventSink {
             }
             _ => None,
         };
-        if let Some((key, _, tool)) = requested {
+        if let Some((key, agent_id, tool)) = requested {
             if !tool_may_modify_workspace(&tool) {
                 return;
             }
-            if let Ok(capture) = diff_review::capture(&self.workspace) {
-                self.diff_baselines.lock().await.insert(key, capture);
+            let workspace = self.agent_workspace(agent_id).await;
+            if let Ok(capture) = diff_review::capture(&workspace) {
+                self.diff_baselines
+                    .lock()
+                    .await
+                    .insert(key, (workspace, capture));
             }
             return;
         }
@@ -102,13 +114,13 @@ impl RuntimeEventSink {
         if !tool_may_modify_workspace(&tool) {
             return;
         }
-        let Some(before) = self.diff_baselines.lock().await.remove(&key) else {
+        let Some((workspace, before)) = self.diff_baselines.lock().await.remove(&key) else {
             return;
         };
         if let Err(error) = diff_review::record_tool_attribution(
             &self.home,
             before,
-            &self.workspace,
+            &workspace,
             diff_review::AttributionContext {
                 session_id: self.session_id,
                 turn_id: self.turn_id,
@@ -124,6 +136,18 @@ impl RuntimeEventSink {
                 self.task_id
             );
         }
+    }
+
+    async fn agent_workspace(&self, agent_id: uuid::Uuid) -> PathBuf {
+        if agent_id == self.root_agent_id {
+            return self.workspace.clone();
+        }
+        self.child_workspaces
+            .lock()
+            .await
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_else(|| self.workspace.clone())
     }
 }
 
@@ -2284,6 +2308,7 @@ impl TaskManager {
             events: self.events.clone(),
             agents: self.agents.clone(),
             diff_baselines: AsyncMutex::new(HashMap::new()),
+            child_workspaces: AsyncMutex::new(HashMap::new()),
         });
         tokio::spawn(async move {
             let execution = crate::harness::execute_runtime(&home, request, connection, sink);

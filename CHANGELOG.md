@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.20.0-rc4] - 2026-08-11
+
+### Added
+
+- 内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；TOML Profile 可用 `worktree = "shared" | "dedicated"` 覆盖策略。
+- 子 Agent 生命周期与 Runtime Agent Store 新增实际 Workspace、根 Workspace、Worktree 分支和隔离标记。
+
+### Changed
+
+- Editor 已审批目标按根 Workspace 相对路径映射到专属 Worktree；Child 写工具的 Diff Attribution 在自己的 Worktree 内采集，不再误归属父工作区。
+
+### Security
+
+- 专属 Worktree 仅能从包含当前 Workspace 的 Git 仓库创建，使用不可预测 Agent UUID 路径；任务结束时保留分支与目录供审查，不自动删除或合并用户改动。
+
 ## [0.20.0-rc3] - 2026-08-11
 
 ### Added

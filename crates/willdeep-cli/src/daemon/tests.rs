@@ -99,6 +99,9 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
     let turn_id = uuid::Uuid::new_v4();
     let root_agent_id = uuid::Uuid::new_v4();
     let child_agent_id = uuid::Uuid::new_v4();
+    let child_workspace = root.join("child-workspace");
+    std::fs::create_dir_all(&child_workspace).unwrap();
+    initialize_git_workspace(&child_workspace);
     let sink = RuntimeEventSink {
         task_id,
         session_id: Some(session_id),
@@ -109,14 +112,29 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
         events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
         agents: test_agent_store(&root),
         diff_baselines: AsyncMutex::new(HashMap::new()),
+        child_workspaces: AsyncMutex::new(HashMap::new()),
     };
 
+    sink.emit(willdeep_core::AgentEvent::SubagentStarted {
+        id: child_agent_id,
+        profile: "editor".to_owned(),
+        label: "isolated edit".to_owned(),
+        background: true,
+        max_turns: 6,
+        token_budget: None,
+        timeout_seconds: Some(300),
+        workspace: child_workspace.clone(),
+        root_workspace: workspace.clone(),
+        worktree_branch: Some("willdeep/agent-test".to_owned()),
+        dedicated_worktree: true,
+    })
+    .await;
     sink.emit(willdeep_core::AgentEvent::SubagentToolRequested {
         id: child_agent_id,
         name: "edit_file".to_owned(),
     })
     .await;
-    std::fs::write(workspace.join("child.txt"), "child change\n").unwrap();
+    std::fs::write(child_workspace.join("child.txt"), "child change\n").unwrap();
     sink.emit(willdeep_core::AgentEvent::SubagentToolCompleted {
         id: child_agent_id,
         name: "edit_file".to_owned(),
@@ -262,7 +280,11 @@ fn agent_store_persists_structured_harness_lifecycle() {
                 serde_json::json!({
                     "profile": "scout",
                     "label": "inspect files",
-                    "background": true
+                    "background": true,
+                    "workspace": root.join("child-worktree"),
+                    "root_workspace": root,
+                    "worktree_branch": "willdeep/agent-test",
+                    "dedicated_worktree": true
                 }),
             ),
         )
@@ -299,6 +321,11 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert_eq!(completed_child.status, RuntimeAgentStatus::Completed);
     assert_eq!(completed_child.current_turn, 2);
     assert_eq!(completed_child.total_tokens, Some(9));
+    assert!(completed_child.dedicated_worktree);
+    assert_eq!(
+        completed_child.worktree_branch.as_deref(),
+        Some("willdeep/agent-test")
+    );
 
     store
         .apply_harness_event(

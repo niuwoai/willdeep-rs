@@ -7,6 +7,7 @@ pub mod provider;
 pub mod session;
 pub mod skills;
 pub mod subagent;
+mod subagent_worktree;
 pub mod tools;
 pub mod types;
 
@@ -27,6 +28,7 @@ pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use session::{Session, SessionStore};
 pub use skills::SkillCatalog;
 pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
+pub use subagent_worktree::SubagentWorktreePolicy;
 pub use tools::{
     ApprovalDecision, ApprovalMode, Approver, CommandVerification, ToolRegistry, UserQuestion,
     VerificationStatus, WebToolConfig,

@@ -809,6 +809,10 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             max_turns,
             token_budget,
             timeout_seconds,
+            workspace,
+            root_workspace,
+            worktree_branch,
+            dedicated_worktree,
         } => serde_json::json!({
             "type": "subagent_started",
             "id": id,
@@ -818,6 +822,10 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "max_turns": max_turns,
             "token_budget": token_budget,
             "timeout_seconds": timeout_seconds
+            ,"workspace": workspace
+            ,"root_workspace": root_workspace
+            ,"worktree_branch": worktree_branch
+            ,"dedicated_worktree": dedicated_worktree
         }),
         AgentEvent::SubagentCompleted { id, status, report } => serde_json::json!({
             "type": "subagent_completed",
