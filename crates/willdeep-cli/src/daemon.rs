@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,6 +28,7 @@ const LOCK_RECOVERY_ATTEMPTS: usize = 120;
 
 mod agent_control;
 mod agent_store;
+mod control_api;
 pub(crate) mod diff_review;
 mod event_stream;
 mod herdr;
@@ -477,6 +478,7 @@ struct ServerState {
     sessions: Arc<session_store::RuntimeSessionStore>,
     workspaces: Arc<workspace_store::WorkspaceStore>,
     diff_review_lock: Arc<tokio::sync::Mutex<()>>,
+    idempotency: Arc<control_api::IdempotencyStore>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -852,6 +854,91 @@ pub async fn detach() -> Result<()> {
         "Client detached; Runtime pid {} continues running (uptime {}s).",
         health.pid, health.uptime_seconds
     );
+    Ok(())
+}
+
+pub async fn api(
+    operation: String,
+    params_file: Option<PathBuf>,
+    request_id: Option<uuid::Uuid>,
+    ndjson: bool,
+) -> Result<()> {
+    if !willdeep_runtime_protocol::SUPPORTED_OPERATIONS.contains(&operation.as_str())
+        && !matches!(operation.as_str(), "agent.prompt" | "agent.wait")
+    {
+        bail!("unknown Runtime operation: {operation}");
+    }
+    let params = match params_file.as_deref() {
+        None => serde_json::json!({}),
+        Some(path) if path == Path::new("-") => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            serde_json::from_str(&input).context("parse API params from stdin")?
+        }
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)
+            .with_context(|| format!("parse API params file as JSON: {}", path.display()))?,
+    };
+    if !params.is_object() {
+        bail!("API params must be a JSON object");
+    }
+    let home = crate::config::willdeep_home()?;
+    let state = ensure_running(&home).await?;
+    if operation == "event.stream" {
+        if !ndjson {
+            bail!("event.stream is an NDJSON stream; pass --ndjson");
+        }
+        return stream_api_events(
+            &state,
+            &params,
+            request_id.unwrap_or_else(uuid::Uuid::new_v4),
+        )
+        .await;
+    }
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(operation, &params, request_id)
+            .await?;
+    let failed = matches!(
+        response,
+        willdeep_runtime_protocol::ApiResponse::Error { .. }
+    );
+    let value = serde_json::to_value(response)?;
+    if ndjson {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+    if failed {
+        bail!("Runtime API operation failed; inspect the error envelope above");
+    }
+    Ok(())
+}
+
+async fn stream_api_events(
+    state: &DaemonState,
+    params: &serde_json::Value,
+    request_id: uuid::Uuid,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StreamParams {
+        #[serde(default)]
+        after: u64,
+        #[serde(default = "default_event_limit")]
+        limit: usize,
+    }
+
+    let params: StreamParams = serde_json::from_value(params.clone())
+        .context("event.stream params must contain only after and limit")?;
+    let mut events = runtime_client(state)?
+        .stream_events(params.after, params.limit, Some(request_id))
+        .await?;
+    let mut stdout = std::io::stdout().lock();
+    while let Some(event) = events.next::<RuntimeEvent>().await? {
+        serde_json::to_writer(&mut stdout, &event)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
     Ok(())
 }
 
@@ -1306,11 +1393,16 @@ async fn status(home: &Path) -> Result<()> {
 
 async fn capabilities_cli(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<
-        willdeep_runtime_protocol::RuntimeCapabilities,
-    > = authorized_get(&state, "/v1/capabilities").await?;
+    let response = runtime_client(&state)?.capabilities(None).await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn runtime_client(state: &DaemonState) -> Result<willdeep_runtime_client::RuntimeClient> {
+    Ok(willdeep_runtime_client::RuntimeClient::new(
+        format!("http://{}", state.address),
+        state.token.clone(),
+    )?)
 }
 
 async fn stop(home: &Path) -> Result<()> {
@@ -1449,6 +1541,7 @@ async fn run(home: &Path) -> Result<()> {
         sessions: sessions.clone(),
         workspaces: tasks.workspaces.clone(),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
+        idempotency: Arc::new(control_api::IdempotencyStore::default()),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
@@ -1488,10 +1581,15 @@ async fn run(home: &Path) -> Result<()> {
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities_handler))
+        .route("/v1/api", post(control_api::handler))
         .route("/v1/events", get(events_handler))
         .route(
             "/v1/events/stream",
             get(event_stream::events_stream_handler),
+        )
+        .route(
+            "/v1/events/stream.ndjson",
+            get(event_stream::events_ndjson_handler),
         )
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))

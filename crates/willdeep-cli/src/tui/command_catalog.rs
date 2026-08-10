@@ -1,6 +1,6 @@
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 12] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 13] {
     [
         (
             "/help",
@@ -24,6 +24,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "管理手机中继",
                 "Manage mobile relay",
                 "モバイルリレーを管理",
+            ),
+        ),
+        (
+            "/webapp",
+            language.text(
+                "启动或查看本地 Web App",
+                "Start or inspect the local Web App",
+                "ローカル Web App を起動・確認",
             ),
         ),
         (

@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc1`，支持：
+当前版本为 `0.21.0-rc2`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -19,7 +19,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 版本化 JSON 会话持久化、列表和恢复；
 - Codex/WillDeep 兼容的 `SKILL.md` 发现、列表和安全资源读取；
 - MCP stdio server 初始化、工具发现、命名空间注册与调用。
-- `/goal`、`/compress`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用，TUI 与 Web 均提供 `/` 命令及 `$` 技能候选；
+- `/goal`、`/compress`、`/webapp`、`/skills`、`/clear`、`/help` 命令及 `$skill-name` 显式技能引用，TUI 与 Web 均提供 `/` 命令及 `$` 技能候选；
 - `/mobile` 二维码入口，通过 `j.niuwoai.com` WebSocket Relay 连接 WillDeep Mobile；
 - GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
 - some.im 纯文本模型通过同一账号下的视觉模型理解图片；
@@ -88,6 +88,8 @@ willdeep daemon retry-agent <agent-id>
 willdeep daemon cancel <task-id>
 willdeep daemon pending
 willdeep daemon resolve <interaction-id> allow-once
+willdeep api session.list --ndjson
+willdeep api event.stream --params-file events.json --ndjson
 willdeep daemon resolve <interaction-id> deny
 willdeep daemon resolve <interaction-id> always-allow
 willdeep daemon answer <interaction-id> "自由输入答案"
@@ -314,7 +316,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。运行 `willdeep daemon capabilities` 可读取受 Token 保护的协议版本、对象类型、操作名、传输方式与大小限制；新控制端点使用带 `protocol_version`、`server_version` 和可选 `request_id` 的统一响应信封。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc2` 新增统一 `willdeep api`、可续传 NDJSON 事件流与 `willdeep-runtime-client` crate。运行 `willdeep daemon capabilities` 可读取受 Token 保护的协议版本、对象类型、操作名、传输方式与大小限制；控制端点使用带 `protocol_version`、`server_version` 和可选 `request_id` 的统一响应信封。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

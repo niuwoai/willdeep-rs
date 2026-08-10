@@ -5,6 +5,35 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: &str = "1.0";
 pub const MIN_CLIENT_PROTOCOL_VERSION: &str = "1.0";
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ApiRequest {
+    pub protocol_version: String,
+    pub request_id: uuid::Uuid,
+    pub operation: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+impl ApiRequest {
+    pub fn new(operation: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            request_id: uuid::Uuid::new_v4(),
+            operation: operation.into(),
+            params,
+        }
+    }
+
+    pub fn is_protocol_compatible(&self) -> bool {
+        protocol_major(&self.protocol_version) == protocol_major(PROTOCOL_VERSION)
+    }
+}
+
+fn protocol_major(version: &str) -> Option<&str> {
+    let major = version.split('.').next()?;
+    (!major.is_empty() && major.chars().all(|value| value.is_ascii_digit())).then_some(major)
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
@@ -115,7 +144,11 @@ impl RuntimeCapabilities {
                 .iter()
                 .map(|value| (*value).to_owned())
                 .collect(),
-            transports: vec![TransportKind::HttpLoopback, TransportKind::ServerSentEvents],
+            transports: vec![
+                TransportKind::HttpLoopback,
+                TransportKind::ServerSentEvents,
+                TransportKind::Ndjson,
+            ],
             limits: ProtocolLimits {
                 max_event_page: 1_000,
                 max_prompt_bytes: 1024 * 1024,
@@ -143,6 +176,8 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "session.export",
     "agent.list",
     "agent.get",
+    "agent.prompt",
+    "agent.wait",
     "agent.stop",
     "agent.retry",
     "turn.submit",
@@ -212,6 +247,28 @@ impl<T> ApiResponse<T> {
             },
         }
     }
+
+    pub fn error(
+        code: ErrorCode,
+        message: impl Into<String>,
+        retryable: bool,
+        server_version: impl Into<String>,
+        request_id: Option<uuid::Uuid>,
+    ) -> Self {
+        Self::Error {
+            error: ApiError {
+                code,
+                message: message.into(),
+                retryable,
+                fields: BTreeMap::new(),
+            },
+            meta: ResponseMeta {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                server_version: server_version.into(),
+                request_id,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +302,17 @@ mod tests {
         assert!(!json.contains("api_key"));
         let decoded: ApiResponse<RuntimeCapabilities> = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn request_requires_the_same_protocol_major() {
+        let mut request = ApiRequest::new("session.list", serde_json::Value::Null);
+        assert!(request.is_protocol_compatible());
+        request.protocol_version = "1.99".to_owned();
+        assert!(request.is_protocol_compatible());
+        request.protocol_version = "2.0".to_owned();
+        assert!(!request.is_protocol_compatible());
+        request.protocol_version = "invalid".to_owned();
+        assert!(!request.is_protocol_compatible());
     }
 }

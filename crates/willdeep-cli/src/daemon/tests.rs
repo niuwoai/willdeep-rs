@@ -208,6 +208,7 @@ async fn authorization_requires_exact_local_token() {
             workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
         ),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
+        idempotency: Arc::new(control_api::IdempotencyStore::default()),
     });
     assert_eq!(
         authorize(&state, &HeaderMap::new()),

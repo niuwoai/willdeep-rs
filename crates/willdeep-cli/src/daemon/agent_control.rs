@@ -117,6 +117,16 @@ async fn enqueue_agent_command(
     message: Option<String>,
 ) -> Result<Response, StatusCode> {
     authorize(state, headers)?;
+    let command = enqueue_agent_command_internal(state, id, kind, message).await?;
+    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
+}
+
+pub(super) async fn enqueue_agent_command_internal(
+    state: &ServerState,
+    id: uuid::Uuid,
+    kind: AgentCommandKind,
+    message: Option<String>,
+) -> Result<AgentCommand, StatusCode> {
     let agent = state
         .agents
         .get(id)
@@ -167,7 +177,7 @@ async fn enqueue_agent_command(
             ),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
+    Ok(command)
 }
 
 pub(super) async fn agent_commands_handler(

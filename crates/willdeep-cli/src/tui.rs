@@ -45,6 +45,7 @@ mod rendering;
 mod runtime_ui;
 mod session_commands;
 mod sidebar;
+mod webapp_commands;
 mod workspace_attention;
 mod workspace_commands;
 use activity::ToolActivity;
@@ -701,6 +702,11 @@ async fn event_loop(
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
                             }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
+                            match webapp_commands::handle_webapp_command(&prompt,&runtime.home,&runtime.runtime_submit.workspace,runtime.runtime_submit.config.as_deref(),runtime.runtime_submit.profile.as_deref(),language).await {
+                                Ok(Some(message))=>{app.append_transcript(message);continue;},
+                                Ok(None)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("启动 Web App 失败","Start Web App failed","Web App の起動に失敗しました")));continue;},
+                            }
                             if prompt.trim()=="/diff" {
                                 match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
                                     Ok(snapshot)=>{
@@ -1775,7 +1781,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /webapp [status|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {

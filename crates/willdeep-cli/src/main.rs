@@ -147,6 +147,20 @@ enum CliCommand {
         #[command(subcommand)]
         action: daemon::DaemonAction,
     },
+    /// Invoke one stable Runtime operation with a JSON request envelope.
+    Api {
+        /// Namespaced operation such as session.list or agent.get.
+        operation: String,
+        /// JSON object file, or - for stdin. Omit for an empty object.
+        #[arg(long, value_name = "PATH|-")]
+        params_file: Option<PathBuf>,
+        /// Stable client-generated request ID. A UUID is generated when omitted.
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+        /// Emit one compact JSON object suitable for NDJSON pipelines.
+        #[arg(long)]
+        ndjson: bool,
+    },
     /// Attach to the persistent Runtime event stream.
     Attach {
         /// Resume after this event sequence number.
@@ -204,6 +218,12 @@ async fn run() -> Result<()> {
     if let Some(command) = cli.command.clone() {
         return match command {
             CliCommand::Daemon { action } => daemon::handle(action).await,
+            CliCommand::Api {
+                operation,
+                params_file,
+                request_id,
+                ndjson,
+            } => daemon::api(operation, params_file, request_id, ndjson).await,
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
@@ -212,7 +232,10 @@ async fn run() -> Result<()> {
     let administrative =
         cli.list_projects || cli.list_sessions || cli.list_approvals || cli.clear_approvals;
     if cli.onboarding
-        || (!administrative && cli.config.is_none() && !config::default_config_path()?.exists())
+        || (!cli.web
+            && !administrative
+            && cli.config.is_none()
+            && !config::default_config_path()?.exists())
     {
         onboarding::run(cli.config.as_deref()).await?;
     }

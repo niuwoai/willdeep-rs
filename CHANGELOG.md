@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.21.0-rc2] - 2026-08-11
+
+### Added
+
+- 新增受 Token 保护的 `POST /v1/api` 统一 JSON 控制入口，以及 `willdeep api <operation> --params-file <JSON|->`；Session、Agent、Turn、Approval、Question 与 Event 的首批操作使用协议 crate 定义的请求/响应信封。
+- 新增可续传 `GET /v1/events/stream.ndjson`，每行均为完整统一事件信封；CLI `willdeep api event.stream --ndjson` 与共享 Rust Client 可按 `after` 游标消费长连接。
+- 新增 `willdeep-runtime-client` crate，集中处理回环端点校验、Runtime Token、能力协商、统一调用及有界 NDJSON 解码。
+- TUI Prompt 新增 `/webapp` 与 `/webapp status`；前者在当前 Workspace 启动内嵌 Web App，候选列表同步提供命令说明。
+
+### Changed
+
+- CLI 的统一 API、能力查询与 NDJSON 事件消费改用共享 Rust Client，不再各自拼装 HTTP 请求。
+- 修改类统一请求按 Request ID 做进程内有界幂等去重；同一 ID 携带不同参数会返回冲突。
+- Web App 启动不再强制进入 Provider 首次设置；无 Provider 时仍可查看本地 Runtime 状态，真正提交模型任务时再返回配置错误。
+
+### Security
+
+- 幂等缓存只保留请求参数指纹，不额外保存 Prompt 或回答正文；内部错误对客户端统一脱敏，详细上下文只进入 Runtime 本地日志。
+- `/webapp` 只允许回环监听地址；远程访问仍须由反向代理、VPN 或 SSH Tunnel 显式提供认证与暴露边界。
+
 ## [0.21.0-rc1] - 2026-08-11
 
 ### Added

@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
+use axum::body::{Body, Bytes};
+use axum::http::header::CONTENT_TYPE;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream;
 
@@ -112,6 +114,49 @@ pub(super) async fn events_stream_handler(
         .into_response())
 }
 
+pub(super) async fn events_ndjson_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let request_id = headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<uuid::Uuid>().ok());
+    let receiver = state.events.subscribe();
+    let backlog = state
+        .events
+        .read_after(query.after, query.limit.clamp(1, LIVE_BACKLOG_LIMIT))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into();
+    let live = LiveEventState {
+        backlog,
+        receiver,
+        log: state.events.clone(),
+        cursor: query.after,
+    };
+    let events = stream::unfold(live, move |mut state| async move {
+        next_event(&mut state).await.map(|event| {
+            let line = Ok::<Bytes, Infallible>(ndjson_event(event, request_id));
+            (line, state)
+        })
+    });
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
+        .body(Body::from_stream(events))
+        .expect("valid NDJSON response"))
+}
+
+fn ndjson_event(event: RuntimeEvent, request_id: Option<uuid::Uuid>) -> Bytes {
+    let response =
+        willdeep_runtime_protocol::ApiResponse::ok(event, willdeep_core::VERSION, request_id);
+    let mut value =
+        serde_json::to_vec(&response).expect("Runtime event response is JSON serializable");
+    value.push(b'\n');
+    Bytes::from(value)
+}
+
 async fn next_event(state: &mut LiveEventState) -> Option<RuntimeEvent> {
     loop {
         while let Some(event) = state.backlog.pop_front() {
@@ -181,5 +226,25 @@ mod tests {
         // The queued broadcast copy of event 2 is skipped by the cursor.
         assert_eq!(next_event(&mut state).await.unwrap().sequence, 3);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ndjson_event_is_one_complete_envelope_line() {
+        let request_id = uuid::Uuid::new_v4();
+        let line = ndjson_event(
+            RuntimeEvent {
+                sequence: 42,
+                timestamp: 123,
+                kind: "turn.completed".to_owned(),
+                message: "done".to_owned(),
+            },
+            Some(request_id),
+        );
+        assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert_eq!(line.last(), Some(&b'\n'));
+        let value: serde_json::Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["sequence"], 42);
+        assert_eq!(value["meta"]["request_id"], request_id.to_string());
     }
 }
