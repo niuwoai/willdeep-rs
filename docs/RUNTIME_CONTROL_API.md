@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc19
+> 当前实现版本：v0.21.0-rc20
 
 ## 1. 目标
 
@@ -90,7 +90,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc19",
+    "server_version": "0.21.0-rc20",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +108,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc19"
+    "server_version": "0.21.0-rc20"
   }
 }
 ```
@@ -142,8 +142,8 @@ diff.revert
 2. [x] 受 Token 的能力协商端点；
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
 4. [x] Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 与 Diff Review 共享 DTO；
-5. [-] Rust Client Library；已覆盖全部公开对象、统一调用、能力协商、NDJSON、Unix Socket、Windows Named Pipe，以及 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event 高频类型化方法；继续补强 Diff/Worktree 高级方法；
-6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI bridge 的 Session 搜索、Turn 提交/停止、Event、Agent、Task、Inbox、Tool 和 Artifact 已使用类型化方法，Workspace、Diff Center、Web Session/Turn 与 CLI Session/Turn 管理也已迁移共享 Client；其他兼容命令继续迁移；
+5. [-] Rust Client Library；已覆盖全部公开对象、统一调用、能力协商、NDJSON、Unix Socket、Windows Named Pipe，以及 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event 和 Diff Review 类型化方法；Worktree 公共 DTO 与高级方法待稳定；
+6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI bridge 的 Session 搜索、Turn、Event、Agent、Task、Inbox、Tool、Artifact 与完整 Diff Center 已使用类型化方法，Workspace、Web Session/Turn 与 CLI Session/Turn 管理也已迁移共享 Client；其他兼容命令继续迁移；
 7. [x] Unix Socket 与 Windows Named Pipe；
 8. [-] Swift FFI、移动端和自动化兼容验证；已提供覆盖全部 11 类公开对象的固定 JSON decoder 夹具，客户端适配层与端到端双读待完成。
 

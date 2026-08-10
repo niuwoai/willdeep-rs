@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc19
+> 当前实施版本：v0.21.0-rc20
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc20（已完成）：Rust Runtime Client 新增 Diff Snapshot/Content/Reviews/Review/Verifications/Record Verification/Attributions/Commit Preview/Revert 全套类型化方法；审查、记录验证和撤销显式要求幂等 Request ID。TUI/CLI Diff bridge 的全部统一 API 调用迁移到这些方法，不再手写操作名和返回类型。下一步稳定 Worktree Review/Merge/Audit/Quarantine 公共 DTO 和 Client，并在 Web 展示 Workspace Change Artifact 详情。
 
 v0.21.0-rc19（已完成）：Web Runtime 侧栏支持 Approval 的 Allow Once/Deny/Always Allow，Question 的候选单选、多选提交和自定义回答，以及后台 Agent 的补充 Prompt、停止和重试。服务端每个写端点先重新校验 Runtime 注册 Workspace 与 Web 启动白名单，再确认 Gate/Agent 属于该 Workspace Snapshot；请求体严格拒绝客户端夹带额外作用域。操作完成后立即刷新 Activity，轮询仍负责最终一致性。下一步加入 Web Diff/Artifact 详情和基于 Event Cursor 的 Activity 推送，减少轮询。
 

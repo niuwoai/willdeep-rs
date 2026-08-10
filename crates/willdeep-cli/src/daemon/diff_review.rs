@@ -692,13 +692,9 @@ fn area_name(area: DiffArea) -> &'static str {
 pub(crate) async fn remote_snapshot(home: &Path, workspace: &Path) -> Result<DiffSnapshot> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffSnapshot>(
-            "diff.snapshot",
-            &willdeep_runtime_protocol::DiffSnapshotParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-            },
-            None,
-        )
+        .diff_snapshot(&willdeep_runtime_protocol::DiffSnapshotParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+        })
         .await?;
     local_snapshot(runtime_api_data(response)?)
 }
@@ -712,16 +708,12 @@ pub(crate) async fn remote_content(
 ) -> Result<String> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffContent>(
-            "diff.content",
-            &willdeep_runtime_protocol::DiffContentParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-                snapshot_id: snapshot_id.to_owned(),
-                path: path.to_owned(),
-                area: public_area(area),
-            },
-            None,
-        )
+        .diff_content(&willdeep_runtime_protocol::DiffContentParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+            path: path.to_owned(),
+            area: public_area(area),
+        })
         .await?;
     Ok(runtime_api_data(response)?.content)
 }
@@ -733,8 +725,7 @@ pub(crate) async fn remote_review(
 ) -> Result<DiffReviewRecord> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffReview>(
-            "diff.review",
+        .review_diff(
             &willdeep_runtime_protocol::DiffReviewParams {
                 workspace: request.workspace.to_string_lossy().into_owned(),
                 snapshot_id: snapshot_id.to_owned(),
@@ -742,7 +733,7 @@ pub(crate) async fn remote_review(
                 decision: public_decision(request.decision),
                 note: request.note.clone(),
             },
-            None,
+            uuid::Uuid::new_v4(),
         )
         .await?;
     local_review(runtime_api_data(response)?)
@@ -755,14 +746,10 @@ pub(crate) async fn remote_reviews(
 ) -> Result<Vec<DiffReviewRecord>> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, Vec<willdeep_runtime_protocol::DiffReview>>(
-            "diff.reviews",
-            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-                snapshot_id: snapshot_id.to_owned(),
-            },
-            None,
-        )
+        .diff_reviews(&willdeep_runtime_protocol::DiffSnapshotQueryParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+        })
         .await?;
     runtime_api_data(response)?
         .into_iter()
@@ -777,14 +764,10 @@ pub(crate) async fn remote_verifications(
 ) -> Result<Vec<DiffVerificationRecord>> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, Vec<willdeep_runtime_protocol::DiffVerification>>(
-            "diff.verifications",
-            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-                snapshot_id: snapshot_id.to_owned(),
-            },
-            None,
-        )
+        .diff_verifications(&willdeep_runtime_protocol::DiffSnapshotQueryParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+        })
         .await?;
     runtime_api_data(response)?
         .into_iter()
@@ -799,14 +782,10 @@ pub(crate) async fn remote_attributions(
 ) -> Result<Vec<DiffAttributionRecord>> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, Vec<willdeep_runtime_protocol::DiffAttribution>>(
-            "diff.attributions",
-            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-                snapshot_id: snapshot_id.to_owned(),
-            },
-            None,
-        )
+        .diff_attributions(&willdeep_runtime_protocol::DiffSnapshotQueryParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+        })
         .await?;
     runtime_api_data(response)?
         .into_iter()
@@ -824,17 +803,13 @@ pub(crate) async fn remote_commit_preview(
 ) -> Result<CommitPreview> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffCommitPreview>(
-            "diff.commit_preview",
-            &willdeep_runtime_protocol::DiffCommitPreviewParams {
-                workspace: workspace.to_string_lossy().into_owned(),
-                snapshot_id: snapshot_id.to_owned(),
-                message: message.to_owned(),
-                remote: remote.to_owned(),
-                tag: tag.map(ToOwned::to_owned),
-            },
-            None,
-        )
+        .diff_commit_preview(&willdeep_runtime_protocol::DiffCommitPreviewParams {
+            workspace: workspace.to_string_lossy().into_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+            message: message.to_owned(),
+            remote: remote.to_owned(),
+            tag: tag.map(ToOwned::to_owned),
+        })
         .await?;
     local_commit_preview(runtime_api_data(response)?)
 }
@@ -846,15 +821,14 @@ pub(crate) async fn remote_revert(
 ) -> Result<RevertResult> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffRevertResult>(
-            "diff.revert",
+        .revert_diff(
             &willdeep_runtime_protocol::DiffRevertParams {
                 workspace: request.workspace.to_string_lossy().into_owned(),
                 snapshot_id: snapshot_id.to_owned(),
                 path: request.path.clone(),
                 area: public_area(request.area),
             },
-            None,
+            uuid::Uuid::new_v4(),
         )
         .await?;
     let result = runtime_api_data(response)?;
@@ -880,8 +854,7 @@ pub(crate) async fn remote_record_verification(
         willdeep_core::VerificationStatus::LaunchFailed => VerificationOutcome::LaunchFailed,
     };
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::DiffVerification>(
-            "diff.verification.record",
+        .record_diff_verification(
             &willdeep_runtime_protocol::DiffVerificationParams {
                 workspace: workspace.to_string_lossy().into_owned(),
                 snapshot_id,
@@ -903,7 +876,7 @@ pub(crate) async fn remote_record_verification(
                 },
                 summary: verification.summary,
             },
-            None,
+            uuid::Uuid::new_v4(),
         )
         .await?;
     local_verification(runtime_api_data(response)?)

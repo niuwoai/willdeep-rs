@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0-rc20] - 2026-08-11
+
+### Added
+
+- Rust Runtime Client 新增 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销的完整类型化方法。
+
+### Changed
+
+- TUI/CLI Diff bridge 的全部统一 API 调用迁移到共享 Client；审查、验证记录和撤销显式携带幂等 Request ID。
+
 ## [0.21.0-rc19] - 2026-08-11
 
 ### Added

@@ -5,8 +5,11 @@ use futures_util::{Stream, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use willdeep_runtime_protocol::{
-    AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse, EmptyParams,
-    EventListParams, IdParams, ListArtifactsParams, ListToolsParams, ListTurnsParams,
+    AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse,
+    DiffAttribution, DiffCommitPreview, DiffCommitPreviewParams, DiffContent, DiffContentParams,
+    DiffRevertParams, DiffRevertResult, DiffReview, DiffReviewParams, DiffSnapshot,
+    DiffSnapshotParams, DiffSnapshotQueryParams, DiffVerification, DiffVerificationParams,
+    EmptyParams, EventListParams, IdParams, ListArtifactsParams, ListToolsParams, ListTurnsParams,
     PendingApproval, PendingQuestion, ResolveApprovalParams, RuntimeAgent, RuntimeAgentCommand,
     RuntimeArtifact, RuntimeCapabilities, RuntimeEvent, RuntimeInteractionResult, RuntimeSession,
     RuntimeTask, RuntimeTool, RuntimeTurn, RuntimeWorkspace, SearchSessionsParams,
@@ -284,6 +287,73 @@ impl RuntimeClient {
         params: &EventListParams,
     ) -> Result<ApiResponse<Vec<RuntimeEvent>>, ClientError> {
         self.call("event.list", params, None).await
+    }
+
+    pub async fn diff_snapshot(
+        &self,
+        params: &DiffSnapshotParams,
+    ) -> Result<ApiResponse<DiffSnapshot>, ClientError> {
+        self.call("diff.snapshot", params, None).await
+    }
+
+    pub async fn diff_content(
+        &self,
+        params: &DiffContentParams,
+    ) -> Result<ApiResponse<DiffContent>, ClientError> {
+        self.call("diff.content", params, None).await
+    }
+
+    pub async fn diff_reviews(
+        &self,
+        params: &DiffSnapshotQueryParams,
+    ) -> Result<ApiResponse<Vec<DiffReview>>, ClientError> {
+        self.call("diff.reviews", params, None).await
+    }
+
+    pub async fn review_diff(
+        &self,
+        params: &DiffReviewParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<DiffReview>, ClientError> {
+        self.call("diff.review", params, Some(request_id)).await
+    }
+
+    pub async fn diff_verifications(
+        &self,
+        params: &DiffSnapshotQueryParams,
+    ) -> Result<ApiResponse<Vec<DiffVerification>>, ClientError> {
+        self.call("diff.verifications", params, None).await
+    }
+
+    pub async fn record_diff_verification(
+        &self,
+        params: &DiffVerificationParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<DiffVerification>, ClientError> {
+        self.call("diff.verification.record", params, Some(request_id))
+            .await
+    }
+
+    pub async fn diff_attributions(
+        &self,
+        params: &DiffSnapshotQueryParams,
+    ) -> Result<ApiResponse<Vec<DiffAttribution>>, ClientError> {
+        self.call("diff.attributions", params, None).await
+    }
+
+    pub async fn diff_commit_preview(
+        &self,
+        params: &DiffCommitPreviewParams,
+    ) -> Result<ApiResponse<DiffCommitPreview>, ClientError> {
+        self.call("diff.commit_preview", params, None).await
+    }
+
+    pub async fn revert_diff(
+        &self,
+        params: &DiffRevertParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<DiffRevertResult>, ClientError> {
+        self.call("diff.revert", params, Some(request_id)).await
     }
 
     pub async fn tools(
