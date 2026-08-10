@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.16.0-rc3
+> 当前实施版本：v0.16.0-rc4
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -57,7 +57,8 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [x] Runtime 托管任务支持持久审批与 ask_user 队列，其他 CLI 客户端可解决后恢复原 Harness。
 - [ ] 交互 Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime 原生生命周期。
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
-- [ ] TUI 接入 attach/detach，关闭 TUI 不终止已迁入 Runtime 的任务。
+- [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
+- [ ] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线。
 - [ ] Unix Socket 与 Windows Named Pipe；实时事件推送、断线续传和请求去重。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
 - [ ] 无损优雅升级与版本交接。
@@ -176,4 +177,4 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.16.0-rc3：阶段 2 第三批完成；Runtime 托管 Harness 的审批与 ask_user 进入持久待处理队列，可跨客户端允许、拒绝或回答后继续原任务；控制 Token 改为私有 stdin 内存传递。下一批让 TUI 直接连接 Runtime 任务、事件和 Pending Interaction。
+v0.16.0-rc4：阶段 2 第四批完成；TUI 右栏接入 Runtime 任务、审批和提问，支持 Enter 解阻塞、K 停止，并可从 Composer 用 `/runtime` 提交含附件的可分离任务。下一批将 Runtime 逐轮事件按游标恢复到 TUI 聊天区，并推进原生 Agent 生命周期。

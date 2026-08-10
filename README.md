@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.16.0-rc3`，支持：
+当前版本为 `0.16.0-rc4`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -30,6 +30,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
 - Runtime 持有的非交互 Harness 任务提交、查询、取消及断线后事件补读。
 - Runtime 后台审批与 ask_user 待处理列表、跨客户端解决和原任务续跑。
+- TUI Runtime Inbox、远端审批/回答/停止，以及 `/runtime` 可分离任务提交与附件透传。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面已经可用，Harness、会话和后台任务向 Daemon 的完整迁移仍在进行。
 
@@ -62,6 +63,8 @@ Runtime 事件按递增序号写入私有 NDJSON 日志。`attach --after <序�
 `daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 通过 stdin 传给 Harness，不会出现在进程参数中。任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复；`daemon cancel` 可停止仍在运行的任务。
 
 后台 Harness 需要审批或调用 `ask_user` 时会进入 WaitingApproval/WaitingAnswer。`daemon pending` 查看待处理项，使用 `resolve` 或 `answer` 后，原任务从等待点继续。Runtime 控制 Token 只通过启动时私有 stdin 进入 Harness 内存，不会作为环境变量传给 Shell 或 MCP。
+
+在普通 TUI Composer 输入 `/runtime <任务>`，可把当前 Workspace、Profile 和输入附件交给 Runtime。右栏 Inbox 会同步该任务及其审批/提问；在待处理条目按 Enter 使用原有弹窗，选中任务按 `K` 停止。退出 TUI 后任务继续运行，重新进入 TUI 后会再次从 Runtime 状态恢复到 Inbox。
 
 ## 构建
 

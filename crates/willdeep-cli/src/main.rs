@@ -484,6 +484,7 @@ async fn run() -> Result<()> {
     });
     relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
+        let runtime_profile = session.profile.clone().or_else(|| cli.profile.clone());
         return tui::run(
             agent,
             session,
@@ -491,7 +492,18 @@ async fn run() -> Result<()> {
             home,
             skills,
             relay_bridge,
-            (tui_tx, tui_rx, context_window, background_tasks, language),
+            (
+                tui_tx,
+                tui_rx,
+                context_window,
+                background_tasks,
+                daemon::RuntimeSubmitOptions {
+                    workspace,
+                    profile: runtime_profile,
+                    config: Some(cli.config.clone().unwrap_or(config::default_config_path()?)),
+                },
+                language,
+            ),
         )
         .await;
     }

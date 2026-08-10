@@ -256,6 +256,10 @@ fn runtime_connection_is_encoded_in_private_stdin_payload() {
     let task_id = uuid::Uuid::new_v4();
     let data = runtime_harness_input(
         "safe prompt".to_owned(),
+        vec![willdeep_core::MessageAttachment::Text {
+            name: "notes.txt".to_owned(),
+            content: "attached".to_owned(),
+        }],
         RuntimeConnection {
             url: "http://127.0.0.1:1234".to_owned(),
             token: "private-control-token".to_owned(),
@@ -267,4 +271,5 @@ fn runtime_connection_is_encoded_in_private_stdin_payload() {
     assert_eq!(value["prompt"], "safe prompt");
     assert_eq!(value["runtime"]["token"], "private-control-token");
     assert_eq!(value["runtime"]["task_id"], task_id.to_string());
+    assert_eq!(value["attachments"][0]["content"], "attached");
 }

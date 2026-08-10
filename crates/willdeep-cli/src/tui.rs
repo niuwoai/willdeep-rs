@@ -35,8 +35,12 @@ use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
+mod dispatch;
+mod runtime_ui;
 mod sidebar;
 mod workspace_attention;
+use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use runtime_ui::open_remote_gate;
 use sidebar::render_sidebar;
 use workspace_attention::workspace_attention;
 
@@ -46,6 +50,7 @@ pub enum UiMessage {
     Question(UserQuestion, oneshot::Sender<Option<String>>),
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
+    RuntimeNotice(String),
 }
 pub struct TuiSink {
     pub ui: mpsc::UnboundedSender<UiMessage>,
@@ -117,6 +122,8 @@ struct App {
     activity_line: String,
     background_tasks: Vec<BackgroundTaskSnapshot>,
     workspace_attention: Vec<AttentionItem>,
+    runtime_attention: Vec<AttentionItem>,
+    runtime_gates: Vec<crate::daemon::RemoteGate>,
     background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
@@ -286,6 +293,7 @@ pub async fn run(
         mpsc::UnboundedReceiver<UiMessage>,
         u64,
         Arc<BackgroundTaskRegistry>,
+        crate::daemon::RuntimeSubmitOptions,
         Language,
     ),
 ) -> Result<()> {
@@ -304,10 +312,11 @@ pub async fn run(
         relay_bridge,
         context_window: ui.2,
         background_tasks: ui.3,
+        runtime_submit: ui.4,
         tx: ui.0,
         rx: ui.1,
     };
-    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.4).await;
+    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.5).await;
     terminal::disable_raw_mode()?;
     execute!(
         term.backend_mut(),
@@ -325,6 +334,7 @@ struct TuiRuntime {
     relay_bridge: RelayBridge,
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
+    runtime_submit: crate::daemon::RuntimeSubmitOptions,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
 }
@@ -351,11 +361,22 @@ async fn event_loop(
     let mut background_rx = runtime.background_tasks.subscribe();
     let mut events = EventStream::new();
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
+    let (runtime_snapshot_tx, mut runtime_snapshot_rx) =
+        mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
-            _=refresh.tick()=>app.background_tasks=runtime.background_tasks.snapshots(),
+            _=refresh.tick()=>{
+                app.background_tasks=runtime.background_tasks.snapshots();
+                let home=runtime.home.clone();
+                let tx=runtime_snapshot_tx.clone();
+                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home).await{let _=tx.send(snapshot);}});
+            },
+            Some(snapshot)=runtime_snapshot_rx.recv()=>{
+                app.runtime_attention=snapshot.attention;
+                app.runtime_gates=snapshot.gates;
+            },
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
@@ -435,9 +456,20 @@ async fn event_loop(
                             KeyCode::Down=>app.sidebar_move(1),
                             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT)=>app.sidebar_move(-1),
                             KeyCode::Tab=>app.sidebar_move(1),
-                            KeyCode::Enter=>app.sidebar_activate(&runtime.background_tasks),
+                            KeyCode::Enter=>{
+                                if let Some(gate)=app.selected_remote_gate(){
+                                    open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                                }else{app.sidebar_activate(&runtime.background_tasks);}
+                            },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
-                            KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>app.attention_stop(&runtime.background_tasks),
+                            KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>{
+                                if let Some(id)=app.selected_runtime_task_id(){
+                                    match crate::daemon::cancel_remote_task(&runtime.home,id).await {
+                                        Ok(())=>app.notice=Some(language.text("已请求停止 Runtime 任务","Runtime task stop requested","Runtime タスクの停止を要求しました").to_owned()),
+                                        Err(error)=>app.notice=Some(format!("{}: {error}",language.text("停止失败","Stop failed","停止に失敗"))),
+                                    }
+                                }else{app.attention_stop(&runtime.background_tasks);}
+                            },
                             KeyCode::Char('r')|KeyCode::Char('R') if app.sidebar_selected==1=>{
                                 if app.attention_retry(&runtime.background_tasks){
                                     session.attention_read=app.attention_read.clone();
@@ -467,6 +499,16 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            if prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ") {
+                                let remote_prompt=prompt.trim().strip_prefix("/runtime").unwrap_or_default().trim().to_owned();
+                                let attachments=std::mem::take(&mut app.attachments).into_iter().map(|value|value.message).collect();
+                                let remote_prompt=app.enrich_prompt(&remote_prompt,&runtime.skills);
+                                match crate::daemon::submit_runtime_prompt(&runtime.home,&runtime.runtime_submit,remote_prompt,attachments).await {
+                                    Ok(task)=>app.append_transcript(format!("System: {} {}",language.text("已提交 Runtime 任务","Runtime task submitted","Runtime タスクを送信しました"),task.id)),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 任务失败","Submit Runtime task failed","Runtime タスクの送信に失敗"))),
+                                }
+                                continue;
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if app.handle_slash_command(&prompt,&runtime.skills){continue;}
                             dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;
@@ -494,6 +536,7 @@ async fn event_loop(
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
+                UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
             },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
@@ -544,6 +587,8 @@ impl App {
             activity_line: String::new(),
             background_tasks: Vec::new(),
             workspace_attention: Vec::new(),
+            runtime_attention: Vec::new(),
+            runtime_gates: Vec::new(),
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
@@ -617,6 +662,7 @@ impl App {
         if !self.running {
             items.extend(self.workspace_attention.iter().cloned());
         }
+        items.extend(self.runtime_attention.iter().cloned());
         items.retain(|item| !self.attention_read.contains(&item.id));
         sort_attention_items(&mut items);
         items
@@ -636,6 +682,25 @@ impl App {
     }
     fn selected_attention(&self) -> Option<AttentionItem> {
         self.attention_items().get(self.attention_selected).cloned()
+    }
+    fn selected_remote_gate(&self) -> Option<crate::daemon::RemoteGate> {
+        let id = self
+            .selected_attention()?
+            .id
+            .strip_prefix("runtime-interaction:")?
+            .parse::<uuid::Uuid>()
+            .ok()?;
+        self.runtime_gates
+            .iter()
+            .find(|gate| gate.id() == id)
+            .cloned()
+    }
+    fn selected_runtime_task_id(&self) -> Option<uuid::Uuid> {
+        self.selected_attention()?
+            .id
+            .strip_prefix("runtime-task:")?
+            .parse()
+            .ok()
     }
     fn attention_activate(&mut self, registry: &BackgroundTaskRegistry) {
         let Some(item) = self.selected_attention() else {
@@ -1000,7 +1065,7 @@ impl App {
         };
         match &palette.items[item_index].action {
             PaletteAction::Command(command) => {
-                let suffix = if matches!(command.as_str(), "/goal" | "/mobile") {
+                let suffix = if matches!(command.as_str(), "/goal" | "/mobile" | "/runtime") {
                     " "
                 } else {
                     ""
@@ -1101,7 +1166,7 @@ impl App {
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
-                let suffix = if matches!(command, "/goal" | "/mobile") {
+                let suffix = if matches!(command, "/goal" | "/mobile" | "/runtime") {
                     " "
                 } else {
                     ""
@@ -1446,7 +1511,7 @@ impl App {
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
         match command {
             "/help" => self.append_transcript(
-                "System: /goal <text>|off · /compress · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: /goal <text>|off · /compress · /runtime <task> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -1550,91 +1615,6 @@ impl App {
             format!("{}\n\n{prompt}", blocks.join("\n\n"))
         }
     }
-}
-
-fn dispatch_prompt(
-    app: &mut App,
-    session: &mut Session,
-    store: &SessionStore,
-    skills: &SkillCatalog,
-    agent: &Arc<Agent>,
-    tx: &mpsc::UnboundedSender<UiMessage>,
-    prompt: String,
-) -> Result<()> {
-    app.running = true;
-    app.turn_started = Some(Instant::now());
-    app.tools.reset();
-    app.progress_log.clear();
-    app.record_progress(
-        app.language
-            .text(
-                "正在思考 · 理解你的请求",
-                "Thinking · understanding your request",
-                "思考中 · リクエストを理解しています",
-            )
-            .to_owned(),
-    );
-    let history = session.messages.clone();
-    let attachments = std::mem::take(&mut app.attachments)
-        .into_iter()
-        .map(|value| value.message)
-        .collect();
-    let enriched = app.enrich_prompt(&prompt, skills);
-    let user = Message::user_with_attachments(enriched, attachments);
-    session.messages.push(user.clone());
-    store.save(session)?;
-    let agent = agent.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let _ = tx.send(UiMessage::Finished(
-            agent.run_with_history_message(history, user).await,
-        ));
-    });
-    Ok(())
-}
-
-fn dispatch_compress(
-    app: &mut App,
-    session: &Session,
-    agent: &Arc<Agent>,
-    tx: &mpsc::UnboundedSender<UiMessage>,
-) {
-    app.running = true;
-    app.turn_started = Some(Instant::now());
-    app.progress_log.clear();
-    app.record_progress("Compressing context".to_owned());
-    let history = session.messages.clone();
-    let agent = agent.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let _ = tx.send(UiMessage::Compressed(agent.compress_history(history).await));
-    });
-}
-
-fn dispatch_notification(
-    app: &mut App,
-    session: &mut Session,
-    store: &SessionStore,
-    agent: &Arc<Agent>,
-    tx: &mpsc::UnboundedSender<UiMessage>,
-    notice: String,
-) -> Result<()> {
-    app.running = true;
-    app.turn_started = Some(Instant::now());
-    app.progress_log.clear();
-    app.record_progress("Handling background result".to_owned());
-    let history = session.messages.clone();
-    let message = Message::user(notice);
-    session.messages.push(message.clone());
-    store.save(session)?;
-    let agent = agent.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let _ = tx.send(UiMessage::Finished(
-            agent.run_with_history_message(history, message).await,
-        ));
-    });
-    Ok(())
 }
 
 fn mobile_snapshot(session: &Session) -> serde_json::Value {
@@ -2504,7 +2484,7 @@ fn approval_content(description: &str, always: bool, language: Language) -> Vec<
     content
 }
 
-fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
+fn command_candidates(language: Language) -> [(&'static str, &'static str); 7] {
     [
         (
             "/help",
@@ -2528,6 +2508,14 @@ fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
                 "管理手机中继",
                 "Manage mobile relay",
                 "モバイルリレーを管理",
+            ),
+        ),
+        (
+            "/runtime",
+            language.text(
+                "提交可分离的 Runtime 任务",
+                "Submit a detachable Runtime task",
+                "切り離し可能な Runtime タスクを送信",
             ),
         ),
         (

@@ -24,6 +24,12 @@ const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 
+mod tui_bridge;
+pub(crate) use tui_bridge::{
+    RemoteGate, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
+    resolve_remote_approval, runtime_snapshot,
+};
+
 #[derive(Clone, Debug, Subcommand)]
 pub enum DaemonAction {
     /// Start the local Runtime Daemon in the background.
@@ -136,8 +142,8 @@ enum RuntimeTaskStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct RuntimeTask {
-    id: uuid::Uuid,
+pub(crate) struct RuntimeTask {
+    pub(crate) id: uuid::Uuid,
     status: RuntimeTaskStatus,
     workspace: PathBuf,
     profile: Option<String>,
@@ -152,9 +158,18 @@ struct RuntimeTask {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SubmitTask {
     prompt: String,
+    #[serde(default)]
+    attachments: Vec<willdeep_core::MessageAttachment>,
     workspace: PathBuf,
     profile: Option<String>,
     config: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeSubmitOptions {
+    pub workspace: PathBuf,
+    pub profile: Option<String>,
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -311,21 +326,45 @@ async fn submit(
     prompt: Vec<String>,
 ) -> Result<()> {
     let prompt = prompt.join(" ");
-    if prompt.trim().is_empty() {
-        bail!("Runtime task prompt must not be empty");
+    let task = submit_runtime_prompt(
+        home,
+        &RuntimeSubmitOptions {
+            workspace: workspace.unwrap_or(std::env::current_dir()?),
+            profile,
+            config,
+        },
+        prompt,
+        Vec::new(),
+    )
+    .await?;
+    println!(
+        "submitted\tid={}\tstatus={:?}\tworkspace={}",
+        task.id,
+        task.status,
+        task.workspace.display()
+    );
+    Ok(())
+}
+
+pub(crate) async fn submit_runtime_prompt(
+    home: &Path,
+    options: &RuntimeSubmitOptions,
+    prompt: String,
+    attachments: Vec<willdeep_core::MessageAttachment>,
+) -> Result<RuntimeTask> {
+    if prompt.trim().is_empty() && attachments.is_empty() {
+        bail!("Runtime task prompt and attachments must not both be empty");
     }
-    let workspace = workspace
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()?;
     let state = ensure_running(home).await?;
     let response = client()
         .post(format!("http://{}/v1/tasks", state.address))
         .header(TOKEN_HEADER, &state.token)
         .json(&SubmitTask {
             prompt,
-            workspace,
-            profile,
-            config,
+            attachments,
+            workspace: options.workspace.canonicalize()?,
+            profile: options.profile.clone(),
+            config: options.config.clone(),
         })
         .send()
         .await?;
@@ -335,14 +374,7 @@ async fn submit(
             response.text().await?
         );
     }
-    let task: RuntimeTask = response.json().await?;
-    println!(
-        "submitted\tid={}\tstatus={:?}\tworkspace={}",
-        task.id,
-        task.status,
-        task.workspace.display()
-    );
-    Ok(())
+    Ok(response.json().await?)
 }
 
 async fn list_tasks(home: &Path) -> Result<()> {
@@ -1339,6 +1371,7 @@ impl TaskManager {
         let mut stdin = child.stdin.take().context("open Runtime task stdin")?;
         let input = runtime_harness_input(
             request.prompt,
+            request.attachments,
             RuntimeConnection {
                 url: self.runtime_url.clone(),
                 token: self.runtime_token.clone(),
@@ -1534,10 +1567,14 @@ impl TaskManager {
     }
 }
 
-fn runtime_harness_input(prompt: String, runtime: RuntimeConnection) -> Result<Vec<u8>> {
+fn runtime_harness_input(
+    prompt: String,
+    attachments: Vec<willdeep_core::MessageAttachment>,
+    runtime: RuntimeConnection,
+) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "prompt": prompt,
-        "attachments": [],
+        "attachments": attachments,
         "runtime": runtime
     }))?)
 }

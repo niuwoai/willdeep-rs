@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.0-rc4] - 2026-08-10
+
+### Added
+
+- TUI 每秒同步 Runtime 任务与 Pending Interaction，并合入右栏 Attention Inbox；远端运行、等待、失败和完成状态与本地条目统一排序。
+- 在 Runtime 审批或提问条目上按 Enter，复用现有 Allow/Disallow/Always Allow 和 ask_user 弹窗；解决结果发回原后台 Harness。
+- Runtime 任务条目支持 `K` 请求停止；TUI 状态栏显示成功或失败反馈。
+- Composer 新增 `/runtime <task>`，把文本、粘贴文本附件和图片附件提交给可分离 Runtime；TUI 退出不终止任务。
+
+### Changed
+
+- `/` 命令候选和帮助加入 `/runtime`，Runtime 提交沿用当前 Workspace、Provider Profile、配置路径和显式 Skills 展开结果。
+
 ## [0.16.0-rc3] - 2026-08-10
 
 ### Added

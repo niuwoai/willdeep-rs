@@ -421,6 +421,39 @@ mod tests {
         app.handle_mouse(20, 14, &registry, &skills);
         assert_eq!(question_receiver.await.unwrap().as_deref(), Some("B"));
     }
+
+    #[test]
+    fn runtime_attention_selects_remote_gate_and_task_actions() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let interaction_id = uuid::Uuid::new_v4();
+        app.runtime_attention.push(AttentionItem {
+            id: format!("runtime-interaction:{interaction_id}"),
+            source: AttentionSource::Approval,
+            title: "Runtime approval".to_owned(),
+            detail: "run tests".to_owned(),
+            status: RuntimeStatus::WaitingApproval,
+            elapsed_millis: None,
+        });
+        app.runtime_gates.push(crate::daemon::RemoteGate::Approval {
+            id: interaction_id,
+            description: "run tests".to_owned(),
+            always_allow_available: true,
+        });
+        assert_eq!(app.selected_remote_gate().unwrap().id(), interaction_id);
+
+        let task_id = uuid::Uuid::new_v4();
+        app.runtime_attention.clear();
+        app.runtime_gates.clear();
+        app.runtime_attention.push(AttentionItem {
+            id: format!("runtime-task:{task_id}"),
+            source: AttentionSource::BackgroundShell,
+            title: "Runtime task".to_owned(),
+            detail: String::new(),
+            status: RuntimeStatus::Working,
+            elapsed_millis: None,
+        });
+        assert_eq!(app.selected_runtime_task_id(), Some(task_id));
+    }
     #[tokio::test]
     async fn mouse_can_toggle_and_submit_multi_choice_question() {
         let registry = BackgroundTaskRegistry::default();
