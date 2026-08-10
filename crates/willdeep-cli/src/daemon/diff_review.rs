@@ -1797,6 +1797,41 @@ pub(crate) async fn record_tool_attribution(
     Ok(Some(record))
 }
 
+pub(crate) fn workspace_change_artifacts(
+    home: &Path,
+    params: willdeep_runtime_protocol::ListArtifactsParams,
+) -> Result<Vec<willdeep_runtime_protocol::RuntimeArtifact>> {
+    let limit = params.limit.unwrap_or(200).clamp(1, 1_000);
+    let mut records = load_attributions(&attribution_store_path(home))?;
+    records.reverse();
+    let mut artifacts = records
+        .into_iter()
+        .filter(|record| {
+            params
+                .session_id
+                .is_none_or(|id| record.session_id == Some(id))
+        })
+        .filter(|record| params.turn_id.is_none_or(|id| record.turn_id == Some(id)))
+        .filter(|record| params.task_id.is_none_or(|id| record.task_id == id))
+        .filter(|record| params.agent_id.is_none_or(|id| record.agent_id == id))
+        .map(|record| willdeep_runtime_protocol::RuntimeArtifact {
+            id: record.id,
+            kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+            session_id: record.session_id,
+            turn_id: record.turn_id,
+            task_id: record.task_id,
+            agent_id: record.agent_id,
+            title: format!("{} workspace changes", record.tool),
+            source_id: record.after_snapshot_id,
+            item_count: record.paths.len(),
+            created_at: record.created_at,
+        })
+        .filter(|artifact| params.kind.is_none_or(|kind| artifact.kind == kind))
+        .collect::<Vec<_>>();
+    artifacts.truncate(limit);
+    Ok(artifacts)
+}
+
 fn enrich_untracked(workspace: &Path, files: &mut BTreeMap<String, DiffFile>) {
     for file in files
         .values_mut()
@@ -2338,6 +2373,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![vec!["created-by-agent.txt"], vec!["second.txt"]]
         );
+        let artifacts = workspace_change_artifacts(
+            &home,
+            willdeep_runtime_protocol::ListArtifactsParams {
+                session_id: Some(session_id),
+                ..Default::default()
+            },
+        )
+        .expect("workspace change artifacts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].source_id, second.after_snapshot_id);
+        assert_eq!(artifacts[0].item_count, 1);
+        let public_json = serde_json::to_string(&artifacts).unwrap();
+        assert!(!public_json.contains("created-by-agent.txt"));
+        assert!(!public_json.contains(workspace.to_string_lossy().as_ref()));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

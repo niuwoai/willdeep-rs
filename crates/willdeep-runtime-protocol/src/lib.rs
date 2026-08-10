@@ -282,6 +282,37 @@ pub struct ListToolsParams {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    WorkspaceChange,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeArtifact {
+    pub id: uuid::Uuid,
+    pub kind: ArtifactKind,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub title: String,
+    pub source_id: String,
+    pub item_count: usize,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListArtifactsParams {
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: Option<uuid::Uuid>,
+    pub agent_id: Option<uuid::Uuid>,
+    pub kind: Option<ArtifactKind>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Queued,
     Running,
@@ -734,6 +765,8 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "turn.stop",
     "tool.list",
     "tool.get",
+    "artifact.list",
+    "artifact.get",
     "approval.list",
     "approval.resolve",
     "question.list",
@@ -991,6 +1024,33 @@ mod tests {
         assert!(!object.contains_key("workspace"));
         assert!(SUPPORTED_OPERATIONS.contains(&"tool.list"));
         assert!(SUPPORTED_OPERATIONS.contains(&"tool.get"));
+    }
+
+    #[test]
+    fn workspace_change_artifact_exposes_source_but_not_paths_or_content() {
+        let artifact = RuntimeArtifact {
+            id: uuid::Uuid::new_v4(),
+            kind: ArtifactKind::WorkspaceChange,
+            session_id: Some(uuid::Uuid::new_v4()),
+            turn_id: Some(uuid::Uuid::new_v4()),
+            task_id: uuid::Uuid::new_v4(),
+            agent_id: uuid::Uuid::new_v4(),
+            title: "edit_file workspace changes".to_owned(),
+            source_id: "snapshot-hash".to_owned(),
+            item_count: 2,
+            created_at: 10,
+        };
+        let value = serde_json::to_value(&artifact).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RuntimeArtifact>(value.clone()).unwrap(),
+            artifact
+        );
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("paths"));
+        assert!(!object.contains_key("content"));
+        assert!(!object.contains_key("workspace"));
+        assert!(SUPPORTED_OPERATIONS.contains(&"artifact.list"));
+        assert!(SUPPORTED_OPERATIONS.contains(&"artifact.get"));
     }
 
     #[test]

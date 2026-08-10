@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc11
+> 当前实施版本：v0.21.0-rc12
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -115,7 +115,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 7：统一控制 API（v0.21.0）
 
-- [-] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event；除 Artifact 外均已迁移为公开 DTO。
+- [x] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event 公共 DTO。
 - [x] 本地 JSON 请求响应与 NDJSON/流式事件协议；统一 API 使用版本化请求/响应信封，事件流按全局序号补读并逐行输出完整信封。
 - [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
 - [-] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；修改类统一请求使用 Pending→Completed 私有日志跨重启去重，不确定崩溃窗口拒绝自动重放；剩余修改操作迁移待完成。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc12（已完成）：新增稳定 Artifact DTO 与 `artifact.list/get`。工具窗口内经内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session/Turn/Task/Agent、来源快照和变更项数量；公开元数据不泄露 Workspace、文件名或内容，具体读取继续走 Workspace 授权与精确快照保护的 Diff API。11 类 Runtime 公共对象 DTO 至此全部完成。下一步让 TUI/Web 直接消费 Tool/Artifact 查询，并继续 Rust Client 类型化便捷方法。
 
 v0.21.0-rc11（已完成）：新增稳定 `RuntimeTool`、状态和过滤 DTO，以及 `tool.list/get` 统一操作。Runtime 对主/子 Agent Tool Activity 建立有界持久索引，记录 Session/Turn/Task/Agent 归属与毫秒级起止时间，重启时将运行项收敛为 Interrupted。公开记录不保存参数、输出、Workspace 路径或内部错误。下一步稳定 Artifact DTO 与来源绑定，并让 TUI/Web 直接消费 Tool 查询结果。
 

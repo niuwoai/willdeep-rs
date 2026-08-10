@@ -356,6 +356,29 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             },
             Err(error) => Err(error),
         },
+        "artifact.list" => match params::<willdeep_runtime_protocol::ListArtifactsParams>(&request)
+        {
+            Ok(params) => json_result(diff_review::workspace_change_artifacts(&state.home, params)),
+            Err(error) => Err(error),
+        },
+        "artifact.get" => match params::<IdParams>(&request) {
+            Ok(params) => diff_review::workspace_change_artifacts(
+                &state.home,
+                willdeep_runtime_protocol::ListArtifactsParams {
+                    limit: Some(1_000),
+                    ..Default::default()
+                },
+            )
+            .map_err(ApiFailure::internal)
+            .and_then(|artifacts| {
+                artifacts
+                    .into_iter()
+                    .find(|artifact| artifact.id == params.id)
+                    .ok_or_else(|| ApiFailure::not_found("Runtime Artifact not found"))
+            })
+            .and_then(json),
+            Err(error) => Err(error),
+        },
         "approval.list" => {
             let interactions = state
                 .tasks
