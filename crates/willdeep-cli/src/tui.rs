@@ -125,6 +125,7 @@ struct App {
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
+    runtime_agent_selected: usize,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
@@ -471,6 +472,8 @@ async fn event_loop(
                             KeyCode::Esc=>app.focus=FocusPane::Prompt,
                             KeyCode::Up if app.sidebar_selected==1&&app.sidebar_expanded[1]=>app.attention_move(-1),
                             KeyCode::Down if app.sidebar_selected==1&&app.sidebar_expanded[1]=>app.attention_move(1),
+                            KeyCode::Up if app.sidebar_selected==2&&app.sidebar_expanded[2]=>app.runtime_agent_move(-1),
+                            KeyCode::Down if app.sidebar_selected==2&&app.sidebar_expanded[2]=>app.runtime_agent_move(1),
                             KeyCode::Up=>app.sidebar_move(-1),
                             KeyCode::Down=>app.sidebar_move(1),
                             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT)=>app.sidebar_move(-1),
@@ -493,6 +496,22 @@ async fn event_loop(
                                 if app.attention_retry(&runtime.background_tasks){
                                     session.attention_read=app.attention_read.clone();
                                     store.save(session)?;
+                                }
+                            },
+                            KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==2=>{
+                                if let Some(agent)=app.selected_runtime_agent(){
+                                    match crate::daemon::stop_remote_agent(&runtime.home,agent.id).await {
+                                        Ok(())=>app.notice=Some(language.text("已请求停止子 Agent","Child Agent stop requested","子 Agent の停止を要求しました").to_owned()),
+                                        Err(error)=>app.notice=Some(format!("{}: {error}",language.text("停止失败","Stop failed","停止に失敗"))),
+                                    }
+                                }
+                            },
+                            KeyCode::Char('r')|KeyCode::Char('R') if app.sidebar_selected==2=>{
+                                if let Some(agent)=app.selected_runtime_agent(){
+                                    match crate::daemon::retry_remote_agent(&runtime.home,agent.id).await {
+                                        Ok(())=>app.notice=Some(language.text("已请求重试子 Agent","Child Agent retry requested","子 Agent の再試行を要求しました").to_owned()),
+                                        Err(error)=>app.notice=Some(format!("{}: {error}",language.text("重试失败","Retry failed","再試行に失敗"))),
+                                    }
                                 }
                             },
                             KeyCode::Char('m')|KeyCode::Char('M') if app.sidebar_selected==1=>{
@@ -624,6 +643,7 @@ impl App {
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
             runtime_agents: Vec::new(),
+            runtime_agent_selected: 0,
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
@@ -681,40 +701,6 @@ impl App {
             FocusPane::Chat => FocusPane::Sidebar,
             FocusPane::Sidebar => FocusPane::Prompt,
         };
-    }
-    fn attention_items(&self) -> Vec<AttentionItem> {
-        let mut items = Vec::new();
-        if let Some((description, _, _)) = &self.approval {
-            items.push(AttentionItem::approval(description.clone()));
-        }
-        if let Some(dialog) = &self.question {
-            items.push(AttentionItem::question(dialog.request.question.clone()));
-        }
-        items.extend(
-            self.background_tasks
-                .iter()
-                .map(AttentionItem::from_background),
-        );
-        if !self.running {
-            items.extend(self.workspace_attention.iter().cloned());
-        }
-        items.extend(self.runtime_attention.iter().cloned());
-        items.retain(|item| !self.attention_read.contains(&item.id));
-        sort_attention_items(&mut items);
-        items
-    }
-    fn attention_move(&mut self, delta: isize) {
-        let count = self.attention_items().len();
-        if count == 0 {
-            self.attention_selected = 0;
-            return;
-        }
-        self.attention_selected = if delta < 0 {
-            self.attention_selected.checked_sub(1).unwrap_or(count - 1)
-        } else {
-            (self.attention_selected + 1) % count
-        };
-        self.sidebar_manual_scroll = false;
     }
     fn selected_attention(&self) -> Option<AttentionItem> {
         self.attention_items().get(self.attention_selected).cloned()

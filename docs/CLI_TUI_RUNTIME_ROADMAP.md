@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.16.0-rc7
+> 当前实施版本：v0.16.0-rc8
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -57,6 +57,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [x] Runtime 托管任务支持持久审批与 ask_user 队列，其他 CLI 客户端可解决后恢复原 Harness。
 - [x] Runtime Root Agent 持久实体、受保护查询 API、任务状态同步和 TUI 基础状态摘要。
 - [x] `spawn_agent` 稳定 ID、Root→Child 父子关系、Profile/模式、轮次、工具、Token 和正常完成终态进入 Runtime 与 TUI。
+- [x] 后台 Child Agent 与后台任务稳定绑定；Runtime 持久 stop/retry 命令并由原 Harness 按 Agent UUID 执行、确认，CLI/TUI 可精确控制。
 - [ ] 交互 Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime 原生生命周期。
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
@@ -81,7 +82,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 - [ ] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
 - [ ] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误。
-- [ ] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff。
+- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
 
@@ -216,13 +217,13 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.16.0-rc7：`spawn_agent` 已生成稳定子 Agent ID，前台及正常完成的后台子 Agent 上报轮次、工具、Token 和终态；Runtime 持久 Root→Child 树并在 TUI 分层显示。下一批将后台任务的取消、重试和结果回流本身迁入 Runtime，补齐异常路径。
+v0.16.0-rc8：后台任务保存稳定 Child Agent UUID，取消、失败、重试完整驱动 Agent 终态；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发 stop/retry 并接收确认，CLI 提供 `daemon stop-agent/retry-agent`，TUI Runtime 区可选择 Agent 后按 `K/R` 控制。下一批迁移交互式 Root Harness 与实时事件推送。
 
 ## 6. 建议执行顺序
 
-1. 完成并发布 `v0.16.0-rc5`：Runtime 事件恢复、Workspace 过滤、持久游标与重连去重。
+1. 完成并发布 `v0.16.0-rc8`：Child Agent 稳定任务绑定、精确停止/重试与跨进程确认。
 2. 将交互式主 Harness 迁入 Runtime 原生生命周期。
-3. 将子 Agent、后台任务、审批、MCP 和附件迁入统一生命周期。
+3. 将剩余后台 Shell、审批、MCP 和附件迁入统一生命周期。
 4. 实现实时事件推送、断线续传、请求幂等以及跨平台本地传输。
 5. 完成异常退出、守护进程重启和客户端重连的端到端测试。
 6. 实现完整会话恢复、Fork、归档、导出与搜索。

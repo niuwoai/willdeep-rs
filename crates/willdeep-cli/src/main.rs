@@ -400,6 +400,10 @@ async fn run() -> Result<()> {
         Arc::new(TerminalApprover(language))
     };
     let background_tasks = Arc::new(BackgroundTaskRegistry::default());
+    let _agent_command_watcher = daemon::start_agent_command_watcher(
+        web_input.as_ref().and_then(|input| input.runtime.as_ref()),
+        background_tasks.clone(),
+    )?;
     let tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
         .with_skills(skills.clone())
@@ -942,6 +946,7 @@ impl EventSink for TerminalSink {
                     "status": match status {
                         SubagentLifecycleStatus::Completed => "completed",
                         SubagentLifecycleStatus::Blocked => "blocked",
+                        SubagentLifecycleStatus::Cancelled => "cancelled",
                         SubagentLifecycleStatus::Failed => "failed",
                     }
                 }),

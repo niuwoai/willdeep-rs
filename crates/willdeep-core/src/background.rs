@@ -11,6 +11,8 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 type TaskFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type TaskLauncher = Arc<dyn Fn() -> TaskFuture + Send + Sync>;
+type TaskLifecycleFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type TaskLifecycleHook = Arc<dyn Fn(BackgroundTaskSnapshot) -> TaskLifecycleFuture + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +36,8 @@ pub enum BackgroundTaskStatus {
 #[derive(Clone, Debug, Serialize)]
 pub struct BackgroundTaskSnapshot {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<uuid::Uuid>,
     pub kind: BackgroundTaskKind,
     pub label: String,
     pub status: BackgroundTaskStatus,
@@ -54,6 +58,7 @@ struct TaskRecord {
     output: String,
     cancel: watch::Sender<bool>,
     retry: Option<TaskLauncher>,
+    lifecycle: Option<TaskLifecycleHook>,
 }
 
 struct RegistryState {
@@ -134,21 +139,51 @@ impl BackgroundTaskRegistry {
             .is_some_and(|task| task.cancel.send(true).is_ok())
     }
 
+    pub fn kill_agent(&self, agent_id: uuid::Uuid) -> bool {
+        let state = self.inner.lock().expect("background registry");
+        state
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| {
+                task.snapshot.agent_id == Some(agent_id)
+                    && task.snapshot.status == BackgroundTaskStatus::Running
+            })
+            .is_some_and(|task| task.cancel.send(true).is_ok())
+    }
+
     pub fn retry(&self, id: &str) -> Option<String> {
-        let (kind, label, launcher) = {
+        let (agent_id, kind, label, launcher, lifecycle) = {
             let state = self.inner.lock().expect("background registry");
             let task = state.tasks.iter().find(|task| task.snapshot.id == id)?;
             if task.snapshot.status == BackgroundTaskStatus::Running {
                 return None;
             }
             (
+                task.snapshot.agent_id,
                 task.snapshot.kind.clone(),
                 task.snapshot.label.clone(),
                 task.retry.clone()?,
+                task.lifecycle.clone(),
             )
         };
         let future = launcher();
-        Some(self.launch(kind, label, future, Some(launcher)))
+        Some(self.launch(agent_id, kind, label, future, Some(launcher), lifecycle))
+    }
+
+    pub fn retry_agent(&self, agent_id: uuid::Uuid) -> Option<String> {
+        let id = self
+            .inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.snapshot.agent_id == Some(agent_id))?
+            .snapshot
+            .id
+            .clone();
+        self.retry(&id)
     }
 
     /// Internal lifecycle entry. Callers must complete their own approval
@@ -165,15 +200,44 @@ impl BackgroundTaskRegistry {
     {
         let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
         let future = launcher();
-        self.launch(kind, label, future, Some(launcher))
+        self.launch(None, kind, label, future, Some(launcher), None)
+    }
+
+    pub(crate) fn start_retriable_with_lifecycle<F, Fut, H, HFut>(
+        &self,
+        agent_id: uuid::Uuid,
+        kind: BackgroundTaskKind,
+        label: String,
+        launcher: F,
+        lifecycle: H,
+    ) -> String
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = TaskResult> + Send + 'static,
+        H: Fn(BackgroundTaskSnapshot) -> HFut + Send + Sync + 'static,
+        HFut: Future<Output = ()> + Send + 'static,
+    {
+        let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
+        let lifecycle: TaskLifecycleHook = Arc::new(move |snapshot| Box::pin(lifecycle(snapshot)));
+        let future = launcher();
+        self.launch(
+            Some(agent_id),
+            kind,
+            label,
+            future,
+            Some(launcher),
+            Some(lifecycle),
+        )
     }
 
     fn launch(
         &self,
+        agent_id: Option<uuid::Uuid>,
         kind: BackgroundTaskKind,
         label: String,
         future: TaskFuture,
         retry: Option<TaskLauncher>,
+        lifecycle: Option<TaskLifecycleHook>,
     ) -> String {
         let prefix = if kind == BackgroundTaskKind::Shell {
             "job"
@@ -185,43 +249,51 @@ impl BackgroundTaskRegistry {
             &uuid::Uuid::new_v4().simple().to_string()[..6]
         );
         let (cancel, mut cancelled) = watch::channel(false);
+        let snapshot = BackgroundTaskSnapshot {
+            id: id.clone(),
+            agent_id,
+            kind,
+            label,
+            status: BackgroundTaskStatus::Running,
+            elapsed_millis: 0,
+            exit_code: None,
+            output_bytes: 0,
+        };
         self.inner
             .lock()
             .expect("background registry")
             .tasks
             .push(TaskRecord {
-                snapshot: BackgroundTaskSnapshot {
-                    id: id.clone(),
-                    kind,
-                    label,
-                    status: BackgroundTaskStatus::Running,
-                    elapsed_millis: 0,
-                    exit_code: None,
-                    output_bytes: 0,
-                },
+                snapshot: snapshot.clone(),
                 started: Instant::now(),
                 output: String::new(),
                 cancel,
                 retry,
+                lifecycle: lifecycle.clone(),
             });
         let registry = self.clone();
         let task_id = id.clone();
         tokio::spawn(async move {
+            if let Some(lifecycle) = &lifecycle {
+                lifecycle(snapshot).await;
+            }
             let result = tokio::select! {
                 result = future => result,
                 _ = cancelled.changed() => TaskResult { status: BackgroundTaskStatus::Killed, exit_code: None, output: "task cancelled".to_owned() },
             };
-            registry.finish(&task_id, result);
+            if let Some(event) = registry.finish(&task_id, result)
+                && let Some(lifecycle) = &lifecycle
+            {
+                lifecycle(event.snapshot).await;
+            }
         });
         id
     }
 
-    fn finish(&self, id: &str, result: TaskResult) {
+    fn finish(&self, id: &str, result: TaskResult) -> Option<BackgroundTaskEvent> {
         let event = {
             let mut state = self.inner.lock().expect("background registry");
-            let Some(task) = state.tasks.iter_mut().find(|task| task.snapshot.id == id) else {
-                return;
-            };
+            let task = state.tasks.iter_mut().find(|task| task.snapshot.id == id)?;
             task.output = truncate(result.output);
             task.snapshot.status = result.status;
             task.snapshot.exit_code = result.exit_code;
@@ -238,7 +310,8 @@ impl BackgroundTaskRegistry {
             .expect("background registry")
             .pending
             .push_back(event.clone());
-        let _ = self.events.send(event);
+        let _ = self.events.send(event.clone());
+        Some(event)
     }
 }
 
@@ -369,5 +442,86 @@ mod tests {
         );
         assert_eq!(registry.output(&retried, 5).as_deref(), Some("attempt 1"));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_hook_observes_cancel_and_retry_transitions() {
+        let registry = BackgroundTaskRegistry::default();
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancelled_agent_id = uuid::Uuid::new_v4();
+        registry.start_retriable_with_lifecycle(
+            cancelled_agent_id,
+            BackgroundTaskKind::Subagent,
+            "cancelled agent".to_owned(),
+            || async { std::future::pending::<TaskResult>().await },
+            move |snapshot| {
+                let tx = lifecycle_tx.clone();
+                async move {
+                    let _ = tx.send(snapshot);
+                }
+            },
+        );
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Running
+        );
+        assert_eq!(registry.snapshots()[0].agent_id, Some(cancelled_agent_id));
+        assert!(registry.kill_agent(cancelled_agent_id));
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Killed
+        );
+
+        let registry = BackgroundTaskRegistry::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let launch_attempts = attempts.clone();
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let retried_agent_id = uuid::Uuid::new_v4();
+        let id = registry.start_retriable_with_lifecycle(
+            retried_agent_id,
+            BackgroundTaskKind::Subagent,
+            "retried agent".to_owned(),
+            move || {
+                let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    TaskResult {
+                        status: if attempt == 0 {
+                            BackgroundTaskStatus::Failed
+                        } else {
+                            BackgroundTaskStatus::Completed
+                        },
+                        exit_code: Some(if attempt == 0 { 1 } else { 0 }),
+                        output: format!("attempt {attempt}"),
+                    }
+                }
+            },
+            move |snapshot| {
+                let tx = lifecycle_tx.clone();
+                async move {
+                    let _ = tx.send(snapshot);
+                }
+            },
+        );
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Running
+        );
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Failed
+        );
+        let retried = registry
+            .retry_agent(retried_agent_id)
+            .expect("retriable agent");
+        assert_ne!(retried, id);
+        assert_eq!(registry.snapshots()[0].agent_id, Some(retried_agent_id));
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Running
+        );
+        assert_eq!(
+            lifecycle_rx.recv().await.unwrap().status,
+            BackgroundTaskStatus::Completed
+        );
     }
 }

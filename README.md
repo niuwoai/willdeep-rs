@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.16.0-rc7`，支持：
+当前版本为 `0.16.0-rc8`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -47,6 +47,10 @@ willdeep daemon logs --lines 100
 willdeep daemon submit --workspace . --profile some-im "检查项目并运行测试"
 willdeep daemon tasks
 willdeep daemon task <task-id>
+willdeep daemon agents
+willdeep daemon agent <agent-id>
+willdeep daemon stop-agent <agent-id>
+willdeep daemon retry-agent <agent-id>
 willdeep daemon cancel <task-id>
 willdeep daemon pending
 willdeep daemon resolve <interaction-id> allow-once
@@ -66,9 +70,9 @@ Runtime 事件按递增序号写入私有 NDJSON 日志。`attach --after <序�
 
 后台 Harness 需要审批或调用 `ask_user` 时会进入 WaitingApproval/WaitingAnswer。`daemon pending` 查看待处理项，使用 `resolve` 或 `answer` 后，原任务从等待点继续。Runtime 控制 Token 只通过启动时私有 stdin 进入 Harness 内存，不会作为环境变量传给 Shell 或 MCP。
 
-`willdeep daemon agents` 列出 Runtime 持有的结构化 Agent；`willdeep daemon agent <id>` 查看单个 Agent 的 Workspace、Profile、状态、轮次、当前工具和 Token。对应本地 API 为 `GET /v1/agents` 与 `GET /v1/agents/{id}`，和其他 Runtime API 一样必须携带私有 `x-willdeep-token`。
+`willdeep daemon agents` 列出 Runtime 持有的结构化 Agent；`willdeep daemon agent <id>` 查看单个 Agent 的 Workspace、Profile、状态、轮次、当前工具和 Token。后台 Child Agent 可用 `stop-agent` 精确停止，进入终态后可用 `retry-agent` 重试；重试沿用同一 Agent UUID。对应查询和控制 API 与其他 Runtime API 一样必须携带私有 `x-willdeep-token`，命令通过持久队列交给所属的原 Harness 执行并确认。
 
-在普通 TUI Composer 输入 `/runtime <任务>`，可把当前 Workspace、Profile 和输入附件交给 Runtime。右栏 Inbox 会同步该任务及其审批/提问；在待处理条目按 Enter 使用原有弹窗，选中任务按 `K` 停止。退出 TUI 后任务继续运行；模型轮次、工具状态、用量和正式回复按持久事件游标补读。用户请求和正式回复同时写入 Session，重新进入后聊天记录完整恢复且不会重复插入。
+在普通 TUI Composer 输入 `/runtime <任务>`，可把当前 Workspace、Profile 和输入附件交给 Runtime。右栏 Inbox 会同步该任务及其审批/提问；在待处理条目按 Enter 使用原有弹窗，选中任务按 `K` 停止。在右栏 Runtime 区展开后用 `↑/↓` 选择 Agent，按 `K` 停止运行中的后台 Child Agent，按 `R` 重试已结束的后台 Child Agent。退出 TUI 后任务继续运行；模型轮次、工具状态、用量和正式回复按持久事件游标补读。用户请求和正式回复同时写入 Session，重新进入后聊天记录完整恢复且不会重复插入。
 
 ## 构建
 

@@ -144,14 +144,6 @@ impl SubagentCatalog {
         let profile_id = profile.id.clone();
         let background = args.run_in_background.unwrap_or(false);
         let agent_id = uuid::Uuid::new_v4();
-        self.sink
-            .emit(AgentEvent::SubagentStarted {
-                id: agent_id,
-                profile: profile_id.clone(),
-                label: label.clone(),
-                background,
-            })
-            .await;
         if background {
             let running = self
                 .background
@@ -167,8 +159,12 @@ impl SubagentCatalog {
                     "at most 3 background subagents may run concurrently".to_owned(),
                 ));
             }
+            let runner_sink = self.sink.clone();
             let lifecycle_sink = self.sink.clone();
-            let id = self.background.start_retriable(
+            let lifecycle_profile = profile_id.clone();
+            let lifecycle_label = label.clone();
+            let id = self.background.start_retriable_with_lifecycle(
+                agent_id,
                 BackgroundTaskKind::Subagent,
                 format!("{label} · {profile_id}"),
                 move || {
@@ -176,7 +172,7 @@ impl SubagentCatalog {
                     let profile = profile.clone();
                     let prompt = prompt.clone();
                     let approved_target = approved_target.clone();
-                    let sink = lifecycle_sink.clone();
+                    let sink = runner_sink.clone();
                     async move {
                         let result = run_profile(
                             workspace,
@@ -187,12 +183,29 @@ impl SubagentCatalog {
                             agent_id,
                         )
                         .await;
-                        sink.emit(AgentEvent::SubagentCompleted {
-                            id: agent_id,
-                            status: subagent_lifecycle_status(&result),
-                        })
-                        .await;
                         subagent_task_result(result)
+                    }
+                },
+                move |snapshot| {
+                    let sink = lifecycle_sink.clone();
+                    let profile = lifecycle_profile.clone();
+                    let label = lifecycle_label.clone();
+                    async move {
+                        if snapshot.status == BackgroundTaskStatus::Running {
+                            sink.emit(AgentEvent::SubagentStarted {
+                                id: agent_id,
+                                profile,
+                                label,
+                                background: true,
+                            })
+                            .await;
+                        } else {
+                            sink.emit(AgentEvent::SubagentCompleted {
+                                id: agent_id,
+                                status: background_lifecycle_status(&snapshot.status),
+                            })
+                            .await;
+                        }
                     }
                 },
             );
@@ -200,6 +213,14 @@ impl SubagentCatalog {
                 "Subagent started: agent_id={agent_id}, background_task={id}. Its report will be delivered automatically to the main harness."
             ))
         } else {
+            self.sink
+                .emit(AgentEvent::SubagentStarted {
+                    id: agent_id,
+                    profile: profile_id,
+                    label,
+                    background: false,
+                })
+                .await;
             let result = run_profile(
                 workspace,
                 profile,
@@ -217,6 +238,18 @@ impl SubagentCatalog {
                 .await;
             result
         }
+    }
+}
+
+fn background_lifecycle_status(status: &BackgroundTaskStatus) -> SubagentLifecycleStatus {
+    match status {
+        BackgroundTaskStatus::Completed => SubagentLifecycleStatus::Completed,
+        BackgroundTaskStatus::Blocked => SubagentLifecycleStatus::Blocked,
+        BackgroundTaskStatus::Killed => SubagentLifecycleStatus::Cancelled,
+        BackgroundTaskStatus::Running
+        | BackgroundTaskStatus::Failed
+        | BackgroundTaskStatus::TimedOut
+        | BackgroundTaskStatus::LaunchFailed => SubagentLifecycleStatus::Failed,
     }
 }
 

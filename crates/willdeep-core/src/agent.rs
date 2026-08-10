@@ -66,6 +66,7 @@ pub enum AgentEvent {
 pub enum SubagentLifecycleStatus {
     Completed,
     Blocked,
+    Cancelled,
     Failed,
 }
 

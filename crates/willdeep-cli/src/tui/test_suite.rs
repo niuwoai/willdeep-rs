@@ -170,6 +170,7 @@ mod tests {
         app.sidebar_hits = vec![(2, SidebarHit::Section(1)), (5, SidebarHit::Attention(0))];
         app.background_tasks.push(BackgroundTaskSnapshot {
             id: "job_test".to_owned(),
+            agent_id: None,
             kind: willdeep_core::BackgroundTaskKind::Shell,
             label: "Run tests".to_owned(),
             status: BackgroundTaskStatus::Completed,
@@ -245,6 +246,17 @@ mod tests {
         assert!(rendered.contains("root · T3 · - · 42t"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
         assert!(rendered.contains("inspect · T1 · read_file · 9t"));
+        assert_eq!(
+            app.selected_runtime_agent().unwrap().label.as_deref(),
+            Some("root")
+        );
+        app.runtime_agent_move(1);
+        assert_eq!(
+            app.selected_runtime_agent().unwrap().label.as_deref(),
+            Some("inspect")
+        );
+        app.runtime_agent_move(1);
+        assert_eq!(app.runtime_agent_selected, 0);
     }
     #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
@@ -668,6 +680,7 @@ mod tests {
         app.background_tasks.extend([
             BackgroundTaskSnapshot {
                 id: "job_failed".to_owned(),
+                agent_id: None,
                 kind: willdeep_core::BackgroundTaskKind::Shell,
                 label: "Tests".to_owned(),
                 status: BackgroundTaskStatus::Failed,
@@ -677,6 +690,7 @@ mod tests {
             },
             BackgroundTaskSnapshot {
                 id: "agent_working".to_owned(),
+                agent_id: None,
                 kind: willdeep_core::BackgroundTaskKind::Subagent,
                 label: "Scout".to_owned(),
                 status: BackgroundTaskStatus::Running,
@@ -705,6 +719,7 @@ mod tests {
         app.background_tasks.extend([
             BackgroundTaskSnapshot {
                 id: "job_failed".to_owned(),
+                agent_id: None,
                 kind: willdeep_core::BackgroundTaskKind::Shell,
                 label: "Failed tests".to_owned(),
                 status: BackgroundTaskStatus::Failed,
@@ -714,6 +729,7 @@ mod tests {
             },
             BackgroundTaskSnapshot {
                 id: "job_done".to_owned(),
+                agent_id: None,
                 kind: willdeep_core::BackgroundTaskKind::Shell,
                 label: "Finished build".to_owned(),
                 status: BackgroundTaskStatus::Completed,

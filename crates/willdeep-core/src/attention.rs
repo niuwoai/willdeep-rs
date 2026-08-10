@@ -192,6 +192,7 @@ mod tests {
     fn task(kind: BackgroundTaskKind, status: BackgroundTaskStatus) -> BackgroundTaskSnapshot {
         BackgroundTaskSnapshot {
             id: "task_1".to_owned(),
+            agent_id: None,
             kind,
             label: "Inspect repository".to_owned(),
             status,

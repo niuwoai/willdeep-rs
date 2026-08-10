@@ -24,12 +24,16 @@ const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 
+mod agent_control;
 mod agent_store;
 pub(crate) mod tui_bridge;
+pub(crate) use agent_control::start_agent_command_watcher;
+use agent_control::{AgentCommandKind, AgentCommandStore, ResolveAgentCommand};
 use agent_store::{AgentStore, RuntimeAgentStatus};
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    resolve_remote_approval, runtime_event_head, runtime_events, runtime_snapshot,
+    resolve_remote_approval, retry_remote_agent, runtime_event_head, runtime_events,
+    runtime_snapshot, stop_remote_agent,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -70,6 +74,10 @@ pub enum DaemonAction {
     Agents,
     /// Show one Runtime-owned agent.
     Agent { id: uuid::Uuid },
+    /// Request cancellation of a running background child Agent.
+    StopAgent { id: uuid::Uuid },
+    /// Retry a terminal background child Agent.
+    RetryAgent { id: uuid::Uuid },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
     /// List approvals and questions currently blocking Runtime tasks.
@@ -115,6 +123,7 @@ struct ServerState {
     events: Arc<EventLog>,
     tasks: Arc<TaskManager>,
     agents: Arc<AgentStore>,
+    agent_commands: Arc<AgentCommandStore>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +291,8 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
+        DaemonAction::StopAgent { id } => control_agent(&home, id, AgentCommandKind::Stop).await,
+        DaemonAction::RetryAgent { id } => control_agent(&home, id, AgentCommandKind::Retry).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -421,6 +432,31 @@ async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     let agent: agent_store::RuntimeAgent =
         authorized_get(&state, &format!("/v1/agents/{id}")).await?;
     print_agent(&agent);
+    Ok(())
+}
+
+async fn control_agent(home: &Path, id: uuid::Uuid, kind: AgentCommandKind) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let action = match kind {
+        AgentCommandKind::Stop => "stop",
+        AgentCommandKind::Retry => "retry",
+    };
+    let response = client()
+        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Agent {action}: {}",
+            response.text().await?
+        );
+    }
+    let command: agent_control::AgentCommand = response.json().await?;
+    println!(
+        "agent_command\tid={}\tagent={}\taction={:?}\tstatus={:?}",
+        command.id, command.agent_id, command.kind, command.status
+    );
     Ok(())
 }
 
@@ -837,6 +873,7 @@ async fn run(home: &Path) -> Result<()> {
     let shutdown_signal = Arc::new(Notify::new());
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
+    let agent_commands = Arc::new(AgentCommandStore::open(paths.agent_commands.clone())?);
     let tasks = Arc::new(TaskManager::open(
         paths.tasks.clone(),
         paths.interactions.clone(),
@@ -853,15 +890,23 @@ async fn run(home: &Path) -> Result<()> {
         events: events.clone(),
         tasks: tasks.clone(),
         agents: agents.clone(),
+        agent_commands: agent_commands.clone(),
     });
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/events", get(events_handler))
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))
+        .route("/v1/agents/{id}/stop", post(stop_agent_handler))
+        .route("/v1/agents/{id}/retry", post(retry_agent_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
+        .route("/v1/tasks/{id}/agent-commands", get(agent_commands_handler))
+        .route(
+            "/v1/tasks/{task_id}/agent-commands/{command_id}/resolve",
+            post(resolve_agent_command_handler),
+        )
         .route(
             "/v1/tasks/{id}/interactions",
             post(create_interaction_handler),
@@ -996,6 +1041,122 @@ async fn agent_handler(
         .map(Json)
         .map(IntoResponse::into_response)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn stop_agent_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop).await
+}
+
+async fn retry_agent_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry).await
+}
+
+async fn enqueue_agent_command(
+    state: &ServerState,
+    headers: &HeaderMap,
+    id: uuid::Uuid,
+    kind: AgentCommandKind,
+) -> Result<Response, StatusCode> {
+    authorize(state, headers)?;
+    let agent = state
+        .agents
+        .get(id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if agent.parent_id.is_none() || !agent.background {
+        return Err(StatusCode::CONFLICT);
+    }
+    let task = state
+        .tasks
+        .get(agent.task_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !matches!(
+        task.status,
+        RuntimeTaskStatus::Running
+            | RuntimeTaskStatus::WaitingApproval
+            | RuntimeTaskStatus::WaitingAnswer
+    ) {
+        return Err(StatusCode::CONFLICT);
+    }
+    let valid_status = match kind {
+        AgentCommandKind::Stop => agent.status == RuntimeAgentStatus::Running,
+        AgentCommandKind::Retry => matches!(
+            agent.status,
+            RuntimeAgentStatus::Blocked
+                | RuntimeAgentStatus::Completed
+                | RuntimeAgentStatus::Failed
+                | RuntimeAgentStatus::Cancelled
+                | RuntimeAgentStatus::Interrupted
+        ),
+    };
+    if !valid_status {
+        return Err(StatusCode::CONFLICT);
+    }
+    let command = state
+        .agent_commands
+        .enqueue(agent.task_id, agent.id, kind)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .events
+        .append(
+            "agent.command_requested",
+            format!(
+                "task_id={} agent_id={} command_id={} kind={kind:?}",
+                agent.task_id, agent.id, command.id
+            ),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
+}
+
+async fn agent_commands_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    if state.tasks.get(task_id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let commands = state
+        .agent_commands
+        .pending_for_task(task_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(commands).into_response())
+}
+
+async fn resolve_agent_command_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath((task_id, command_id)): AxumPath<(uuid::Uuid, uuid::Uuid)>,
+    Json(resolution): Json<ResolveAgentCommand>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let command = state
+        .agent_commands
+        .resolve(task_id, command_id, resolution)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .events
+        .append(
+            "agent.command_resolved",
+            format!(
+                "task_id={} agent_id={} command_id={} status={:?}",
+                command.task_id, command.agent_id, command.id, command.status
+            ),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(command).into_response())
 }
 
 async fn task_handler(
@@ -1158,6 +1319,7 @@ struct DaemonPaths {
     events: PathBuf,
     tasks: PathBuf,
     agents: PathBuf,
+    agent_commands: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
 }
@@ -1171,6 +1333,7 @@ impl DaemonPaths {
             events: directory.join("events.ndjson"),
             tasks: directory.join("tasks.json"),
             agents: directory.join("agents.json"),
+            agent_commands: directory.join("agent-commands.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
             directory,

@@ -212,8 +212,29 @@ impl AgentStore {
             .parse::<uuid::Uuid>()
             .context("subagent_started has invalid id")?;
         let mut agents = self.lock()?;
-        if agents.contains_key(&id) {
-            return Ok(());
+        if let Some(agent) = agents.get_mut(&id) {
+            agent.profile = value
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            agent.label = value
+                .get("label")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            agent.background = value
+                .get("background")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(agent.background);
+            agent.status = RuntimeAgentStatus::Running;
+            agent.current_turn = 0;
+            agent.current_tool = None;
+            agent.input_tokens = None;
+            agent.output_tokens = None;
+            agent.total_tokens = None;
+            agent.updated_at = now();
+            agent.completed_at = None;
+            agent.error = None;
+            return persist_agents(&self.path, &agents);
         }
         let parent = agents
             .values()
@@ -269,6 +290,7 @@ impl AgentStore {
         agent.status = match value.get("status").and_then(|value| value.as_str()) {
             Some("completed") => RuntimeAgentStatus::Completed,
             Some("blocked") => RuntimeAgentStatus::Blocked,
+            Some("cancelled") => RuntimeAgentStatus::Cancelled,
             _ => RuntimeAgentStatus::Failed,
         };
         agent.updated_at = now();

@@ -46,6 +46,9 @@ fn authorization_requires_exact_local_token() {
             .unwrap(),
         ),
         agents,
+        agent_commands: Arc::new(
+            AgentCommandStore::open(root.join("agent-commands.json")).unwrap(),
+        ),
     };
     assert_eq!(
         authorize(&state, &HeaderMap::new()),
@@ -102,52 +105,84 @@ fn agent_store_persists_structured_harness_lifecycle() {
         )
         .unwrap();
     let child_id = uuid::Uuid::new_v4();
+    let child_event = |kind: &str, extra: serde_json::Value| {
+        let mut value = serde_json::json!({"type": kind, "id": child_id});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value.to_string()
+    };
     store
         .apply_harness_event(
             task_id,
-            &serde_json::json!({
-                "type": "subagent_started",
-                "id": child_id,
-                "profile": "scout",
-                "label": "inspect files",
-                "background": true
-            })
-            .to_string(),
+            &child_event(
+                "subagent_started",
+                serde_json::json!({
+                    "profile": "scout",
+                    "label": "inspect files",
+                    "background": true
+                }),
+            ),
         )
         .unwrap();
     store
         .apply_harness_event(
             task_id,
-            &serde_json::json!({
-                "type": "subagent_turn_started",
-                "id": child_id,
-                "turn": 2
-            })
-            .to_string(),
+            &child_event("subagent_turn_started", serde_json::json!({"turn": 2})),
         )
         .unwrap();
     store
         .apply_harness_event(
             task_id,
-            &serde_json::json!({
-                "type": "subagent_usage",
-                "id": child_id,
-                "input_tokens": 7,
-                "output_tokens": 2,
-                "total_tokens": 9
-            })
-            .to_string(),
+            &child_event(
+                "subagent_usage",
+                serde_json::json!({
+                    "input_tokens": 7,
+                    "output_tokens": 2,
+                    "total_tokens": 9
+                }),
+            ),
         )
         .unwrap();
     store
         .apply_harness_event(
             task_id,
-            &serde_json::json!({
-                "type": "subagent_completed",
-                "id": child_id,
-                "status": "completed"
-            })
-            .to_string(),
+            &child_event(
+                "subagent_completed",
+                serde_json::json!({"status": "completed"}),
+            ),
+        )
+        .unwrap();
+    let completed_child = store.get(child_id).unwrap().unwrap();
+    assert_eq!(completed_child.status, RuntimeAgentStatus::Completed);
+    assert_eq!(completed_child.current_turn, 2);
+    assert_eq!(completed_child.total_tokens, Some(9));
+
+    store
+        .apply_harness_event(
+            task_id,
+            &child_event(
+                "subagent_started",
+                serde_json::json!({
+                    "profile": "scout",
+                    "label": "inspect files retry",
+                    "background": true
+                }),
+            ),
+        )
+        .unwrap();
+    let retried_child = store.get(child_id).unwrap().unwrap();
+    assert_eq!(retried_child.status, RuntimeAgentStatus::Running);
+    assert_eq!(retried_child.current_turn, 0);
+    assert_eq!(retried_child.total_tokens, None);
+    store
+        .apply_harness_event(
+            task_id,
+            &child_event(
+                "subagent_completed",
+                serde_json::json!({"status": "cancelled"}),
+            ),
         )
         .unwrap();
     store
@@ -173,9 +208,9 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert_eq!(child.parent_id, Some(agent.id));
     assert_eq!(child.profile.as_deref(), Some("scout"));
     assert!(child.background);
-    assert_eq!(child.status, RuntimeAgentStatus::Completed);
-    assert_eq!(child.current_turn, 2);
-    assert_eq!(child.total_tokens, Some(9));
+    assert_eq!(child.status, RuntimeAgentStatus::Cancelled);
+    assert_eq!(child.current_turn, 0);
+    assert_eq!(child.total_tokens, None);
     std::fs::remove_dir_all(root).unwrap();
 }
 

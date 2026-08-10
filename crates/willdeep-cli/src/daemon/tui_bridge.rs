@@ -182,6 +182,30 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
     })
 }
 
+pub(crate) async fn stop_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
+    control_remote_agent(home, id, "stop").await
+}
+
+pub(crate) async fn retry_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
+    control_remote_agent(home, id, "retry").await
+}
+
+async fn control_remote_agent(home: &Path, id: uuid::Uuid, action: &str) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Agent {action}: {}",
+            response.text().await?
+        );
+    }
+    Ok(())
+}
+
 fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
     RemoteAgent {
         id: agent.id,

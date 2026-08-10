@@ -1,5 +1,65 @@
 use super::*;
 
+impl App {
+    pub(super) fn attention_items(&self) -> Vec<AttentionItem> {
+        let mut items = Vec::new();
+        if let Some((description, _, _)) = &self.approval {
+            items.push(AttentionItem::approval(description.clone()));
+        }
+        if let Some(dialog) = &self.question {
+            items.push(AttentionItem::question(dialog.request.question.clone()));
+        }
+        items.extend(
+            self.background_tasks
+                .iter()
+                .map(AttentionItem::from_background),
+        );
+        if !self.running {
+            items.extend(self.workspace_attention.iter().cloned());
+        }
+        items.extend(self.runtime_attention.iter().cloned());
+        items.retain(|item| !self.attention_read.contains(&item.id));
+        sort_attention_items(&mut items);
+        items
+    }
+
+    pub(super) fn attention_move(&mut self, delta: isize) {
+        let count = self.attention_items().len();
+        if count == 0 {
+            self.attention_selected = 0;
+            return;
+        }
+        self.attention_selected = if delta < 0 {
+            self.attention_selected.checked_sub(1).unwrap_or(count - 1)
+        } else {
+            (self.attention_selected + 1) % count
+        };
+        self.sidebar_manual_scroll = false;
+    }
+
+    pub(super) fn runtime_agent_move(&mut self, delta: isize) {
+        let count = self.runtime_agents.len().min(5);
+        if count == 0 {
+            self.runtime_agent_selected = 0;
+            return;
+        }
+        self.runtime_agent_selected = if delta < 0 {
+            self.runtime_agent_selected
+                .checked_sub(1)
+                .unwrap_or(count - 1)
+        } else {
+            (self.runtime_agent_selected + 1) % count
+        };
+        self.sidebar_manual_scroll = false;
+    }
+
+    pub(super) fn selected_runtime_agent(&self) -> Option<crate::daemon::tui_bridge::RemoteAgent> {
+        self.runtime_agents
+            .get(self.runtime_agent_selected)
+            .cloned()
+    }
+}
+
 pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     let relay = if app.mobile_gateway.is_some() {
         app.language.text("已连接", "connected", "接続済み")
@@ -172,7 +232,10 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ),
                         Style::default().fg(Color::Gray),
                     ));
-                    for agent in app.runtime_agents.iter().take(5) {
+                    app.runtime_agent_selected = app
+                        .runtime_agent_selected
+                        .min(app.runtime_agents.len().min(5).saturating_sub(1));
+                    for (agent_index, agent) in app.runtime_agents.iter().take(5).enumerate() {
                         let short = agent.id.to_string();
                         let short = short.get(..6).unwrap_or(&short);
                         let profile = agent.profile.as_deref().unwrap_or("root");
@@ -183,12 +246,20 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         } else {
                             "    "
                         };
+                        let agent_style = if app.focus == FocusPane::Sidebar
+                            && app.sidebar_selected == 2
+                            && app.runtime_agent_selected == agent_index
+                        {
+                            attention_style(agent.status).add_modifier(Modifier::REVERSED)
+                        } else {
+                            attention_style(agent.status)
+                        };
                         lines.push(Line::styled(
                             format!(
                                 "{prefix} {short} · {profile}{mode} · {}",
                                 runtime_status_label(agent.status, app.language)
                             ),
-                            attention_style(agent.status),
+                            agent_style,
                         ));
                         lines.push(Line::styled(
                             format!(

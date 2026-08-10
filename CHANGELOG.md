@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.0-rc8] - 2026-08-10
+
+### Added
+
+- 后台任务保存稳定 Child Agent UUID，并支持按 Agent UUID 精确取消或重试；重试产生新的后台任务 ID，但保持同一 Agent 身份。
+- Runtime 新增受 Token 保护的持久 Agent 命令队列和 stop/retry API；原 Harness 轮询执行命令并回写 applied/rejected 结果。
+- CLI 新增 `daemon stop-agent` 与 `daemon retry-agent`；TUI Runtime 区支持上下选择 Agent，并用 `K/R` 请求停止或重试。
+
+### Changed
+
+- 后台子 Agent 的 Running、Completed、Failed、Blocked 与 Cancelled 状态统一由后台任务生命周期驱动，重试时清理旧轮次、工具、Token 和错误状态。
+- TUI 侧栏交互方法继续拆入独立模块，主文件保持在 3000 行以内。
+
+### Security
+
+- Agent 控制 API、Harness 拉取和结果确认均要求 Runtime 本地随机 Token；命令仅能作用于所属 Runtime Task 的后台 Child Agent。
+
 ## [0.16.0-rc7] - 2026-08-10
 
 ### Added
