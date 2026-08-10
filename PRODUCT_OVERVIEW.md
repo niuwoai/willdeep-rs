@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.15.0-rc1
+> 最后更新：2026-08-10 | 当前版本：v0.15.0-rc2
 
 ## 项目简介
 
@@ -29,6 +29,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI Prompt、聊天区和状态栏三态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；
 - TUI 右栏 Attention Inbox 按人工介入优先级聚合待处理、工作中和最近完成事项；
+- Attention Inbox 支持键盘/鼠标选择、后台任务与子 Agent 详情跳转、停止运行项和标记已读；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；

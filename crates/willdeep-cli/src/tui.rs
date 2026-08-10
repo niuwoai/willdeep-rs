@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +34,9 @@ use willdeep_core::{
 use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
+
+mod sidebar;
+use sidebar::render_sidebar;
 
 pub enum UiMessage {
     Agent(AgentEvent),
@@ -131,6 +134,8 @@ struct App {
     help_visible: bool,
     sidebar_hits: Vec<(u16, SidebarHit)>,
     sidebar_manual_scroll: bool,
+    attention_selected: usize,
+    attention_read: BTreeSet<String>,
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
     search: Option<SearchState>,
@@ -159,7 +164,7 @@ enum FocusPane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarHit {
     Section(usize),
-    Task(usize),
+    Attention(usize),
 }
 
 struct TaskDetail {
@@ -417,12 +422,16 @@ async fn event_loop(
                     if app.focus==FocusPane::Sidebar {
                         match key.code {
                             KeyCode::Esc=>app.focus=FocusPane::Prompt,
+                            KeyCode::Up if app.sidebar_selected==1&&app.sidebar_expanded[1]=>app.attention_move(-1),
+                            KeyCode::Down if app.sidebar_selected==1&&app.sidebar_expanded[1]=>app.attention_move(1),
                             KeyCode::Up=>app.sidebar_move(-1),
                             KeyCode::Down=>app.sidebar_move(1),
                             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT)=>app.sidebar_move(-1),
                             KeyCode::Tab=>app.sidebar_move(1),
                             KeyCode::Enter=>app.sidebar_activate(&runtime.background_tasks),
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
+                            KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>app.attention_stop(&runtime.background_tasks),
+                            KeyCode::Char('m')|KeyCode::Char('M') if app.sidebar_selected==1=>app.attention_mark_read(),
                             _=>{}
                         }
                         continue;
@@ -535,6 +544,8 @@ impl App {
             help_visible: false,
             sidebar_hits: Vec::new(),
             sidebar_manual_scroll: false,
+            attention_selected: 0,
+            attention_read: BTreeSet::new(),
             task_detail: None,
             task_detail_scroll: 0,
             search: None,
@@ -582,8 +593,67 @@ impl App {
                 .iter()
                 .map(AttentionItem::from_background),
         );
+        items.retain(|item| !self.attention_read.contains(&item.id));
         sort_attention_items(&mut items);
         items
+    }
+    fn attention_move(&mut self, delta: isize) {
+        let count = self.attention_items().len();
+        if count == 0 {
+            self.attention_selected = 0;
+            return;
+        }
+        self.attention_selected = if delta < 0 {
+            self.attention_selected.checked_sub(1).unwrap_or(count - 1)
+        } else {
+            (self.attention_selected + 1) % count
+        };
+        self.sidebar_manual_scroll = false;
+    }
+    fn selected_attention(&self) -> Option<AttentionItem> {
+        self.attention_items().get(self.attention_selected).cloned()
+    }
+    fn attention_activate(&mut self, registry: &BackgroundTaskRegistry) {
+        let Some(item) = self.selected_attention() else {
+            self.sidebar_toggle();
+            return;
+        };
+        if let Some(index) = self
+            .background_tasks
+            .iter()
+            .position(|task| task.id == item.id)
+        {
+            self.open_task_detail(index, registry);
+        }
+    }
+    fn attention_stop(&mut self, registry: &BackgroundTaskRegistry) {
+        let Some(item) = self.selected_attention() else {
+            return;
+        };
+        if item.status == RuntimeStatus::Working && registry.kill(&item.id) {
+            self.notice = Some(format!(
+                "{}: {}",
+                self.language.text(
+                    "已请求停止任务",
+                    "Task stop requested",
+                    "タスク停止を要求しました"
+                ),
+                item.id
+            ));
+        }
+    }
+    fn attention_mark_read(&mut self) {
+        let Some(item) = self.selected_attention() else {
+            return;
+        };
+        if matches!(
+            item.status,
+            RuntimeStatus::Done | RuntimeStatus::Cancelled | RuntimeStatus::Failed
+        ) {
+            self.attention_read.insert(item.id);
+            let remaining = self.attention_items().len();
+            self.attention_selected = self.attention_selected.min(remaining.saturating_sub(1));
+        }
     }
     fn sidebar_toggle(&mut self) {
         self.sidebar_expanded[self.sidebar_selected] =
@@ -600,11 +670,8 @@ impl App {
         };
     }
     fn sidebar_activate(&mut self, registry: &BackgroundTaskRegistry) {
-        if self.sidebar_selected == 2
-            && self.sidebar_expanded[2]
-            && !self.background_tasks.is_empty()
-        {
-            self.open_task_detail(0, registry);
+        if self.sidebar_selected == 1 && self.sidebar_expanded[1] {
+            self.attention_activate(registry);
         } else {
             self.sidebar_toggle();
         }
@@ -1296,7 +1363,11 @@ impl App {
                         self.sidebar_selected = section;
                         self.sidebar_toggle();
                     }
-                    SidebarHit::Task(index) => self.open_task_detail(index, registry),
+                    SidebarHit::Attention(index) => {
+                        self.sidebar_selected = 1;
+                        self.attention_selected = index;
+                        self.attention_activate(registry);
+                    }
                 }
             }
         } else if self.transcript_rect.contains((x, y).into()) {
@@ -2496,203 +2567,15 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，M 已读     Space 折叠，Esc 返回输入\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, M Read    Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、M 既読      Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
-}
-
-fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
-    let relay = if app.mobile_gateway.is_some() {
-        app.language.text("已连接", "connected", "接続済み")
-    } else {
-        app.language.text("关闭", "off", "オフ")
-    };
-    let attention = app.attention_items();
-    let agent_status = rollup_status(
-        std::iter::once(if app.running {
-            RuntimeStatus::Working
-        } else {
-            RuntimeStatus::Idle
-        })
-        .chain(attention.iter().map(|item| item.status)),
-    );
-    let titles = [
-        app.language.text("工作区", "Workspace", "ワークスペース"),
-        app.language.text("需要关注", "Attention Inbox", "要確認"),
-        app.language.text("运行状态", "Runtime", "実行状態"),
-        app.language
-            .text("移动中继", "Mobile relay", "モバイルリレー"),
-    ];
-    let mut lines = Vec::new();
-    let mut headers = [0usize; 4];
-    let mut logical_hits = Vec::new();
-    for (section, title) in titles.into_iter().enumerate() {
-        headers[section] = lines.len();
-        logical_hits.push((lines.len(), SidebarHit::Section(section)));
-        let selected = app.focus == FocusPane::Sidebar && app.sidebar_selected == section;
-        let marker = if app.sidebar_expanded[section] {
-            "▾"
-        } else {
-            "▸"
-        };
-        let style = if selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD)
-        };
-        lines.push(Line::styled(format!("{marker} {title}"), style));
-        if !app.sidebar_expanded[section] {
-            continue;
-        }
-        match section {
-            0 => lines.extend(
-                app.workspace_status
-                    .lines()
-                    .map(|line| Line::raw(format!("  {line}"))),
-            ),
-            1 if attention.is_empty() => lines.push(Line::raw(format!(
-                "  {}",
-                app.language
-                    .text("目前无需处理", "Nothing needs attention", "対応事項なし")
-            ))),
-            1 => {
-                for (group, heading) in [
-                    (
-                        AttentionSection::NeedsYou,
-                        app.language.text("需要你处理", "Needs you", "対応が必要"),
-                    ),
-                    (
-                        AttentionSection::Working,
-                        app.language.text("正在工作", "Working", "作業中"),
-                    ),
-                    (
-                        AttentionSection::Recent,
-                        app.language.text("最近完成", "Recent", "最近完了"),
-                    ),
-                ] {
-                    let grouped = attention
-                        .iter()
-                        .filter(|item| item.status.section() == Some(group))
-                        .take(8)
-                        .collect::<Vec<_>>();
-                    if grouped.is_empty() {
-                        continue;
-                    }
-                    lines.push(Line::styled(
-                        format!("  {heading} · {}", grouped.len()),
-                        Style::default().fg(Color::Gray),
-                    ));
-                    for item in grouped {
-                        if let Some(task_index) = app
-                            .background_tasks
-                            .iter()
-                            .position(|task| task.id == item.id)
-                        {
-                            logical_hits.push((lines.len(), SidebarHit::Task(task_index)));
-                        }
-                        let elapsed = item
-                            .elapsed_millis
-                            .map(|millis| format!(" · {:.1}s", millis as f64 / 1000.0))
-                            .unwrap_or_default();
-                        lines.push(Line::styled(
-                            format!(
-                                "    {} · {}{elapsed}",
-                                attention_source_label(item.source, app.language),
-                                runtime_status_label(item.status, app.language),
-                            ),
-                            attention_style(item.status),
-                        ));
-                        lines.push(Line::styled(
-                            format!("      {}", item.title),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                }
-            }
-            2 => {
-                lines.push(Line::raw(format!(
-                    "  {}: {}",
-                    app.language.text("智能体", "Agent", "エージェント"),
-                    runtime_status_label(agent_status, app.language)
-                )));
-                lines.push(Line::raw(format!(
-                    "  {}: {}/{}",
-                    app.language
-                        .text("工具完成", "Tools complete", "ツール完了"),
-                    app.tools.completed,
-                    app.tools.requested
-                )));
-                lines.push(Line::raw(format!(
-                    "  {}: {}",
-                    app.language.text("失败", "Failed", "失敗"),
-                    app.tools.failed
-                )));
-            }
-            3 => {
-                lines.push(Line::raw(format!(
-                    "  {}: {relay}",
-                    app.language.text("中继", "Relay", "リレー")
-                )));
-                lines.push(Line::raw(format!(
-                    "  {}: {}",
-                    app.language
-                        .text("手机队列", "Phone queue", "モバイルキュー"),
-                    app.mobile_queue.len()
-                )));
-            }
-            _ => {}
-        }
-        lines.push(Line::raw(""));
-    }
-    let viewport = area.height.saturating_sub(2).max(1) as usize;
-    let selected_row = headers[app.sidebar_selected];
-    if !app.sidebar_manual_scroll {
-        if selected_row < app.sidebar_scroll {
-            app.sidebar_scroll = selected_row;
-        } else if selected_row >= app.sidebar_scroll + viewport {
-            app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
-        }
-    }
-    let max_scroll = lines.len().saturating_sub(viewport);
-    app.sidebar_scroll = app.sidebar_scroll.min(max_scroll);
-    app.sidebar_hits = logical_hits
-        .into_iter()
-        .filter_map(|(row, hit)| {
-            (row >= app.sidebar_scroll && row < app.sidebar_scroll + viewport)
-                .then_some((area.y + 1 + (row - app.sidebar_scroll) as u16, hit))
-        })
-        .collect();
-    let border = if app.focus == FocusPane::Sidebar {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(app.language.text(
-                        "状态 · Ctrl+W 聚焦 · Ctrl+B 隐藏",
-                        "Status · Ctrl+W focus · Ctrl+B hide",
-                        "状態 · Ctrl+W フォーカス · Ctrl+B 非表示",
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border)),
-            )
-            .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0)),
-        area,
-    );
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -2959,54 +2842,21 @@ fn question_option_row(popup_y: u16, question: &str, width: usize, index: usize)
         .saturating_add(index.min(u16::MAX as usize) as u16)
 }
 
-#[cfg(test)]
-mod command_tests {
-    use super::*;
-
-    #[test]
-    fn goal_command_enriches_future_prompts() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let skills = SkillCatalog::default();
-
-        assert!(app.handle_slash_command("/goal ship the CLI", &skills));
-        let enriched = app.enrich_prompt("continue", &skills);
-
-        assert!(enriched.contains("<goal>\nship the CLI\n</goal>"));
-        assert!(enriched.ends_with("continue"));
-        assert!(app.handle_slash_command("/goal off", &skills));
-        assert_eq!(app.enrich_prompt("continue", &skills), "continue");
-    }
-
-    #[test]
-    fn unknown_slash_command_is_handled_locally() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let skills = SkillCatalog::default();
-
-        assert!(app.handle_slash_command("/wat", &skills));
-        assert!(app.transcript.last().unwrap().contains("unknown command"));
-    }
-
-    #[test]
-    fn ordinary_prompt_is_not_treated_as_command() {
-        let mut app = App::new(Vec::new(), Language::En);
-        assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
-    }
-}
 fn transcript(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
-        .filter_map(|m| match m.role {
+        .filter_map(|message| match message.role {
             willdeep_core::Role::User => Some(format!(
                 "You: {}{}",
-                m.content,
-                if m.attachments.is_empty() {
+                message.content,
+                if message.attachments.is_empty() {
                     String::new()
                 } else {
-                    format!(" [{} attachment(s)]", m.attachments.len())
+                    format!(" [{} attachment(s)]", message.attachments.len())
                 }
             )),
-            willdeep_core::Role::Assistant if !m.content.trim().is_empty() => {
-                Some(format!("WillDeep: {}", m.content))
+            willdeep_core::Role::Assistant if !message.content.trim().is_empty() => {
+                Some(format!("WillDeep: {}", message.content))
             }
             _ => None,
         })
@@ -3033,493 +2883,4 @@ fn welcome_message(workspace: &std::path::Path, language: Language) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn aggregates_tools() {
-        let mut a = ToolActivity::default();
-        a.requested("read_file");
-        a.completed("read_file", true);
-        assert!(a.summary(Language::En).contains("1 failed"));
-    }
-
-    #[test]
-    fn welcome_mentions_workspace_without_entering_model_history() {
-        let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"), Language::ZhCn);
-        assert!(welcome.starts_with("WillDeep:"));
-        assert!(welcome.contains("willdeep-rs"));
-    }
-    #[test]
-    fn approval_shortcuts_are_colored_and_localized() {
-        let lines = approval_content("run command", true, Language::Ja);
-        let actions = lines.last().unwrap();
-        assert_eq!(actions.spans[0].content, " Y ");
-        assert_eq!(actions.spans[0].style.bg, Some(Color::Yellow));
-        assert!(
-            actions
-                .spans
-                .iter()
-                .any(|span| span.content.contains("常に許可"))
-        );
-        let deny = actions
-            .spans
-            .iter()
-            .find(|span| span.content == " N ")
-            .unwrap();
-        assert_eq!(deny.style.bg, Some(Color::Red));
-        assert!(
-            actions
-                .spans
-                .iter()
-                .any(|span| span.content.contains("拒否"))
-        );
-    }
-    #[test]
-    fn long_paste_is_attachment_and_deletable() {
-        let mut a = App::new(Vec::new(), Language::En);
-        a.handle_paste("one\ntwo".to_owned());
-        assert_eq!(a.attachments.len(), 1);
-        a.delete_selected_attachment();
-        assert!(a.attachments.is_empty());
-    }
-    #[test]
-    fn cjk_wraps() {
-        assert_eq!(visual_lines("中文", 2), 2);
-    }
-    #[test]
-    fn transcript_height_uses_ratatui_word_wrapping() {
-        let entries = vec!["WillDeep: 12345 12345 12345".to_owned()];
-
-        assert_eq!(rendered_transcript_height(&entries, 10), 4);
-        assert_eq!(visual_lines(&entries.join("\n"), 10), 3);
-    }
-    #[test]
-    fn skill_menu_filters_and_inserts_selected_skill() {
-        let workspace =
-            std::env::temp_dir().join(format!("willdeep-tui-skill-menu-{}", uuid::Uuid::new_v4()));
-        let skill_dir = workspace.join(".willdeep/skills/image-processing");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: Image Processing\ndescription: Edit images\n---\n# Instructions",
-        )
-        .unwrap();
-        let skills = SkillCatalog::discover(&workspace, &[]);
-        let mut app = App::new(Vec::new(), Language::En);
-        app.input.insert("use $image-pro");
-
-        assert!(app.handle_skill_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &skills));
-        assert_eq!(app.input.text(), "use $image-processing ");
-
-        std::fs::remove_dir_all(workspace).unwrap();
-    }
-    #[test]
-    fn command_menu_filters_and_inserts_without_executing() {
-        let mut app = App::new(Vec::new(), Language::ZhCn);
-        app.input.insert("/com");
-
-        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.input.text(), "/compress");
-        assert!(app.transcript.is_empty());
-    }
-    #[test]
-    fn sidebar_navigation_wraps_and_toggles_sections() {
-        let mut app = App::new(Vec::new(), Language::ZhCn);
-        app.sidebar_move(-1);
-        assert_eq!(app.focus, FocusPane::Sidebar);
-        assert_eq!(app.sidebar_selected, 3);
-
-        app.sidebar_toggle();
-        assert!(!app.sidebar_expanded[3]);
-        app.sidebar_move(1);
-        assert_eq!(app.sidebar_selected, 0);
-    }
-    #[test]
-    fn focus_cycles_through_prompt_chat_and_sidebar() {
-        let mut app = App::new(Vec::new(), Language::En);
-        app.cycle_focus();
-        assert_eq!(app.focus, FocusPane::Chat);
-        app.cycle_focus();
-        assert_eq!(app.focus, FocusPane::Sidebar);
-        app.cycle_focus();
-        assert_eq!(app.focus, FocusPane::Prompt);
-    }
-    #[test]
-    fn clicking_sidebar_focuses_it_and_clicking_prompt_restores_prompt_focus() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        app.sidebar_rect = Rect::new(80, 0, 20, 30);
-        app.prompt_rect = Rect::new(0, 20, 80, 8);
-        app.transcript_rect = Rect::new(0, 0, 80, 20);
-
-        app.handle_mouse(85, 5, &registry, &skills);
-        assert_eq!(app.focus, FocusPane::Sidebar);
-        app.handle_mouse(5, 22, &registry, &skills);
-        assert_eq!(app.focus, FocusPane::Prompt);
-        app.handle_mouse(5, 5, &registry, &skills);
-        assert_eq!(app.focus, FocusPane::Chat);
-    }
-    #[test]
-    fn clicking_sidebar_hits_toggles_sections_and_opens_task_detail() {
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        app.sidebar_rect = Rect::new(80, 0, 20, 30);
-        app.sidebar_hits = vec![(2, SidebarHit::Section(1)), (5, SidebarHit::Task(0))];
-        app.background_tasks.push(BackgroundTaskSnapshot {
-            id: "job_test".to_owned(),
-            kind: willdeep_core::BackgroundTaskKind::Shell,
-            label: "Run tests".to_owned(),
-            status: BackgroundTaskStatus::Completed,
-            elapsed_millis: 1200,
-            exit_code: Some(0),
-            output_bytes: 12,
-        });
-
-        app.handle_mouse(85, 2, &registry, &skills);
-        assert_eq!(app.sidebar_selected, 1);
-        assert!(!app.sidebar_expanded[1]);
-        app.handle_mouse(85, 5, &registry, &skills);
-        assert_eq!(
-            app.task_detail
-                .as_ref()
-                .map(|detail| detail.snapshot.id.as_str()),
-            Some("job_test")
-        );
-    }
-    #[test]
-    fn sidebar_wheel_scrolls_content_without_changing_selected_section() {
-        let mut app = App::new(Vec::new(), Language::En);
-        app.sidebar_selected = 2;
-        app.sidebar_scroll_by(3);
-        assert_eq!(app.sidebar_selected, 2);
-        assert_eq!(app.sidebar_scroll, 3);
-        assert!(app.sidebar_manual_scroll);
-    }
-    #[test]
-    fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
-        let mut app = App::new(Vec::new(), Language::ZhCn);
-        assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
-        assert!(app.help_visible);
-        assert!(app.handle_help_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(!app.help_visible);
-
-        app.input.insert("这是什么");
-        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)));
-    }
-    #[test]
-    fn help_documents_current_focus_and_sidebar_shortcuts() {
-        assert_eq!(focus_label(FocusPane::Sidebar, Language::ZhCn), "状态栏");
-        let help = help_content(Language::ZhCn);
-        assert!(help.contains("Ctrl+W"));
-        assert!(help.contains("Enter/Space"));
-        assert!(help.contains("Ctrl+F"));
-        assert!(help.contains("Ctrl+P"));
-    }
-    #[test]
-    fn chat_search_filters_cycles_and_scrolls_to_matching_entries() {
-        let mut app = App::new(
-            vec![
-                "You: first".to_owned(),
-                "WillDeep: Alpha result".to_owned(),
-                "You: middle".to_owned(),
-                "WillDeep: alpha again".to_owned(),
-            ],
-            Language::En,
-        );
-        app.transcript_width = 40;
-        app.viewport_height = 2;
-        app.search = Some(SearchState::default());
-        for character in "ALPHA".chars() {
-            app.handle_search_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-
-        let search = app.search.as_ref().unwrap();
-        assert_eq!(search.matches, vec![1, 3]);
-        assert_eq!(search.selected, 0);
-        assert!(!app.follow_bottom);
-
-        app.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.search.as_ref().unwrap().selected, 1);
-        app.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
-        assert_eq!(app.search.as_ref().unwrap().selected, 0);
-    }
-    #[test]
-    fn chat_search_highlights_matches_without_removing_markdown_styles() {
-        let text = colored_transcript(&["WillDeep: **Alpha** and alpha".to_owned()], Some("alpha"));
-        let highlighted = text
-            .lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .filter(|span| span.style.bg == Some(Color::Yellow))
-            .collect::<Vec<_>>();
-
-        assert_eq!(highlighted.len(), 2);
-        assert!(highlighted[0].style.add_modifier.contains(Modifier::BOLD));
-    }
-    #[test]
-    fn command_palette_fuzzy_filters_and_inserts_a_command() {
-        let workspace = std::env::temp_dir().join(format!(
-            "willdeep-palette-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let session = Session::new(workspace.clone(), None, "Palette test");
-        let registry = BackgroundTaskRegistry::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        app.workspace = Some(workspace.clone());
-        let store = SessionStore::new(workspace.join("home"));
-        app.open_palette(&SkillCatalog::default(), &store, &session);
-        for character in "cmp".chars() {
-            app.handle_palette_key(
-                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-                &registry,
-            );
-        }
-
-        let palette = app.palette.as_ref().unwrap();
-        let labels = palette
-            .filtered
-            .iter()
-            .map(|index| palette.items[*index].label.as_str())
-            .collect::<Vec<_>>();
-        assert!(labels.contains(&"/compress"));
-        app.handle_palette_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &registry);
-        assert_eq!(app.input.text(), "/compress");
-        assert!(app.palette.is_none());
-        std::fs::remove_dir_all(workspace).unwrap();
-    }
-    #[test]
-    fn workspace_file_palette_is_bounded_and_skips_heavy_directories() {
-        let workspace = std::env::temp_dir().join(format!(
-            "willdeep-palette-files-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(workspace.join("src")).unwrap();
-        std::fs::create_dir_all(workspace.join("target")).unwrap();
-        std::fs::write(workspace.join("src/main.rs"), "fn main() {}").unwrap();
-        std::fs::write(workspace.join("target/ignored"), "large").unwrap();
-
-        let files = workspace_files(&workspace, 10);
-        assert_eq!(files, vec!["src/main.rs"]);
-        assert_eq!(fuzzy_score("smr", "src/main.rs"), Some(7));
-        std::fs::remove_dir_all(workspace).unwrap();
-    }
-    #[test]
-    fn transient_thought_is_single_line_and_bounded() {
-        let value = compact_thought(&format!("first\n{}", "x".repeat(300)));
-        assert!(!value.contains('\n'));
-        assert!(value.chars().count() <= 181);
-    }
-    #[test]
-    fn renders_common_markdown_for_terminal() {
-        let lines = render_assistant_markdown(
-            "# Title\n- **bold** and `code`\n[Docs](https://example.com)",
-        );
-        let rendered = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(rendered.contains("■ Title"));
-        assert!(rendered.contains("• bold and code"));
-        assert!(rendered.contains("Docs (https://example.com)"));
-        assert!(
-            lines[1]
-                .spans
-                .iter()
-                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-        );
-    }
-    #[test]
-    fn encodes_clipboard_rgba_as_deletable_image() {
-        let value = encode_clipboard_image(1, 1, vec![255, 0, 0, 255]).unwrap();
-        assert!(matches!(
-            value.message,
-            MessageAttachment::Image {
-                width: 1,
-                height: 1,
-                ..
-            }
-        ));
-    }
-    #[tokio::test]
-    async fn ask_dialog_accepts_custom_text() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let (sender, receiver) = oneshot::channel();
-        app.question = Some(AskDialog {
-            request: UserQuestion {
-                question: "Choose".to_owned(),
-                options: vec!["A".to_owned(), "B".to_owned()],
-                multi_select: false,
-            },
-            selected: 0,
-            checked: vec![false, false],
-            answer: PromptEditor::default(),
-            sender,
-        });
-        for value in "Other".chars() {
-            app.handle_question_key(KeyEvent::new(KeyCode::Char(value), KeyModifiers::NONE));
-        }
-        app.handle_question_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(receiver.await.expect("answer").as_deref(), Some("Other"));
-    }
-    #[tokio::test]
-    async fn ask_dialog_supports_multiple_selected_options() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let (sender, receiver) = oneshot::channel();
-        app.question = Some(AskDialog {
-            request: UserQuestion {
-                question: "Choose".to_owned(),
-                options: vec!["A".to_owned(), "B".to_owned()],
-                multi_select: true,
-            },
-            selected: 0,
-            checked: vec![false, false],
-            answer: PromptEditor::default(),
-            sender,
-        });
-        app.handle_question_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        app.handle_question_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_question_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        app.handle_question_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(receiver.await.expect("answer").as_deref(), Some("A, B"));
-    }
-    #[tokio::test]
-    async fn mouse_can_resolve_approval_and_single_choice_question() {
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        let (approval_sender, approval_receiver) = oneshot::channel();
-        app.approval = Some(("Run tests".to_owned(), true, approval_sender));
-        app.approval_rect = Rect::new(10, 10, 60, 9);
-        app.handle_mouse(35, 18, &registry, &skills);
-        assert_eq!(
-            approval_receiver.await.unwrap(),
-            ApprovalDecision::AlwaysAllow
-        );
-
-        let (question_sender, question_receiver) = oneshot::channel();
-        app.question = Some(AskDialog {
-            request: UserQuestion {
-                question: "Choose".to_owned(),
-                options: vec!["A".to_owned(), "B".to_owned()],
-                multi_select: false,
-            },
-            selected: 0,
-            checked: vec![false, false],
-            answer: PromptEditor::default(),
-            sender: question_sender,
-        });
-        app.question_rect = Rect::new(10, 10, 60, 10);
-        app.question_hits = vec![(13, 0), (14, 1)];
-        app.handle_mouse(20, 14, &registry, &skills);
-        assert_eq!(question_receiver.await.unwrap().as_deref(), Some("B"));
-    }
-    #[tokio::test]
-    async fn mouse_can_toggle_and_submit_multi_choice_question() {
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        let (sender, receiver) = oneshot::channel();
-        app.question = Some(AskDialog {
-            request: UserQuestion {
-                question: "Choose".to_owned(),
-                options: vec!["A".to_owned(), "B".to_owned()],
-                multi_select: true,
-            },
-            selected: 0,
-            checked: vec![false, false],
-            answer: PromptEditor::default(),
-            sender,
-        });
-        app.question_rect = Rect::new(10, 10, 60, 10);
-        app.question_hits = vec![(13, 0), (14, 1)];
-
-        app.handle_mouse(20, 13, &registry, &skills);
-        assert!(app.question.as_ref().unwrap().checked[0]);
-        app.handle_mouse(60, 18, &registry, &skills);
-        assert_eq!(receiver.await.unwrap().as_deref(), Some("A"));
-    }
-    #[test]
-    fn mouse_can_place_cursor_in_chat_search() {
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        let mut search = SearchState::default();
-        search.editor.insert("abc");
-        app.search = Some(search);
-        app.search_rect = Rect::new(10, 2, 40, 3);
-
-        app.handle_mouse(12, 3, &registry, &skills);
-        app.handle_search_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
-        assert_eq!(app.search.as_ref().unwrap().editor.text(), "aXbc");
-    }
-    #[test]
-    fn wrapped_question_offsets_mouse_option_rows() {
-        assert_eq!(question_option_row(10, "123456789", 4, 0), 15);
-        assert_eq!(question_option_row(10, "123456789", 4, 1), 16);
-    }
-    #[test]
-    fn attention_inbox_merges_human_gates_and_background_work() {
-        let mut app = App::new(Vec::new(), Language::En);
-        let (approval_sender, _approval_receiver) = oneshot::channel();
-        app.approval = Some(("Run release".to_owned(), true, approval_sender));
-        let (question_sender, _question_receiver) = oneshot::channel();
-        app.question = Some(AskDialog {
-            request: UserQuestion {
-                question: "Choose target".to_owned(),
-                options: vec!["A".to_owned()],
-                multi_select: false,
-            },
-            selected: 0,
-            checked: vec![false],
-            answer: PromptEditor::default(),
-            sender: question_sender,
-        });
-        app.background_tasks.extend([
-            BackgroundTaskSnapshot {
-                id: "job_failed".to_owned(),
-                kind: willdeep_core::BackgroundTaskKind::Shell,
-                label: "Tests".to_owned(),
-                status: BackgroundTaskStatus::Failed,
-                elapsed_millis: 50,
-                exit_code: Some(1),
-                output_bytes: 10,
-            },
-            BackgroundTaskSnapshot {
-                id: "agent_working".to_owned(),
-                kind: willdeep_core::BackgroundTaskKind::Subagent,
-                label: "Scout".to_owned(),
-                status: BackgroundTaskStatus::Running,
-                elapsed_millis: 20,
-                exit_code: None,
-                output_bytes: 0,
-            },
-        ]);
-
-        let items = app.attention_items();
-        assert_eq!(
-            items.iter().map(|item| item.status).collect::<Vec<_>>(),
-            vec![
-                RuntimeStatus::WaitingApproval,
-                RuntimeStatus::WaitingAnswer,
-                RuntimeStatus::Failed,
-                RuntimeStatus::Working,
-            ]
-        );
-    }
-    #[test]
-    fn mouse_click_inserts_command_candidate() {
-        let registry = BackgroundTaskRegistry::default();
-        let skills = SkillCatalog::default();
-        let mut app = App::new(Vec::new(), Language::En);
-        app.input.insert("/com");
-        app.command_rect = Rect::new(0, 0, 60, 4);
-        app.command_hits = vec![(1, 0)];
-
-        app.handle_mouse(5, 1, &registry, &skills);
-        assert_eq!(app.input.text(), "/compress");
-    }
-}
+mod test_suite;
