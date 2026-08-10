@@ -1,5 +1,9 @@
 use super::*;
-use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode, IdParams};
+use willdeep_runtime_protocol::{
+    AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse,
+    ApprovalDecision, ErrorCode, EventListParams, IdParams, ResolveApprovalParams,
+    WorkspaceEnsureParams,
+};
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
 const MAX_TURN_PROMPT_BYTES: usize = 1024 * 1024;
@@ -68,58 +72,6 @@ impl IdempotencyStore {
             .collect::<Vec<_>>();
         write_json_atomic(path, &values)
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EventListParams {
-    #[serde(default)]
-    after: u64,
-    #[serde(default = "default_event_limit")]
-    limit: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentPromptParams {
-    id: uuid::Uuid,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentWaitParams {
-    id: uuid::Uuid,
-    #[serde(default = "default_wait_timeout_ms")]
-    timeout_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolveApprovalParams {
-    id: uuid::Uuid,
-    decision: ApprovalDecisionParam,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ApprovalDecisionParam {
-    AllowOnce,
-    Deny,
-    AlwaysAllow,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnswerQuestionParams {
-    id: uuid::Uuid,
-    answer: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceEnsureParams {
-    root: String,
 }
 
 pub(super) async fn handler(
@@ -1226,14 +1178,34 @@ async fn agent_command(
 }
 
 fn command_response(command: agent_control::AgentCommand) -> ApiResult {
-    json(serde_json::json!({
-        "id": command.id,
-        "task_id": command.task_id,
-        "agent_id": command.agent_id,
-        "kind": command.kind,
-        "status": command.status,
-        "created_at": command.created_at
-    }))
+    json(willdeep_runtime_protocol::RuntimeAgentCommand {
+        id: command.id,
+        task_id: command.task_id,
+        agent_id: command.agent_id,
+        kind: match command.kind {
+            agent_control::AgentCommandKind::Stop => {
+                willdeep_runtime_protocol::AgentCommandKind::Stop
+            }
+            agent_control::AgentCommandKind::Retry => {
+                willdeep_runtime_protocol::AgentCommandKind::Retry
+            }
+            agent_control::AgentCommandKind::Instruct => {
+                willdeep_runtime_protocol::AgentCommandKind::Instruct
+            }
+        },
+        status: match command.status {
+            agent_control::AgentCommandStatus::Pending => {
+                willdeep_runtime_protocol::AgentCommandStatus::Pending
+            }
+            agent_control::AgentCommandStatus::Applied => {
+                willdeep_runtime_protocol::AgentCommandStatus::Applied
+            }
+            agent_control::AgentCommandStatus::Rejected => {
+                willdeep_runtime_protocol::AgentCommandStatus::Rejected
+            }
+        },
+        created_at: command.created_at,
+    })
 }
 
 async fn agent_wait(state: &ServerState, request: &ApiRequest) -> ApiResult {
@@ -1270,9 +1242,9 @@ async fn agent_wait(state: &ServerState, request: &ApiRequest) -> ApiResult {
 async fn resolve_approval(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<ResolveApprovalParams>(request)?;
     let resolution = match params.decision {
-        ApprovalDecisionParam::AllowOnce => InteractionResolution::AllowOnce,
-        ApprovalDecisionParam::Deny => InteractionResolution::Deny,
-        ApprovalDecisionParam::AlwaysAllow => InteractionResolution::AlwaysAllow,
+        ApprovalDecision::AllowOnce => InteractionResolution::AllowOnce,
+        ApprovalDecision::Deny => InteractionResolution::Deny,
+        ApprovalDecision::AlwaysAllow => InteractionResolution::AlwaysAllow,
     };
     resolve_interaction(state, params.id, resolution).await
 }
@@ -1300,12 +1272,12 @@ async fn resolve_interaction(
     resolution: InteractionResolution,
 ) -> ApiResult {
     match state.tasks.resolve_interaction(id, resolution).await {
-        Ok(Some(interaction)) => json(serde_json::json!({
-            "id": interaction.id,
-            "task_id": interaction.task_id,
-            "status": "resolved",
-            "resolved_at": interaction.resolved_at
-        })),
+        Ok(Some(interaction)) => json(willdeep_runtime_protocol::RuntimeInteractionResult {
+            id: interaction.id,
+            task_id: interaction.task_id,
+            status: willdeep_runtime_protocol::InteractionResultStatus::Resolved,
+            resolved_at: interaction.resolved_at,
+        }),
         Ok(None) => Err(ApiFailure::not_found("Runtime Interaction not found")),
         Err(error) => Err(ApiFailure {
             status: StatusCode::CONFLICT,
@@ -1427,14 +1399,6 @@ fn error_response(
         )),
     )
         .into_response()
-}
-
-fn default_event_limit() -> usize {
-    200
-}
-
-fn default_wait_timeout_ms() -> u64 {
-    10_000
 }
 
 #[cfg(test)]

@@ -138,6 +138,88 @@ pub struct IdParams {
     pub id: uuid::Uuid,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyParams {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPromptParams {
+    pub id: uuid::Uuid,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWaitParams {
+    pub id: uuid::Uuid,
+    #[serde(default = "default_agent_wait_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl AgentWaitParams {
+    pub fn new(id: uuid::Uuid) -> Self {
+        Self {
+            id,
+            timeout_ms: default_agent_wait_timeout_ms(),
+        }
+    }
+}
+
+fn default_agent_wait_timeout_ms() -> u64 {
+    10_000
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    AllowOnce,
+    Deny,
+    AlwaysAllow,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveApprovalParams {
+    pub id: uuid::Uuid,
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerQuestionParams {
+    pub id: uuid::Uuid,
+    pub answer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EventListParams {
+    #[serde(default)]
+    pub after: u64,
+    #[serde(default = "default_event_list_limit")]
+    pub limit: usize,
+}
+
+impl Default for EventListParams {
+    fn default() -> Self {
+        Self {
+            after: 0,
+            limit: default_event_list_limit(),
+        }
+    }
+}
+
+fn default_event_list_limit() -> usize {
+    200
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEnsureParams {
+    pub root: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RenameSessionParams {
@@ -360,6 +442,32 @@ pub struct RuntimeAgent {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentCommandKind {
+    Stop,
+    Retry,
+    Instruct,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandStatus {
+    Pending,
+    Applied,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeAgentCommand {
+    pub id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub kind: AgentCommandKind,
+    pub status: AgentCommandStatus,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Queued,
     Running,
@@ -405,6 +513,22 @@ pub struct PendingQuestion {
     pub options: Vec<String>,
     pub multi_select: bool,
     pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeInteractionResult {
+    pub id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub status: InteractionResultStatus,
+    pub resolved_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionResultStatus {
+    Resolved,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -909,6 +1033,25 @@ mod tests {
         decode_fixture::<RuntimeArtifact>(responses, "artifact");
         decode_fixture::<RuntimeEvent>(responses, "event");
         assert_eq!(responses.len(), 11);
+
+        let requests = fixture["requests"].as_object().unwrap();
+        let prompt: ApiRequest = serde_json::from_value(requests["agent_prompt"].clone()).unwrap();
+        assert_eq!(prompt.operation, "agent.prompt");
+        let _: AgentPromptParams = serde_json::from_value(prompt.params).unwrap();
+        let wait: ApiRequest = serde_json::from_value(requests["agent_wait"].clone()).unwrap();
+        let _: AgentWaitParams = serde_json::from_value(wait.params).unwrap();
+        let approval: ApiRequest =
+            serde_json::from_value(requests["approval_resolve"].clone()).unwrap();
+        let _: ResolveApprovalParams = serde_json::from_value(approval.params).unwrap();
+        let question: ApiRequest =
+            serde_json::from_value(requests["question_answer"].clone()).unwrap();
+        let _: AnswerQuestionParams = serde_json::from_value(question.params).unwrap();
+        let events: ApiRequest = serde_json::from_value(requests["event_list"].clone()).unwrap();
+        let _: EventListParams = serde_json::from_value(events.params).unwrap();
+
+        let results = fixture["control_results"].as_object().unwrap();
+        decode_fixture::<RuntimeAgentCommand>(results, "agent_command");
+        decode_fixture::<RuntimeInteractionResult>(results, "interaction");
     }
 
     #[test]
@@ -943,6 +1086,53 @@ mod tests {
         assert_eq!(data.objects.last(), Some(&ObjectKind::Unknown));
         assert_eq!(data.capabilities.last(), Some(&Capability::Unknown));
         assert_eq!(data.transports.last(), Some(&TransportKind::Unknown));
+    }
+
+    #[test]
+    fn control_params_are_strict_and_keep_stable_defaults() {
+        let agent_id = uuid::Uuid::new_v4();
+        let wait: AgentWaitParams =
+            serde_json::from_value(serde_json::json!({"id": agent_id})).unwrap();
+        assert_eq!(wait.timeout_ms, 10_000);
+        let events: EventListParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(events, EventListParams::default());
+        assert_eq!(events.limit, 200);
+        assert!(
+            serde_json::from_value::<ResolveApprovalParams>(serde_json::json!({
+                "id": agent_id,
+                "decision": "allow_once",
+                "workspace": "/must/not/be/accepted"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn public_control_results_exclude_private_agent_message_and_error() {
+        let command = RuntimeAgentCommand {
+            id: uuid::Uuid::new_v4(),
+            task_id: uuid::Uuid::new_v4(),
+            agent_id: uuid::Uuid::new_v4(),
+            kind: AgentCommandKind::Instruct,
+            status: AgentCommandStatus::Pending,
+            created_at: 10,
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(!json.contains("message"));
+        assert!(!json.contains("error"));
+        let result = RuntimeInteractionResult {
+            id: uuid::Uuid::new_v4(),
+            task_id: uuid::Uuid::new_v4(),
+            status: InteractionResultStatus::Resolved,
+            resolved_at: Some(20),
+        };
+        assert_eq!(
+            serde_json::from_str::<RuntimeInteractionResult>(
+                &serde_json::to_string(&result).unwrap()
+            )
+            .unwrap(),
+            result
+        );
     }
 
     #[test]

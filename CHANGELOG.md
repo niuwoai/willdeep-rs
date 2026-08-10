@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0-rc17] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增 Agent Prompt/Wait、Approval Resolve、Question Answer、Event List、Workspace Ensure 严格参数 DTO，以及脱敏的 Agent Command/Interaction Result 返回 DTO。
+- Rust Runtime Client 新增 Workspace、Session、Agent、Turn、Task、Approval、Question 与 Event 高频类型化观察和控制方法；修改操作显式接收幂等 Request ID。
+- 跨语言兼容夹具加入 Agent、审批、提问、事件控制请求与公共结果，Rust 测试逐项解码。
+
+### Changed
+
+- TUI Runtime bridge 的 Session 搜索、Turn、Event、Agent、Task、Inbox、Tool 与 Artifact 调用迁移到共享 Client 的类型化方法。
+
 ## [0.21.0-rc16] - 2026-08-11
 
 ### Fixed

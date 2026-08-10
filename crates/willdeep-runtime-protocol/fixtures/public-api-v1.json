@@ -183,5 +183,73 @@
         "request_id": "00000000-0000-4000-8000-000000000006"
       }
     }
+  },
+  "requests": {
+    "agent_prompt": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000011",
+      "operation": "agent.prompt",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "message": "Continue with the verification"
+      }
+    },
+    "agent_wait": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000012",
+      "operation": "agent.wait",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "timeout_ms": 10000
+      }
+    },
+    "approval_resolve": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000013",
+      "operation": "approval.resolve",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "decision": "allow_once"
+      }
+    },
+    "question_answer": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000014",
+      "operation": "question.answer",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000009",
+        "answer": "A"
+      }
+    },
+    "event_list": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000015",
+      "operation": "event.list",
+      "params": { "after": 15, "limit": 200 }
+    }
+  },
+  "control_results": {
+    "agent_command": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000016",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "agent_id": "00000000-0000-4000-8000-000000000003",
+        "kind": "instruct",
+        "status": "pending",
+        "created_at": 145
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc17" }
+    },
+    "interaction": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "status": "resolved",
+        "resolved_at": 146
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc17" }
+    }
   }
 }

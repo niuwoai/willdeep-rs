@@ -88,15 +88,7 @@ pub(crate) struct RemoteSessionState {
 
 pub(crate) async fn remote_session_states(home: &Path) -> Result<Vec<RemoteSessionState>> {
     let state = ensure_running(home).await?;
-    let sessions = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::RuntimeSession>>(
-                "session.list",
-                &serde_json::json!({}),
-                None,
-            )
-            .await?,
-    )?;
+    let sessions = api_data(runtime_client(&state)?.sessions().await?)?;
     Ok(sessions
         .into_iter()
         .map(|session| RemoteSessionState {
@@ -225,15 +217,7 @@ pub(crate) async fn search_remote_sessions(
             _ => bail!("unsupported Session search parameter: {key}"),
         }
     }
-    let results = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::SessionSearchResult>>(
-                "session.search",
-                &params,
-                None,
-            )
-            .await?,
-    )?;
+    let results = api_data(runtime_client(&state)?.search_sessions(&params).await?)?;
     Ok(serde_json::to_value(results)?)
 }
 
@@ -280,15 +264,14 @@ pub(crate) async fn submit_runtime_turn(
     let state = ensure_running(home).await?;
     let turn = api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
-                "turn.submit",
+            .submit_turn(
                 &willdeep_runtime_protocol::SubmitTurnParams {
                     session_id,
                     turn_request_id: request_id,
                     prompt,
                     attachments: attachments.into_iter().map(public_attachment).collect(),
                 },
-                Some(request_id),
+                request_id,
             )
             .await?,
     )?;
@@ -299,11 +282,7 @@ pub(crate) async fn stop_remote_turn(home: &Path, id: uuid::Uuid) -> Result<()> 
     let state = ensure_running(home).await?;
     api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
-                "turn.stop",
-                &serde_json::json!({"id": id}),
-                None,
-            )
+            .stop_turn(id, uuid::Uuid::new_v4())
             .await?,
     )?;
     Ok(())
@@ -328,15 +307,7 @@ pub(crate) async fn runtime_events(
     };
     probe(&state).await?;
     let workspace = workspace.canonicalize()?;
-    let tasks = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTask>>(
-                "task.list",
-                &serde_json::json!({}),
-                None,
-            )
-            .await?,
-    )?;
+    let tasks = api_data(runtime_client(&state)?.tasks().await?)?;
     let visible_tasks = tasks
         .into_iter()
         .filter(|task| {
@@ -350,11 +321,7 @@ pub(crate) async fn runtime_events(
         .collect::<HashMap<_, _>>();
     let events = api_data(
         runtime_client(&state)?
-            .call::<_, Vec<RuntimeEvent>>(
-                "event.list",
-                &serde_json::json!({"after": after, "limit": 200}),
-                None,
-            )
+            .events(&willdeep_runtime_protocol::EventListParams { after, limit: 200 })
             .await?,
     )?;
     Ok(events
@@ -503,11 +470,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         }
     };
     let workspace = workspace.canonicalize()?;
-    let response: willdeep_runtime_protocol::ApiResponse<
-        Vec<willdeep_runtime_protocol::RuntimeAgent>,
-    > = runtime_client(&state)?
-        .call("agent.list", &serde_json::json!({}), None)
-        .await?;
+    let response = runtime_client(&state)?.agents().await?;
     let mut agents = api_data(response)?
         .into_iter()
         .filter(|agent| {
@@ -521,15 +484,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         .map(remote_agent)
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| (agent.parent_id.is_some(), agent.parent_id, agent.id));
-    let tasks = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTask>>(
-                "task.list",
-                &serde_json::json!({}),
-                None,
-            )
-            .await?,
-    )?;
+    let tasks = api_data(runtime_client(&state)?.tasks().await?)?;
     let visible_tasks = tasks
         .iter()
         .filter(|task| {
@@ -543,14 +498,10 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         .collect::<std::collections::HashSet<_>>();
     let tools = api_data(
         runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTool>>(
-                "tool.list",
-                &willdeep_runtime_protocol::ListToolsParams {
-                    limit: Some(100),
-                    ..Default::default()
-                },
-                None,
-            )
+            .tools(&willdeep_runtime_protocol::ListToolsParams {
+                limit: Some(100),
+                ..Default::default()
+            })
             .await?,
     )?
     .into_iter()
@@ -558,37 +509,17 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
     .collect();
     let artifacts = api_data(
         runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::RuntimeArtifact>>(
-                "artifact.list",
-                &willdeep_runtime_protocol::ListArtifactsParams {
-                    limit: Some(100),
-                    ..Default::default()
-                },
-                None,
-            )
+            .artifacts(&willdeep_runtime_protocol::ListArtifactsParams {
+                limit: Some(100),
+                ..Default::default()
+            })
             .await?,
     )?
     .into_iter()
     .filter(|artifact| visible_tasks.contains(&artifact.task_id))
     .collect();
-    let approvals = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::PendingApproval>>(
-                "approval.list",
-                &serde_json::json!({}),
-                None,
-            )
-            .await?,
-    )?;
-    let questions = api_data(
-        runtime_client(&state)?
-            .call::<_, Vec<willdeep_runtime_protocol::PendingQuestion>>(
-                "question.list",
-                &serde_json::json!({}),
-                None,
-            )
-            .await?,
-    )?;
+    let approvals = api_data(runtime_client(&state)?.approvals().await?)?;
+    let questions = api_data(runtime_client(&state)?.questions().await?)?;
     let mut attention = tasks
         .into_iter()
         .filter(|task| visible_tasks.contains(&task.id))
@@ -644,11 +575,23 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
 }
 
 pub(crate) async fn stop_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
-    control_remote_agent(home, id, "stop").await
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .stop_agent(id, uuid::Uuid::new_v4())
+            .await?,
+    )?;
+    Ok(())
 }
 
 pub(crate) async fn retry_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
-    control_remote_agent(home, id, "retry").await
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .retry_agent(id, uuid::Uuid::new_v4())
+            .await?,
+    )?;
+    Ok(())
 }
 
 pub(crate) async fn instruct_remote_agent(
@@ -657,27 +600,12 @@ pub(crate) async fn instruct_remote_agent(
     message: String,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
-        runtime_client(&state)?
-            .call(
-                "agent.prompt",
-                &serde_json::json!({"id": id, "message": message}),
-                None,
-            )
-            .await?;
-    api_data(response).map(|_| ())
-}
-
-async fn control_remote_agent(home: &Path, id: uuid::Uuid, action: &str) -> Result<()> {
-    let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
-        runtime_client(&state)?
-            .call(
-                format!("agent.{action}"),
-                &serde_json::json!({"id": id}),
-                None,
-            )
-            .await?;
+    let response = runtime_client(&state)?
+        .prompt_agent(
+            &willdeep_runtime_protocol::AgentPromptParams { id, message },
+            uuid::Uuid::new_v4(),
+        )
+        .await?;
     api_data(response).map(|_| ())
 }
 
@@ -820,19 +748,21 @@ pub(crate) async fn resolve_remote_approval(
     decision: willdeep_core::ApprovalDecision,
 ) -> Result<()> {
     let decision = match decision {
-        willdeep_core::ApprovalDecision::AllowOnce => "allow_once",
-        willdeep_core::ApprovalDecision::Deny => "deny",
-        willdeep_core::ApprovalDecision::AlwaysAllow => "always_allow",
+        willdeep_core::ApprovalDecision::AllowOnce => {
+            willdeep_runtime_protocol::ApprovalDecision::AllowOnce
+        }
+        willdeep_core::ApprovalDecision::Deny => willdeep_runtime_protocol::ApprovalDecision::Deny,
+        willdeep_core::ApprovalDecision::AlwaysAllow => {
+            willdeep_runtime_protocol::ApprovalDecision::AlwaysAllow
+        }
     };
     let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
-        runtime_client(&state)?
-            .call(
-                "approval.resolve",
-                &serde_json::json!({"id": id, "decision": decision}),
-                None,
-            )
-            .await?;
+    let response = runtime_client(&state)?
+        .resolve_approval(
+            &willdeep_runtime_protocol::ResolveApprovalParams { id, decision },
+            uuid::Uuid::new_v4(),
+        )
+        .await?;
     api_data(response).map(|_| ())
 }
 
@@ -842,22 +772,19 @@ pub(crate) async fn answer_remote_question(
     answer: Option<String>,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
-        runtime_client(&state)?
-            .call(
-                "question.answer",
-                &serde_json::json!({"id": id, "answer": answer}),
-                None,
-            )
-            .await?;
+    let response = runtime_client(&state)?
+        .answer_question(
+            &willdeep_runtime_protocol::AnswerQuestionParams { id, answer },
+            uuid::Uuid::new_v4(),
+        )
+        .await?;
     api_data(response).map(|_| ())
 }
 
 pub(crate) async fn cancel_remote_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response: willdeep_runtime_protocol::ApiResponse<willdeep_runtime_protocol::RuntimeTask> =
-        runtime_client(&state)?
-            .call("task.cancel", &serde_json::json!({"id": id}), None)
-            .await?;
+    let response = runtime_client(&state)?
+        .cancel_task(id, uuid::Uuid::new_v4())
+        .await?;
     api_data(response).map(|_| ())
 }

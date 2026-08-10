@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc16`，支持：
+当前版本为 `0.21.0-rc17`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -316,7 +316,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc16` 已覆盖全部 11 类公开对象 DTO。Tool Activity 和 Workspace Change Artifact 已被 TUI 与 Web 直接消费；共享 Rust Client 提供 `tools/tool/artifacts/artifact` 类型化查询，单项查询成功时直接解码公共对象，未找到时保留统一错误信封。仓库提供固定的公共 API JSON 兼容夹具，Swift、Android 和其他客户端可直接用于解码契约测试。具体变化路径与内容仍须通过受授权的精确 Diff API 获取。本机客户端优先使用 Unix Socket 或 Windows Named Pipe。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc17` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact 与 Event 的高频类型化观察/控制方法；TUI Runtime bridge 已迁移这些方法。仓库提供固定的公共 API JSON 兼容夹具，Swift、Android 和其他客户端可直接用于对象、控制请求及结果的解码契约测试。具体变化路径与内容仍须通过受授权的精确 Diff API 获取。本机客户端优先使用 Unix Socket 或 Windows Named Pipe。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc16
+> 当前实现版本：v0.21.0-rc17
 
 ## 1. 目标
 
@@ -90,7 +90,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc16",
+    "server_version": "0.21.0-rc17",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +108,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc16"
+    "server_version": "0.21.0-rc17"
   }
 }
 ```
@@ -142,14 +142,14 @@ diff.revert
 2. [x] 受 Token 的能力协商端点；
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
 4. [x] Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 与 Diff Review 共享 DTO；
-5. [-] Rust Client Library；已覆盖全部公开对象、统一调用、能力协商、NDJSON、Unix Socket 和 Windows Named Pipe；继续补强高级类型化便捷方法；
-6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session/Turn，Web Session/Turn，以及 CLI Session/Turn 管理已迁移；Session 收养从 Runtime 私有存储恢复配置引用；其他 CLI 兼容命令继续迁移；
+5. [-] Rust Client Library；已覆盖全部公开对象、统一调用、能力协商、NDJSON、Unix Socket、Windows Named Pipe，以及 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event 高频类型化方法；继续补强 Diff/Worktree 高级方法；
+6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI bridge 的 Session 搜索、Turn 提交/停止、Event、Agent、Task、Inbox、Tool 和 Artifact 已使用类型化方法，Workspace、Diff Center、Web Session/Turn 与 CLI Session/Turn 管理也已迁移共享 Client；其他兼容命令继续迁移；
 7. [x] Unix Socket 与 Windows Named Pipe；
 8. [-] Swift FFI、移动端和自动化兼容验证；已提供覆盖全部 11 类公开对象的固定 JSON decoder 夹具，客户端适配层与端到端双读待完成。
 
 ## 9. 跨语言兼容夹具
 
-[`public-api-v1.json`](../crates/willdeep-runtime-protocol/fixtures/public-api-v1.json) 是协议 `1.0` 的固定 decoder contract fixture。它包含统一响应信封和 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 十一类公开对象，不包含认证凭据、Prompt、工具参数、输出正文或本机路径。
+[`public-api-v1.json`](../crates/willdeep-runtime-protocol/fixtures/public-api-v1.json) 是协议 `1.0` 的固定 decoder contract fixture。它包含统一响应信封，Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 十一类公开对象，以及 Agent Prompt/Wait、审批、提问、事件查询请求和公共控制结果；不包含认证凭据、用户 Prompt、工具参数、输出正文或本机路径。
 
 Swift、Android 和第三方客户端应在 CI 中逐项解码 `responses`，并至少断言：
 

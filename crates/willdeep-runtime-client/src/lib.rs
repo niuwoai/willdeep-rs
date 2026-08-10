@@ -5,8 +5,12 @@ use futures_util::{Stream, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use willdeep_runtime_protocol::{
-    ApiRequest, ApiResponse, IdParams, ListArtifactsParams, ListToolsParams, RuntimeArtifact,
-    RuntimeCapabilities, RuntimeTool,
+    AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse, EmptyParams,
+    EventListParams, IdParams, ListArtifactsParams, ListToolsParams, ListTurnsParams,
+    PendingApproval, PendingQuestion, ResolveApprovalParams, RuntimeAgent, RuntimeAgentCommand,
+    RuntimeArtifact, RuntimeCapabilities, RuntimeEvent, RuntimeInteractionResult, RuntimeSession,
+    RuntimeTask, RuntimeTool, RuntimeTurn, RuntimeWorkspace, SearchSessionsParams,
+    SubmitTurnParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -135,6 +139,151 @@ impl RuntimeClient {
                 .await?,
         )
         .await
+    }
+
+    pub async fn workspaces(&self) -> Result<ApiResponse<Vec<RuntimeWorkspace>>, ClientError> {
+        self.call("workspace.list", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn sessions(&self) -> Result<ApiResponse<Vec<RuntimeSession>>, ClientError> {
+        self.call("session.list", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn search_sessions(
+        &self,
+        params: &SearchSessionsParams,
+    ) -> Result<ApiResponse<Vec<willdeep_runtime_protocol::SessionSearchResult>>, ClientError> {
+        self.call("session.search", params, None).await
+    }
+
+    pub async fn session(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.get", &IdParams { id }, None).await
+    }
+
+    pub async fn agents(&self) -> Result<ApiResponse<Vec<RuntimeAgent>>, ClientError> {
+        self.call("agent.list", &EmptyParams::default(), None).await
+    }
+
+    pub async fn agent(&self, id: uuid::Uuid) -> Result<ApiResponse<RuntimeAgent>, ClientError> {
+        self.call("agent.get", &IdParams { id }, None).await
+    }
+
+    pub async fn prompt_agent(
+        &self,
+        params: &AgentPromptParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
+        self.call("agent.prompt", params, Some(request_id)).await
+    }
+
+    pub async fn wait_agent(
+        &self,
+        params: &AgentWaitParams,
+    ) -> Result<ApiResponse<RuntimeAgent>, ClientError> {
+        self.call("agent.wait", params, None).await
+    }
+
+    pub async fn stop_agent(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
+        self.call("agent.stop", &IdParams { id }, Some(request_id))
+            .await
+    }
+
+    pub async fn retry_agent(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
+        self.call("agent.retry", &IdParams { id }, Some(request_id))
+            .await
+    }
+
+    pub async fn tasks(&self) -> Result<ApiResponse<Vec<RuntimeTask>>, ClientError> {
+        self.call("task.list", &EmptyParams::default(), None).await
+    }
+
+    pub async fn task(&self, id: uuid::Uuid) -> Result<ApiResponse<RuntimeTask>, ClientError> {
+        self.call("task.get", &IdParams { id }, None).await
+    }
+
+    pub async fn cancel_task(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeTask>, ClientError> {
+        self.call("task.cancel", &IdParams { id }, Some(request_id))
+            .await
+    }
+
+    pub async fn turns(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<ApiResponse<Vec<RuntimeTurn>>, ClientError> {
+        self.call("turn.list", &ListTurnsParams { session_id }, None)
+            .await
+    }
+
+    pub async fn turn(&self, id: uuid::Uuid) -> Result<ApiResponse<RuntimeTurn>, ClientError> {
+        self.call("turn.get", &IdParams { id }, None).await
+    }
+
+    pub async fn submit_turn(
+        &self,
+        params: &SubmitTurnParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeTurn>, ClientError> {
+        self.call("turn.submit", params, Some(request_id)).await
+    }
+
+    pub async fn stop_turn(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeTurn>, ClientError> {
+        self.call("turn.stop", &IdParams { id }, Some(request_id))
+            .await
+    }
+
+    pub async fn approvals(&self) -> Result<ApiResponse<Vec<PendingApproval>>, ClientError> {
+        self.call("approval.list", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn resolve_approval(
+        &self,
+        params: &ResolveApprovalParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeInteractionResult>, ClientError> {
+        self.call("approval.resolve", params, Some(request_id))
+            .await
+    }
+
+    pub async fn questions(&self) -> Result<ApiResponse<Vec<PendingQuestion>>, ClientError> {
+        self.call("question.list", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn answer_question(
+        &self,
+        params: &AnswerQuestionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeInteractionResult>, ClientError> {
+        self.call("question.answer", params, Some(request_id)).await
+    }
+
+    pub async fn events(
+        &self,
+        params: &EventListParams,
+    ) -> Result<ApiResponse<Vec<RuntimeEvent>>, ClientError> {
+        self.call("event.list", params, None).await
     }
 
     pub async fn tools(

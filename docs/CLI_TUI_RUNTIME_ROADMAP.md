@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc16
+> 当前实施版本：v0.21.0-rc17
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc17（已完成）：Agent Prompt/Wait、Approval Resolve、Question Answer、Event List 与 Workspace Ensure 参数从 daemon 私有结构提升为严格公共 DTO；Agent Command 与 Interaction Result 也改为不含私有 message/error 的稳定返回 DTO。Rust Client 新增 Workspace、Session、Agent、Turn、Task、Approval、Question 和 Event 高频类型化方法，修改操作显式接收幂等 Request ID；TUI bridge 的对应调用以及 Tool/Artifact 查询已迁移。跨语言夹具同步加入控制请求与结果。下一步补齐 Diff/Worktree 类型化 Client，并开始 Web 的 Agent/Inbox 详情交互。
 
 v0.21.0-rc16（已完成）：修正 Rust Runtime Client 的 `tool.get` 与 `artifact.get` 返回契约：成功响应直接包含 `RuntimeTool`/`RuntimeArtifact`，不存在对象由统一 `not_found` 错误信封表达，不再错误声明为 `Option<T>`。新增 Unix Socket 真实 `tool.get` 往返测试，覆盖操作名、ID 参数与直接对象解码。下一步将 Agent、审批、提问和事件的私有参数提升为公共 DTO，并扩展类型化 Client。
 
