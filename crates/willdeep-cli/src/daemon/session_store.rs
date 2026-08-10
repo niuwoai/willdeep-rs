@@ -279,9 +279,11 @@ impl RuntimeSessionStore {
                 .unwrap_or_else(|| "New Runtime session".to_owned());
             let mut core =
                 willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
+            core.config = request.config.clone();
             self.core.save(&mut core)?;
             core
         };
+        let config = core.config.clone().or(request.config);
         let timestamp = now();
         let session = RuntimeSession {
             schema: RUNTIME_SESSION_SCHEMA,
@@ -290,7 +292,7 @@ impl RuntimeSessionStore {
             workspace,
             profile: request.profile,
             model: request.model,
-            config: request.config,
+            config,
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
             created_at: timestamp,
@@ -1337,6 +1339,25 @@ pub(super) async fn create_session_cli(
 ) -> Result<()> {
     let state = ensure_running(home).await?;
     let workspace = workspace_store::resolve_cli_root(home, workspace).await?;
+    if config.is_none() {
+        let session = cli_api_data(
+            runtime_client(&state)?
+                .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                    "session.create",
+                    &willdeep_runtime_protocol::CreateSessionParams {
+                        id: None,
+                        workspace: workspace.display().to_string(),
+                        profile,
+                        model,
+                        title,
+                    },
+                    Some(uuid::Uuid::new_v4()),
+                )
+                .await?,
+        )?;
+        print_public_session(&session);
+        return Ok(());
+    }
     let response = client()
         .post(format!("http://{}/v1/sessions", state.address))
         .header(TOKEN_HEADER, &state.token)
@@ -1362,17 +1383,33 @@ pub(super) async fn create_session_cli(
 
 pub(super) async fn list_sessions_cli(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let sessions: Vec<RuntimeSession> = authorized_get(&state, "/v1/sessions").await?;
+    let sessions = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeSession>>(
+                "session.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
     for session in sessions {
-        print_session(&session);
+        print_public_session(&session);
     }
     Ok(())
 }
 
 pub(super) async fn show_session_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let session: RuntimeSession = authorized_get(&state, &format!("/v1/sessions/{id}")).await?;
-    print_session(&session);
+    let session = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.get",
+                &willdeep_runtime_protocol::IdParams { id },
+                None,
+            )
+            .await?,
+    )?;
+    print_public_session(&session);
     Ok(())
 }
 
@@ -1388,45 +1425,47 @@ pub(super) async fn search_sessions_cli(
     updated_before: Option<u64>,
 ) -> Result<()> {
     let query = query.join(" ");
-    let mut parameters = Vec::<(&str, String)>::new();
-    if !query.trim().is_empty() {
-        parameters.push(("q", query));
-    }
-    if let Some(workspace) = workspace {
-        parameters.push(("workspace", workspace.canonicalize()?.display().to_string()));
-    }
-    if let Some(status) = status {
-        parameters.push(("status", status));
-    }
-    if let Some(profile) = profile {
-        parameters.push(("profile", profile));
-    }
-    if let Some(model) = model {
-        parameters.push(("model", model));
-    }
-    if let Some(updated_after) = updated_after {
-        parameters.push(("updated_after", updated_after.to_string()));
-    }
-    if let Some(updated_before) = updated_before {
-        parameters.push(("updated_before", updated_before.to_string()));
-    }
-    if parameters.is_empty() {
+    let query = (!query.trim().is_empty()).then_some(query);
+    let workspace = workspace
+        .map(|workspace| workspace.canonicalize())
+        .transpose()?
+        .map(|workspace| workspace.display().to_string());
+    let status = status
+        .map(|status| {
+            serde_json::from_value::<willdeep_runtime_protocol::SessionStatus>(
+                serde_json::Value::String(status),
+            )
+            .context("invalid Session status filter")
+        })
+        .transpose()?;
+    if query.is_none()
+        && workspace.is_none()
+        && status.is_none()
+        && profile.is_none()
+        && model.is_none()
+        && updated_after.is_none()
+        && updated_before.is_none()
+    {
         bail!("Session search requires text or at least one filter");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!("http://{}/v1/sessions/search", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&parameters)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session search: {}",
-            response.text().await?
-        );
-    }
-    let results: Vec<RuntimeSessionSearchResult> = response.json().await?;
+    let results = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::SessionSearchResult>>(
+                "session.search",
+                &willdeep_runtime_protocol::SearchSessionsParams {
+                    query,
+                    workspace,
+                    status,
+                    profile,
+                    model,
+                    updated_after,
+                    updated_before,
+                },
+                None,
+            )
+            .await?,
+    )?;
     for result in results {
         println!(
             "{}\t{:?}\tprofile={}\tmodel={}\tmessages={}\t{}\t{}\t{}",
@@ -1436,7 +1475,7 @@ pub(super) async fn search_sessions_cli(
             result.model.as_deref().unwrap_or("default"),
             result.message_count,
             result.title,
-            result.workspace.display(),
+            result.workspace.as_deref().unwrap_or("private"),
             result.snippet.as_deref().unwrap_or("")
         );
     }
@@ -1449,9 +1488,17 @@ pub(super) async fn rename_session_cli(
     title: Vec<String>,
 ) -> Result<()> {
     let title = title.join(" ");
-    let session: RuntimeSession =
-        post_session_action(home, id, "rename", Some(&RenameRuntimeSession { title })).await?;
-    print_session(&session);
+    let state = ensure_running(home).await?;
+    let session = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.rename",
+                &willdeep_runtime_protocol::RenameSessionParams { id, title },
+                Some(uuid::Uuid::new_v4()),
+            )
+            .await?,
+    )?;
+    print_public_session(&session);
     Ok(())
 }
 
@@ -1463,19 +1510,23 @@ pub(super) async fn fork_session_cli(
     provider_profile: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
-    let session: RuntimeSession = post_session_action(
-        home,
-        id,
-        "fork",
-        Some(&ForkRuntimeSession {
-            title,
-            through_turn_id,
-            provider_profile,
-            model,
-        }),
-    )
-    .await?;
-    print_session(&session);
+    let state = ensure_running(home).await?;
+    let session = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.fork",
+                &willdeep_runtime_protocol::ForkSessionParams {
+                    id,
+                    title,
+                    through_turn_id,
+                    provider_profile,
+                    model,
+                },
+                Some(uuid::Uuid::new_v4()),
+            )
+            .await?,
+    )?;
+    print_public_session(&session);
     Ok(())
 }
 
@@ -1484,10 +1535,20 @@ pub(super) async fn archive_session_cli(
     id: uuid::Uuid,
     unarchive: bool,
 ) -> Result<()> {
-    let action = if unarchive { "unarchive" } else { "archive" };
-    let session: RuntimeSession =
-        post_session_action::<(), RuntimeSession>(home, id, action, None).await?;
-    print_session(&session);
+    let state = ensure_running(home).await?;
+    let session = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.archive",
+                &willdeep_runtime_protocol::ArchiveSessionParams {
+                    id,
+                    archived: !unarchive,
+                },
+                Some(uuid::Uuid::new_v4()),
+            )
+            .await?,
+    )?;
+    print_public_session(&session);
     Ok(())
 }
 
@@ -1497,8 +1558,15 @@ pub(super) async fn export_session_cli(
     output: Option<PathBuf>,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let export: RuntimeSessionExport =
-        authorized_get(&state, &format!("/v1/sessions/{id}/export")).await?;
+    let export = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, serde_json::Value>(
+                "session.export",
+                &willdeep_runtime_protocol::IdParams { id },
+                None,
+            )
+            .await?,
+    )?;
     let data = serde_json::to_vec_pretty(&export)?;
     if let Some(output) = output {
         if let Some(parent) = output
@@ -1520,46 +1588,20 @@ pub(super) async fn delete_session_cli(home: &Path, id: uuid::Uuid, yes: bool) -
         bail!("Session deletion is permanent; repeat with --yes for Session {id}");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .delete(format!("http://{}/v1/sessions/{id}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&DeleteRuntimeSession { confirmation: id })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session deletion: {}",
-            response.text().await?
-        );
-    }
+    cli_api_data(
+        runtime_client(&state)?
+            .call::<_, serde_json::Value>(
+                "session.delete",
+                &willdeep_runtime_protocol::DeleteSessionParams {
+                    id,
+                    confirmation: id,
+                },
+                Some(uuid::Uuid::new_v4()),
+            )
+            .await?,
+    )?;
     println!("deleted\t{id}");
     Ok(())
-}
-
-async fn post_session_action<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
-    home: &Path,
-    id: uuid::Uuid,
-    action: &str,
-    body: Option<&T>,
-) -> Result<R> {
-    let state = ensure_running(home).await?;
-    let request = client()
-        .post(format!(
-            "http://{}/v1/sessions/{id}/{action}",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token);
-    let response = match body {
-        Some(body) => request.json(body).send().await?,
-        None => request.send().await?,
-    };
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session {action}: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
 }
 
 pub(super) async fn submit_turn_cli(
@@ -1573,61 +1615,108 @@ pub(super) async fn submit_turn_cli(
         bail!("Runtime Turn prompt must not be empty");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/sessions/{session_id}/turns",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&CreateRuntimeTurn {
-            request_id: request_id.unwrap_or_else(uuid::Uuid::new_v4),
-            prompt,
-            attachments: Vec::new(),
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Turn submission: {}",
-            response.text().await?
-        );
-    }
-    print_turn(&response.json().await?);
+    let turn_request_id = request_id.unwrap_or_else(uuid::Uuid::new_v4);
+    let turn = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                "turn.submit",
+                &willdeep_runtime_protocol::SubmitTurnParams {
+                    session_id,
+                    turn_request_id,
+                    prompt,
+                    attachments: Vec::new(),
+                },
+                Some(turn_request_id),
+            )
+            .await?,
+    )?;
+    print_public_turn(&turn);
     Ok(())
 }
 
 pub(super) async fn list_turns_cli(home: &Path, session_id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let turns: Vec<RuntimeTurn> =
-        authorized_get(&state, &format!("/v1/sessions/{session_id}/turns")).await?;
+    let turns = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTurn>>(
+                "turn.list",
+                &willdeep_runtime_protocol::ListTurnsParams { session_id },
+                None,
+            )
+            .await?,
+    )?;
     for turn in turns {
-        print_turn(&turn);
+        print_public_turn(&turn);
     }
     Ok(())
 }
 
 pub(super) async fn show_turn_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let turn: RuntimeTurn = authorized_get(&state, &format!("/v1/turns/{id}")).await?;
-    print_turn(&turn);
+    let turn = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                "turn.get",
+                &willdeep_runtime_protocol::IdParams { id },
+                None,
+            )
+            .await?,
+    )?;
+    print_public_turn(&turn);
     Ok(())
 }
 
 pub(super) async fn stop_turn_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/turns/{id}/stop", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Turn cancellation: {}",
-            response.text().await?
-        );
-    }
-    print_turn(&response.json().await?);
+    let turn = cli_api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                "turn.stop",
+                &willdeep_runtime_protocol::IdParams { id },
+                Some(uuid::Uuid::new_v4()),
+            )
+            .await?,
+    )?;
+    print_public_turn(&turn);
     Ok(())
+}
+
+fn cli_api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
+    match response {
+        willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+            bail!("Runtime API error: {}", error.message)
+        }
+    }
+}
+
+fn print_public_session(session: &willdeep_runtime_protocol::RuntimeSession) {
+    println!(
+        "{}\t{:?}\tprofile={}\tmodel={}\tagent={}\tactive_turn={}\t{}",
+        session.id,
+        session.status,
+        session.profile.as_deref().unwrap_or("default"),
+        session.model.as_deref().unwrap_or("default"),
+        session.root_agent_id,
+        session
+            .active_turn_id
+            .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+        session.workspace.as_deref().unwrap_or("private")
+    );
+}
+
+fn print_public_turn(turn: &willdeep_runtime_protocol::RuntimeTurn) {
+    println!(
+        "{}\t{:?}\tsession={}\trequest={}\tsequence={}\ttask={}\tattempts={}",
+        turn.id,
+        turn.status,
+        turn.session_id,
+        turn.request_id,
+        turn.queue_sequence,
+        turn.active_task_id
+            .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+        turn.attempts
+    );
 }
 
 fn print_session(session: &RuntimeSession) {
@@ -1642,20 +1731,6 @@ fn print_session(session: &RuntimeSession) {
             .active_turn_id
             .map_or_else(|| "none".to_owned(), |id| id.to_string()),
         session.workspace.display()
-    );
-}
-
-fn print_turn(turn: &RuntimeTurn) {
-    println!(
-        "{}\t{:?}\tsession={}\trequest={}\tsequence={}\ttask={}\tattempts={}",
-        turn.id,
-        turn.status,
-        turn.session_id,
-        turn.request_id,
-        turn.queue_sequence,
-        turn.active_task_id
-            .map_or_else(|| "none".to_owned(), |id| id.to_string()),
-        turn.attempts
     );
 }
 
@@ -1928,6 +2003,8 @@ mod tests {
             Some("mock".to_owned()),
             "existing",
         );
+        let stored_config = root.join("private-config.toml");
+        core.config = Some(stored_config.clone());
         core_store.save(&mut core).unwrap();
         let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
         let request = || CreateRuntimeSession {
@@ -1935,13 +2012,14 @@ mod tests {
             workspace: workspace.clone(),
             profile: Some("mock".to_owned()),
             model: None,
-            config: Some(root.join("config.toml")),
+            config: Some(root.join("client-supplied-config.toml")),
             title: Some("ignored for adoption".to_owned()),
         };
 
         let (adopted, created) = store.ensure(request()).unwrap();
         assert!(created);
         assert_eq!(adopted.id, core.id);
+        assert_eq!(adopted.config.as_ref(), Some(&stored_config));
         let (same, created) = store.ensure(request()).unwrap();
         assert!(!created);
         assert_eq!(same, adopted);

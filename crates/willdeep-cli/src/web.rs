@@ -419,7 +419,6 @@ async fn ensure_web_runtime_session(state: &WebState, id: uuid::Uuid) -> Result<
         &session.workspace,
         session.profile,
         None,
-        Some(state.config_path.clone()),
         session.title,
     )
     .await
@@ -528,6 +527,9 @@ async fn run_runtime_turn_inner(
         .await
         .map_err(WebError::from_anyhow)?;
     let needs_adoption_save = !session.runtime_managed;
+    if session.config.is_none() {
+        session.config = Some(state.config_path.clone());
+    }
     session.runtime_managed = true;
     if session.runtime_event_cursor == 0 {
         session.runtime_event_cursor = event_head;
@@ -543,7 +545,6 @@ async fn run_runtime_turn_inner(
         &workspace,
         session.profile.clone().or(profile),
         None,
-        Some(state.config_path.clone()),
         session.title.clone(),
     )
     .await

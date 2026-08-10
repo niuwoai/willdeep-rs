@@ -17,6 +17,8 @@ pub struct Session {
     pub title: String,
     pub workspace: PathBuf,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub config: Option<PathBuf>,
     pub created_at: u64,
     pub updated_at: u64,
     pub messages: Vec<Message>,
@@ -39,6 +41,7 @@ impl Session {
             title: title(prompt),
             workspace,
             profile,
+            config: None,
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
@@ -211,6 +214,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .to_owned(),
         workspace: PathBuf::from(workspace),
         profile: None,
+        config: None,
         created_at: updated,
         updated_at: updated,
         messages,
@@ -254,6 +258,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("willdeep-session-{}", Uuid::new_v4()));
         let store = SessionStore::new(&root);
         let mut session = Session::new(root.clone(), None, "hello session");
+        session.config = Some(root.join("config.toml"));
         session.messages.push(Message::user_with_attachments(
             "hello",
             vec![crate::MessageAttachment::Image {
@@ -266,6 +271,7 @@ mod tests {
         ));
         store.save(&mut session).unwrap();
         let loaded = store.load(session.id).unwrap();
+        assert_eq!(loaded.config, session.config);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);
         assert!(loaded.attention_read.is_empty());
@@ -282,5 +288,14 @@ mod tests {
         assert!(!store.delete(session.id).unwrap());
         assert!(store.load(session.id).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_session_without_config_remains_readable() {
+        let session = Session::new(PathBuf::from("/workspace"), None, "legacy");
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("config");
+        let loaded: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.config, None);
     }
 }

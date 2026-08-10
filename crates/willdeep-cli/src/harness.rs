@@ -116,6 +116,9 @@ pub(crate) async fn execute_runtime(
             &request.prompt,
         )
     });
+    if session.config.is_none() {
+        session.config = request.config.clone();
+    }
     let outcome = execute_noninteractive(
         &built,
         &store,

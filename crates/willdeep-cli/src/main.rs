@@ -365,6 +365,9 @@ async fn run() -> Result<()> {
             prompt.as_deref().unwrap_or("New session"),
         )
     });
+    if session.config.is_none() {
+        session.config = Some(cli.config.clone().unwrap_or(config::default_config_path()?));
+    }
     relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
         let runtime_profile = session.profile.clone().or_else(|| cli.profile.clone());

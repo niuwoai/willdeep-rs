@@ -107,6 +107,7 @@ async fn switch(
             &workspace.name,
         )
     });
+    target.config = runtime.runtime_submit.config.clone();
     target.runtime_managed = true;
     if target.runtime_event_cursor == 0 {
         target.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
@@ -120,7 +121,6 @@ async fn switch(
         &workspace.root,
         workspace.provider_profile.clone(),
         runtime.runtime_submit.model.clone(),
-        runtime.runtime_submit.config.clone(),
         target.title.clone(),
     )
     .await?;

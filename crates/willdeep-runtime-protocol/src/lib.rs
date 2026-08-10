@@ -128,6 +128,12 @@ pub struct CreateSessionParams {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct IdParams {
+    pub id: uuid::Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RenameSessionParams {
     pub id: uuid::Uuid,
     pub title: String,
@@ -979,6 +985,17 @@ mod tests {
     #[test]
     fn session_management_params_require_explicit_targets() {
         let id = uuid::Uuid::new_v4();
+        assert!(
+            serde_json::from_value::<CreateSessionParams>(serde_json::json!({
+                "id": id,
+                "workspace": "/workspace",
+                "profile": "default",
+                "model": null,
+                "title": "Private config stays server-side",
+                "config": "/private/config.toml"
+            }))
+            .is_err()
+        );
         let rename = RenameSessionParams {
             id,
             title: "Renamed".to_owned(),

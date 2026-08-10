@@ -1,5 +1,5 @@
 use super::*;
-use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode};
+use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode, IdParams};
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
 const MAX_TURN_PROMPT_BYTES: usize = 1024 * 1024;
@@ -68,12 +68,6 @@ impl IdempotencyStore {
             .collect::<Vec<_>>();
         write_json_atomic(path, &values)
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IdParams {
-    id: uuid::Uuid,
 }
 
 #[derive(Debug, Deserialize)]

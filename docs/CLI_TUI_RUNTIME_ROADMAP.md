@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc9
+> 当前实施版本：v0.21.0-rc10
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc10（已完成）：`daemon sessions/session/search/rename/fork/archive/export/delete` 与 Turn 提交、列表、查询、停止全部迁移到共享 Runtime Client，因此自动使用 Unix Socket/Windows Named Pipe。Core Session 新增向后兼容的私有配置引用；TUI/Web 收养只通过统一 `session.create` 发送稳定公开字段，Runtime 从 Core Session 恢复配置路径，公共 DTO 明确拒绝 `config`。下一步稳定 Tool、Artifact 公开 DTO 与操作，并继续迁移其他 CLI 兼容命令。
 
 v0.21.0-rc9（已完成）：Runtime Daemon 在 Unix 平台新增权限为 `0600` 的本地 Socket，在 Windows 平台新增拒绝远程连接的随机 Named Pipe；共享 Runtime Client、CLI、TUI 与 Web 优先使用本地传输，旧版 daemon 状态继续回退到受 Token 保护的回环 TCP。能力协商只报告当前实际传输，Unix 清理拒绝覆盖或删除普通文件。macOS 真实 Socket 往返、旧状态兼容和 Windows GNU 目标交叉编译纳入验证。下一步迁移带私有配置引用的 Session 收养和剩余 CLI 兼容命令，并继续稳定 Tool、Artifact DTO。
 

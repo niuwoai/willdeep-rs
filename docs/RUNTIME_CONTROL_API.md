@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc9
+> 当前实现版本：v0.21.0-rc10
 
 ## 1. 目标
 
@@ -86,7 +86,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc9",
+    "server_version": "0.21.0-rc10",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -104,7 +104,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc9"
+    "server_version": "0.21.0-rc10"
   }
 }
 ```
@@ -124,6 +124,7 @@ diff.revert
 - 所有控制端点必须显式校验随机 Runtime Token；
 - API Key、Provider Secret、Runtime Token 永不进入 DTO、事件或错误字段；
 - Prompt、附件正文和工具参数默认仅在明确需要的目标操作中返回；
+- Session 收养只接受稳定 ID、Workspace、Profile 与模型等公开字段；配置文件路径由 Runtime 从 Core Session 私有存储恢复，`CreateSessionParams` 拒绝客户端夹带 `config`；
 - 文件路径按调用方权限裁剪；公开能力响应不得包含任何用户路径；
 - `fields` 错误上下文只允许稳定字段名和非敏感值；
 - Workspace 权限由服务端注册表覆盖，客户端字段不能扩大权限；
@@ -136,6 +137,6 @@ diff.revert
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
 4. [x] Workspace、Session、Agent、Turn、Task、Approval、Question、Event 与 Diff Review 共享 DTO；
 5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码、Unix Socket、Windows Named Pipe 和 Workspace/会话/Agent/任务/交互/Diff DTO，剩余 Tool 与 Artifact 继续进行；
-6. [-] TUI/Web 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session 搜索、Turn 提交/停止与控制，以及 Web Session 管理和 Turn 提交/停止已迁移；带私有配置引用的 Session 收养和部分 CLI 兼容命令继续迁移；Web/TUI 事件补读已迁移；
+6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session/Turn，Web Session/Turn，以及 CLI Session/Turn 管理已迁移；Session 收养从 Runtime 私有存储恢复配置引用；其他 CLI 兼容命令继续迁移；
 7. [x] Unix Socket 与 Windows Named Pipe；
 8. [ ] Swift FFI、移动端和自动化兼容验证。

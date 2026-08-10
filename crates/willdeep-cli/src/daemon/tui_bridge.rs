@@ -241,30 +241,24 @@ pub(crate) async fn ensure_runtime_session(
     workspace: &Path,
     profile: Option<String>,
     model: Option<String>,
-    config: Option<PathBuf>,
     title: String,
 ) -> Result<RemoteRuntimeSession> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/sessions", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&session_store::CreateRuntimeSession {
-            id: Some(id),
-            workspace: workspace.canonicalize()?,
-            profile,
-            model,
-            config,
-            title: Some(title),
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session adoption: {}",
-            response.text().await?
-        );
-    }
-    let session: session_store::RuntimeSession = response.json().await?;
+    let session = api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.create",
+                &willdeep_runtime_protocol::CreateSessionParams {
+                    id: Some(id),
+                    workspace: workspace.canonicalize()?.display().to_string(),
+                    profile,
+                    model,
+                    title: Some(title),
+                },
+                Some(id),
+            )
+            .await?,
+    )?;
     Ok(RemoteRuntimeSession {
         id: session.id,
         root_agent_id: session.root_agent_id,

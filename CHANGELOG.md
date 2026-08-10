@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc10] - 2026-08-11
+
+### Added
+
+- Core Session 以向后兼容字段持久化私有配置引用，供 Runtime 在收养现有 Session 时自行恢复。
+- 协议 crate 新增严格拒绝未知字段的通用 `IdParams`，供 Session 与 Turn 查询/控制操作复用。
+
+### Changed
+
+- `daemon sessions/session/search/rename/fork/archive/export/delete` 与 Turn 提交、列表、查询、停止全部改走共享 Runtime Client，自动使用 Unix Socket 或 Windows Named Pipe。
+- TUI 与 Web 收养 Session 改用统一 `session.create`，客户端不再重复发送配置文件路径。
+
+### Security
+
+- `CreateSessionParams` 明确拒绝 `config` 等未知字段；收养操作只接收稳定 Session ID，并以 Runtime 已持有的 Core Session 配置为准，不信任客户端提供的路径。
+
 ## [0.21.0-rc9] - 2026-08-11
 
 ### Added
