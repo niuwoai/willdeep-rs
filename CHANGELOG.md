@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0-rc21] - 2026-08-11
+
+### Added
+
+- 稳定 Worktree Review、Merge、Audit、Quarantine 公共请求/返回 DTO，并将四个操作接入统一 API Dispatch。
+- Rust Runtime Client 新增 Worktree 类型化方法；CLI/TUI bridge 从旧专用 HTTP 端点迁移，Merge/Quarantine 显式使用幂等 Request ID。
+- `ApiResponse::into_result()` 和标准 `ApiError` 统一成功/错误信封解包，同时保留错误码与重试字段。
+
+### Security
+
+- Worktree Merge 继续绑定精确 Review ID，Quarantine 绑定 Agent、Child Snapshot 与显式确认；严格参数拒绝额外删除意图字段。
+
 ## [0.21.0-rc20] - 2026-08-11
 
 ### Added

@@ -72,9 +72,73 @@ pub(crate) async fn quarantine_handler(
     .map_err(quarantine_error_status)
 }
 
+pub(super) fn unified_audit(
+    state: &ServerState,
+) -> Result<Vec<willdeep_runtime_protocol::RuntimeWorktreeAudit>, StatusCode> {
+    audit(&state.home, &state.tasks.agents)
+        .map(|entries| entries.into_iter().map(public_audit).collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub(super) fn unified_quarantine(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::WorktreeQuarantineParams,
+) -> Result<willdeep_runtime_protocol::RuntimeWorktreeQuarantineResult, StatusCode> {
+    if !params.confirm {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    quarantine(
+        &state.home,
+        &state.tasks.agents,
+        params.agent_id,
+        &params.child_snapshot_id,
+    )
+    .map(
+        |result| willdeep_runtime_protocol::RuntimeWorktreeQuarantineResult {
+            agent_id: result.agent_id,
+            original_path: Some(result.original_path.display().to_string()),
+            quarantine_path: Some(result.quarantine_path.display().to_string()),
+            branch_retained: result.branch_retained,
+        },
+    )
+    .map_err(quarantine_error_status)
+}
+
+fn public_audit(audit: ManagedWorktreeAudit) -> willdeep_runtime_protocol::RuntimeWorktreeAudit {
+    willdeep_runtime_protocol::RuntimeWorktreeAudit {
+        agent_id: audit.agent_id,
+        path: Some(audit.path.display().to_string()),
+        branch: audit.branch,
+        state: match audit.state {
+            ManagedWorktreeState::Active => willdeep_runtime_protocol::ManagedWorktreeState::Active,
+            ManagedWorktreeState::Reviewable => {
+                willdeep_runtime_protocol::ManagedWorktreeState::Reviewable
+            }
+            ManagedWorktreeState::Merged => willdeep_runtime_protocol::ManagedWorktreeState::Merged,
+            ManagedWorktreeState::Clean => willdeep_runtime_protocol::ManagedWorktreeState::Clean,
+            ManagedWorktreeState::Quarantined => {
+                willdeep_runtime_protocol::ManagedWorktreeState::Quarantined
+            }
+            ManagedWorktreeState::Missing => {
+                willdeep_runtime_protocol::ManagedWorktreeState::Missing
+            }
+            ManagedWorktreeState::Unknown => {
+                willdeep_runtime_protocol::ManagedWorktreeState::Unknown
+            }
+        },
+        child_snapshot_id: audit.child_snapshot_id,
+        changed_files: audit.changed_files,
+        quarantine_allowed: audit.quarantine_allowed,
+        reason: audit.reason,
+    }
+}
+
 pub(crate) async fn audit_cli(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let entries: Vec<ManagedWorktreeAudit> = authorized_get(&state, "/v1/worktrees/audit").await?;
+    let entries = runtime_client(&state)?
+        .audit_worktrees()
+        .await?
+        .into_result()?;
     for entry in entries {
         println!(
             "{}\t{:?}\tfiles={}\tquarantine={}\tsnapshot={}\t{}\t{}",
@@ -85,7 +149,7 @@ pub(crate) async fn audit_cli(home: &Path) -> Result<()> {
             entry.changed_files,
             entry.quarantine_allowed,
             entry.child_snapshot_id.as_deref().unwrap_or("—"),
-            entry.path.display(),
+            entry.path.as_deref().unwrap_or("—"),
             entry.reason
         );
     }
@@ -104,30 +168,22 @@ pub(crate) async fn quarantine_cli(
         );
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/agents/{id}/worktree-quarantine",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&WorktreeQuarantineRequest {
-            child_snapshot_id,
-            confirm: true,
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Worktree quarantine: {}",
-            response.text().await?
-        );
-    }
-    let result: WorktreeQuarantineResult = response.json().await?;
+    let result = (runtime_client(&state)?
+        .quarantine_worktree(
+            &willdeep_runtime_protocol::WorktreeQuarantineParams {
+                agent_id: id,
+                child_snapshot_id,
+                confirm: true,
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?)
+        .into_result()?;
     println!(
         "quarantined\tagent={}\tfrom={}\tto={}\tbranch_retained={}",
         result.agent_id,
-        result.original_path.display(),
-        result.quarantine_path.display(),
+        result.original_path.as_deref().unwrap_or("—"),
+        result.quarantine_path.as_deref().unwrap_or("—"),
         result.branch_retained.as_deref().unwrap_or("—")
     );
     Ok(())

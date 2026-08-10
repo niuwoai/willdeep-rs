@@ -786,6 +786,91 @@ pub struct DiffRevertParams {
     pub area: DiffArea,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeMergeDecision {
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeReviewParams {
+    pub agent_id: uuid::Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeMergeParams {
+    pub agent_id: uuid::Uuid,
+    pub review_id: String,
+    pub decision: WorktreeMergeDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeQuarantineParams {
+    pub agent_id: uuid::Uuid,
+    pub child_snapshot_id: String,
+    pub confirm: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeWorktreeReview {
+    pub id: String,
+    pub agent_id: uuid::Uuid,
+    pub root_workspace: Option<String>,
+    pub worktree: Option<String>,
+    pub branch: String,
+    pub child_snapshot_id: String,
+    pub root_snapshot_id: String,
+    pub files: Vec<DiffFile>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch_bytes: usize,
+    pub can_merge: bool,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeWorktreeMergeResult {
+    pub review_id: String,
+    pub applied: bool,
+    pub root_snapshot_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedWorktreeState {
+    Active,
+    Reviewable,
+    Merged,
+    Clean,
+    Quarantined,
+    Missing,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeWorktreeAudit {
+    pub agent_id: Option<uuid::Uuid>,
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    pub state: ManagedWorktreeState,
+    pub child_snapshot_id: Option<String>,
+    pub changed_files: usize,
+    pub quarantine_allowed: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeWorktreeQuarantineResult {
+    pub agent_id: uuid::Uuid,
+    pub original_path: Option<String>,
+    pub quarantine_path: Option<String>,
+    pub branch_retained: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolLimits {
     pub max_event_page: u32,
@@ -943,6 +1028,14 @@ pub struct ApiError {
     pub fields: BTreeMap<String, String>,
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} ({:?})", self.message, self.code)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ResponseMeta {
     pub protocol_version: String,
@@ -989,6 +1082,13 @@ impl<T> ApiResponse<T> {
                 server_version: server_version.into(),
                 request_id,
             },
+        }
+    }
+
+    pub fn into_result(self) -> Result<T, ApiError> {
+        match self {
+            Self::Ok { data, .. } => Ok(data),
+            Self::Error { error, .. } => Err(error),
         }
     }
 }
@@ -1132,6 +1232,47 @@ mod tests {
             )
             .unwrap(),
             result
+        );
+    }
+
+    #[test]
+    fn api_response_into_result_preserves_public_error_details() {
+        let ok = ApiResponse::ok(42_u32, "test", None);
+        assert_eq!(ok.into_result().unwrap(), 42);
+        let error = ApiResponse::<u32>::error(
+            ErrorCode::StaleSnapshot,
+            "snapshot changed",
+            false,
+            "test",
+            None,
+        )
+        .into_result()
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleSnapshot);
+        assert_eq!(error.to_string(), "snapshot changed (StaleSnapshot)");
+    }
+
+    #[test]
+    fn worktree_control_params_require_exact_agent_and_snapshot_targets() {
+        let agent_id = uuid::Uuid::new_v4();
+        let params = WorktreeMergeParams {
+            agent_id,
+            review_id: "review-1".to_owned(),
+            decision: WorktreeMergeDecision::Approve,
+        };
+        assert_eq!(
+            serde_json::from_value::<WorktreeMergeParams>(serde_json::to_value(&params).unwrap())
+                .unwrap(),
+            params
+        );
+        assert!(
+            serde_json::from_value::<WorktreeQuarantineParams>(serde_json::json!({
+                "agent_id": agent_id,
+                "child_snapshot_id": "snapshot-1",
+                "confirm": true,
+                "delete": true
+            }))
+            .is_err()
         );
     }
 

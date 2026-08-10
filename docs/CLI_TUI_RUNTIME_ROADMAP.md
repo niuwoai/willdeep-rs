@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc20
+> 当前实施版本：v0.21.0-rc21
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc21（已完成）：稳定 Worktree Review/Merge/Audit/Quarantine 请求与返回 DTO，并将四个此前只列入能力清单、尚未由统一 Dispatch 实现的操作正式接入；Merge/Quarantine 纳入持久幂等。Rust Client 增加对应类型化方法，CLI/TUI bridge 从旧专用 HTTP 端点迁移。`ApiResponse::into_result()` 与标准 `ApiError` 统一成功/错误信封解包，避免各模块复制逻辑。下一步审计阶段 7 所有宣称支持的操作是否真实 Dispatch，并补 `agent.spawn`。
 
 v0.21.0-rc20（已完成）：Rust Runtime Client 新增 Diff Snapshot/Content/Reviews/Review/Verifications/Record Verification/Attributions/Commit Preview/Revert 全套类型化方法；审查、记录验证和撤销显式要求幂等 Request ID。TUI/CLI Diff bridge 的全部统一 API 调用迁移到这些方法，不再手写操作名和返回类型。下一步稳定 Worktree Review/Merge/Audit/Quarantine 公共 DTO 和 Client，并在 Web 展示 Workspace Change Artifact 详情。
 

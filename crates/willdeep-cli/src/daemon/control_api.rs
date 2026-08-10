@@ -441,6 +441,38 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
                 .and_then(json),
             Err(error) => Err(error),
         },
+        "worktree.review" => {
+            match params::<willdeep_runtime_protocol::WorktreeReviewParams>(&request) {
+                Ok(params) => worktree_review::unified_review(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "worktree.merge" => {
+            match params::<willdeep_runtime_protocol::WorktreeMergeParams>(&request) {
+                Ok(params) => worktree_review::unified_merge(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "worktree.audit" => match params::<willdeep_runtime_protocol::EmptyParams>(&request) {
+            Ok(_) => worktree_maintenance::unified_audit(state)
+                .map_err(ApiFailure::from_diff_status)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
+        "worktree.quarantine" => {
+            match params::<willdeep_runtime_protocol::WorktreeQuarantineParams>(&request) {
+                Ok(params) => worktree_maintenance::unified_quarantine(state, params)
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err(ApiFailure {
             status: StatusCode::NOT_IMPLEMENTED,
             code: ErrorCode::UnsupportedOperation,
@@ -503,6 +535,8 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "diff.review"
             | "diff.verification.record"
             | "diff.revert"
+            | "worktree.merge"
+            | "worktree.quarantine"
     )
 }
 

@@ -48,7 +48,10 @@ pub(crate) struct WorktreeMergeResult {
 
 pub(crate) async fn remote_review(home: &Path, id: uuid::Uuid) -> Result<WorktreeReview> {
     let state = ensure_running(home).await?;
-    authorized_get(&state, &format!("/v1/agents/{id}/worktree-review")).await
+    let response = runtime_client(&state)?
+        .worktree_review(&willdeep_runtime_protocol::WorktreeReviewParams { agent_id: id })
+        .await?;
+    local_review(response.into_result()?)
 }
 
 pub(crate) async fn remote_merge(
@@ -57,25 +60,73 @@ pub(crate) async fn remote_merge(
     review_id: String,
 ) -> Result<WorktreeMergeResult> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/agents/{id}/worktree-merge",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&WorktreeMergeRequest {
-            review_id,
-            decision: WorktreeMergeDecision::Approve,
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Worktree merge: {}",
-            response.text().await?
-        );
+    let result = (runtime_client(&state)?
+        .merge_worktree(
+            &willdeep_runtime_protocol::WorktreeMergeParams {
+                agent_id: id,
+                review_id,
+                decision: willdeep_runtime_protocol::WorktreeMergeDecision::Approve,
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?)
+        .into_result()?;
+    Ok(WorktreeMergeResult {
+        review_id: result.review_id,
+        applied: result.applied,
+        root_snapshot_id: result.root_snapshot_id,
+    })
+}
+
+fn local_review(
+    review: willdeep_runtime_protocol::RuntimeWorktreeReview,
+) -> Result<WorktreeReview> {
+    Ok(WorktreeReview {
+        id: review.id,
+        agent_id: review.agent_id,
+        root_workspace: PathBuf::from(
+            review
+                .root_workspace
+                .context("missing root Workspace path")?,
+        ),
+        worktree: PathBuf::from(review.worktree.context("missing Worktree path")?),
+        branch: review.branch,
+        child_snapshot_id: review.child_snapshot_id,
+        root_snapshot_id: review.root_snapshot_id,
+        files: review.files.into_iter().map(local_file).collect(),
+        additions: review.additions,
+        deletions: review.deletions,
+        patch_bytes: review.patch_bytes,
+        can_merge: review.can_merge,
+        blockers: review.blockers,
+    })
+}
+
+fn local_file(file: willdeep_runtime_protocol::DiffFile) -> diff_review::DiffFile {
+    diff_review::DiffFile {
+        path: file.path,
+        old_path: file.old_path,
+        kind: match file.kind {
+            willdeep_runtime_protocol::DiffFileKind::Added => diff_review::DiffFileKind::Added,
+            willdeep_runtime_protocol::DiffFileKind::Modified => {
+                diff_review::DiffFileKind::Modified
+            }
+            willdeep_runtime_protocol::DiffFileKind::Deleted => diff_review::DiffFileKind::Deleted,
+            willdeep_runtime_protocol::DiffFileKind::Renamed => diff_review::DiffFileKind::Renamed,
+            willdeep_runtime_protocol::DiffFileKind::Copied => diff_review::DiffFileKind::Copied,
+            willdeep_runtime_protocol::DiffFileKind::Unmerged => {
+                diff_review::DiffFileKind::Unmerged
+            }
+            willdeep_runtime_protocol::DiffFileKind::Untracked => {
+                diff_review::DiffFileKind::Untracked
+            }
+        },
+        staged: file.staged,
+        unstaged: file.unstaged,
+        binary: file.binary,
+        additions: file.additions,
+        deletions: file.deletions,
     }
-    Ok(response.json().await?)
 }
 
 pub(crate) async fn review_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
@@ -147,6 +198,14 @@ pub(crate) async fn merge_handler(
     Json(request): Json<WorktreeMergeRequest>,
 ) -> Result<Json<WorktreeMergeResult>, StatusCode> {
     authorize(&state, &headers)?;
+    merge(&state, id, request).await.map(Json)
+}
+
+async fn merge(
+    state: &ServerState,
+    id: uuid::Uuid,
+    request: WorktreeMergeRequest,
+) -> Result<WorktreeMergeResult, StatusCode> {
     let _guard = MERGE_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
@@ -162,11 +221,11 @@ pub(crate) async fn merge_handler(
         return Err(StatusCode::CONFLICT);
     }
     if request.decision == WorktreeMergeDecision::Reject {
-        return Ok(Json(WorktreeMergeResult {
+        return Ok(WorktreeMergeResult {
             review_id: current.id,
             applied: false,
             root_snapshot_id: current.root_snapshot_id,
-        }));
+        });
     }
     if !current.can_merge {
         return Err(StatusCode::CONFLICT);
@@ -187,11 +246,97 @@ pub(crate) async fn merge_handler(
             id, current.id, updated.id
         ),
     );
-    Ok(Json(WorktreeMergeResult {
+    Ok(WorktreeMergeResult {
         review_id: current.id,
         applied: true,
         root_snapshot_id: updated.id,
-    }))
+    })
+}
+
+pub(super) async fn unified_review(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::WorktreeReviewParams,
+) -> Result<willdeep_runtime_protocol::RuntimeWorktreeReview, StatusCode> {
+    let agent = state
+        .tasks
+        .agents
+        .get(params.agent_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    review(&agent)
+        .map(public_review)
+        .map_err(review_error_status)
+}
+
+pub(super) async fn unified_merge(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::WorktreeMergeParams,
+) -> Result<willdeep_runtime_protocol::RuntimeWorktreeMergeResult, StatusCode> {
+    let decision = match params.decision {
+        willdeep_runtime_protocol::WorktreeMergeDecision::Approve => WorktreeMergeDecision::Approve,
+        willdeep_runtime_protocol::WorktreeMergeDecision::Reject => WorktreeMergeDecision::Reject,
+    };
+    merge(
+        state,
+        params.agent_id,
+        WorktreeMergeRequest {
+            review_id: params.review_id,
+            decision,
+        },
+    )
+    .await
+    .map(
+        |result| willdeep_runtime_protocol::RuntimeWorktreeMergeResult {
+            review_id: result.review_id,
+            applied: result.applied,
+            root_snapshot_id: result.root_snapshot_id,
+        },
+    )
+}
+
+fn public_review(review: WorktreeReview) -> willdeep_runtime_protocol::RuntimeWorktreeReview {
+    willdeep_runtime_protocol::RuntimeWorktreeReview {
+        id: review.id,
+        agent_id: review.agent_id,
+        root_workspace: Some(review.root_workspace.display().to_string()),
+        worktree: Some(review.worktree.display().to_string()),
+        branch: review.branch,
+        child_snapshot_id: review.child_snapshot_id,
+        root_snapshot_id: review.root_snapshot_id,
+        files: review.files.into_iter().map(public_file).collect(),
+        additions: review.additions,
+        deletions: review.deletions,
+        patch_bytes: review.patch_bytes,
+        can_merge: review.can_merge,
+        blockers: review.blockers,
+    }
+}
+
+fn public_file(file: diff_review::DiffFile) -> willdeep_runtime_protocol::DiffFile {
+    willdeep_runtime_protocol::DiffFile {
+        path: file.path,
+        old_path: file.old_path,
+        kind: match file.kind {
+            diff_review::DiffFileKind::Added => willdeep_runtime_protocol::DiffFileKind::Added,
+            diff_review::DiffFileKind::Modified => {
+                willdeep_runtime_protocol::DiffFileKind::Modified
+            }
+            diff_review::DiffFileKind::Deleted => willdeep_runtime_protocol::DiffFileKind::Deleted,
+            diff_review::DiffFileKind::Renamed => willdeep_runtime_protocol::DiffFileKind::Renamed,
+            diff_review::DiffFileKind::Copied => willdeep_runtime_protocol::DiffFileKind::Copied,
+            diff_review::DiffFileKind::Unmerged => {
+                willdeep_runtime_protocol::DiffFileKind::Unmerged
+            }
+            diff_review::DiffFileKind::Untracked => {
+                willdeep_runtime_protocol::DiffFileKind::Untracked
+            }
+        },
+        staged: file.staged,
+        unstaged: file.unstaged,
+        binary: file.binary,
+        additions: file.additions,
+        deletions: file.deletions,
+    }
 }
 
 fn review(agent: &RuntimeAgent) -> Result<WorktreeReview> {

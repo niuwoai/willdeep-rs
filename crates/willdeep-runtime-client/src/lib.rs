@@ -12,8 +12,10 @@ use willdeep_runtime_protocol::{
     EmptyParams, EventListParams, IdParams, ListArtifactsParams, ListToolsParams, ListTurnsParams,
     PendingApproval, PendingQuestion, ResolveApprovalParams, RuntimeAgent, RuntimeAgentCommand,
     RuntimeArtifact, RuntimeCapabilities, RuntimeEvent, RuntimeInteractionResult, RuntimeSession,
-    RuntimeTask, RuntimeTool, RuntimeTurn, RuntimeWorkspace, SearchSessionsParams,
-    SubmitTurnParams,
+    RuntimeTask, RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit,
+    RuntimeWorktreeMergeResult, RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview,
+    SearchSessionsParams, SubmitTurnParams, WorktreeMergeParams, WorktreeQuarantineParams,
+    WorktreeReviewParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -354,6 +356,37 @@ impl RuntimeClient {
         request_id: uuid::Uuid,
     ) -> Result<ApiResponse<DiffRevertResult>, ClientError> {
         self.call("diff.revert", params, Some(request_id)).await
+    }
+
+    pub async fn worktree_review(
+        &self,
+        params: &WorktreeReviewParams,
+    ) -> Result<ApiResponse<RuntimeWorktreeReview>, ClientError> {
+        self.call("worktree.review", params, None).await
+    }
+
+    pub async fn merge_worktree(
+        &self,
+        params: &WorktreeMergeParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeWorktreeMergeResult>, ClientError> {
+        self.call("worktree.merge", params, Some(request_id)).await
+    }
+
+    pub async fn audit_worktrees(
+        &self,
+    ) -> Result<ApiResponse<Vec<RuntimeWorktreeAudit>>, ClientError> {
+        self.call("worktree.audit", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn quarantine_worktree(
+        &self,
+        params: &WorktreeQuarantineParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeWorktreeQuarantineResult>, ClientError> {
+        self.call("worktree.quarantine", params, Some(request_id))
+            .await
     }
 
     pub async fn tools(
