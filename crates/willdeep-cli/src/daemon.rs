@@ -27,6 +27,7 @@ const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 mod agent_control;
 mod agent_store;
 mod event_stream;
+mod session_store;
 pub(crate) mod tui_bridge;
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::start_agent_command_watcher;
@@ -76,6 +77,35 @@ pub enum DaemonAction {
     Agents,
     /// Show one Runtime-owned agent.
     Agent { id: uuid::Uuid },
+    /// Create a persistent interactive Runtime Session.
+    CreateSession {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// List persistent interactive Runtime Sessions.
+    Sessions,
+    /// Show one persistent Runtime Session.
+    Session { id: uuid::Uuid },
+    /// Queue a user Turn in a persistent Runtime Session.
+    SubmitTurn {
+        session_id: uuid::Uuid,
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+        #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    /// List Turns in a Runtime Session.
+    Turns { session_id: uuid::Uuid },
+    /// Show one Runtime Turn.
+    Turn { id: uuid::Uuid },
+    /// Stop a queued or running Runtime Turn.
+    StopTurn { id: uuid::Uuid },
     /// Request cancellation of a running background child Agent.
     StopAgent { id: uuid::Uuid },
     /// Retry a terminal background child Agent.
@@ -126,6 +156,7 @@ struct ServerState {
     tasks: Arc<TaskManager>,
     agents: Arc<AgentStore>,
     agent_commands: Arc<AgentCommandStore>,
+    sessions: Arc<session_store::RuntimeSessionStore>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,6 +185,10 @@ enum RuntimeTaskStatus {
 pub(crate) struct RuntimeTask {
     pub(crate) id: uuid::Uuid,
     #[serde(default)]
+    pub(crate) session_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub(crate) turn_id: Option<uuid::Uuid>,
+    #[serde(default)]
     pub(crate) agent_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub(crate) event_start_sequence: u64,
@@ -176,6 +211,10 @@ struct SubmitTask {
     workspace: PathBuf,
     profile: Option<String>,
     config: Option<PathBuf>,
+    #[serde(default)]
+    session_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    turn_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone)]
@@ -256,6 +295,7 @@ struct TaskManager {
     executable: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    sessions: Arc<session_store::RuntimeSessionStore>,
     runtime_url: String,
     runtime_token: String,
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
@@ -265,6 +305,7 @@ struct TaskManager {
     interactions: RwLock<HashMap<uuid::Uuid, RuntimeInteraction>>,
     interaction_waiters:
         Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<InteractionResolution>>>,
+    turn_scheduler: tokio::sync::mpsc::UnboundedSender<uuid::Uuid>,
 }
 
 pub async fn handle(action: DaemonAction) -> Result<()> {
@@ -284,6 +325,24 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
+        DaemonAction::CreateSession {
+            workspace,
+            profile,
+            config,
+            title,
+        } => session_store::create_session_cli(&home, workspace, profile, config, title).await,
+        DaemonAction::Sessions => session_store::list_sessions_cli(&home).await,
+        DaemonAction::Session { id } => session_store::show_session_cli(&home, id).await,
+        DaemonAction::SubmitTurn {
+            session_id,
+            request_id,
+            prompt,
+        } => session_store::submit_turn_cli(&home, session_id, request_id, prompt).await,
+        DaemonAction::Turns { session_id } => {
+            session_store::list_turns_cli(&home, session_id).await
+        }
+        DaemonAction::Turn { id } => session_store::show_turn_cli(&home, id).await,
+        DaemonAction::StopTurn { id } => session_store::stop_turn_cli(&home, id).await,
         DaemonAction::StopAgent { id } => {
             agent_control::control_agent(&home, id, agent_control::AgentCommandKind::Stop).await
         }
@@ -387,6 +446,8 @@ pub(crate) async fn submit_runtime_prompt(
             workspace: options.workspace.canonicalize()?,
             profile: options.profile.clone(),
             config: options.config.clone(),
+            session_id: None,
+            turn_id: None,
         })
         .send()
         .await?;
@@ -846,15 +907,22 @@ async fn run(home: &Path) -> Result<()> {
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
     let agent_commands = Arc::new(AgentCommandStore::open(paths.agent_commands.clone())?);
-    let tasks = Arc::new(TaskManager::open(
-        paths.tasks.clone(),
-        paths.interactions.clone(),
-        std::env::current_exe()?,
-        events.clone(),
-        agents.clone(),
-        format!("http://{address}"),
-        state.token.clone(),
+    let sessions = Arc::new(session_store::RuntimeSessionStore::open(
+        paths.runtime_sessions.clone(),
+        home,
     )?);
+    let (turn_scheduler, mut scheduled_sessions) = tokio::sync::mpsc::unbounded_channel();
+    let tasks = Arc::new(TaskManager::open(TaskManagerOptions {
+        path: paths.tasks.clone(),
+        interactions_path: paths.interactions.clone(),
+        executable: std::env::current_exe()?,
+        events: events.clone(),
+        agents: agents.clone(),
+        sessions: sessions.clone(),
+        turn_scheduler,
+        runtime_url: format!("http://{address}"),
+        runtime_token: state.token.clone(),
+    })?);
     let server_state = Arc::new(ServerState {
         token: state.token,
         started_at,
@@ -863,7 +931,39 @@ async fn run(home: &Path) -> Result<()> {
         tasks: tasks.clone(),
         agents: agents.clone(),
         agent_commands: agent_commands.clone(),
+        sessions: sessions.clone(),
     });
+    let scheduler_state = server_state.clone();
+    tokio::spawn(async move {
+        while let Some(session_id) = scheduled_sessions.recv().await {
+            let claimed = scheduler_state.sessions.claim_next(session_id);
+            let Ok(Some(claimed)) = claimed else {
+                continue;
+            };
+            let turn_id = claimed.metadata.id;
+            match scheduler_state.tasks.submit(claimed.request).await {
+                Ok(task) => {
+                    let _ = scheduler_state.events.append(
+                        "turn.started",
+                        format!(
+                            "session_id={session_id} turn_id={turn_id} task_id={}",
+                            task.id
+                        ),
+                    );
+                }
+                Err(error) => {
+                    let _ = scheduler_state.sessions.complete_claim_failure(
+                        turn_id,
+                        format!("start queued Turn task: {error:#}"),
+                    );
+                    let _ = scheduler_state.tasks.schedule_session(session_id);
+                }
+            }
+        }
+    });
+    for session_id in sessions.schedulable_sessions()? {
+        tasks.schedule_session(session_id)?;
+    }
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/events", get(events_handler))
@@ -882,6 +982,20 @@ async fn run(home: &Path) -> Result<()> {
             post(agent_control::retry_agent_handler),
         )
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
+        .route(
+            "/v1/sessions",
+            get(session_store::sessions_handler).post(session_store::create_session_handler),
+        )
+        .route("/v1/sessions/{id}", get(session_store::session_handler))
+        .route(
+            "/v1/sessions/{id}/turns",
+            get(session_store::turns_handler).post(session_store::create_turn_handler),
+        )
+        .route("/v1/turns/{id}", get(session_store::turn_handler))
+        .route(
+            "/v1/turns/{id}/stop",
+            post(session_store::stop_turn_handler),
+        )
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
         .route(
@@ -1189,6 +1303,7 @@ struct DaemonPaths {
     tasks: PathBuf,
     agents: PathBuf,
     agent_commands: PathBuf,
+    runtime_sessions: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
 }
@@ -1203,6 +1318,7 @@ impl DaemonPaths {
             tasks: directory.join("tasks.json"),
             agents: directory.join("agents.json"),
             agent_commands: directory.join("agent-commands.json"),
+            runtime_sessions: directory.join("sessions.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
             directory,
@@ -1210,16 +1326,31 @@ impl DaemonPaths {
     }
 }
 
+struct TaskManagerOptions {
+    path: PathBuf,
+    interactions_path: PathBuf,
+    executable: PathBuf,
+    events: Arc<EventLog>,
+    agents: Arc<AgentStore>,
+    sessions: Arc<session_store::RuntimeSessionStore>,
+    turn_scheduler: tokio::sync::mpsc::UnboundedSender<uuid::Uuid>,
+    runtime_url: String,
+    runtime_token: String,
+}
+
 impl TaskManager {
-    fn open(
-        path: PathBuf,
-        interactions_path: PathBuf,
-        executable: PathBuf,
-        events: Arc<EventLog>,
-        agents: Arc<AgentStore>,
-        runtime_url: String,
-        runtime_token: String,
-    ) -> Result<Self> {
+    fn open(options: TaskManagerOptions) -> Result<Self> {
+        let TaskManagerOptions {
+            path,
+            interactions_path,
+            executable,
+            events,
+            agents,
+            sessions,
+            turn_scheduler,
+            runtime_url,
+            runtime_token,
+        } = options;
         let mut tasks = load_tasks(&path)?;
         let mut interactions = load_interactions(&interactions_path)?;
         let mut recovered = false;
@@ -1235,12 +1366,25 @@ impl TaskManager {
                 task.error = Some("Runtime restarted while task was active".to_owned());
                 recovered = true;
             }
-            let agent = agents.ensure_root(
-                task.id,
-                task.workspace.clone(),
-                task.profile.clone(),
-                agent_status(task.status),
-            )?;
+            let agent = if let Some(session_id) = task.session_id {
+                let session = sessions
+                    .get(session_id)?
+                    .with_context(|| format!("Runtime Session {session_id} for recovered task"))?;
+                agents.ensure_session_root(
+                    session.root_agent_id,
+                    task.id,
+                    task.workspace.clone(),
+                    task.profile.clone(),
+                    agent_status(task.status),
+                )?
+            } else {
+                agents.ensure_root(
+                    task.id,
+                    task.workspace.clone(),
+                    task.profile.clone(),
+                    agent_status(task.status),
+                )?
+            };
             if task.agent_id != Some(agent.id) {
                 task.agent_id = Some(agent.id);
                 recovered = true;
@@ -1269,6 +1413,7 @@ impl TaskManager {
             executable,
             events,
             agents,
+            sessions,
             runtime_url,
             runtime_token,
             tasks: RwLock::new(tasks),
@@ -1277,6 +1422,7 @@ impl TaskManager {
             interactions_path,
             interactions: RwLock::new(interactions),
             interaction_waiters: Mutex::new(HashMap::new()),
+            turn_scheduler,
         })
     }
 
@@ -1290,6 +1436,12 @@ impl TaskManager {
             .collect::<Vec<_>>();
         tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
         tasks
+    }
+
+    fn schedule_session(&self, session_id: uuid::Uuid) -> Result<()> {
+        self.turn_scheduler
+            .send(session_id)
+            .map_err(|_| anyhow::anyhow!("Runtime Turn scheduler stopped"))
     }
 
     async fn get(&self, id: uuid::Uuid) -> Option<RuntimeTask> {
@@ -1347,6 +1499,16 @@ impl TaskManager {
         persist_interactions(&self.interactions_path, &interaction_snapshot)?;
         self.agents
             .set_status_for_task(interaction.task_id, agent_status(status), None)?;
+        self.sessions.set_task_waiting(
+            interaction.task_id,
+            match status {
+                RuntimeTaskStatus::WaitingApproval => {
+                    session_store::RuntimeTurnStatus::WaitingApproval
+                }
+                RuntimeTaskStatus::WaitingAnswer => session_store::RuntimeTurnStatus::WaitingAnswer,
+                _ => session_store::RuntimeTurnStatus::Running,
+            },
+        )?;
         self.interaction_waiters
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime interaction waiter lock poisoned"))?
@@ -1400,6 +1562,10 @@ impl TaskManager {
         persist_tasks(&self.path, &task_snapshot)?;
         self.agents
             .set_status_for_task(interaction.task_id, RuntimeAgentStatus::Running, None)?;
+        self.sessions.set_task_waiting(
+            interaction.task_id,
+            session_store::RuntimeTurnStatus::Running,
+        )?;
         let sender = self
             .interaction_waiters
             .lock()
@@ -1435,6 +1601,8 @@ impl TaskManager {
         let id = uuid::Uuid::new_v4();
         let mut task = RuntimeTask {
             id,
+            session_id: request.session_id,
+            turn_id: request.turn_id,
             agent_id: None,
             event_start_sequence: 0,
             status: RuntimeTaskStatus::Queued,
@@ -1447,18 +1615,35 @@ impl TaskManager {
             exit_code: None,
             error: None,
         };
-        let agent = self.agents.ensure_root(
-            id,
-            request.workspace.clone(),
-            request.profile.clone(),
-            RuntimeAgentStatus::Queued,
-        )?;
+        let agent = if let Some(session_id) = request.session_id {
+            let session = self
+                .sessions
+                .get(session_id)?
+                .context("Runtime Session not found")?;
+            self.agents.ensure_session_root(
+                session.root_agent_id,
+                id,
+                request.workspace.clone(),
+                request.profile.clone(),
+                RuntimeAgentStatus::Queued,
+            )?
+        } else {
+            self.agents.ensure_root(
+                id,
+                request.workspace.clone(),
+                request.profile.clone(),
+                RuntimeAgentStatus::Queued,
+            )?
+        };
         task.agent_id = Some(agent.id);
         self.events.append(
             "agent.created",
             format!("agent_id={} task_id={id} parent_id=none", agent.id),
         )?;
         self.insert_and_persist(task.clone()).await?;
+        if let Some(turn_id) = task.turn_id {
+            self.sessions.bind_task(turn_id, id)?;
+        }
         task.event_start_sequence = self
             .events
             .append("task.queued", format!("task_id={id}"))?
@@ -1481,6 +1666,9 @@ impl TaskManager {
         }
         if let Some(config) = &request.config {
             command.arg("--config").arg(config);
+        }
+        if let Some(session_id) = request.session_id {
+            command.arg("--resume").arg(session_id.to_string());
         }
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -1642,21 +1830,21 @@ impl TaskManager {
     }
 
     async fn finish(
-        &self,
+        self: &Arc<Self>,
         id: uuid::Uuid,
         status: RuntimeTaskStatus,
         exit_code: Option<i32>,
         error: Option<String>,
     ) -> Result<()> {
         let _persistence = self.persistence.lock().await;
-        let snapshot = {
+        let (finished_task, snapshot) = {
             let mut tasks = self.tasks.write().await;
             let task = tasks.get_mut(&id).context("Runtime task disappeared")?;
             task.status = status;
             task.completed_at = Some(now());
             task.exit_code = exit_code;
             task.error = error.clone();
-            tasks.clone()
+            (task.clone(), tasks.clone())
         };
         persist_tasks(&self.path, &snapshot)?;
         self.agents
@@ -1668,13 +1856,39 @@ impl TaskManager {
                 _ => "task.failed",
             },
             format!(
-                "task_id={id} exit_code={} error={}",
+                "task_id={id} session_id={} turn_id={} exit_code={} error={}",
+                finished_task
+                    .session_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                finished_task
+                    .turn_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
-                error.unwrap_or_default()
+                error.clone().unwrap_or_default()
             ),
         )?;
+        let runtime_session = self.sessions.complete_task(id, status, error.clone())?;
+        if let (Some(session_id), Some(turn_id)) = (finished_task.session_id, finished_task.turn_id)
+        {
+            self.events.append(
+                match status {
+                    RuntimeTaskStatus::Completed => "turn.completed",
+                    RuntimeTaskStatus::Cancelled => "turn.cancelled",
+                    RuntimeTaskStatus::Interrupted => "turn.interrupted",
+                    _ => "turn.failed",
+                },
+                format!(
+                    "session_id={session_id} turn_id={turn_id} task_id={id} exit_code={} error={}",
+                    exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                    error.clone().unwrap_or_default()
+                ),
+            )?;
+        }
         drop(_persistence);
         self.cancel_task_interactions(id).await?;
+        if let Some(session_id) = runtime_session {
+            self.schedule_session(session_id)?;
+        }
         Ok(())
     }
 

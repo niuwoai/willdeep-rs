@@ -106,6 +106,57 @@ impl AgentStore {
         Ok(agent)
     }
 
+    pub fn ensure_session_root(
+        &self,
+        id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        workspace: PathBuf,
+        profile: Option<String>,
+        status: RuntimeAgentStatus,
+    ) -> Result<RuntimeAgent> {
+        let mut agents = self.lock()?;
+        if let Some(agent) = agents.get_mut(&id) {
+            agent.task_id = task_id;
+            agent.workspace = workspace;
+            agent.profile = profile;
+            agent.status = status;
+            agent.current_turn = 0;
+            agent.current_tool = None;
+            agent.input_tokens = None;
+            agent.output_tokens = None;
+            agent.total_tokens = None;
+            agent.updated_at = now();
+            agent.completed_at = None;
+            agent.error = None;
+            let agent = agent.clone();
+            persist_agents(&self.path, &agents)?;
+            return Ok(agent);
+        }
+        let timestamp = now();
+        let agent = RuntimeAgent {
+            id,
+            parent_id: None,
+            task_id,
+            label: Some("root".to_owned()),
+            background: false,
+            workspace,
+            profile,
+            status,
+            current_turn: 0,
+            current_tool: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            completed_at: None,
+            error: None,
+        };
+        agents.insert(agent.id, agent.clone());
+        persist_agents(&self.path, &agents)?;
+        Ok(agent)
+    }
+
     pub fn list(&self) -> Result<Vec<RuntimeAgent>> {
         let mut agents = self.lock()?.values().cloned().collect::<Vec<_>>();
         agents.sort_by_key(|agent| std::cmp::Reverse(agent.created_at));

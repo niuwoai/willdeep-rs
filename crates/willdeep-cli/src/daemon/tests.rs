@@ -4,6 +4,16 @@ fn test_agent_store(root: &Path) -> Arc<AgentStore> {
     Arc::new(AgentStore::open(root.join("agents.json")).unwrap())
 }
 
+fn test_runtime_session_store(root: &Path) -> Arc<session_store::RuntimeSessionStore> {
+    Arc::new(
+        session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), root).unwrap(),
+    )
+}
+
+fn test_turn_scheduler() -> tokio::sync::mpsc::UnboundedSender<uuid::Uuid> {
+    tokio::sync::mpsc::unbounded_channel().0
+}
+
 #[test]
 fn state_round_trips_without_exposing_token_in_logs() {
     let root = std::env::temp_dir().join(format!("willdeep-daemon-{}", uuid::Uuid::new_v4()));
@@ -34,20 +44,26 @@ fn authorization_requires_exact_local_token() {
         shutdown: Arc::new(Notify::new()),
         events: events.clone(),
         tasks: Arc::new(
-            TaskManager::open(
-                root.join("tasks.json"),
-                root.join("interactions.json"),
-                PathBuf::from("willdeep"),
+            TaskManager::open(TaskManagerOptions {
+                path: root.join("tasks.json"),
+                interactions_path: root.join("interactions.json"),
+                executable: PathBuf::from("willdeep"),
                 events,
-                agents.clone(),
-                "http://127.0.0.1:1".to_owned(),
-                "test-token".to_owned(),
-            )
+                agents: agents.clone(),
+                sessions: test_runtime_session_store(&root),
+                turn_scheduler: test_turn_scheduler(),
+                runtime_url: "http://127.0.0.1:1".to_owned(),
+                runtime_token: "test-token".to_owned(),
+            })
             .unwrap(),
         ),
         agents,
         agent_commands: Arc::new(
             AgentCommandStore::open(root.join("agent-commands.json")).unwrap(),
+        ),
+        sessions: Arc::new(
+            session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root)
+                .unwrap(),
         ),
     };
     assert_eq!(
@@ -222,6 +238,8 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     let id = uuid::Uuid::new_v4();
     let task = RuntimeTask {
         id,
+        session_id: None,
+        turn_id: None,
         agent_id: None,
         event_start_sequence: 0,
         status: RuntimeTaskStatus::Running,
@@ -237,20 +255,81 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
-    let manager = TaskManager::open(
+    let manager = TaskManager::open(TaskManagerOptions {
         path,
-        root.join("interactions.json"),
-        PathBuf::from("willdeep"),
+        interactions_path: root.join("interactions.json"),
+        executable: PathBuf::from("willdeep"),
         events,
         agents,
-        "http://127.0.0.1:1".to_owned(),
-        "test-token".to_owned(),
-    )
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
     .unwrap();
     let recovered = manager.tasks.blocking_read();
     assert_eq!(recovered[&id].status, RuntimeTaskStatus::Interrupted);
     assert!(recovered[&id].completed_at.is_some());
     drop(recovered);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_recovery_preserves_the_session_root_agent_id() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-session-task-recovery-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = test_runtime_session_store(&root);
+    let session = sessions
+        .create(session_store::CreateRuntimeSession {
+            workspace: workspace.clone(),
+            profile: None,
+            config: None,
+            title: None,
+        })
+        .unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let path = root.join("tasks.json");
+    let task = RuntimeTask {
+        id: task_id,
+        session_id: Some(session.id),
+        turn_id: None,
+        agent_id: Some(session.root_agent_id),
+        event_start_sequence: 0,
+        status: RuntimeTaskStatus::Running,
+        workspace,
+        profile: None,
+        pid: Some(10),
+        created_at: 1,
+        started_at: Some(2),
+        completed_at: None,
+        exit_code: None,
+        error: None,
+    };
+    persist_tasks(&path, &HashMap::from([(task_id, task)])).unwrap();
+    let agents = test_agent_store(&root);
+    let manager = TaskManager::open(TaskManagerOptions {
+        path,
+        interactions_path: root.join("interactions.json"),
+        executable: PathBuf::from("willdeep"),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: agents.clone(),
+        sessions,
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        manager.tasks.blocking_read()[&task_id].agent_id,
+        Some(session.root_agent_id)
+    );
+    assert_eq!(agents.list().unwrap().len(), 1);
+    assert_eq!(agents.list().unwrap()[0].id, session.root_agent_id);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -296,15 +375,17 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
     let manager = Arc::new(
-        TaskManager::open(
-            path.clone(),
-            root.join("interactions.json"),
-            PathBuf::from("willdeep"),
+        TaskManager::open(TaskManagerOptions {
+            path: path.clone(),
+            interactions_path: root.join("interactions.json"),
+            executable: PathBuf::from("willdeep"),
             events,
             agents,
-            "http://127.0.0.1:1".to_owned(),
-            "test-token".to_owned(),
-        )
+            sessions: test_runtime_session_store(&root),
+            turn_scheduler: test_turn_scheduler(),
+            runtime_url: "http://127.0.0.1:1".to_owned(),
+            runtime_token: "test-token".to_owned(),
+        })
         .unwrap(),
     );
     let mut updates = Vec::new();
@@ -316,6 +397,8 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
             manager
                 .insert_and_persist(RuntimeTask {
                     id,
+                    session_id: None,
+                    turn_id: None,
                     agent_id: None,
                     event_start_sequence: 0,
                     status: RuntimeTaskStatus::Completed,
@@ -345,20 +428,24 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     std::fs::create_dir_all(&root).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
     let agents = test_agent_store(&root);
-    let manager = TaskManager::open(
-        root.join("tasks.json"),
-        root.join("interactions.json"),
-        PathBuf::from("willdeep"),
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: root.join("tasks.json"),
+        interactions_path: root.join("interactions.json"),
+        executable: PathBuf::from("willdeep"),
         events,
         agents,
-        "http://127.0.0.1:1".to_owned(),
-        "test-token".to_owned(),
-    )
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
     .unwrap();
     let task_id = uuid::Uuid::new_v4();
     manager
         .insert_and_persist(RuntimeTask {
             id: task_id,
+            session_id: None,
+            turn_id: None,
             agent_id: None,
             event_start_sequence: 0,
             status: RuntimeTaskStatus::Running,

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.16.0-rc10] - 2026-08-10
+
+### Added
+
+- 定义稳定 Runtime Session / Root Agent / Turn / Execution Task 身份、状态、幂等、恢复与安全协议。
+- Runtime 新增持久 Session/Turn 元数据、稳定 Root Agent ID，以及受 Token 保护的 Session/Turn 创建、列表、详情和停止 API。
+- CLI 新增 `daemon create-session/sessions/session/submit-turn/turns/turn/stop-turn`，支持从脚本管理长期 Runtime 会话。
+- Turn 使用客户端 `request_id` 幂等入队，同一 Session 按持久序号严格串行；成功执行后清除队列中的 Prompt 和附件副本。
+- Runtime 为 Turn 发布 queued/started/completed/failed/cancelled/interrupted 事件，并在审批或提问时同步等待状态。
+
+### Changed
+
+- Runtime 启动时将遗留活动 Session/Turn 明确恢复为 Interrupted，自动恢复未开始的排队 Turn，同时保持 Core Session 消息文件为唯一历史来源。
+- 排队 Turn 可在 Task 绑定前安全取消并释放 Session，避免领取/启动竞争窗口阻塞后续队列。
+
 ## [0.16.0-rc9] - 2026-08-10
 
 ### Added

@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.16.0-rc9
+> 最后更新：2026-08-10 | 当前版本：v0.16.0-rc10
 
 ## 项目简介
 
@@ -37,6 +37,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 提供受 Token 保护的 SSE 事件流，按游标分页补历史后切换实时广播；慢客户端从持久日志恢复，TUI 长连接消费并对旧 Daemon 保留轮询降级；
 - 非交互 Harness 可通过 Runtime 提交、查询和取消；Daemon 持有进程生命周期并把模型输出、session_id 和终态写入可续传事件流；
 - Runtime 使用单实例租约锁协调并发启动，重启时将遗留运行任务标记为 Interrupted，停止时取消仍在运行的任务；
+- Runtime Session/Turn API 与 CLI 提供稳定 Root Agent、幂等请求 ID、持久严格串行队列、排队/运行取消、终态事件和重启恢复；成功后 Core Session 保留唯一消息历史并清除队列私密正文；
 - Runtime 托管任务支持持久审批和 ask_user 待处理项，可由其他 CLI 客户端允许、拒绝或自由回答后继续原 Harness；
 - TUI 右栏统一展示 Runtime 任务与待处理项，支持远端审批、回答和停止；Composer 可用 `/runtime` 提交含文本或图片附件的可分离任务；
 - TUI 按 Session 事件游标补读当前 Workspace 的 Runtime 模型、工具、用量与完成事件；用户请求和正式回复写入会话，退出重连后完整恢复且不重复；
@@ -109,4 +110,4 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。
-- [ ] 将 Harness、任务和会话生命周期迁入 Runtime Daemon，并提供 attach/detach 与事件断线续传。
+- [-] 将 Harness、任务和会话生命周期迁入 Runtime Daemon；持久 Session/Turn、attach/detach 与事件断线续传已完成，TUI/Web 迁移和 Runtime 原生进程内 Harness 尚待完成。
