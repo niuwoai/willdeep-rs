@@ -121,6 +121,40 @@ struct RuntimeActivityQuery {
 struct RuntimeActivitySummary {
     tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
+    agents: Vec<WebRuntimeAgent>,
+    gates: Vec<WebRuntimeGate>,
+    attention_count: usize,
+}
+
+#[derive(Serialize)]
+struct WebRuntimeAgent {
+    id: uuid::Uuid,
+    parent_id: Option<uuid::Uuid>,
+    label: Option<String>,
+    background: bool,
+    profile: Option<String>,
+    status: &'static str,
+    current_turn: u64,
+    current_tool: Option<String>,
+    total_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WebRuntimeGate {
+    Approval {
+        id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        description: String,
+        always_allow_available: bool,
+    },
+    Question {
+        id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        question: String,
+        options: Vec<String>,
+        multi_select: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -270,7 +304,67 @@ async fn runtime_activity(
     Ok(Json(RuntimeActivitySummary {
         tools: snapshot.tools,
         artifacts: snapshot.artifacts,
+        agents: snapshot
+            .agents
+            .into_iter()
+            .map(|agent| WebRuntimeAgent {
+                id: agent.id,
+                parent_id: agent.parent_id,
+                label: agent.label,
+                background: agent.background,
+                profile: agent.profile,
+                status: runtime_status_name(agent.status),
+                current_turn: agent.current_turn,
+                current_tool: agent.current_tool,
+                total_tokens: agent.total_tokens,
+            })
+            .collect(),
+        gates: snapshot
+            .gates
+            .into_iter()
+            .map(|gate| match gate {
+                crate::daemon::RemoteGate::Approval {
+                    id,
+                    task_id,
+                    description,
+                    always_allow_available,
+                } => WebRuntimeGate::Approval {
+                    id,
+                    task_id,
+                    description,
+                    always_allow_available,
+                },
+                crate::daemon::RemoteGate::Question {
+                    id,
+                    task_id,
+                    question,
+                    options,
+                    multi_select,
+                } => WebRuntimeGate::Question {
+                    id,
+                    task_id,
+                    question,
+                    options,
+                    multi_select,
+                },
+            })
+            .collect(),
+        attention_count: snapshot.attention.len(),
     }))
+}
+
+fn runtime_status_name(status: willdeep_core::RuntimeStatus) -> &'static str {
+    match status {
+        willdeep_core::RuntimeStatus::Idle => "idle",
+        willdeep_core::RuntimeStatus::Working => "working",
+        willdeep_core::RuntimeStatus::Blocked => "blocked",
+        willdeep_core::RuntimeStatus::WaitingApproval => "waiting_approval",
+        willdeep_core::RuntimeStatus::WaitingAnswer => "waiting_answer",
+        willdeep_core::RuntimeStatus::Failed => "failed",
+        willdeep_core::RuntimeStatus::Done => "done",
+        willdeep_core::RuntimeStatus::Cancelled => "cancelled",
+        willdeep_core::RuntimeStatus::Unknown => "unknown",
+    }
 }
 
 async fn sessions(
@@ -1003,6 +1097,26 @@ mod tests {
             "Review Rust code"
         );
         assert!(safe_skill_description(&"x".repeat(500)).chars().count() <= 320);
+    }
+
+    #[test]
+    fn web_runtime_agent_summary_excludes_workspace_report_and_internal_errors() {
+        let value = serde_json::to_value(WebRuntimeAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            label: Some("reader".to_owned()),
+            background: true,
+            profile: Some("reader".to_owned()),
+            status: runtime_status_name(willdeep_core::RuntimeStatus::Working),
+            current_turn: 2,
+            current_tool: Some("read_file".to_owned()),
+            total_tokens: Some(100),
+        })
+        .unwrap();
+        assert_eq!(value["status"], "working");
+        assert!(value.get("workspace").is_none());
+        assert!(value.get("report").is_none());
+        assert!(value.get("error").is_none());
     }
 
     #[test]

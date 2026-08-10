@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc18] - 2026-08-11
+
+### Added
+
+- Web Activity API 在 Workspace 双重白名单边界内增加 Agent、待审批/回答 Gate 和关注项计数。
+- React 新增独立 Runtime 侧栏组件，展示 Agent 状态与轮次、待处理详情、工具和产物摘要；新增文案覆盖简中、英语和日语。
+
+### Security
+
+- Web Agent 摘要不下发 Workspace 路径、Agent 报告或内部错误，相关字段由回归测试守护。
+
 ## [0.21.0-rc17] - 2026-08-11
 
 ### Added

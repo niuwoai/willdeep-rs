@@ -1,0 +1,88 @@
+import { Box, Flex, Text, VStack } from "@chakra-ui/react";
+import type { Messages } from "./i18n";
+
+export type RuntimeTool = {
+  id: string;
+  name: string;
+  status: "running" | "completed" | "failed" | "interrupted";
+  started_at_ms: number;
+  completed_at_ms: number | null;
+};
+
+export type RuntimeArtifact = {
+  id: string;
+  title: string;
+  kind: "workspace_change";
+  item_count: number;
+  created_at: number;
+};
+
+export type RuntimeAgent = {
+  id: string;
+  parent_id: string | null;
+  label: string | null;
+  background: boolean;
+  profile: string | null;
+  status: string;
+  current_turn: number;
+  current_tool: string | null;
+  total_tokens: number | null;
+};
+
+export type RuntimeGate =
+  | { kind: "approval"; id: string; task_id: string; description: string; always_allow_available: boolean }
+  | { kind: "question"; id: string; task_id: string; question: string; options: string[]; multi_select: boolean };
+
+export type RuntimeActivity = {
+  tools: RuntimeTool[];
+  artifacts: RuntimeArtifact[];
+  agents: RuntimeAgent[];
+  gates: RuntimeGate[];
+  attention_count: number;
+};
+
+type Props = {
+  activity: RuntimeActivity;
+  messages: Messages;
+};
+
+function agentStatus(status: string, t: Messages) {
+  if (status === "working") return t.working;
+  if (status === "waiting_approval") return t.waitingApproval;
+  if (status === "waiting_answer") return t.waitingAnswer;
+  if (status === "failed") return t.toolFailed;
+  if (status === "done") return t.toolDone;
+  if (status === "blocked") return t.blocked;
+  return status;
+}
+
+export function RuntimeSidebar({ activity, messages: t }: Props) {
+  const runningTools = activity.tools.filter((tool) => tool.status === "running").length;
+  return <Box mt="4" p="3" border="1px solid" borderColor="#202a35" borderRadius="md" bg="#101820">
+    <Text fontSize="xs" color="#8290a3" mb="2">{t.runtimeActivity}</Text>
+    <Flex gap="3" wrap="wrap">
+      <Text fontSize="sm">{t.tools}: {activity.tools.length}</Text>
+      <Text fontSize="sm">{t.running}: {runningTools}</Text>
+      <Text fontSize="sm">{t.artifacts}: {activity.artifacts.length}</Text>
+    </Flex>
+    <Flex gap="3" mt="2" wrap="wrap">
+      <Text fontSize="sm">{t.agents}: {activity.agents.length}</Text>
+      <Text fontSize="sm">{t.needsAttention}: {activity.attention_count}</Text>
+    </Flex>
+    {activity.gates.length > 0 && <VStack align="stretch" gap="2" mt="3">
+      {activity.gates.slice(0, 3).map((gate) => <Box key={gate.id} p="2" borderRadius="sm" bg="#171d24">
+        <Text fontSize="xs" color="#e5b96f">{gate.kind === "approval" ? t.waitingApproval : t.waitingAnswer}</Text>
+        <Text fontSize="xs" lineClamp="2">{gate.kind === "approval" ? gate.description : gate.question}</Text>
+      </Box>)}
+    </VStack>}
+    {activity.agents.length > 0 && <VStack align="stretch" gap="1" mt="3">
+      {activity.agents.slice(0, 4).map((agent) => <Flex key={agent.id} justify="space-between" gap="2" fontSize="xs">
+        <Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text>
+        <Text color="#8290a3" flexShrink="0">{agentStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text>
+      </Flex>)}
+    </VStack>}
+    {activity.tools[0] && <Text mt="2" fontSize="xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
+      {activity.tools[0].name} · {activity.tools[0].status === "running" ? t.toolRunning : activity.tools[0].status === "completed" ? t.toolDone : t.toolFailed}
+    </Text>}
+  </Box>;
+}

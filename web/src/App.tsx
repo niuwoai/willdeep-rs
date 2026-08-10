@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Flex, Heading, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, languageLabels, languages, messages, type Language } from "./i18n";
+import { RuntimeSidebar, type RuntimeActivity } from "./RuntimeSidebar";
 
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
 type Session = { id: string; title: string; workspace: string; updated_at: number; archived: boolean; active: boolean };
@@ -10,9 +11,6 @@ type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; conten
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
 type ComposerSkill = { identifier: string; name: string; description: string };
 type ComposerData = { commands: string[]; skills: ComposerSkill[] };
-type RuntimeTool = { id: string; name: string; status: "running" | "completed" | "failed" | "interrupted"; started_at_ms: number; completed_at_ms: number | null };
-type RuntimeArtifact = { id: string; title: string; kind: "workspace_change"; item_count: number; created_at: number };
-type RuntimeActivity = { tools: RuntimeTool[]; artifacts: RuntimeArtifact[] };
 const defaultCommands = ["/help", "/goal", "/compress", "/skills", "/clear"];
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
@@ -36,7 +34,7 @@ export function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [goal, setGoal] = useState("");
   const [composer, setComposer] = useState<ComposerData>({ commands: defaultCommands, skills: [] });
-  const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivity>({ tools: [], artifacts: [] });
+  const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivity>({ tools: [], artifacts: [], agents: [], gates: [], attention_count: 0 });
   const [busy, setBusy] = useState(false); const [activity, setActivity] = useState(""); const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null); const endRef = useRef<HTMLDivElement | null>(null);
   const activeRunRef = useRef<string | null>(null);
@@ -48,7 +46,7 @@ export function App() {
   useEffect(() => { json<Workspace[]>("/api/workspaces").then((values) => { setWorkspaces(values); setWorkspace(values[0]?.path ?? ""); }).catch((reason: Error) => setError(`${t.loadFailed}: ${reason.message}`)); }, [t.loadFailed]);
   useEffect(() => { if (!workspace) return; json<Session[]>("/api/sessions").then(setSessions).catch((reason: Error) => setError(`${t.loadFailed}: ${reason.message}`)); json<ComposerData>(`/api/composer?workspace=${encodeURIComponent(workspace)}`).then(setComposer).catch((reason: Error) => setError(`${t.loadFailed}: ${reason.message}`)); setSessionId(""); setChat([]); }, [workspace, t.loadFailed]);
   useEffect(() => {
-    if (!workspace) { setRuntimeActivity({ tools: [], artifacts: [] }); return; }
+    if (!workspace) { setRuntimeActivity({ tools: [], artifacts: [], agents: [], gates: [], attention_count: 0 }); return; }
     let active = true;
     const refresh = () => json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`).then((value) => { if (active) setRuntimeActivity(value); }).catch(() => undefined);
     void refresh(); const timer = window.setInterval(refresh, 2000);
@@ -61,7 +59,6 @@ export function App() {
   const commandMatches = useMemo(() => prompt.startsWith("/") ? composer.commands.filter((item) => item.startsWith(prompt.split(/\s/)[0])).slice(0, 6) : [], [prompt, composer.commands]);
   const skillQuery = prompt.match(/(?:^|\s)\$([\w-]*)$/)?.[1]?.toLowerCase();
   const skillMatches = useMemo(() => skillQuery === undefined ? [] : composer.skills.filter((skill) => `${skill.identifier} ${skill.name} ${skill.description}`.toLowerCase().includes(skillQuery)).slice(0, 8), [skillQuery, composer.skills]);
-  const runningToolCount = useMemo(() => runtimeActivity.tools.filter((tool) => tool.status === "running").length, [runtimeActivity.tools]);
 
   function updateRun(runId: string, updater: (steps: RunStep[]) => RunStep[]) {
     setChat((current) => current.map((message) => message.id === runId ? { ...message, steps: updater(message.steps ?? []) } : message));
@@ -209,11 +206,7 @@ export function App() {
       <Heading size="lg">{t.appName}</Heading><Text color="#718096" mb="8">{t.webHarness}</Text>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.readOnly : item.access === "smart" ? t.smartApproval : t.workspaceWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <Box mt="4" p="3" border="1px solid" borderColor="#202a35" borderRadius="md" bg="#101820">
-        <Text fontSize="xs" color="#8290a3" mb="2">{t.runtimeActivity}</Text>
-        <Flex gap="3" wrap="wrap"><Text fontSize="sm">{t.tools}: {runtimeActivity.tools.length}</Text><Text fontSize="sm">{t.running}: {runningToolCount}</Text><Text fontSize="sm">{t.artifacts}: {runtimeActivity.artifacts.length}</Text></Flex>
-        {runtimeActivity.tools[0] && <Text mt="2" fontSize="xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{runtimeActivity.tools[0].name} · {runtimeActivity.tools[0].status === "running" ? t.toolRunning : runtimeActivity.tools[0].status === "completed" ? t.toolDone : t.toolFailed}</Text>}
-      </Box>
+      <RuntimeSidebar activity={runtimeActivity} messages={t} />
       <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
       <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} />
       <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" opacity={item.archived ? 0.58 : 1} variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}{item.archived ? ` · ${t.archived}` : ""}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>

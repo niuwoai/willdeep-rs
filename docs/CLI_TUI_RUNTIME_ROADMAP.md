@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc17
+> 当前实施版本：v0.21.0-rc18
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc18（已完成）：Web Activity API 在既有 Workspace 注册表与启动白名单双重约束内增加 Agent、Approval/Question Gate 和关注项计数；Agent 摘要不下发 Workspace、报告或内部错误。React 将 Runtime 侧栏拆为独立组件，展示 Agent 状态、轮次、待审批/回答详情、工具和产物统计；所有新增文案覆盖中英日。下一步为 Web Gate 增加审批/回答交互，并补 Agent 停止/重试/补充 Prompt。
 
 v0.21.0-rc17（已完成）：Agent Prompt/Wait、Approval Resolve、Question Answer、Event List 与 Workspace Ensure 参数从 daemon 私有结构提升为严格公共 DTO；Agent Command 与 Interaction Result 也改为不含私有 message/error 的稳定返回 DTO。Rust Client 新增 Workspace、Session、Agent、Turn、Task、Approval、Question 和 Event 高频类型化方法，修改操作显式接收幂等 Request ID；TUI bridge 的对应调用以及 Tool/Artifact 查询已迁移。跨语言夹具同步加入控制请求与结果。下一步补齐 Diff/Worktree 类型化 Client，并开始 Web 的 Agent/Inbox 详情交互。
 
