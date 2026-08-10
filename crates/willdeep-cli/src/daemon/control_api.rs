@@ -3,22 +3,67 @@ use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode, RuntimeCapab
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
 
-#[derive(Default)]
 pub(super) struct IdempotencyStore {
     state: AsyncMutex<IdempotencyState>,
+    path: Option<PathBuf>,
 }
 
 #[derive(Default)]
 struct IdempotencyState {
-    responses: HashMap<uuid::Uuid, CachedResponse>,
+    responses: HashMap<uuid::Uuid, StoredRequest>,
     order: std::collections::VecDeque<uuid::Uuid>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct CachedResponse {
-    fingerprint: u64,
-    status: StatusCode,
+    status: u16,
     body: ApiResponse<serde_json::Value>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredRequest {
+    fingerprint: u64,
+    response: Option<CachedResponse>,
+}
+
+impl Default for IdempotencyStore {
+    fn default() -> Self {
+        Self {
+            state: AsyncMutex::new(IdempotencyState::default()),
+            path: None,
+        }
+    }
+}
+
+impl IdempotencyStore {
+    pub(super) fn open(path: PathBuf) -> anyhow::Result<Self> {
+        let stored = if path.exists() {
+            serde_json::from_slice::<Vec<(uuid::Uuid, StoredRequest)>>(&std::fs::read(&path)?)?
+        } else {
+            Vec::new()
+        };
+        let mut state = IdempotencyState::default();
+        for (id, request) in stored.into_iter().rev().take(IDEMPOTENCY_CACHE_LIMIT).rev() {
+            state.order.push_back(id);
+            state.responses.insert(id, request);
+        }
+        Ok(Self {
+            state: AsyncMutex::new(state),
+            path: Some(path),
+        })
+    }
+
+    fn persist(&self, state: &IdempotencyState) -> anyhow::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let values = state
+            .order
+            .iter()
+            .filter_map(|id| state.responses.get(id).cloned().map(|value| (*id, value)))
+            .collect::<Vec<_>>();
+        write_json_atomic(path, &values)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,8 +155,8 @@ pub(super) async fn handler(
 async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Response {
     let fingerprint = request_fingerprint(&request);
     let mut cache = state.idempotency.state.lock().await;
-    if let Some(cached) = cache.responses.get(&request.request_id) {
-        if cached.fingerprint != fingerprint {
+    if let Some(stored) = cache.responses.get(&request.request_id) {
+        if stored.fingerprint != fingerprint {
             return error_response(
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
@@ -120,22 +165,59 @@ async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Respon
                 Some(request.request_id),
             );
         }
-        return (cached.status, Json(cached.body.clone())).into_response();
+        let Some(cached) = &stored.response else {
+            return error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::Unavailable,
+                "request outcome is uncertain after Runtime interruption; inspect current state before using a new request_id",
+                false,
+                Some(request.request_id),
+            );
+        };
+        return (
+            StatusCode::from_u16(cached.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(cached.body.clone()),
+        )
+            .into_response();
     }
-    let response = dispatch(state, request.clone()).await;
     cache.order.push_back(request.request_id);
     cache.responses.insert(
         request.request_id,
-        CachedResponse {
+        StoredRequest {
             fingerprint,
-            status: response.status,
-            body: response.body.clone(),
+            response: None,
+        },
+    );
+    if let Err(error) = state.idempotency.persist(&cache) {
+        eprintln!("persist pending Runtime request idempotency record: {error:#}");
+        cache.responses.remove(&request.request_id);
+        cache.order.retain(|id| *id != request.request_id);
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "failed to persist request idempotency record",
+            false,
+            Some(request.request_id),
+        );
+    }
+    let response = dispatch(state, request.clone()).await;
+    cache.responses.insert(
+        request.request_id,
+        StoredRequest {
+            fingerprint,
+            response: Some(CachedResponse {
+                status: response.status.as_u16(),
+                body: response.body.clone(),
+            }),
         },
     );
     while cache.order.len() > IDEMPOTENCY_CACHE_LIMIT {
         if let Some(id) = cache.order.pop_front() {
             cache.responses.remove(&id);
         }
+    }
+    if let Err(error) = state.idempotency.persist(&cache) {
+        eprintln!("persist completed Runtime request idempotency record: {error:#}");
     }
     response.into_response()
 }
@@ -185,6 +267,33 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         "agent.retry" => {
             agent_command(state, &request, agent_control::AgentCommandKind::Retry).await
         }
+        "task.list" => json(
+            state
+                .tasks
+                .list()
+                .await
+                .into_iter()
+                .map(public_task)
+                .collect::<Vec<_>>(),
+        ),
+        "task.get" => match params::<IdParams>(&request) {
+            Ok(params) => state
+                .tasks
+                .get(params.id)
+                .await
+                .map(public_task)
+                .map(json)
+                .unwrap_or_else(|| Err(ApiFailure::not_found("Runtime Task not found"))),
+            Err(error) => Err(error),
+        },
+        "task.cancel" => match params::<IdParams>(&request) {
+            Ok(params) => match state.tasks.cancel(params.id).await {
+                Ok(Some(task)) => json(public_task(task)),
+                Ok(None) => Err(ApiFailure::not_found("Runtime Task not found")),
+                Err(error) => Err(ApiFailure::internal(error)),
+            },
+            Err(error) => Err(error),
+        },
         "turn.get" => match params::<IdParams>(&request) {
             Ok(params) => match state.sessions.get_turn(params.id) {
                 Ok(Some(turn)) => json(public_turn(turn)),
@@ -199,11 +308,20 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
                 .pending_interactions()
                 .await
                 .into_iter()
-                .filter(|interaction| matches!(interaction.kind, InteractionKind::Approval { .. }))
+                .filter_map(public_approval)
                 .collect::<Vec<_>>();
             json(interactions)
         }
         "approval.resolve" => resolve_approval(state, &request).await,
+        "question.list" => json(
+            state
+                .tasks
+                .pending_interactions()
+                .await
+                .into_iter()
+                .filter_map(public_question)
+                .collect::<Vec<_>>(),
+        ),
         "question.answer" => answer_question(state, &request).await,
         "event.list" => match params::<EventListParams>(&request) {
             Ok(params) => json_result(
@@ -261,7 +379,12 @@ impl UnifiedResponse {
 fn is_mutating_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "agent.prompt" | "agent.stop" | "agent.retry" | "approval.resolve" | "question.answer"
+        "agent.prompt"
+            | "agent.stop"
+            | "agent.retry"
+            | "task.cancel"
+            | "approval.resolve"
+            | "question.answer"
     )
 }
 
@@ -381,6 +504,75 @@ fn public_agent(
     }
 }
 
+fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
+    use willdeep_runtime_protocol::TaskStatus as Target;
+
+    willdeep_runtime_protocol::RuntimeTask {
+        id: task.id,
+        session_id: task.session_id,
+        turn_id: task.turn_id,
+        agent_id: task.agent_id,
+        event_start_sequence: task.event_start_sequence,
+        status: match task.status {
+            RuntimeTaskStatus::Queued => Target::Queued,
+            RuntimeTaskStatus::Running => Target::Running,
+            RuntimeTaskStatus::Cancelling => Target::Cancelling,
+            RuntimeTaskStatus::WaitingApproval => Target::WaitingApproval,
+            RuntimeTaskStatus::WaitingAnswer => Target::WaitingAnswer,
+            RuntimeTaskStatus::Completed => Target::Completed,
+            RuntimeTaskStatus::Failed => Target::Failed,
+            RuntimeTaskStatus::Cancelled => Target::Cancelled,
+            RuntimeTaskStatus::Interrupted => Target::Interrupted,
+        },
+        workspace: Some(task.workspace.to_string_lossy().into_owned()),
+        profile: task.profile,
+        created_at: task.created_at,
+        started_at: task.started_at,
+        completed_at: task.completed_at,
+        exit_code: task.exit_code,
+    }
+}
+
+fn public_approval(
+    interaction: RuntimeInteraction,
+) -> Option<willdeep_runtime_protocol::PendingApproval> {
+    let InteractionKind::Approval {
+        description,
+        always_allow_available,
+    } = interaction.kind
+    else {
+        return None;
+    };
+    Some(willdeep_runtime_protocol::PendingApproval {
+        id: interaction.id,
+        task_id: interaction.task_id,
+        description,
+        always_allow_available,
+        created_at: interaction.created_at,
+    })
+}
+
+fn public_question(
+    interaction: RuntimeInteraction,
+) -> Option<willdeep_runtime_protocol::PendingQuestion> {
+    let InteractionKind::Question {
+        question,
+        options,
+        multi_select,
+    } = interaction.kind
+    else {
+        return None;
+    };
+    Some(willdeep_runtime_protocol::PendingQuestion {
+        id: interaction.id,
+        task_id: interaction.task_id,
+        question,
+        options,
+        multi_select,
+        created_at: interaction.created_at,
+    })
+}
+
 async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<AgentPromptParams>(request)?;
     let message = params.message.trim();
@@ -485,7 +677,12 @@ async fn resolve_interaction(
     resolution: InteractionResolution,
 ) -> ApiResult {
     match state.tasks.resolve_interaction(id, resolution).await {
-        Ok(Some(interaction)) => json(interaction),
+        Ok(Some(interaction)) => json(serde_json::json!({
+            "id": interaction.id,
+            "task_id": interaction.task_id,
+            "status": "resolved",
+            "resolved_at": interaction.resolved_at
+        })),
         Ok(None) => Err(ApiFailure::not_found("Runtime Interaction not found")),
         Err(error) => Err(ApiFailure {
             status: StatusCode::CONFLICT,
@@ -620,5 +817,62 @@ mod tests {
     fn internal_errors_are_redacted_from_clients() {
         let error = ApiFailure::internal("/private/path contains provider-secret");
         assert_eq!(error.message, "internal Runtime error");
+    }
+
+    #[tokio::test]
+    async fn idempotency_store_persists_pending_and_completed_without_request_params() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-idempotency-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("idempotency.json");
+        let id = uuid::Uuid::new_v4();
+        let store = IdempotencyStore::open(path.clone()).unwrap();
+        {
+            let mut state = store.state.lock().await;
+            state.order.push_back(id);
+            state.responses.insert(
+                id,
+                StoredRequest {
+                    fingerprint: 42,
+                    response: None,
+                },
+            );
+            store.persist(&state).unwrap();
+        }
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("secret prompt"));
+        let reopened = IdempotencyStore::open(path.clone()).unwrap();
+        assert!(
+            reopened
+                .state
+                .lock()
+                .await
+                .responses
+                .get(&id)
+                .unwrap()
+                .response
+                .is_none()
+        );
+        {
+            let mut state = reopened.state.lock().await;
+            state.responses.get_mut(&id).unwrap().response = Some(CachedResponse {
+                status: 200,
+                body: ApiResponse::ok(serde_json::json!({"status": "resolved"}), "test", Some(id)),
+            });
+            reopened.persist(&state).unwrap();
+        }
+        let completed = IdempotencyStore::open(path).unwrap();
+        assert!(
+            completed
+                .state
+                .lock()
+                .await
+                .responses
+                .get(&id)
+                .unwrap()
+                .response
+                .is_some()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

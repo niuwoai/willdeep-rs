@@ -322,14 +322,36 @@ pub(crate) async fn runtime_events(
     };
     probe(&state).await?;
     let workspace = workspace.canonicalize()?;
-    let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
+    let tasks = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTask>>(
+                "task.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
     let visible_tasks = tasks
         .into_iter()
-        .filter(|task| task.workspace == workspace)
+        .filter(|task| {
+            task.workspace
+                .as_deref()
+                .map(Path::new)
+                .and_then(|path| path.canonicalize().ok())
+                .is_some_and(|path| path == workspace)
+        })
         .map(|task| (task.id, task.session_id))
         .collect::<HashMap<_, _>>();
-    Ok(fetch_events(&state, after)
-        .await?
+    let events = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<RuntimeEvent>>(
+                "event.list",
+                &serde_json::json!({"after": after, "limit": 200}),
+                None,
+            )
+            .await?,
+    )?;
+    Ok(events
         .into_iter()
         .map(|event| {
             let session_id = event_task_id(&event.message)
@@ -491,62 +513,86 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         .map(remote_agent)
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| (agent.parent_id.is_some(), agent.parent_id, agent.id));
-    let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
+    let tasks = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTask>>(
+                "task.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
     let visible_tasks = tasks
         .iter()
-        .filter(|task| task.workspace == workspace)
+        .filter(|task| {
+            task.workspace
+                .as_deref()
+                .map(Path::new)
+                .and_then(|path| path.canonicalize().ok())
+                .is_some_and(|path| path == workspace)
+        })
         .map(|task| task.id)
         .collect::<std::collections::HashSet<_>>();
-    let interactions: Vec<RuntimeInteraction> =
-        authorized_get::<Vec<RuntimeInteraction>>(&state, "/v1/interactions")
-            .await?
-            .into_iter()
-            .filter(|interaction| visible_tasks.contains(&interaction.task_id))
-            .collect();
+    let approvals = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::PendingApproval>>(
+                "approval.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
+    let questions = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::PendingQuestion>>(
+                "question.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
     let mut attention = tasks
         .into_iter()
         .filter(|task| visible_tasks.contains(&task.id))
         .filter(|task| runtime_task_visible(task, now()))
-        .filter(|task| task.status != RuntimeTaskStatus::Queued)
+        .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
         .map(runtime_task_attention)
         .collect::<Vec<_>>();
     let mut gates = Vec::new();
-    for interaction in interactions {
-        let item = match &interaction.kind {
-            InteractionKind::Approval { description, .. } => {
-                gates.push(RemoteGate::Approval {
-                    id: interaction.id,
-                    task_id: interaction.task_id,
-                    description: description.clone(),
-                    always_allow_available: matches!(
-                        interaction.kind,
-                        InteractionKind::Approval {
-                            always_allow_available: true,
-                            ..
-                        }
-                    ),
-                });
-                willdeep_core::AttentionItem::approval(description.clone())
-            }
-            InteractionKind::Question {
-                question,
-                options,
-                multi_select,
-            } => {
-                gates.push(RemoteGate::Question {
-                    id: interaction.id,
-                    task_id: interaction.task_id,
-                    question: question.clone(),
-                    options: options.clone(),
-                    multi_select: *multi_select,
-                });
-                willdeep_core::AttentionItem::question(question.clone())
-            }
-        };
+    for approval in approvals
+        .into_iter()
+        .filter(|approval| visible_tasks.contains(&approval.task_id))
+    {
+        gates.push(RemoteGate::Approval {
+            id: approval.id,
+            task_id: approval.task_id,
+            description: approval.description.clone(),
+            always_allow_available: approval.always_allow_available,
+        });
+        let item = willdeep_core::AttentionItem::approval(approval.description);
         attention.push(willdeep_core::AttentionItem {
-            id: format!("runtime-interaction:{}", interaction.id),
+            id: format!("runtime-interaction:{}", approval.id),
             title: item.title,
-            detail: format!("Runtime task {}\n{}", interaction.task_id, item.detail),
+            detail: format!("Runtime task {}\n{}", approval.task_id, item.detail),
+            ..item
+        });
+    }
+    for question in questions
+        .into_iter()
+        .filter(|question| visible_tasks.contains(&question.task_id))
+    {
+        gates.push(RemoteGate::Question {
+            id: question.id,
+            task_id: question.task_id,
+            question: question.question.clone(),
+            options: question.options.clone(),
+            multi_select: question.multi_select,
+        });
+        let item = willdeep_core::AttentionItem::question(question.question);
+        attention.push(willdeep_core::AttentionItem {
+            id: format!("runtime-interaction:{}", question.id),
+            title: item.title,
+            detail: format!("Runtime task {}\n{}", question.task_id, item.detail),
             ..item
         });
     }
@@ -647,19 +693,19 @@ fn api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T>
     }
 }
 
-fn runtime_task_attention(task: RuntimeTask) -> willdeep_core::AttentionItem {
+fn runtime_task_attention(
+    task: willdeep_runtime_protocol::RuntimeTask,
+) -> willdeep_core::AttentionItem {
+    use willdeep_runtime_protocol::TaskStatus;
+
     let status = match task.status {
-        RuntimeTaskStatus::Queued | RuntimeTaskStatus::Running => {
-            willdeep_core::RuntimeStatus::Working
-        }
-        RuntimeTaskStatus::Cancelling => willdeep_core::RuntimeStatus::Working,
-        RuntimeTaskStatus::WaitingApproval => willdeep_core::RuntimeStatus::WaitingApproval,
-        RuntimeTaskStatus::WaitingAnswer => willdeep_core::RuntimeStatus::WaitingAnswer,
-        RuntimeTaskStatus::Completed => willdeep_core::RuntimeStatus::Done,
-        RuntimeTaskStatus::Failed | RuntimeTaskStatus::Interrupted => {
-            willdeep_core::RuntimeStatus::Failed
-        }
-        RuntimeTaskStatus::Cancelled => willdeep_core::RuntimeStatus::Cancelled,
+        TaskStatus::Queued | TaskStatus::Running => willdeep_core::RuntimeStatus::Working,
+        TaskStatus::Cancelling => willdeep_core::RuntimeStatus::Working,
+        TaskStatus::WaitingApproval => willdeep_core::RuntimeStatus::WaitingApproval,
+        TaskStatus::WaitingAnswer => willdeep_core::RuntimeStatus::WaitingAnswer,
+        TaskStatus::Completed => willdeep_core::RuntimeStatus::Done,
+        TaskStatus::Failed | TaskStatus::Interrupted => willdeep_core::RuntimeStatus::Failed,
+        TaskStatus::Cancelled => willdeep_core::RuntimeStatus::Cancelled,
     };
     willdeep_core::AttentionItem {
         id: format!("runtime-task:{}", task.id),
@@ -667,12 +713,9 @@ fn runtime_task_attention(task: RuntimeTask) -> willdeep_core::AttentionItem {
         status,
         title: format!("Runtime task {}", task.id),
         detail: format!(
-            "Workspace: {}\nStatus: {:?}\nPID: {}\nError: {}",
-            task.workspace.display(),
-            task.status,
-            task.pid
-                .map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
-            task.error.unwrap_or_default()
+            "Workspace: {}\nStatus: {:?}",
+            task.workspace.as_deref().unwrap_or("-"),
+            task.status
         ),
         elapsed_millis: task
             .started_at
@@ -680,10 +723,14 @@ fn runtime_task_attention(task: RuntimeTask) -> willdeep_core::AttentionItem {
     }
 }
 
-pub(super) fn runtime_task_visible(task: &RuntimeTask, timestamp: u64) -> bool {
+pub(super) fn runtime_task_visible(
+    task: &willdeep_runtime_protocol::RuntimeTask,
+    timestamp: u64,
+) -> bool {
     !matches!(
         task.status,
-        RuntimeTaskStatus::Completed | RuntimeTaskStatus::Cancelled
+        willdeep_runtime_protocol::TaskStatus::Completed
+            | willdeep_runtime_protocol::TaskStatus::Cancelled
     ) || task
         .completed_at
         .is_some_and(|completed| timestamp.saturating_sub(completed) <= 5 * 60)
@@ -730,16 +777,9 @@ pub(crate) async fn answer_remote_question(
 
 pub(crate) async fn cancel_remote_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/tasks/{id}/stop", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected task cancellation: HTTP {}",
-            response.status()
-        );
-    }
-    Ok(())
+    let response: willdeep_runtime_protocol::ApiResponse<willdeep_runtime_protocol::RuntimeTask> =
+        runtime_client(&state)?
+            .call("task.cancel", &serde_json::json!({"id": id}), None)
+            .await?;
+    api_data(response).map(|_| ())
 }

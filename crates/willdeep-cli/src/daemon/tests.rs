@@ -44,21 +44,19 @@ fn state_round_trips_without_exposing_token_in_logs() {
 
 #[test]
 fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
-    let task = |completed_at| RuntimeTask {
+    let task = |completed_at| willdeep_runtime_protocol::RuntimeTask {
         id: uuid::Uuid::new_v4(),
         session_id: None,
         turn_id: None,
         agent_id: None,
         event_start_sequence: 0,
-        status: RuntimeTaskStatus::Completed,
-        workspace: std::env::temp_dir(),
+        status: willdeep_runtime_protocol::TaskStatus::Completed,
+        workspace: Some(std::env::temp_dir().to_string_lossy().into_owned()),
         profile: None,
-        pid: None,
         created_at: 1,
         started_at: Some(10),
         completed_at: Some(completed_at),
         exit_code: Some(0),
-        error: None,
     };
     assert!(tui_bridge::runtime_task_visible(&task(700), 1_000));
     assert!(!tui_bridge::runtime_task_visible(&task(699), 1_000));

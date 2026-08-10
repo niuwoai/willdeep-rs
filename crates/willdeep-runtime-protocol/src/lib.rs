@@ -184,6 +184,55 @@ pub struct RuntimeAgent {
     pub completed_at: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Queued,
+    Running,
+    Cancelling,
+    WaitingApproval,
+    WaitingAnswer,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTask {
+    pub id: uuid::Uuid,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub agent_id: Option<uuid::Uuid>,
+    pub event_start_sequence: u64,
+    pub status: TaskStatus,
+    pub workspace: Option<String>,
+    pub profile: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub description: String,
+    pub always_allow_available: bool,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingQuestion {
+    pub id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub question: String,
+    pub options: Vec<String>,
+    pub multi_select: bool,
+    pub created_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolLimits {
     pub max_event_page: u32,
@@ -282,11 +331,15 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "agent.wait",
     "agent.stop",
     "agent.retry",
+    "task.list",
+    "task.get",
+    "task.cancel",
     "turn.submit",
     "turn.get",
     "turn.stop",
     "approval.list",
     "approval.resolve",
+    "question.list",
     "question.answer",
     "event.list",
     "event.stream",
@@ -451,5 +504,34 @@ mod tests {
         assert!(json.get("prompt").is_none());
         assert!(json.get("attachments").is_none());
         assert!(json.get("error").is_none());
+
+        let task = RuntimeTask {
+            id: uuid::Uuid::new_v4(),
+            session_id: Some(session.id),
+            turn_id: Some(turn.id),
+            agent_id: None,
+            event_start_sequence: 1,
+            status: TaskStatus::Running,
+            workspace: Some("/workspace".to_owned()),
+            profile: None,
+            created_at: 1,
+            started_at: Some(2),
+            completed_at: None,
+            exit_code: None,
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(json.get("pid").is_none());
+        assert!(json.get("error").is_none());
+
+        let approval = PendingApproval {
+            id: uuid::Uuid::new_v4(),
+            task_id: task.id,
+            description: "run tests".to_owned(),
+            always_allow_available: true,
+            created_at: 1,
+        };
+        let json = serde_json::to_value(&approval).unwrap();
+        assert!(json.get("resolution").is_none());
+        assert!(json.get("resolved_at").is_none());
     }
 }

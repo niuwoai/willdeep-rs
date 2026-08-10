@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.21.0-rc4] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增稳定 Runtime Task、Pending Approval 和 Pending Question DTO，以及 `task.list/get/cancel`、`question.list` 统一操作。
+- 修改类统一请求新增私有持久幂等日志：执行前记录 Pending，完成后记录响应；Runtime 重启后相同 Request ID 返回原响应，崩溃窗口中的不确定请求拒绝自动重放。
+
+### Changed
+
+- TUI Attention Inbox 的 Task、审批和问题列表改走共享 Runtime Client；取消后台 Task 改用幂等 `task.cancel`。
+- Web/TUI 的事件补读改用统一 `event.list`，不再读取旧原始事件端点；实时 TUI 继续使用共享 NDJSON Client。
+- 审批和问题解决响应只返回 ID、Task ID、Resolved 状态与时间，不回显审批描述、回答正文或内部 Interaction 存储字段。
+
+### Security
+
+- 公开 Task DTO 不包含 PID 和内部错误；Pending DTO 不包含 Resolution、回答正文或解决时间。
+- 幂等文件仅保存参数指纹和脱敏响应，不保存原始 Prompt、Agent 指令或用户回答；Pending 日志落盘失败时不会执行修改操作。
+
 ## [0.21.0-rc3] - 2026-08-11
 
 ### Added

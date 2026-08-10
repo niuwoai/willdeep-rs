@@ -1535,7 +1535,9 @@ async fn run(home: &Path) -> Result<()> {
         sessions: sessions.clone(),
         workspaces: tasks.workspaces.clone(),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
-        idempotency: Arc::new(control_api::IdempotencyStore::default()),
+        idempotency: Arc::new(control_api::IdempotencyStore::open(
+            paths.idempotency.clone(),
+        )?),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
@@ -2033,6 +2035,7 @@ struct DaemonPaths {
     tasks: PathBuf,
     agents: PathBuf,
     agent_commands: PathBuf,
+    idempotency: PathBuf,
     runtime_sessions: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
@@ -2048,6 +2051,7 @@ impl DaemonPaths {
             tasks: directory.join("tasks.json"),
             agents: directory.join("agents.json"),
             agent_commands: directory.join("agent-commands.json"),
+            idempotency: directory.join("idempotency.json"),
             runtime_sessions: directory.join("sessions.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
