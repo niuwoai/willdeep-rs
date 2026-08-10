@@ -26,14 +26,16 @@ const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 
 mod agent_control;
 mod agent_store;
+mod event_stream;
 pub(crate) mod tui_bridge;
+use agent_control::AgentCommandStore;
 pub(crate) use agent_control::start_agent_command_watcher;
-use agent_control::{AgentCommandKind, AgentCommandStore, ResolveAgentCommand};
 use agent_store::{AgentStore, RuntimeAgentStatus};
+use event_stream::EventLog;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    resolve_remote_approval, retry_remote_agent, runtime_event_head, runtime_events,
-    runtime_snapshot, stop_remote_agent,
+    resolve_remote_approval, retry_remote_agent, runtime_event_head, runtime_snapshot,
+    start_runtime_event_follower, stop_remote_agent,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -132,15 +134,6 @@ struct RuntimeEvent {
     timestamp: u64,
     kind: String,
     message: String,
-}
-
-struct EventLog {
-    path: PathBuf,
-    state: Mutex<EventLogState>,
-}
-
-struct EventLogState {
-    next_sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,8 +284,12 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
-        DaemonAction::StopAgent { id } => control_agent(&home, id, AgentCommandKind::Stop).await,
-        DaemonAction::RetryAgent { id } => control_agent(&home, id, AgentCommandKind::Retry).await,
+        DaemonAction::StopAgent { id } => {
+            agent_control::control_agent(&home, id, agent_control::AgentCommandKind::Stop).await
+        }
+        DaemonAction::RetryAgent { id } => {
+            agent_control::control_agent(&home, id, agent_control::AgentCommandKind::Retry).await
+        }
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -432,31 +429,6 @@ async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     let agent: agent_store::RuntimeAgent =
         authorized_get(&state, &format!("/v1/agents/{id}")).await?;
     print_agent(&agent);
-    Ok(())
-}
-
-async fn control_agent(home: &Path, id: uuid::Uuid, kind: AgentCommandKind) -> Result<()> {
-    let state = ensure_running(home).await?;
-    let action = match kind {
-        AgentCommandKind::Stop => "stop",
-        AgentCommandKind::Retry => "retry",
-    };
-    let response = client()
-        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Agent {action}: {}",
-            response.text().await?
-        );
-    }
-    let command: agent_control::AgentCommand = response.json().await?;
-    println!(
-        "agent_command\tid={}\tagent={}\taction={:?}\tstatus={:?}",
-        command.id, command.agent_id, command.kind, command.status
-    );
     Ok(())
 }
 
@@ -895,17 +867,30 @@ async fn run(home: &Path) -> Result<()> {
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/events", get(events_handler))
+        .route(
+            "/v1/events/stream",
+            get(event_stream::events_stream_handler),
+        )
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))
-        .route("/v1/agents/{id}/stop", post(stop_agent_handler))
-        .route("/v1/agents/{id}/retry", post(retry_agent_handler))
+        .route(
+            "/v1/agents/{id}/stop",
+            post(agent_control::stop_agent_handler),
+        )
+        .route(
+            "/v1/agents/{id}/retry",
+            post(agent_control::retry_agent_handler),
+        )
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
-        .route("/v1/tasks/{id}/agent-commands", get(agent_commands_handler))
+        .route(
+            "/v1/tasks/{id}/agent-commands",
+            get(agent_control::agent_commands_handler),
+        )
         .route(
             "/v1/tasks/{task_id}/agent-commands/{command_id}/resolve",
-            post(resolve_agent_command_handler),
+            post(agent_control::resolve_agent_command_handler),
         )
         .route(
             "/v1/tasks/{id}/interactions",
@@ -1041,122 +1026,6 @@ async fn agent_handler(
         .map(Json)
         .map(IntoResponse::into_response)
         .ok_or(StatusCode::NOT_FOUND)
-}
-
-async fn stop_agent_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<uuid::Uuid>,
-) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop).await
-}
-
-async fn retry_agent_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<uuid::Uuid>,
-) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry).await
-}
-
-async fn enqueue_agent_command(
-    state: &ServerState,
-    headers: &HeaderMap,
-    id: uuid::Uuid,
-    kind: AgentCommandKind,
-) -> Result<Response, StatusCode> {
-    authorize(state, headers)?;
-    let agent = state
-        .agents
-        .get(id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    if agent.parent_id.is_none() || !agent.background {
-        return Err(StatusCode::CONFLICT);
-    }
-    let task = state
-        .tasks
-        .get(agent.task_id)
-        .await
-        .ok_or(StatusCode::NOT_FOUND)?;
-    if !matches!(
-        task.status,
-        RuntimeTaskStatus::Running
-            | RuntimeTaskStatus::WaitingApproval
-            | RuntimeTaskStatus::WaitingAnswer
-    ) {
-        return Err(StatusCode::CONFLICT);
-    }
-    let valid_status = match kind {
-        AgentCommandKind::Stop => agent.status == RuntimeAgentStatus::Running,
-        AgentCommandKind::Retry => matches!(
-            agent.status,
-            RuntimeAgentStatus::Blocked
-                | RuntimeAgentStatus::Completed
-                | RuntimeAgentStatus::Failed
-                | RuntimeAgentStatus::Cancelled
-                | RuntimeAgentStatus::Interrupted
-        ),
-    };
-    if !valid_status {
-        return Err(StatusCode::CONFLICT);
-    }
-    let command = state
-        .agent_commands
-        .enqueue(agent.task_id, agent.id, kind)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .events
-        .append(
-            "agent.command_requested",
-            format!(
-                "task_id={} agent_id={} command_id={} kind={kind:?}",
-                agent.task_id, agent.id, command.id
-            ),
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
-}
-
-async fn agent_commands_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    AxumPath(task_id): AxumPath<uuid::Uuid>,
-) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
-    if state.tasks.get(task_id).await.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let commands = state
-        .agent_commands
-        .pending_for_task(task_id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(commands).into_response())
-}
-
-async fn resolve_agent_command_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    AxumPath((task_id, command_id)): AxumPath<(uuid::Uuid, uuid::Uuid)>,
-    Json(resolution): Json<ResolveAgentCommand>,
-) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
-    let command = state
-        .agent_commands
-        .resolve(task_id, command_id, resolution)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    state
-        .events
-        .append(
-            "agent.command_resolved",
-            format!(
-                "task_id={} agent_id={} command_id={} status={:?}",
-                command.task_id, command.agent_id, command.id, command.status
-            ),
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(command).into_response())
 }
 
 async fn task_handler(
@@ -1338,48 +1207,6 @@ impl DaemonPaths {
             interactions: directory.join("interactions.json"),
             directory,
         }
-    }
-}
-
-impl EventLog {
-    fn open(path: PathBuf) -> Result<Self> {
-        let next_sequence = read_events(&path, 0, usize::MAX)?
-            .last()
-            .map_or(1, |event| event.sequence.saturating_add(1));
-        Ok(Self {
-            path,
-            state: Mutex::new(EventLogState { next_sequence }),
-        })
-    }
-
-    fn append(&self, kind: impl Into<String>, message: impl Into<String>) -> Result<RuntimeEvent> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Runtime event log lock poisoned"))?;
-        let event = RuntimeEvent {
-            sequence: state.next_sequence,
-            timestamp: now(),
-            kind: kind.into(),
-            message: message.into(),
-        };
-        let mut file = append_log(&self.path)?;
-        serde_json::to_writer(&mut file, &event)?;
-        std::io::Write::write_all(&mut file, b"\n")?;
-        file.sync_data()?;
-        state.next_sequence = state.next_sequence.saturating_add(1);
-        Ok(event)
-    }
-
-    fn read_after(&self, after: u64, limit: usize) -> Result<Vec<RuntimeEvent>> {
-        read_events(&self.path, after, limit)
-    }
-
-    fn latest_sequence(&self) -> u64 {
-        self.state
-            .lock()
-            .map(|state| state.next_sequence.saturating_sub(1))
-            .unwrap_or_default()
     }
 }
 

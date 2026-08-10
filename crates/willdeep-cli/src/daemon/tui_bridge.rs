@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt;
 
 #[derive(Clone)]
 pub(crate) enum RemoteGate {
@@ -89,6 +90,143 @@ pub(crate) async fn runtime_events(
             }
         })
         .collect())
+}
+
+pub(crate) struct RuntimeEventFollower(tokio::task::JoinHandle<()>);
+
+impl Drop for RuntimeEventFollower {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(crate) fn start_runtime_event_follower(
+    home: PathBuf,
+    after: u64,
+    workspace: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<RemoteRuntimeEvent>>,
+) -> RuntimeEventFollower {
+    RuntimeEventFollower(tokio::spawn(async move {
+        let _ = follow_runtime_events(home, after, workspace, tx).await;
+    }))
+}
+
+async fn follow_runtime_events(
+    home: PathBuf,
+    after: u64,
+    workspace: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<RemoteRuntimeEvent>>,
+) -> Result<()> {
+    let workspace = workspace.canonicalize()?;
+    let mut cursor = after;
+    while !tx.is_closed() {
+        if follow_runtime_events_once(&home, &mut cursor, &workspace, &tx)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn follow_runtime_events_once(
+    home: &Path,
+    cursor: &mut u64,
+    workspace: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<Vec<RemoteRuntimeEvent>>,
+) -> Result<()> {
+    let state = load_state(&DaemonPaths::new(home).state)?;
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .build()?
+        .get(format!(
+            "http://{}/v1/events/stream?after={}&limit=1000",
+            state.address, *cursor
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .send()
+        .await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        let events = runtime_events(home, *cursor, workspace).await?;
+        *cursor = events
+            .iter()
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or(*cursor);
+        let _ = tx.send(events);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        bail!("Runtime event stream returned HTTP {}", response.status());
+    }
+    let mut stream = response.bytes_stream();
+    let mut decoder = SseDecoder::default();
+    let mut visible_tasks = HashMap::<uuid::Uuid, bool>::new();
+    while let Some(chunk) = stream.next().await {
+        for event in decoder.push(&chunk?) {
+            *cursor = (*cursor).max(event.sequence);
+            let visible = if let Some(task_id) = event_task_id(&event.message) {
+                if let Some(visible) = visible_tasks.get(&task_id) {
+                    *visible
+                } else {
+                    let task =
+                        authorized_get::<RuntimeTask>(&state, &format!("/v1/tasks/{task_id}"))
+                            .await
+                            .ok();
+                    let visible = task
+                        .as_ref()
+                        .is_some_and(|task| task.workspace == workspace);
+                    if task.is_some() {
+                        visible_tasks.insert(task_id, visible);
+                    }
+                    visible
+                }
+            } else {
+                false
+            };
+            if tx
+                .send(vec![RemoteRuntimeEvent {
+                    sequence: event.sequence,
+                    kind: event.kind,
+                    message: event.message,
+                    visible,
+                }])
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct SseDecoder {
+    buffer: Vec<u8>,
+}
+
+impl SseDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Vec<RuntimeEvent> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some(end) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.buffer.drain(..=end).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let Some(data) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            if let Ok(event) = serde_json::from_slice::<RuntimeEvent>(data) {
+                events.push(event);
+            }
+        }
+        events
+    }
 }
 
 fn event_task_id(message: &str) -> Option<uuid::Uuid> {
@@ -334,4 +472,37 @@ async fn resolve_interaction_quiet(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn sse_decoder_handles_split_utf8_and_multiple_events() {
+        let first = RuntimeEvent {
+            sequence: 7,
+            timestamp: 1,
+            kind: "模型.事件".to_owned(),
+            message: "中文消息".to_owned(),
+        };
+        let second = RuntimeEvent {
+            sequence: 8,
+            timestamp: 2,
+            kind: "task.completed".to_owned(),
+            message: "done".to_owned(),
+        };
+        let payload = format!(
+            "id: 7\nevent: runtime\ndata: {}\n\nid: 8\ndata: {}\n\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        let split = payload.find("中文").unwrap() + 1;
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.push(&payload.as_bytes()[..split]).is_empty());
+        assert_eq!(
+            decoder.push(&payload.as_bytes()[split..]),
+            vec![first, second]
+        );
+    }
 }

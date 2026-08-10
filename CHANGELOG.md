@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.16.0-rc9] - 2026-08-10
+
+### Added
+
+- Runtime 新增受 Token 保护的 `GET /v1/events/stream` SSE 事件流；连接时从指定游标分页补齐持久事件，随后实时推送新事件。
+- SSE 客户端落后广播窗口时自动从 NDJSON 日志继续追赶，并使用单调序号消除历史读取与实时广播交界处的重复事件。
+- TUI Runtime Bridge 使用可取消的长连接 follower 实时消费事件；连接旧版 Daemon 时自动回退到原轮询接口。
+
+### Changed
+
+- EventLog 与 SSE 实现拆入独立模块，Agent 控制 HTTP/CLI 处理器迁入 `agent_control`，Daemon 主文件恢复到 2000 行以内。
+
+### Security
+
+- SSE 端点沿用 Runtime 随机本地 Token 鉴权；TUI 仍按当前 Workspace 查询任务归属，不向会话展示其他 Workspace 的事件内容。
+
 ## [0.16.0-rc8] - 2026-08-10
 
 ### Added

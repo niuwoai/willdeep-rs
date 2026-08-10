@@ -375,6 +375,12 @@ async fn event_loop(
         mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
     let (runtime_event_tx, mut runtime_event_rx) =
         mpsc::unbounded_channel::<Vec<crate::daemon::RemoteRuntimeEvent>>();
+    let _runtime_event_follower = crate::daemon::start_runtime_event_follower(
+        runtime.home.clone(),
+        app.runtime_event_cursor,
+        runtime.runtime_submit.workspace.clone(),
+        runtime_event_tx,
+    );
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         draw(term, &mut app, &runtime.skills)?;
@@ -385,11 +391,6 @@ async fn event_loop(
                 let tx=runtime_snapshot_tx.clone();
                 let workspace=runtime.runtime_submit.workspace.clone();
                 tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace).await{let _=tx.send(snapshot);}});
-                let home=runtime.home.clone();
-                let tx=runtime_event_tx.clone();
-                let after=app.runtime_event_cursor;
-                let workspace=runtime.runtime_submit.workspace.clone();
-                tokio::spawn(async move {if let Ok(events)=crate::daemon::runtime_events(&home,after,&workspace).await{let _=tx.send(events);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 app.runtime_attention=snapshot.attention;

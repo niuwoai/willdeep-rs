@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.16.0-rc8
+> 当前实施版本：v0.16.0-rc9
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -62,7 +62,8 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
 - [x] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线，并按 Workspace 过滤和去重。
-- [ ] Unix Socket 与 Windows Named Pipe；实时事件推送、断线续传和请求去重。
+- [x] 受 Token 保护的 SSE 实时事件推送；按游标分页补读、慢客户端日志追赶、断线重连去重与 TUI 轮询降级。
+- [ ] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
 - [ ] 无损优雅升级与版本交接。
 
@@ -217,14 +218,14 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.16.0-rc8：后台任务保存稳定 Child Agent UUID，取消、失败、重试完整驱动 Agent 终态；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发 stop/retry 并接收确认，CLI 提供 `daemon stop-agent/retry-agent`，TUI Runtime 区可选择 Agent 后按 `K/R` 控制。下一批迁移交互式 Root Harness 与实时事件推送。
+v0.16.0-rc9：Runtime 新增受 Token 保护的 SSE 事件流，连接时按游标分页补齐 NDJSON 历史，再切换实时广播；广播积压时回读持久日志，TUI 使用可取消 follower 消费并对旧 Daemon 自动轮询降级。Agent 控制与 EventLog 已拆入模块，Daemon 主文件保持在 2000 行以内。下一批定义持久交互式 Session/Root Harness 协议。
 
 ## 6. 建议执行顺序
 
-1. 完成并发布 `v0.16.0-rc8`：Child Agent 稳定任务绑定、精确停止/重试与跨进程确认。
-2. 将交互式主 Harness 迁入 Runtime 原生生命周期。
+1. 完成并发布 `v0.16.0-rc9`：Runtime SSE、游标续传、积压追赶和 TUI 实时消费。
+2. 定义持久交互式 Session/Root Harness 协议，并将交互式主 Harness 迁入 Runtime 原生生命周期。
 3. 将剩余后台 Shell、审批、MCP 和附件迁入统一生命周期。
-4. 实现实时事件推送、断线续传、请求幂等以及跨平台本地传输。
+4. 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 5. 完成异常退出、守护进程重启和客户端重连的端到端测试。
 6. 实现完整会话恢复、Fork、归档、导出与搜索。
 7. 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
