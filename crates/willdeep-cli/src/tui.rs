@@ -118,6 +118,19 @@ struct App {
     skill_menu_dismissed: bool,
     command_selected: usize,
     command_menu_dismissed: bool,
+    focus: FocusPane,
+    sidebar_visible: bool,
+    sidebar_selected: usize,
+    sidebar_expanded: [bool; 4],
+    sidebar_scroll: usize,
+    sidebar_rect: Rect,
+    sidebar_wide: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPane {
+    Prompt,
+    Sidebar,
 }
 
 struct AskDialog {
@@ -273,6 +286,8 @@ async fn event_loop(
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
                     MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row),
+                    MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_move(-1),
+                    MouseEventKind::ScrollDown if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_move(1),
                     MouseEventKind::ScrollUp=>app.scroll_up(3),
                     MouseEventKind::ScrollDown=>app.scroll_down(3),
                     _=>{}
@@ -291,6 +306,35 @@ async fn event_loop(
                     if let Some((_,always,sender))=app.approval.take(){
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('b'){
+                        if app.sidebar_wide {
+                            app.sidebar_visible = !app.sidebar_visible;
+                            if !app.sidebar_visible {app.focus=FocusPane::Prompt;}
+                        } else if app.focus==FocusPane::Sidebar {
+                            app.focus=FocusPane::Prompt;
+                        } else {
+                            app.sidebar_visible=true;
+                            app.focus=FocusPane::Sidebar;
+                        }
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('w'){
+                        app.sidebar_visible=true;
+                        app.focus=if app.focus==FocusPane::Prompt {FocusPane::Sidebar}else{FocusPane::Prompt};
+                        continue;
+                    }
+                    if app.focus==FocusPane::Sidebar {
+                        match key.code {
+                            KeyCode::Esc=>app.focus=FocusPane::Prompt,
+                            KeyCode::Up=>app.sidebar_move(-1),
+                            KeyCode::Down=>app.sidebar_move(1),
+                            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT)=>app.sidebar_move(-1),
+                            KeyCode::Tab=>app.sidebar_move(1),
+                            KeyCode::Enter|KeyCode::Char(' ')=>app.sidebar_toggle(),
+                            _=>{}
+                        }
+                        continue;
                     }
                     if app.handle_command_key(key) || app.handle_skill_key(key, &runtime.skills) { continue; }
                     match key.code {
@@ -390,7 +434,26 @@ impl App {
             skill_menu_dismissed: false,
             command_selected: 0,
             command_menu_dismissed: false,
+            focus: FocusPane::Prompt,
+            sidebar_visible: true,
+            sidebar_selected: 0,
+            sidebar_expanded: [true, true, true, true],
+            sidebar_scroll: 0,
+            sidebar_rect: Rect::default(),
+            sidebar_wide: false,
         }
+    }
+    fn sidebar_move(&mut self, delta: isize) {
+        self.focus = FocusPane::Sidebar;
+        self.sidebar_selected = if delta < 0 {
+            self.sidebar_selected.checked_sub(1).unwrap_or(3)
+        } else {
+            (self.sidebar_selected + 1) % 4
+        };
+    }
+    fn sidebar_toggle(&mut self) {
+        self.sidebar_expanded[self.sidebar_selected] =
+            !self.sidebar_expanded[self.sidebar_selected];
     }
     fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
@@ -667,7 +730,10 @@ impl App {
         }
     }
     fn handle_mouse(&mut self, x: u16, y: u16) {
-        if self.prompt_rect.contains((x, y).into()) {
+        if self.sidebar_rect.contains((x, y).into()) {
+            self.focus = FocusPane::Sidebar;
+        } else if self.prompt_rect.contains((x, y).into()) {
+            self.focus = FocusPane::Prompt;
             let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
             let col = x.saturating_sub(self.prompt_rect.x + 1) as usize;
             self.input.set_cursor_visual(
@@ -938,7 +1004,9 @@ fn draw(
     skills: &SkillCatalog,
 ) -> Result<()> {
     term.draw(|f| {
-        let columns = if f.area().width >= 110 {
+        app.sidebar_wide = f.area().width >= 110;
+        let wide_sidebar = app.sidebar_visible && app.sidebar_wide;
+        let columns = if wide_sidebar {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(76), Constraint::Percentage(24)])
@@ -1113,7 +1181,9 @@ fn draw(
         );
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
-        f.set_cursor_position((cursor_x, cursor_y));
+        if app.focus == FocusPane::Prompt {
+            f.set_cursor_position((cursor_x, cursor_y));
+        }
         let status = app.notice.take().unwrap_or_else(|| {
             let input = app.latest_usage.input_tokens.unwrap_or(0);
             let output = app.latest_usage.output_tokens.unwrap_or(0);
@@ -1144,70 +1214,24 @@ fn draw(
             }
         });
         f.render_widget(Paragraph::new(status), areas[4]);
-        if columns[1].width > 0 {
-            let relay = if app.mobile_gateway.is_some() {
-                app.language.text("已连接", "connected", "接続済み")
+        app.sidebar_rect = Rect::default();
+        if app.sidebar_visible && (wide_sidebar || app.focus == FocusPane::Sidebar) {
+            let sidebar = if wide_sidebar {
+                columns[1]
             } else {
-                app.language.text("关闭", "off", "オフ")
-            };
-            let agent = if app.running {
-                app.language.text("运行中", "running", "実行中")
-            } else {
-                app.language.text("空闲", "idle", "待機中")
-            };
-            let jobs = app
-                .background_tasks
-                .iter()
-                .take(8)
-                .map(|task| {
-                    format!(
-                        "{} · {:?} · {:.1}s\n  {}",
-                        task.id,
-                        task.status,
-                        task.elapsed_millis as f64 / 1000.0,
-                        task.label
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let background = format!(
-                "{}\n\n{}: {agent}\n{}: {relay}\n{}: {}\n{}: {}/{}\n{}: {}\n\n{}",
-                app.workspace_status,
-                app.language.text("智能体", "Agent", "エージェント"),
-                app.language.text("中继", "Relay", "リレー"),
-                app.language
-                    .text("手机队列", "Phone queue", "モバイルキュー"),
-                app.mobile_queue.len(),
-                app.language
-                    .text("工具完成", "Tools complete", "ツール完了"),
-                app.tools.completed,
-                app.tools.requested,
-                app.language.text("失败", "Failed", "失敗"),
-                app.tools.failed,
-                if jobs.is_empty() {
-                    app.language.text(
-                        "没有后台任务",
-                        "No background tasks",
-                        "バックグラウンドタスクなし",
-                    )
-                } else {
-                    &jobs
+                let width = f.area().width.min(46);
+                Rect {
+                    x: f.area().right().saturating_sub(width),
+                    y: f.area().y,
+                    width,
+                    height: f.area().height,
                 }
-            );
-            f.render_widget(
-                Paragraph::new(background)
-                    .block(
-                        Block::default()
-                            .title(app.language.text(
-                                "工作区 · 后台任务",
-                                "Workspace · Background",
-                                "ワークスペース · バックグラウンド",
-                            ))
-                            .borders(Borders::ALL),
-                    )
-                    .wrap(Wrap { trim: false }),
-                columns[1],
-            );
+            };
+            app.sidebar_rect = sidebar;
+            if !wide_sidebar {
+                f.render_widget(Clear, sidebar);
+            }
+            render_sidebar(f, app, sidebar);
         }
         let command_matches = app.command_matches();
         if !app.command_menu_dismissed
@@ -1547,6 +1571,143 @@ fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
             language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
         ),
     ]
+}
+
+fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
+    let relay = if app.mobile_gateway.is_some() {
+        app.language.text("已连接", "connected", "接続済み")
+    } else {
+        app.language.text("关闭", "off", "オフ")
+    };
+    let agent = if app.running {
+        app.language.text("运行中", "running", "実行中")
+    } else {
+        app.language.text("空闲", "idle", "待機中")
+    };
+    let titles = [
+        app.language.text("工作区", "Workspace", "ワークスペース"),
+        app.language.text("运行状态", "Runtime", "実行状態"),
+        app.language
+            .text("后台任务", "Background tasks", "バックグラウンドタスク"),
+        app.language
+            .text("移动中继", "Mobile relay", "モバイルリレー"),
+    ];
+    let mut lines = Vec::new();
+    let mut headers = [0usize; 4];
+    for (section, title) in titles.into_iter().enumerate() {
+        headers[section] = lines.len();
+        let selected = app.focus == FocusPane::Sidebar && app.sidebar_selected == section;
+        let marker = if app.sidebar_expanded[section] {
+            "▾"
+        } else {
+            "▸"
+        };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::styled(format!("{marker} {title}"), style));
+        if !app.sidebar_expanded[section] {
+            continue;
+        }
+        match section {
+            0 => lines.extend(
+                app.workspace_status
+                    .lines()
+                    .map(|line| Line::raw(format!("  {line}"))),
+            ),
+            1 => {
+                lines.push(Line::raw(format!(
+                    "  {}: {agent}",
+                    app.language.text("智能体", "Agent", "エージェント")
+                )));
+                lines.push(Line::raw(format!(
+                    "  {}: {}/{}",
+                    app.language
+                        .text("工具完成", "Tools complete", "ツール完了"),
+                    app.tools.completed,
+                    app.tools.requested
+                )));
+                lines.push(Line::raw(format!(
+                    "  {}: {}",
+                    app.language.text("失败", "Failed", "失敗"),
+                    app.tools.failed
+                )));
+            }
+            2 if app.background_tasks.is_empty() => lines.push(Line::raw(format!(
+                "  {}",
+                app.language.text(
+                    "没有后台任务",
+                    "No background tasks",
+                    "バックグラウンドタスクなし"
+                )
+            ))),
+            2 => {
+                for task in app.background_tasks.iter().take(8) {
+                    lines.push(Line::raw(format!(
+                        "  {} · {:?} · {:.1}s",
+                        task.id,
+                        task.status,
+                        task.elapsed_millis as f64 / 1000.0
+                    )));
+                    lines.push(Line::styled(
+                        format!("    {}", task.label),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+            3 => {
+                lines.push(Line::raw(format!(
+                    "  {}: {relay}",
+                    app.language.text("中继", "Relay", "リレー")
+                )));
+                lines.push(Line::raw(format!(
+                    "  {}: {}",
+                    app.language
+                        .text("手机队列", "Phone queue", "モバイルキュー"),
+                    app.mobile_queue.len()
+                )));
+            }
+            _ => {}
+        }
+        lines.push(Line::raw(""));
+    }
+    let viewport = area.height.saturating_sub(2).max(1) as usize;
+    let selected_row = headers[app.sidebar_selected];
+    if selected_row < app.sidebar_scroll {
+        app.sidebar_scroll = selected_row;
+    } else if selected_row >= app.sidebar_scroll + viewport {
+        app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
+    }
+    let max_scroll = lines.len().saturating_sub(viewport);
+    app.sidebar_scroll = app.sidebar_scroll.min(max_scroll);
+    let border = if app.focus == FocusPane::Sidebar {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(app.language.text(
+                        "状态 · Ctrl+W 聚焦 · Ctrl+B 隐藏",
+                        "Status · Ctrl+W focus · Ctrl+B hide",
+                        "状態 · Ctrl+W フォーカス · Ctrl+B 非表示",
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border)),
+            )
+            .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1920,6 +2081,29 @@ mod tests {
         assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input.text(), "/compress");
         assert!(app.transcript.is_empty());
+    }
+    #[test]
+    fn sidebar_navigation_wraps_and_toggles_sections() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.sidebar_move(-1);
+        assert_eq!(app.focus, FocusPane::Sidebar);
+        assert_eq!(app.sidebar_selected, 3);
+
+        app.sidebar_toggle();
+        assert!(!app.sidebar_expanded[3]);
+        app.sidebar_move(1);
+        assert_eq!(app.sidebar_selected, 0);
+    }
+    #[test]
+    fn clicking_sidebar_focuses_it_and_clicking_prompt_restores_prompt_focus() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.sidebar_rect = Rect::new(80, 0, 20, 30);
+        app.prompt_rect = Rect::new(0, 20, 80, 8);
+
+        app.handle_mouse(85, 5);
+        assert_eq!(app.focus, FocusPane::Sidebar);
+        app.handle_mouse(5, 22);
+        assert_eq!(app.focus, FocusPane::Prompt);
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
