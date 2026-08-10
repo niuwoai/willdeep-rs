@@ -27,6 +27,8 @@ Provider / Tools / MCP / Skills
 
 Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、事件和持久化；客户端只负责展示、输入和控制。所有状态都来自结构化事件，不通过终端文本猜测。
 
+Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_PROCESS_RUNTIME_HARNESS.md`](IN_PROCESS_RUNTIME_HARNESS.md)。
+
 ## 3. 实施阶段
 
 ### 阶段 0：TUI 交互基础（v0.14.0）
@@ -221,7 +223,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.17.0-rc3：Web 不再自行启动和持有独立 Harness 子进程，而是创建或收养 Core Session、提交 Runtime Turn，并将持久 Runtime 事件转换为浏览器 SSE；提交事件暴露稳定 Session/Turn/Root Agent ID，停止按钮调用真实 Turn Stop API，断开 SSE 不取消后台任务，历史会话从 Core Session 恢复。真实进程 E2E 验证成功回答、版本头、历史恢复和立即停止，并据此修复调度器领取 Turn 到绑定 Task 之间取消仍会启动 Harness 的竞态。下一步把 Runtime 当前持有的每 Turn Harness 子进程迁为 Daemon 内原生 Harness 生命周期。
+v0.17.0-rc4（实施中）：已定义 Daemon 内原生 Harness 的 Invocation、Factory、Event Sink、审批、取消、生命周期和验收边界；下一步按设计抽出 CLI/Runtime 共用 Factory 与非交互执行入口，再删除 TaskManager 的每 Turn 子进程过渡层。
 
 ## 6. 建议执行顺序
 

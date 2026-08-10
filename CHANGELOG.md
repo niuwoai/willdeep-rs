@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+
+- 定义 Daemon 内原生 Harness 的共享 Factory、Invocation、Event Sink、审批、取消、生命周期、迁移步骤和可验证验收条件，作为 v0.17.0-rc4 的实施契约。
+
 ## [0.17.0-rc3] - 2026-08-10
 
 ### Added
