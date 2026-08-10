@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.0-rc1] - 2026-08-10
+
+### Added
+
+- 新增 `docs/HERDR_RESEARCH_AND_INTEGRATION.md`，基于 Herdr 官方资料记录状态权威、Snapshot+事件、状态聚合、Socket 控制面、许可证边界和分阶段集成方案。
+- 新增 `willdeep integrations herdr status [--json]`，检查 Herdr CLI、Pane 环境、Socket 配置和生命周期上报就绪状态，不输出 Socket 路径。
+- Runtime 在 Herdr Pane 环境内将全部 Task 聚合为 `working/blocked/idle`，通过公开 `herdr pane report-agent` CLI 非阻塞上报并去重相同状态。
+
+### Security
+
+- Herdr 仅为可选进程级适配器，不成为 Runtime 状态来源；未安装、版本不兼容或上报失败均不影响 Harness。
+- 上报命令使用结构化进程参数，不经过 Shell，不传输 Prompt、API Key、工具参数、文件内容或 Socket 路径。
+- 研究文档明确 Herdr 当前 AGPL/商业双许可证边界；WillDeep 不复制或链接 Herdr 源码。
+
 ## [0.17.0-rc8] - 2026-08-10
 
 ### Added

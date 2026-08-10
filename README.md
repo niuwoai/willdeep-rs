@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.17.0-rc8`，支持：
+当前版本为 `0.18.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -34,6 +34,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime Root Agent 持久生命周期、受 Token 保护的 Agent 查询 API/CLI，以及 TUI 右栏 Agent 状态摘要。
 - `spawn_agent` 稳定 UUID、Root→Child 父子关系以及子 Agent 轮次、工具、Token 和终态的 Runtime/TUI 实时展示。
 - Runtime Session 重命名、完整快照或指定已完成 Turn 的精确 Fork、Fork 时切换 Provider Profile/模型、归档/取消归档、带确认删除、安全 JSON 导出，以及文本、Workspace、状态、Profile、模型和时间组合搜索；CLI、TUI `/session` 与 Web 会话操作共用同一受保护状态机。
+- 可选 Herdr 集成：`willdeep integrations herdr status [--json]` 诊断 CLI/Pane/Socket；在 Herdr Pane 内将 Runtime Task 聚合为 `working/blocked/idle` 并非阻塞上报，Herdr 缺失或失败不影响任务。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面和进程内 Harness 已经可用，会话恢复、统一客户端 API 与后台资源恢复仍在继续完善。
 
@@ -200,7 +201,7 @@ willdeep --web \
   --web-workspace /path/to/backend
 ```
 
-也可用 `--project <名称或UUID>` 一次载入 Swift Project 的全部文件夹。Web 服务只接受启动时 allowlist 内的规范化工作区，不能由请求传入任意目录。当前是单用户模式，不实现应用层鉴权；跨机器访问必须由 Nginx、VPN 或 SSH Tunnel 提供认证与 HTTPS，不应把端口直接暴露到公网。接口和 Computer Use 路线详见 [Xedit 工具能力对照](docs/XEDIT_TOOL_PARITY.md)。
+也可用 `--project <名称或UUID>` 一次载入 Swift Project 的全部文件夹。Web 服务只接受启动时 allowlist 内的规范化工作区，不能由请求传入任意目录。当前是单用户模式，不实现应用层鉴权；跨机器访问必须由 Nginx、VPN 或 SSH Tunnel 提供认证与 HTTPS，不应把端口直接暴露到公网。接口和 Computer Use 路线详见 [Xedit 工具能力对照](docs/XEDIT_TOOL_PARITY.md)，Herdr 取舍与集成边界见 [Herdr 研究与集成方案](docs/HERDR_RESEARCH_AND_INTEGRATION.md)。
 
 终端中不带 Prompt 启动时会进入 TUI：
 

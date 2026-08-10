@@ -28,6 +28,7 @@ const LOCK_RECOVERY_ATTEMPTS: usize = 120;
 mod agent_control;
 mod agent_store;
 mod event_stream;
+mod herdr;
 mod session_store;
 pub(crate) mod tui_bridge;
 use agent_control::AgentCommandStore;
@@ -392,6 +393,7 @@ struct TaskManager {
     interaction_waiters:
         Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<InteractionResolution>>>,
     turn_scheduler: tokio::sync::mpsc::UnboundedSender<uuid::Uuid>,
+    herdr: Option<herdr::HerdrReporter>,
 }
 
 pub async fn handle(action: DaemonAction) -> Result<()> {
@@ -1073,6 +1075,7 @@ async fn run(home: &Path) -> Result<()> {
         runtime_url: format!("http://{address}"),
         runtime_token: state.token.clone(),
     })?);
+    tasks.report_herdr_state().await;
     let server_state = Arc::new(ServerState {
         token: state.token,
         started_at,
@@ -1648,6 +1651,7 @@ impl TaskManager {
             interactions: RwLock::new(interactions),
             interaction_waiters: Mutex::new(HashMap::new()),
             turn_scheduler,
+            herdr: herdr::HerdrReporter::detect(),
         })
     }
 
@@ -1748,6 +1752,7 @@ impl TaskManager {
                 interaction.task_id, interaction.id
             ),
         )?;
+        self.report_herdr_state().await;
         Ok(receiver)
     }
 
@@ -1806,6 +1811,7 @@ impl TaskManager {
                 interaction.task_id, interaction.id
             ),
         )?;
+        self.report_herdr_state().await;
         Ok(Some(interaction))
     }
 
@@ -1975,6 +1981,8 @@ impl TaskManager {
             cancellation.notify_one();
             self.events
                 .append("task.cancellation_requested", format!("task_id={id}"))?;
+            drop(_persistence);
+            self.report_herdr_state().await;
             return Ok(Some(task));
         }
         Ok(self.get(id).await)
@@ -2008,7 +2016,10 @@ impl TaskManager {
             tasks.insert(task.id, task);
             tasks.clone()
         };
-        persist_tasks(&self.path, &snapshot)
+        persist_tasks(&self.path, &snapshot)?;
+        drop(_persistence);
+        self.report_herdr_state().await;
+        Ok(())
     }
 
     async fn finish(
@@ -2072,7 +2083,22 @@ impl TaskManager {
         if let Some(session_id) = runtime_session {
             self.schedule_session(session_id)?;
         }
+        self.report_herdr_state().await;
         Ok(())
+    }
+
+    async fn report_herdr_state(&self) {
+        let Some(reporter) = &self.herdr else {
+            return;
+        };
+        let statuses = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .map(|task| task.status)
+            .collect::<Vec<_>>();
+        reporter.report(statuses.into_iter());
     }
 
     async fn cancel_task_interactions(&self, task_id: uuid::Uuid) -> Result<()> {

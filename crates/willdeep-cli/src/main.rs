@@ -16,6 +16,7 @@ mod daemon;
 mod editor;
 mod harness;
 mod i18n;
+mod integrations;
 mod mobile;
 mod onboarding;
 mod projects;
@@ -154,6 +155,11 @@ enum CliCommand {
     },
     /// Confirm that this client can disconnect without stopping the Runtime.
     Detach,
+    /// Inspect and manage optional external integrations.
+    Integrations {
+        #[command(subcommand)]
+        action: integrations::IntegrationAction,
+    },
 }
 
 #[derive(Deserialize)]
@@ -200,6 +206,7 @@ async fn run() -> Result<()> {
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
+            CliCommand::Integrations { action } => integrations::handle(action).await,
         };
     }
     let administrative =

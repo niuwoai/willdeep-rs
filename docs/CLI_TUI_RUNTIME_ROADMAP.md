@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc8
+> 当前实施版本：v0.18.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -154,10 +154,10 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 验收：多 Agent 流程可声明式复用，每一步可观察、可停止、可审计。
 
-### 阶段 11：Herdr 互操作（v0.23.0）
+### 阶段 11：Herdr 互操作（v0.18.0 起持续交付）
 
-- [ ] `willdeep integrations herdr install/status/uninstall`。
-- [ ] 向 Herdr 上报准确的 working、blocked、approval、done 和 idle 生命周期。
+- [-] 已完成 `willdeep integrations herdr status [--json]`；Integration 配置 install/uninstall 待完成。
+- [x] Runtime Task 聚合后向 Herdr 上报准确的 working、blocked 和 idle；Herdr 将完成且未查看的 idle 投影为 done，审批/提问/失败投影为 blocked。
 - [ ] WillDeep 会话与 Herdr Pane 关联并支持精确跳转。
 - [ ] 可选通过 Herdr 启动 Claude Code、Codex、OpenCode 等外部 Agent。
 - [ ] 外部 Agent 明确标注权限边界，不把画面检测当作强一致结果。
@@ -223,7 +223,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc8（已完成）：Runtime Session 持久化模型覆盖，Fork 可同时选择指定 Turn、Provider Profile 和模型；CLI/TUI 支持文本、Workspace、状态、Profile、模型及时间范围组合搜索。模型覆盖从 Session 调度到原生 Harness 的链路、过滤组合和 TUI 参数解析均由测试覆盖。
+v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架构边界文档、`integrations herdr status` 诊断命令，以及 Runtime Task → Herdr Pane 的去重、非阻塞聚合状态上报。Herdr 未安装或上报失败不影响 Harness。
 
 ## 6. 建议执行顺序
 
@@ -236,7 +236,7 @@ v0.17.0-rc8（已完成）：Runtime Session 持久化模型覆盖，Fork 可同
 7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
 8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
 9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
-10. [ ] 补齐 Workflow、插件、Herdr 互操作和 Computer Use。
+10. [-] Herdr 首批状态上报已完成；继续补齐 Pane 关联、跳转、Workflow、插件和 Computer Use。
 11. [ ] 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
 
 关键路径固定为：`Runtime 持久化 → 会话恢复 → Agent 生命周期 → Diff/Workspace → 统一 API → Web/移动端/Swift 共用内核`。Herdr、Computer Use 和客户端视觉增强可以穿插推进，但不能形成独立于 Runtime 的第二套任务状态机。
@@ -317,7 +317,7 @@ v0.17.0-rc8（已完成）：Runtime Session 持久化模型覆盖，Fork 可同
 - [ ] TUI 可用树或网格查看、切换、接管、停止和重试 Agent。
 - [ ] Agent 独立提交，Review Agent 审查，合并前检测 Worktree 冲突。
 - [ ] Runtime/PTY/Agent Team 保持跨平台；Tmux 和 Herdr 仅作为可选适配器。
-- [ ] Herdr 生命周期上报、Pane 关联、精确跳转及外部 Codex/Claude/OpenCode Agent 启动。
+- [-] Herdr 生命周期上报和诊断已完成；Pane 关联、精确跳转及外部 Codex/Claude/OpenCode Agent 启动待完成。
 
 ### 7.9 Workspace、Git 与 Review Center
 
