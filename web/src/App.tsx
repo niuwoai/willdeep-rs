@@ -105,6 +105,34 @@ export function App() {
     setSessions(await json<Session[]>("/api/sessions"));
   }
 
+  async function refreshRuntimeActivity() {
+    if (!workspace) return;
+    setRuntimeActivity(await json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`));
+  }
+
+  async function resolveRuntimeApproval(id: string, decision: "allow_once" | "deny" | "always_allow") {
+    try {
+      await mutate(`/api/runtime/approvals/${encodeURIComponent(id)}/resolve`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace, decision }) });
+      await refreshRuntimeActivity();
+    } catch (reason) { setError(`${t.runtimeActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function answerRuntimeQuestion(id: string, answer: string | null) {
+    try {
+      await mutate(`/api/runtime/questions/${encodeURIComponent(id)}/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace, answer }) });
+      await refreshRuntimeActivity();
+    } catch (reason) { setError(`${t.runtimeActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function runAgentAction(id: string, action: "stop" | "retry" | "prompt") {
+    const message = action === "prompt" ? window.prompt(t.agentPrompt)?.trim() : undefined;
+    if (action === "prompt" && !message) return;
+    try {
+      await mutate(`/api/runtime/agents/${encodeURIComponent(id)}/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace, ...(message ? { message } : {}) }) });
+      await refreshRuntimeActivity();
+    } catch (reason) { setError(`${t.runtimeActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
   async function renameSelectedSession() {
     if (!selectedSession) return;
     const title = window.prompt(t.renamePrompt, selectedSession.title)?.trim(); if (!title) return;
@@ -206,7 +234,7 @@ export function App() {
       <Heading size="lg">{t.appName}</Heading><Text color="#718096" mb="8">{t.webHarness}</Text>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.readOnly : item.access === "smart" ? t.smartApproval : t.workspaceWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <RuntimeSidebar activity={runtimeActivity} messages={t} />
+      <RuntimeSidebar activity={runtimeActivity} messages={t} busy={busy} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} />
       <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
       <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} />
       <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" opacity={item.archived ? 0.58 : 1} variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}{item.archived ? ` · ${t.archived}` : ""}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>

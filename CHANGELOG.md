@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc19] - 2026-08-11
+
+### Added
+
+- Web Runtime 侧栏支持允许一次、拒绝、始终允许审批，以及候选单选、多选提交和自定义回答。
+- Web 可对后台 Agent 补充 Prompt、停止或重试；操作后立即刷新 Activity，并保留轮询最终一致性。
+
+### Security
+
+- 每个 Web Runtime 写端点重新验证 Workspace 注册表、启动白名单和 Gate/Agent 目标归属；严格请求体拒绝客户端夹带额外作用域。
+
 ## [0.21.0-rc18] - 2026-08-11
 
 ### Added

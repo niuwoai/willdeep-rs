@@ -117,6 +117,41 @@ struct RuntimeActivityQuery {
     workspace: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebWorkspaceAction {
+    workspace: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebAgentPromptAction {
+    workspace: String,
+    message: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WebApprovalDecision {
+    AllowOnce,
+    Deny,
+    AlwaysAllow,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebApprovalAction {
+    workspace: String,
+    decision: WebApprovalDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebQuestionAction {
+    workspace: String,
+    answer: Option<String>,
+}
+
 #[derive(Serialize)]
 struct RuntimeActivitySummary {
     tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
@@ -203,6 +238,20 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces))
         .route("/api/runtime/activity", get(runtime_activity))
+        .route(
+            "/api/runtime/approvals/{id}/resolve",
+            post(resolve_runtime_approval),
+        )
+        .route(
+            "/api/runtime/questions/{id}/answer",
+            post(answer_runtime_question),
+        )
+        .route("/api/runtime/agents/{id}/stop", post(stop_runtime_agent))
+        .route("/api/runtime/agents/{id}/retry", post(retry_runtime_agent))
+        .route(
+            "/api/runtime/agents/{id}/prompt",
+            post(prompt_runtime_agent),
+        )
         .route("/api/composer", get(composer))
         .route("/", get(index))
         .route("/{*path}", get(asset))
@@ -365,6 +414,124 @@ fn runtime_status_name(status: willdeep_core::RuntimeStatus) -> &'static str {
         willdeep_core::RuntimeStatus::Cancelled => "cancelled",
         willdeep_core::RuntimeStatus::Unknown => "unknown",
     }
+}
+
+async fn resolve_runtime_approval(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(action): Json<WebApprovalAction>,
+) -> Result<StatusCode, WebError> {
+    let snapshot = authorized_runtime_snapshot(&state, &action.workspace).await?;
+    let allowed = snapshot_has_approval(&snapshot, id);
+    if !allowed {
+        return Err(WebError::not_found(
+            "Runtime approval not found in this workspace",
+        ));
+    }
+    let decision = match action.decision {
+        WebApprovalDecision::AllowOnce => willdeep_core::ApprovalDecision::AllowOnce,
+        WebApprovalDecision::Deny => willdeep_core::ApprovalDecision::Deny,
+        WebApprovalDecision::AlwaysAllow => willdeep_core::ApprovalDecision::AlwaysAllow,
+    };
+    crate::daemon::resolve_remote_approval(&state.home, id, decision)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn answer_runtime_question(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(action): Json<WebQuestionAction>,
+) -> Result<StatusCode, WebError> {
+    let snapshot = authorized_runtime_snapshot(&state, &action.workspace).await?;
+    let allowed = snapshot_has_question(&snapshot, id);
+    if !allowed {
+        return Err(WebError::not_found(
+            "Runtime question not found in this workspace",
+        ));
+    }
+    crate::daemon::answer_remote_question(&state.home, id, action.answer)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stop_runtime_agent(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(action): Json<WebWorkspaceAction>,
+) -> Result<StatusCode, WebError> {
+    authorize_runtime_agent(&state, &action.workspace, id).await?;
+    crate::daemon::stop_remote_agent(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn retry_runtime_agent(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(action): Json<WebWorkspaceAction>,
+) -> Result<StatusCode, WebError> {
+    authorize_runtime_agent(&state, &action.workspace, id).await?;
+    crate::daemon::retry_remote_agent(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn prompt_runtime_agent(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(action): Json<WebAgentPromptAction>,
+) -> Result<StatusCode, WebError> {
+    authorize_runtime_agent(&state, &action.workspace, id).await?;
+    crate::daemon::instruct_remote_agent(&state.home, id, action.message)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authorized_runtime_snapshot(
+    state: &WebState,
+    workspace: &str,
+) -> Result<crate::daemon::RuntimeSnapshot, WebError> {
+    let workspace = select_workspace(state, Some(workspace)).await?;
+    crate::daemon::runtime_snapshot(&state.home, &workspace.root)
+        .await
+        .map_err(WebError::from_anyhow)
+}
+
+async fn authorize_runtime_agent(
+    state: &WebState,
+    workspace: &str,
+    id: uuid::Uuid,
+) -> Result<(), WebError> {
+    let snapshot = authorized_runtime_snapshot(state, workspace).await?;
+    if snapshot_has_agent(&snapshot, id) {
+        Ok(())
+    } else {
+        Err(WebError::not_found(
+            "Runtime Agent not found in this workspace",
+        ))
+    }
+}
+
+fn snapshot_has_approval(snapshot: &crate::daemon::RuntimeSnapshot, id: uuid::Uuid) -> bool {
+    snapshot.gates.iter().any(
+        |gate| matches!(gate, crate::daemon::RemoteGate::Approval { id: value, .. } if *value == id),
+    )
+}
+
+fn snapshot_has_question(snapshot: &crate::daemon::RuntimeSnapshot, id: uuid::Uuid) -> bool {
+    snapshot.gates.iter().any(
+        |gate| matches!(gate, crate::daemon::RemoteGate::Question { id: value, .. } if *value == id),
+    )
+}
+
+fn snapshot_has_agent(snapshot: &crate::daemon::RuntimeSnapshot, id: uuid::Uuid) -> bool {
+    snapshot.agents.iter().any(|agent| agent.id == id)
 }
 
 async fn sessions(
@@ -994,6 +1161,12 @@ impl WebError {
             message: message.into(),
         }
     }
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
     fn from_anyhow(error: anyhow::Error) -> Self {
         Self::internal(error.to_string())
     }
@@ -1117,6 +1290,56 @@ mod tests {
         assert!(value.get("workspace").is_none());
         assert!(value.get("report").is_none());
         assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn runtime_actions_require_the_target_in_the_selected_workspace_snapshot() {
+        let approval_id = uuid::Uuid::new_v4();
+        let question_id = uuid::Uuid::new_v4();
+        let snapshot = crate::daemon::RuntimeSnapshot {
+            attention: Vec::new(),
+            gates: vec![
+                crate::daemon::RemoteGate::Approval {
+                    id: approval_id,
+                    task_id: uuid::Uuid::new_v4(),
+                    description: "approval".to_owned(),
+                    always_allow_available: true,
+                },
+                crate::daemon::RemoteGate::Question {
+                    id: question_id,
+                    task_id: uuid::Uuid::new_v4(),
+                    question: "question".to_owned(),
+                    options: vec!["A".to_owned()],
+                    multi_select: false,
+                },
+            ],
+            agents: Vec::new(),
+            tools: Vec::new(),
+            artifacts: Vec::new(),
+        };
+        assert!(snapshot_has_approval(&snapshot, approval_id));
+        assert!(snapshot_has_question(&snapshot, question_id));
+        assert!(!snapshot_has_approval(&snapshot, uuid::Uuid::new_v4()));
+        assert!(!snapshot_has_agent(&snapshot, uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn runtime_action_bodies_reject_client_supplied_extra_scope() {
+        assert!(
+            serde_json::from_value::<WebWorkspaceAction>(serde_json::json!({
+                "workspace": "/allowed",
+                "agent_id": uuid::Uuid::new_v4()
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WebApprovalAction>(serde_json::json!({
+                "workspace": "/allowed",
+                "decision": "allow_once",
+                "always_allow": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]

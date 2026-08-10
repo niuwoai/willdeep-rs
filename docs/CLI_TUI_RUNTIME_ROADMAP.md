@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc18
+> 当前实施版本：v0.21.0-rc19
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc19（已完成）：Web Runtime 侧栏支持 Approval 的 Allow Once/Deny/Always Allow，Question 的候选单选、多选提交和自定义回答，以及后台 Agent 的补充 Prompt、停止和重试。服务端每个写端点先重新校验 Runtime 注册 Workspace 与 Web 启动白名单，再确认 Gate/Agent 属于该 Workspace Snapshot；请求体严格拒绝客户端夹带额外作用域。操作完成后立即刷新 Activity，轮询仍负责最终一致性。下一步加入 Web Diff/Artifact 详情和基于 Event Cursor 的 Activity 推送，减少轮询。
 
 v0.21.0-rc18（已完成）：Web Activity API 在既有 Workspace 注册表与启动白名单双重约束内增加 Agent、Approval/Question Gate 和关注项计数；Agent 摘要不下发 Workspace、报告或内部错误。React 将 Runtime 侧栏拆为独立组件，展示 Agent 状态、轮次、待审批/回答详情、工具和产物统计；所有新增文案覆盖中英日。下一步为 Web Gate 增加审批/回答交互，并补 Agent 停止/重试/补充 Prompt。
 

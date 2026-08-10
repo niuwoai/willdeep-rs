@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc18
+> 当前实现版本：v0.21.0-rc19
 
 ## 1. 目标
 
@@ -90,7 +90,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc18",
+    "server_version": "0.21.0-rc19",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +108,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc18"
+    "server_version": "0.21.0-rc19"
   }
 }
 ```
