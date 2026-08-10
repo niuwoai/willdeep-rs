@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc6
+> 当前实现版本：v0.21.0-rc7
 
 ## 1. 目标
 
@@ -82,7 +82,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc6",
+    "server_version": "0.21.0-rc7",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -100,7 +100,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc6"
+    "server_version": "0.21.0-rc7"
   }
 }
 ```
@@ -132,6 +132,6 @@ diff.revert
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
 4. [x] Workspace、Session、Agent、Turn、Task、Approval、Question、Event 与 Diff Review 共享 DTO；
 5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码和 Workspace/会话/Agent/任务/交互/Diff DTO，剩余 Tool、Artifact 与本地传输继续进行；
-6. [-] TUI/Web 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center 与控制已迁移，Session 和 Web 管理操作待迁移；Web/TUI 事件补读已迁移；
+6. [-] TUI/Web 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center 与控制，以及 Web Session 列表/重命名/Fork/归档/删除/导出已迁移；Session 创建、Turn 提交和搜索继续迁移；Web/TUI 事件补读已迁移；
 7. [ ] Unix Socket 与 Windows Named Pipe；
 8. [ ] Swift FFI、移动端和自动化兼容验证。

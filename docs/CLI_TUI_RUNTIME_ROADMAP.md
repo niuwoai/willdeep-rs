@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc6
+> 当前实施版本：v0.21.0-rc7
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc7（已完成）：统一 API 实现 Session 创建、重命名、Fork、归档/恢复、删除和导出，修改操作纳入跨重启 Request ID 幂等；协议 crate 新增严格拒绝未知字段的 Session 管理参数 DTO。Web Session 列表、重命名、Fork、归档、删除和导出 bridge 改用共享 Runtime Client，浏览器 Workspace 白名单校验保持在调用前。下一步迁移 Session 创建/Turn 提交与搜索，并实现 Unix Socket 与 Windows Named Pipe。
 
 v0.21.0-rc6（已完成）：协议 crate 新增 Diff Snapshot、File、Content、Review、Verification、Attribution、Commit Preview 与 Revert 稳定 DTO；统一 API 覆盖全部 Diff 读写操作，TUI Diff Center bridge 改用共享 Runtime Client。审查、验证记录和安全撤销纳入跨重启 Request ID 幂等，服务端继续执行 Workspace 授权、精确 Snapshot、敏感命令过滤、内容上限和 Recovery 保守撤销。下一步迁移 Web Session 管理，并实现 Unix Socket 与 Windows Named Pipe。
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.21.0-rc7] - 2026-08-11
+
+### Added
+
+- 统一 API 实现 `session.create/rename/fork/archive/delete/export`；协议 crate 新增创建、重命名、Fork、归档和精确确认删除参数 DTO。
+
+### Changed
+
+- Web Session 列表、重命名、指定 Turn Fork、归档/恢复、删除和导出改走共享 Runtime Client；Session 修改操作纳入持久 Request ID 幂等。
+
+### Security
+
+- Web 在调用统一 Session 管理前仍校验启动时 Workspace 白名单；公开 Session 响应不包含配置文件路径、排队 Prompt、附件或内部错误，删除同时要求目标 ID 与 confirmation 完全一致。
+
 ## [0.21.0-rc6] - 2026-08-11
 
 ### Added

@@ -262,6 +262,19 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             },
             Err(error) => Err(error),
         },
+        "session.create" => session_create(state, &request),
+        "session.rename" => session_rename(state, &request),
+        "session.fork" => session_fork(state, &request),
+        "session.archive" => session_archive(state, &request),
+        "session.delete" => session_delete(state, &request),
+        "session.export" => match params::<IdParams>(&request) {
+            Ok(params) => state
+                .sessions
+                .export(params.id)
+                .map_err(|_| ApiFailure::not_found("Runtime Session not found"))
+                .and_then(public_session_export),
+            Err(error) => Err(error),
+        },
         "agent.list" => json_result(state.agents.list().map(|agents| {
             agents
                 .into_iter()
@@ -479,6 +492,11 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "workspace.remove"
             | "approval.resolve"
             | "question.answer"
+            | "session.create"
+            | "session.rename"
+            | "session.fork"
+            | "session.archive"
+            | "session.delete"
             | "diff.review"
             | "diff.verification.record"
             | "diff.revert"
@@ -771,6 +789,133 @@ fn workspace_remove(state: &ServerState, request: &ApiRequest) -> ApiResult {
     json(serde_json::json!({"id": workspace.id, "status": "removed"}))
 }
 
+fn session_create(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::CreateSessionParams>(request)?;
+    let workspace = state
+        .workspaces
+        .ensure_registered(Path::new(&params.workspace))
+        .map_err(|error| ApiFailure::invalid(format!("invalid Session Workspace: {error}")))?;
+    let profile = params.profile.or(workspace.provider_profile);
+    let (session, created) = state
+        .sessions
+        .ensure(session_store::CreateRuntimeSession {
+            id: params.id,
+            workspace: workspace.root,
+            profile,
+            model: params.model,
+            config: None,
+            title: params.title,
+        })
+        .map_err(|error| ApiFailure::invalid(format!("cannot create Session: {error}")))?;
+    if created {
+        state
+            .events
+            .append(
+                "session.created",
+                format!(
+                    "session_id={} agent_id={}",
+                    session.id, session.root_agent_id
+                ),
+            )
+            .map_err(ApiFailure::internal)?;
+    }
+    json(public_session(session))
+}
+
+fn session_rename(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::RenameSessionParams>(request)?;
+    let session = state
+        .sessions
+        .rename(params.id, params.title)
+        .map_err(|error| ApiFailure::invalid(format!("cannot rename Session: {error}")))?;
+    state
+        .events
+        .append("session.renamed", format!("session_id={}", params.id))
+        .map_err(ApiFailure::internal)?;
+    json(public_session(session))
+}
+
+fn session_fork(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::ForkSessionParams>(request)?;
+    let session = state
+        .sessions
+        .fork_through(
+            params.id,
+            params.title,
+            params.through_turn_id,
+            params.provider_profile,
+            params.model,
+        )
+        .map_err(|error| ApiFailure::invalid(format!("cannot fork Session: {error}")))?;
+    state
+        .events
+        .append(
+            "session.forked",
+            format!(
+                "source_session_id={} through_turn_id={} session_id={} agent_id={}",
+                params.id,
+                params
+                    .through_turn_id
+                    .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                session.id,
+                session.root_agent_id
+            ),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(public_session(session))
+}
+
+fn session_archive(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::ArchiveSessionParams>(request)?;
+    let session = if params.archived {
+        state.sessions.archive(params.id)
+    } else {
+        state.sessions.unarchive(params.id)
+    }
+    .map_err(|error| ApiFailure::invalid(format!("cannot update Session archive: {error}")))?;
+    state
+        .events
+        .append(
+            if params.archived {
+                "session.archived"
+            } else {
+                "session.unarchived"
+            },
+            format!("session_id={}", params.id),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(public_session(session))
+}
+
+fn session_delete(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::DeleteSessionParams>(request)?;
+    state
+        .sessions
+        .delete(params.id, params.confirmation)
+        .map_err(|error| ApiFailure::invalid(format!("cannot delete Session: {error}")))?;
+    state
+        .events
+        .append("session.deleted", format!("session_id={}", params.id))
+        .map_err(ApiFailure::internal)?;
+    json(serde_json::json!({"id": params.id, "status": "deleted"}))
+}
+
+fn public_session_export(export: session_store::RuntimeSessionExport) -> ApiResult {
+    let value = serde_json::to_value(export).map_err(ApiFailure::internal)?;
+    Ok(scrub_session_export_value(value))
+}
+
+fn scrub_session_export_value(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(session) = value
+        .get_mut("session")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        session.remove("config");
+        session.remove("last_error");
+    }
+    value
+}
+
 async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<AgentPromptParams>(request)?;
     let message = params.message.trim();
@@ -1043,6 +1188,21 @@ mod tests {
     fn internal_errors_are_redacted_from_clients() {
         let error = ApiFailure::internal("/private/path contains provider-secret");
         assert_eq!(error.message, "internal Runtime error");
+    }
+
+    #[test]
+    fn public_session_export_removes_internal_path_and_error_fields() {
+        let value = scrub_session_export_value(serde_json::json!({
+            "session": {
+                "id": uuid::Uuid::nil(),
+                "config": "/private/config.toml",
+                "last_error": "provider secret failed"
+            },
+            "core": {"messages": []}
+        }));
+        assert!(value["session"].get("config").is_none());
+        assert!(value["session"].get("last_error").is_none());
+        assert!(value.get("core").is_some());
     }
 
     #[tokio::test]

@@ -86,13 +86,20 @@ pub(crate) struct RemoteSessionState {
 
 pub(crate) async fn remote_session_states(home: &Path) -> Result<Vec<RemoteSessionState>> {
     let state = ensure_running(home).await?;
-    let sessions: Vec<session_store::RuntimeSession> =
-        authorized_get(&state, "/v1/sessions").await?;
+    let sessions = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeSession>>(
+                "session.list",
+                &serde_json::json!({}),
+                None,
+            )
+            .await?,
+    )?;
     Ok(sessions
         .into_iter()
         .map(|session| RemoteSessionState {
             id: session.id,
-            archived: session.status == session_store::RuntimeSessionStatus::Archived,
+            archived: session.status == willdeep_runtime_protocol::SessionStatus::Archived,
             active: session.active_turn_id.is_some(),
         })
         .collect())
@@ -103,13 +110,17 @@ pub(crate) async fn rename_remote_session(
     id: uuid::Uuid,
     title: String,
 ) -> Result<()> {
-    post_remote_session_action(
-        home,
-        id,
-        "rename",
-        Some(&session_store::RenameRuntimeSession { title }),
-    )
-    .await
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.rename",
+                &willdeep_runtime_protocol::RenameSessionParams { id, title },
+                None,
+            )
+            .await?,
+    )?;
+    Ok(())
 }
 
 pub(crate) async fn fork_remote_session(
@@ -121,21 +132,22 @@ pub(crate) async fn fork_remote_session(
     model: Option<String>,
 ) -> Result<uuid::Uuid> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/sessions/{id}/fork", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&session_store::ForkRuntimeSession {
-            title,
-            through_turn_id,
-            provider_profile,
-            model,
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected Session fork: {}", response.text().await?);
-    }
-    Ok(response.json::<session_store::RuntimeSession>().await?.id)
+    let session = api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.fork",
+                &willdeep_runtime_protocol::ForkSessionParams {
+                    id,
+                    title,
+                    through_turn_id,
+                    provider_profile,
+                    model,
+                },
+                None,
+            )
+            .await?,
+    )?;
+    Ok(session.id)
 }
 
 pub(crate) async fn set_remote_session_archived(
@@ -143,29 +155,33 @@ pub(crate) async fn set_remote_session_archived(
     id: uuid::Uuid,
     archived: bool,
 ) -> Result<()> {
-    post_remote_session_action::<()>(
-        home,
-        id,
-        if archived { "archive" } else { "unarchive" },
-        None,
-    )
-    .await
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
+                "session.archive",
+                &willdeep_runtime_protocol::ArchiveSessionParams { id, archived },
+                None,
+            )
+            .await?,
+    )?;
+    Ok(())
 }
 
 pub(crate) async fn delete_remote_session(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .delete(format!("http://{}/v1/sessions/{id}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&session_store::DeleteRuntimeSession { confirmation: id })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session deletion: {}",
-            response.text().await?
-        );
-    }
+    api_data(
+        runtime_client(&state)?
+            .call::<_, serde_json::Value>(
+                "session.delete",
+                &willdeep_runtime_protocol::DeleteSessionParams {
+                    id,
+                    confirmation: id,
+                },
+                None,
+            )
+            .await?,
+    )?;
     Ok(())
 }
 
@@ -174,7 +190,11 @@ pub(crate) async fn export_remote_session(
     id: uuid::Uuid,
 ) -> Result<serde_json::Value> {
     let state = ensure_running(home).await?;
-    authorized_get(&state, &format!("/v1/sessions/{id}/export")).await
+    api_data(
+        runtime_client(&state)?
+            .call::<_, serde_json::Value>("session.export", &serde_json::json!({"id": id}), None)
+            .await?,
+    )
 }
 
 pub(crate) async fn search_remote_sessions(
@@ -195,32 +215,6 @@ pub(crate) async fn search_remote_sessions(
         );
     }
     Ok(response.json().await?)
-}
-
-async fn post_remote_session_action<T: Serialize + ?Sized>(
-    home: &Path,
-    id: uuid::Uuid,
-    action: &str,
-    body: Option<&T>,
-) -> Result<()> {
-    let state = ensure_running(home).await?;
-    let request = client()
-        .post(format!(
-            "http://{}/v1/sessions/{id}/{action}",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token);
-    let response = match body {
-        Some(body) => request.json(body).send().await?,
-        None => request.send().await?,
-    };
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session {action}: {}",
-            response.text().await?
-        );
-    }
-    Ok(())
 }
 
 pub(crate) async fn ensure_runtime_session(

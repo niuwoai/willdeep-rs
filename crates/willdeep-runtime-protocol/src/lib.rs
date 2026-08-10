@@ -116,6 +116,47 @@ pub struct RuntimeSession {
     pub updated_at: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSessionParams {
+    pub id: Option<uuid::Uuid>,
+    pub workspace: String,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RenameSessionParams {
+    pub id: uuid::Uuid,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSessionParams {
+    pub id: uuid::Uuid,
+    pub title: Option<String>,
+    pub through_turn_id: Option<uuid::Uuid>,
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveSessionParams {
+    pub id: uuid::Uuid,
+    pub archived: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteSessionParams {
+    pub id: uuid::Uuid,
+    pub confirmation: uuid::Uuid,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
@@ -874,5 +915,37 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn session_management_params_require_explicit_targets() {
+        let id = uuid::Uuid::new_v4();
+        let rename = RenameSessionParams {
+            id,
+            title: "Renamed".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_value::<RenameSessionParams>(serde_json::to_value(&rename).unwrap())
+                .unwrap(),
+            rename
+        );
+        assert!(
+            serde_json::from_value::<DeleteSessionParams>(serde_json::json!({
+                "id": id,
+                "confirmation": id,
+                "force": true
+            }))
+            .is_err()
+        );
+        for operation in [
+            "session.create",
+            "session.rename",
+            "session.fork",
+            "session.archive",
+            "session.delete",
+            "session.export",
+        ] {
+            assert!(SUPPORTED_OPERATIONS.contains(&operation));
+        }
     }
 }
