@@ -202,19 +202,37 @@ pub(crate) async fn search_remote_sessions(
     parameters: &[(String, String)],
 ) -> Result<serde_json::Value> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!("http://{}/v1/sessions/search", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .query(parameters)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Session search: {}",
-            response.text().await?
-        );
+    let mut params = willdeep_runtime_protocol::SearchSessionsParams {
+        query: None,
+        workspace: None,
+        status: None,
+        profile: None,
+        model: None,
+        updated_after: None,
+        updated_before: None,
+    };
+    for (key, value) in parameters {
+        match key.as_str() {
+            "q" => params.query = Some(value.clone()),
+            "workspace" => params.workspace = Some(value.clone()),
+            "status" => params.status = Some(parse_public_session_status(value)?),
+            "profile" => params.profile = Some(value.clone()),
+            "model" => params.model = Some(value.clone()),
+            "updated_after" => params.updated_after = Some(value.parse()?),
+            "updated_before" => params.updated_before = Some(value.parse()?),
+            _ => bail!("unsupported Session search parameter: {key}"),
+        }
     }
-    Ok(response.json().await?)
+    let results = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::SessionSearchResult>>(
+                "session.search",
+                &params,
+                None,
+            )
+            .await?,
+    )?;
+    Ok(serde_json::to_value(results)?)
 }
 
 pub(crate) async fn ensure_runtime_session(
@@ -264,36 +282,34 @@ pub(crate) async fn submit_runtime_turn(
     }
     let request_id = uuid::Uuid::new_v4();
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/sessions/{session_id}/turns",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&session_store::CreateRuntimeTurn {
-            request_id,
-            prompt,
-            attachments,
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected Turn: {}", response.text().await?);
-    }
-    let turn: session_store::RuntimeTurn = response.json().await?;
+    let turn = api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                "turn.submit",
+                &willdeep_runtime_protocol::SubmitTurnParams {
+                    session_id,
+                    turn_request_id: request_id,
+                    prompt,
+                    attachments: attachments.into_iter().map(public_attachment).collect(),
+                },
+                Some(request_id),
+            )
+            .await?,
+    )?;
     Ok(RemoteRuntimeTurn { id: turn.id })
 }
 
 pub(crate) async fn stop_remote_turn(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/turns/{id}/stop", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected Turn stop: {}", response.text().await?);
-    }
+    api_data(
+        runtime_client(&state)?
+            .call::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                "turn.stop",
+                &serde_json::json!({"id": id}),
+                None,
+            )
+            .await?,
+    )?;
     Ok(())
 }
 
@@ -684,6 +700,44 @@ fn api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T>
         willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
             bail!("Runtime API error: {}", error.message)
         }
+    }
+}
+
+fn public_attachment(
+    attachment: willdeep_core::MessageAttachment,
+) -> willdeep_runtime_protocol::MessageAttachment {
+    match attachment {
+        willdeep_core::MessageAttachment::Text { name, content } => {
+            willdeep_runtime_protocol::MessageAttachment::Text { name, content }
+        }
+        willdeep_core::MessageAttachment::Image {
+            name,
+            media_type,
+            data,
+            width,
+            height,
+        } => willdeep_runtime_protocol::MessageAttachment::Image {
+            name,
+            media_type,
+            data,
+            width,
+            height,
+        },
+    }
+}
+
+fn parse_public_session_status(value: &str) -> Result<willdeep_runtime_protocol::SessionStatus> {
+    use willdeep_runtime_protocol::SessionStatus;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "idle" => Ok(SessionStatus::Idle),
+        "queued" => Ok(SessionStatus::Queued),
+        "running" => Ok(SessionStatus::Running),
+        "waiting_approval" => Ok(SessionStatus::WaitingApproval),
+        "waiting_answer" => Ok(SessionStatus::WaitingAnswer),
+        "failed" => Ok(SessionStatus::Failed),
+        "interrupted" => Ok(SessionStatus::Interrupted),
+        "archived" => Ok(SessionStatus::Archived),
+        _ => bail!("invalid Session status: {value}"),
     }
 }
 

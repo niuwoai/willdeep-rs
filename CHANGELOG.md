@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.21.0-rc8] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增 Session 搜索结果、文本/图片附件、Turn 提交与列表参数 DTO，以及 `session.search`、`turn.list` 稳定操作。
+- 统一 API 实现 Session 组合搜索和 Turn 提交、列表、查询与停止。
+
+### Changed
+
+- TUI Session 搜索和 TUI/Web Turn 提交、停止改走共享 Runtime Client；Turn 提交同时使用外层 Request ID 与会话内 Turn Request ID 去重。
+
+### Security
+
+- 统一 Turn 提交在 Runtime 边界限制 1 MiB Prompt、12 个附件、文本字符数、图片 MIME/尺寸和 10 MiB 总载荷；参数严格拒绝 Workspace、权限或其他未知控制字段。
+
 ## [0.21.0-rc7] - 2026-08-11
 
 ### Added

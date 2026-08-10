@@ -2,6 +2,10 @@ use super::*;
 use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode, RuntimeCapabilities};
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
+const MAX_TURN_PROMPT_BYTES: usize = 1024 * 1024;
+const MAX_TURN_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_TURN_ATTACHMENTS: usize = 12;
+const MAX_TEXT_ATTACHMENT_CHARS: usize = 200_000;
 
 pub(super) struct IdempotencyStore {
     state: AsyncMutex<IdempotencyState>,
@@ -275,6 +279,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
                 .and_then(public_session_export),
             Err(error) => Err(error),
         },
+        "session.search" => session_search(state, &request),
         "agent.list" => json_result(state.agents.list().map(|agents| {
             agents
                 .into_iter()
@@ -330,6 +335,21 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             },
             Err(error) => Err(error),
         },
+        "turn.list" => match params::<willdeep_runtime_protocol::ListTurnsParams>(&request) {
+            Ok(params) => match state.sessions.get(params.session_id) {
+                Ok(Some(_)) => json_result(
+                    state
+                        .sessions
+                        .list_turns(params.session_id)
+                        .map(|turns| turns.into_iter().map(public_turn).collect::<Vec<_>>()),
+                ),
+                Ok(None) => Err(ApiFailure::not_found("Runtime Session not found")),
+                Err(error) => Err(ApiFailure::internal(error)),
+            },
+            Err(error) => Err(error),
+        },
+        "turn.submit" => turn_submit(state, &request).await,
+        "turn.stop" => turn_stop(state, &request).await,
         "approval.list" => {
             let interactions = state
                 .tasks
@@ -497,6 +517,8 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "session.fork"
             | "session.archive"
             | "session.delete"
+            | "turn.submit"
+            | "turn.stop"
             | "diff.review"
             | "diff.verification.record"
             | "diff.revert"
@@ -517,28 +539,89 @@ fn request_fingerprint(request: &ApiRequest) -> u64 {
 fn public_session(
     session: session_store::RuntimeSession,
 ) -> willdeep_runtime_protocol::RuntimeSession {
-    use session_store::RuntimeSessionStatus as Source;
-    use willdeep_runtime_protocol::SessionStatus as Target;
-
     willdeep_runtime_protocol::RuntimeSession {
         id: session.id,
         root_agent_id: session.root_agent_id,
         workspace: Some(session.workspace.to_string_lossy().into_owned()),
         profile: session.profile,
         model: session.model,
-        status: match session.status {
-            Source::Idle => Target::Idle,
-            Source::Queued => Target::Queued,
-            Source::Running => Target::Running,
-            Source::WaitingApproval => Target::WaitingApproval,
-            Source::WaitingAnswer => Target::WaitingAnswer,
-            Source::Failed => Target::Failed,
-            Source::Interrupted => Target::Interrupted,
-            Source::Archived => Target::Archived,
-        },
+        status: public_session_status(session.status),
         active_turn_id: session.active_turn_id,
         created_at: session.created_at,
         updated_at: session.updated_at,
+    }
+}
+
+fn public_session_status(
+    status: session_store::RuntimeSessionStatus,
+) -> willdeep_runtime_protocol::SessionStatus {
+    use session_store::RuntimeSessionStatus as Source;
+    use willdeep_runtime_protocol::SessionStatus as Target;
+    match status {
+        Source::Idle => Target::Idle,
+        Source::Queued => Target::Queued,
+        Source::Running => Target::Running,
+        Source::WaitingApproval => Target::WaitingApproval,
+        Source::WaitingAnswer => Target::WaitingAnswer,
+        Source::Failed => Target::Failed,
+        Source::Interrupted => Target::Interrupted,
+        Source::Archived => Target::Archived,
+    }
+}
+
+fn local_session_status(
+    status: willdeep_runtime_protocol::SessionStatus,
+) -> session_store::RuntimeSessionStatus {
+    use session_store::RuntimeSessionStatus as Target;
+    use willdeep_runtime_protocol::SessionStatus as Source;
+    match status {
+        Source::Idle => Target::Idle,
+        Source::Queued => Target::Queued,
+        Source::Running => Target::Running,
+        Source::WaitingApproval => Target::WaitingApproval,
+        Source::WaitingAnswer => Target::WaitingAnswer,
+        Source::Failed => Target::Failed,
+        Source::Interrupted => Target::Interrupted,
+        Source::Archived => Target::Archived,
+    }
+}
+
+fn public_session_search_result(
+    result: session_store::RuntimeSessionSearchResult,
+) -> willdeep_runtime_protocol::SessionSearchResult {
+    willdeep_runtime_protocol::SessionSearchResult {
+        id: result.id,
+        title: result.title,
+        workspace: Some(result.workspace.to_string_lossy().into_owned()),
+        status: public_session_status(result.status),
+        profile: result.profile,
+        model: result.model,
+        updated_at: result.updated_at,
+        message_count: result.message_count,
+        snippet: result.snippet,
+    }
+}
+
+fn local_attachment(
+    attachment: willdeep_runtime_protocol::MessageAttachment,
+) -> willdeep_core::MessageAttachment {
+    match attachment {
+        willdeep_runtime_protocol::MessageAttachment::Text { name, content } => {
+            willdeep_core::MessageAttachment::Text { name, content }
+        }
+        willdeep_runtime_protocol::MessageAttachment::Image {
+            name,
+            media_type,
+            data,
+            width,
+            height,
+        } => willdeep_core::MessageAttachment::Image {
+            name,
+            media_type,
+            data,
+            width,
+            height,
+        },
     }
 }
 
@@ -916,6 +999,174 @@ fn scrub_session_export_value(mut value: serde_json::Value) -> serde_json::Value
     value
 }
 
+fn session_search(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::SearchSessionsParams>(request)?;
+    let status = params.status.map(local_session_status);
+    let results = state
+        .sessions
+        .search(session_store::SessionSearchQuery {
+            q: params.query,
+            workspace: params.workspace.map(PathBuf::from),
+            status,
+            profile: params.profile,
+            model: params.model,
+            updated_after: params.updated_after,
+            updated_before: params.updated_before,
+        })
+        .map_err(|error| ApiFailure::invalid(format!("invalid Session search: {error}")))?;
+    json(
+        results
+            .into_iter()
+            .map(public_session_search_result)
+            .collect::<Vec<_>>(),
+    )
+}
+
+async fn turn_submit(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::SubmitTurnParams>(request)?;
+    validate_turn_submission(&params)?;
+    let session_id = params.session_id;
+    let attachments = params
+        .attachments
+        .into_iter()
+        .map(local_attachment)
+        .collect();
+    let (turn, created) = state
+        .sessions
+        .enqueue_turn(
+            session_id,
+            session_store::CreateRuntimeTurn {
+                request_id: params.turn_request_id,
+                prompt: params.prompt,
+                attachments,
+            },
+        )
+        .map_err(|error| ApiFailure::invalid(format!("cannot submit Turn: {error}")))?;
+    if created {
+        let session = state
+            .sessions
+            .get(session_id)
+            .map_err(ApiFailure::internal)?
+            .ok_or_else(|| ApiFailure::not_found("Runtime Session not found"))?;
+        state
+            .events
+            .append(
+                "turn.queued",
+                format!(
+                    "session_id={} agent_id={} turn_id={}",
+                    session_id, session.root_agent_id, turn.id
+                ),
+            )
+            .map_err(ApiFailure::internal)?;
+        state
+            .tasks
+            .schedule_session(session_id)
+            .map_err(ApiFailure::internal)?;
+    }
+    let turn = state
+        .sessions
+        .get_turn(turn.id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Turn not found"))?;
+    json(public_turn(turn))
+}
+
+fn validate_turn_submission(
+    params: &willdeep_runtime_protocol::SubmitTurnParams,
+) -> Result<(), ApiFailure> {
+    if params.prompt.len() > MAX_TURN_PROMPT_BYTES {
+        return Err(ApiFailure::invalid("Turn prompt exceeds 1 MiB"));
+    }
+    if params.attachments.len() > MAX_TURN_ATTACHMENTS {
+        return Err(ApiFailure::invalid("Turn accepts at most 12 attachments"));
+    }
+    for attachment in &params.attachments {
+        match attachment {
+            willdeep_runtime_protocol::MessageAttachment::Text { name, content } => {
+                if name.len() > 512 || content.chars().count() > MAX_TEXT_ATTACHMENT_CHARS {
+                    return Err(ApiFailure::invalid("text attachment is too large"));
+                }
+            }
+            willdeep_runtime_protocol::MessageAttachment::Image {
+                name,
+                media_type,
+                width,
+                height,
+                ..
+            } => {
+                if name.len() > 512
+                    || !matches!(
+                        media_type.as_str(),
+                        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                    )
+                    || *width == 0
+                    || *height == 0
+                {
+                    return Err(ApiFailure::invalid("image attachment is unsupported"));
+                }
+            }
+        }
+    }
+    let attachment_bytes = params
+        .attachments
+        .iter()
+        .map(|attachment| match attachment {
+            willdeep_runtime_protocol::MessageAttachment::Text { name, content } => {
+                name.len().saturating_add(content.len())
+            }
+            willdeep_runtime_protocol::MessageAttachment::Image {
+                name,
+                media_type,
+                data,
+                ..
+            } => name
+                .len()
+                .saturating_add(media_type.len())
+                .saturating_add(data.len()),
+        })
+        .fold(0usize, usize::saturating_add);
+    if attachment_bytes > MAX_TURN_ATTACHMENT_BYTES {
+        return Err(ApiFailure::invalid("Turn attachments exceed 10 MiB"));
+    }
+    Ok(())
+}
+
+async fn turn_stop(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<IdParams>(request)?;
+    let cancellation = state
+        .sessions
+        .request_cancel(params.id)
+        .map_err(|_| ApiFailure::not_found("Runtime Turn not found"))?;
+    if let Some(task_id) = cancellation.task_id {
+        state
+            .tasks
+            .cancel(task_id)
+            .await
+            .map_err(ApiFailure::internal)?;
+    } else if cancellation.cancelled_queued {
+        state
+            .events
+            .append(
+                "turn.cancelled",
+                format!(
+                    "session_id={} turn_id={} task_id=none",
+                    cancellation.session_id, params.id
+                ),
+            )
+            .map_err(ApiFailure::internal)?;
+        state
+            .tasks
+            .schedule_session(cancellation.session_id)
+            .map_err(ApiFailure::internal)?;
+    }
+    let turn = state
+        .sessions
+        .get_turn(params.id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Turn not found"))?;
+    json(public_turn(turn))
+}
+
 async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<AgentPromptParams>(request)?;
     let message = params.message.trim();
@@ -1203,6 +1454,35 @@ mod tests {
         assert!(value["session"].get("config").is_none());
         assert!(value["session"].get("last_error").is_none());
         assert!(value.get("core").is_some());
+    }
+
+    #[test]
+    fn turn_submission_limits_are_enforced_at_the_runtime_boundary() {
+        let mut params = willdeep_runtime_protocol::SubmitTurnParams {
+            session_id: uuid::Uuid::new_v4(),
+            turn_request_id: uuid::Uuid::new_v4(),
+            prompt: "hello".to_owned(),
+            attachments: Vec::new(),
+        };
+        assert!(validate_turn_submission(&params).is_ok());
+        params.attachments = (0..=MAX_TURN_ATTACHMENTS)
+            .map(|index| willdeep_runtime_protocol::MessageAttachment::Text {
+                name: format!("{index}.txt"),
+                content: "x".to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            validate_turn_submission(&params).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        params.attachments = vec![willdeep_runtime_protocol::MessageAttachment::Image {
+            name: "payload.svg".to_owned(),
+            media_type: "image/svg+xml".to_owned(),
+            data: "PHN2Zz4=".to_owned(),
+            width: 1,
+            height: 1,
+        }];
+        assert!(validate_turn_submission(&params).is_err());
     }
 
     #[tokio::test]

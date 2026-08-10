@@ -157,6 +157,63 @@ pub struct DeleteSessionParams {
     pub confirmation: uuid::Uuid,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchSessionsParams {
+    pub query: Option<String>,
+    pub workspace: Option<String>,
+    pub status: Option<SessionStatus>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub updated_after: Option<u64>,
+    pub updated_before: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSearchResult {
+    pub id: uuid::Uuid,
+    pub title: String,
+    pub workspace: Option<String>,
+    pub status: SessionStatus,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub updated_at: u64,
+    pub message_count: usize,
+    pub snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageAttachment {
+    Text {
+        name: String,
+        content: String,
+    },
+    Image {
+        name: String,
+        media_type: String,
+        data: String,
+        width: u32,
+        height: u32,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitTurnParams {
+    pub session_id: uuid::Uuid,
+    pub turn_request_id: uuid::Uuid,
+    pub prompt: String,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListTurnsParams {
+    pub session_id: uuid::Uuid,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
@@ -616,6 +673,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "workspace.remove",
     "session.create",
     "session.list",
+    "session.search",
     "session.get",
     "session.rename",
     "session.fork",
@@ -632,6 +690,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "task.get",
     "task.cancel",
     "turn.submit",
+    "turn.list",
     "turn.get",
     "turn.stop",
     "approval.list",
@@ -944,6 +1003,46 @@ mod tests {
             "session.archive",
             "session.delete",
             "session.export",
+        ] {
+            assert!(SUPPORTED_OPERATIONS.contains(&operation));
+        }
+    }
+
+    #[test]
+    fn turn_submission_round_trips_typed_attachments_and_rejects_extra_controls() {
+        let params = SubmitTurnParams {
+            session_id: uuid::Uuid::new_v4(),
+            turn_request_id: uuid::Uuid::new_v4(),
+            prompt: "inspect the image".to_owned(),
+            attachments: vec![MessageAttachment::Image {
+                name: "screen.png".to_owned(),
+                media_type: "image/png".to_owned(),
+                data: "aGVsbG8=".to_owned(),
+                width: 1,
+                height: 1,
+            }],
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SubmitTurnParams>(value).unwrap(),
+            params
+        );
+        assert!(
+            serde_json::from_value::<SubmitTurnParams>(serde_json::json!({
+                "session_id": uuid::Uuid::new_v4(),
+                "turn_request_id": uuid::Uuid::new_v4(),
+                "prompt": "hello",
+                "attachments": [],
+                "workspace": "/escape"
+            }))
+            .is_err()
+        );
+        for operation in [
+            "session.search",
+            "turn.submit",
+            "turn.list",
+            "turn.get",
+            "turn.stop",
         ] {
             assert!(SUPPORTED_OPERATIONS.contains(&operation));
         }

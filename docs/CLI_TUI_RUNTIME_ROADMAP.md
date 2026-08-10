@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc7
+> 当前实施版本：v0.21.0-rc8
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc8（已完成）：协议 crate 新增 Session Search Result、文本/图片附件、Turn Submit/List 参数 DTO，以及 `session.search`、`turn.list` 稳定操作。统一 API 实现组合搜索、Turn 提交/列表/查询/停止；TUI Session 搜索和 TUI/Web Turn bridge 使用共享 Runtime Client。提交入口限制 Prompt、附件数量、文本长度、图片 MIME/尺寸与总载荷，并拒绝客户端夹带 Workspace/权限字段。下一步实现 Unix Socket 与 Windows Named Pipe，并继续迁移带私有配置引用的 Session 收养和 CLI 兼容命令。
 
 v0.21.0-rc7（已完成）：统一 API 实现 Session 创建、重命名、Fork、归档/恢复、删除和导出，修改操作纳入跨重启 Request ID 幂等；协议 crate 新增严格拒绝未知字段的 Session 管理参数 DTO。Web Session 列表、重命名、Fork、归档、删除和导出 bridge 改用共享 Runtime Client，浏览器 Workspace 白名单校验保持在调用前。下一步迁移 Session 创建/Turn 提交与搜索，并实现 Unix Socket 与 Windows Named Pipe。
 

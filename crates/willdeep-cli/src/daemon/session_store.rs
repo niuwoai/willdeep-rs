@@ -145,33 +145,33 @@ struct ExportedCoreSession {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RuntimeSessionSearchResult {
-    id: uuid::Uuid,
-    title: String,
-    workspace: PathBuf,
-    status: RuntimeSessionStatus,
-    profile: Option<String>,
-    model: Option<String>,
-    updated_at: u64,
-    message_count: usize,
-    snippet: Option<String>,
+    pub(super) id: uuid::Uuid,
+    pub(super) title: String,
+    pub(super) workspace: PathBuf,
+    pub(super) status: RuntimeSessionStatus,
+    pub(super) profile: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) updated_at: u64,
+    pub(super) message_count: usize,
+    pub(super) snippet: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SessionSearchQuery {
     #[serde(default)]
-    q: Option<String>,
+    pub(super) q: Option<String>,
     #[serde(default)]
-    workspace: Option<PathBuf>,
+    pub(super) workspace: Option<PathBuf>,
     #[serde(default)]
-    status: Option<RuntimeSessionStatus>,
+    pub(super) status: Option<RuntimeSessionStatus>,
     #[serde(default)]
-    profile: Option<String>,
+    pub(super) profile: Option<String>,
     #[serde(default)]
-    model: Option<String>,
+    pub(super) model: Option<String>,
     #[serde(default)]
-    updated_after: Option<u64>,
+    pub(super) updated_after: Option<u64>,
     #[serde(default)]
-    updated_before: Option<u64>,
+    pub(super) updated_before: Option<u64>,
 }
 
 pub(super) struct ClaimedRuntimeTurn {
