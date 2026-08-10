@@ -464,6 +464,28 @@ pub enum DaemonAction {
     Run,
 }
 
+#[derive(Clone, Debug, Subcommand)]
+pub enum SessionAction {
+    /// List persistent Runtime Sessions.
+    List,
+    /// Show one Session and its active Turn.
+    Get { id: uuid::Uuid },
+    /// List Turns owned by one Session.
+    Turns { id: uuid::Uuid },
+    /// Stop the Session's active or queued Turn.
+    Stop { id: uuid::Uuid },
+}
+
+pub async fn handle_session(action: SessionAction) -> Result<()> {
+    let home = crate::config::willdeep_home()?;
+    match action {
+        SessionAction::List => session_store::list_sessions_cli(&home).await,
+        SessionAction::Get { id } => session_store::show_session_cli(&home, id).await,
+        SessionAction::Turns { id } => session_store::list_turns_cli(&home, id).await,
+        SessionAction::Stop { id } => session_store::stop_session_cli(&home, id).await,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DaemonState {
     schema: u32,

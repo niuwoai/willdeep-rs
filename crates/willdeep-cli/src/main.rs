@@ -152,6 +152,11 @@ enum CliCommand {
     },
     /// Render the current command tree as a roff man page.
     Man,
+    /// Inspect or stop persistent Runtime Sessions.
+    Session {
+        #[command(subcommand)]
+        action: daemon::SessionAction,
+    },
     /// Create, validate, or inspect the TOML configuration.
     Config {
         #[command(subcommand)]
@@ -333,6 +338,7 @@ async fn run() -> Result<()> {
             CliCommand::Run(_) => unreachable!("run command is normalized above"),
             CliCommand::Completions { shell } => generate_completions(shell),
             CliCommand::Man => generate_man_page(),
+            CliCommand::Session { action } => daemon::handle_session(action).await,
             CliCommand::Config { action } => config::handle(action, cli.config.as_deref()),
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Api {
@@ -1215,6 +1221,23 @@ mod tests {
         assert!(
             Cli::try_parse_from(["willdeep", "run", "--input", "prompt.txt", "inline"]).is_err()
         );
+    }
+
+    #[test]
+    fn top_level_session_commands_parse_stable_targets() {
+        let id = uuid::Uuid::new_v4();
+        for action in ["get", "turns", "stop"] {
+            let cli =
+                Cli::try_parse_from(["willdeep", "session", action, &id.to_string()]).unwrap();
+            assert!(matches!(cli.command, Some(CliCommand::Session { .. })));
+        }
+        let cli = Cli::try_parse_from(["willdeep", "session", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Session {
+                action: daemon::SessionAction::List
+            })
+        ));
     }
 
     #[test]

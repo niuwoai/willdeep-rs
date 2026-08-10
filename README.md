@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc25`，支持：
+当前版本为 `0.21.0-rc26`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -314,6 +314,17 @@ willdeep man
 
 可把补全输出保存到对应 Shell 的补全目录，或在当前 Shell 中加载；`willdeep man` 输出标准 roff，可安装为 `willdeep.1`。
 
+常用 Session 查询和停止不必再记住 `daemon` 下的内部命令：
+
+```bash
+willdeep session list
+willdeep session get <SESSION_ID>
+willdeep session turns <SESSION_ID>
+willdeep session stop <SESSION_ID>
+```
+
+`session stop` 读取目标 Session 当前明确绑定的 active/queued Turn，再以新的幂等 Request ID 请求停止；空闲 Session 会直接报错，不会猜测或停止其他 Session 的任务。
+
 终端启用 Bracketed Paste：短单行粘贴直接插入光标处，多行或超过 200 字符的内容显示为 `Pasted text` 附件行。图片粘贴会读取本机系统剪贴板、转为 PNG 并显示尺寸和大小；发送前可用 `Ctrl+D` 删除。SSH 会话无法读取远端电脑的系统剪贴板图片，这是终端边界，不会静默伪装成功。
 
 ## Skills 与 MCP
@@ -351,7 +362,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc25` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc26` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

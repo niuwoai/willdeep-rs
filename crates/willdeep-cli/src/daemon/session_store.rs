@@ -1681,6 +1681,25 @@ pub(super) async fn stop_turn_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn stop_session_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let client = runtime_client(&state)?;
+    let session = client.session(id).await?.into_result()?;
+    let turn_id = active_turn_for_stop(&session)?;
+    let turn = client
+        .stop_turn(turn_id, uuid::Uuid::new_v4())
+        .await?
+        .into_result()?;
+    print_public_turn(&turn);
+    Ok(())
+}
+
+fn active_turn_for_stop(session: &willdeep_runtime_protocol::RuntimeSession) -> Result<uuid::Uuid> {
+    session
+        .active_turn_id
+        .context("Runtime Session has no active or queued Turn")
+}
+
 fn cli_api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
     match response {
         willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
@@ -2241,5 +2260,28 @@ mod tests {
             second.id
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_stop_targets_only_its_declared_active_turn() {
+        let active_turn_id = uuid::Uuid::new_v4();
+        let session = willdeep_runtime_protocol::RuntimeSession {
+            id: uuid::Uuid::new_v4(),
+            root_agent_id: uuid::Uuid::new_v4(),
+            workspace: None,
+            profile: None,
+            model: None,
+            status: willdeep_runtime_protocol::SessionStatus::Running,
+            active_turn_id: Some(active_turn_id),
+            created_at: 1,
+            updated_at: 2,
+        };
+        assert_eq!(active_turn_for_stop(&session).unwrap(), active_turn_id);
+        let idle = willdeep_runtime_protocol::RuntimeSession {
+            active_turn_id: None,
+            status: willdeep_runtime_protocol::SessionStatus::Idle,
+            ..session
+        };
+        assert!(active_turn_for_stop(&idle).is_err());
     }
 }

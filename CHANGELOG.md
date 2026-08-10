@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0-rc26] - 2026-08-11
+
+### Added
+
+- 新增顶层 `willdeep session list/get/turns/stop`，直接查询或控制持久 Runtime Session。
+
+### Security
+
+- Session Stop 只操作服务端返回的精确 `active_turn_id`；空闲 Session 拒绝停止，不回退到“最近任务”猜测。
+
 ## [0.21.0-rc25] - 2026-08-11
 
 ### Added
