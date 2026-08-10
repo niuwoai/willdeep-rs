@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc10
+> 当前实现版本：v0.21.0-rc11
 
 ## 1. 目标
 
@@ -68,6 +68,8 @@ event.stream
 turn.submit
 turn.list
 turn.stop
+tool.list
+tool.get
 diff.snapshot
 diff.content
 diff.review
@@ -86,7 +88,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc10",
+    "server_version": "0.21.0-rc11",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -104,7 +106,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc10"
+    "server_version": "0.21.0-rc11"
   }
 }
 ```
@@ -124,6 +126,7 @@ diff.revert
 - 所有控制端点必须显式校验随机 Runtime Token；
 - API Key、Provider Secret、Runtime Token 永不进入 DTO、事件或错误字段；
 - Prompt、附件正文和工具参数默认仅在明确需要的目标操作中返回；
+- `RuntimeTool` 只公开稳定 ID、Session/Turn/Task/Agent 归属、工具名、状态和起止时间；Tool 索引不保存参数、输出正文、Workspace 路径或内部错误；
 - Session 收养只接受稳定 ID、Workspace、Profile 与模型等公开字段；配置文件路径由 Runtime 从 Core Session 私有存储恢复，`CreateSessionParams` 拒绝客户端夹带 `config`；
 - 文件路径按调用方权限裁剪；公开能力响应不得包含任何用户路径；
 - `fields` 错误上下文只允许稳定字段名和非敏感值；
@@ -135,8 +138,8 @@ diff.revert
 1. [x] 协议 crate、版本、对象类别、操作名、能力、错误码和响应信封；
 2. [x] 受 Token 的能力协商端点；
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
-4. [x] Workspace、Session、Agent、Turn、Task、Approval、Question、Event 与 Diff Review 共享 DTO；
-5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码、Unix Socket、Windows Named Pipe 和 Workspace/会话/Agent/任务/交互/Diff DTO，剩余 Tool 与 Artifact 继续进行；
+4. [-] Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Event 与 Diff Review 共享 DTO；Artifact 继续迁移；
+5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码、Unix Socket、Windows Named Pipe 和 Workspace/会话/Agent/Tool/任务/交互/Diff DTO，剩余 Artifact 继续进行；
 6. [-] TUI/Web/CLI 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session/Turn，Web Session/Turn，以及 CLI Session/Turn 管理已迁移；Session 收养从 Runtime 私有存储恢复配置引用；其他 CLI 兼容命令继续迁移；
 7. [x] Unix Socket 与 Windows Named Pipe；
 8. [ ] Swift FFI、移动端和自动化兼容验证。

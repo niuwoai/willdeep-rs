@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc11] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增稳定 `RuntimeTool`、`ToolStatus`、`ListToolsParams` DTO，以及 `tool.list`、`tool.get` 操作。
+- Runtime 新增有界持久 Tool Activity 索引，记录主/子 Agent 工具的 Session、Turn、Task、Agent 归属和毫秒级生命周期；重启时运行中记录收敛为 Interrupted。
+
+### Security
+
+- Tool Activity 不持久化也不返回工具参数、输出正文、Workspace 路径或内部错误；工具名有长度上限，列表数量受服务端限制。
+
 ## [0.21.0-rc10] - 2026-08-11
 
 ### Added

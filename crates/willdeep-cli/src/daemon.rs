@@ -34,6 +34,7 @@ mod event_stream;
 mod herdr;
 mod local_transport;
 mod session_store;
+mod tool_store;
 pub(crate) mod tui_bridge;
 mod workspace_store;
 mod worktree_maintenance;
@@ -67,6 +68,7 @@ struct RuntimeEventSink {
     workspace: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    tools: Arc<tool_store::ToolStore>,
     diff_baselines: AsyncMutex<HashMap<String, (PathBuf, diff_review::DiffCapture)>>,
     child_workspaces: AsyncMutex<HashMap<uuid::Uuid, PathBuf>>,
 }
@@ -169,6 +171,16 @@ fn tool_may_modify_workspace(name: &str) -> bool {
 #[async_trait]
 impl willdeep_core::EventSink for RuntimeEventSink {
     async fn emit(&self, event: willdeep_core::AgentEvent) {
+        if let Err(error) = tool_store::observe(
+            &self.tools,
+            self.session_id,
+            self.turn_id,
+            self.task_id,
+            self.root_agent_id,
+            &event,
+        ) {
+            eprintln!("record Tool activity for task {}: {error:#}", self.task_id);
+        }
         self.observe_diff(&event).await;
         let line = crate::agent_event_json(event).to_string();
         if self
@@ -485,6 +497,7 @@ struct ServerState {
     diff_review_lock: Arc<tokio::sync::Mutex<()>>,
     idempotency: Arc<control_api::IdempotencyStore>,
     local_transport: Option<LocalTransportState>,
+    tools: Arc<tool_store::ToolStore>,
 }
 
 type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
@@ -626,6 +639,7 @@ struct TaskManager {
     home: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    tools: Arc<tool_store::ToolStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
     workspaces: Arc<workspace_store::WorkspaceStore>,
     runtime_url: String,
@@ -1557,6 +1571,7 @@ async fn run(home: &Path) -> Result<()> {
             paths.idempotency.clone(),
         )?),
         local_transport: state.local_transport.clone(),
+        tools: tasks.tools.clone(),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
@@ -2205,11 +2220,15 @@ impl TaskManager {
         let workspaces = Arc::new(workspace_store::WorkspaceStore::open(
             home.join("runtime/workspaces.json"),
         )?);
+        let tools = Arc::new(tool_store::ToolStore::open(
+            home.join("runtime/tools.json"),
+        )?);
         Ok(Self {
             path,
             home,
             events,
             agents,
+            tools,
             sessions,
             workspaces,
             runtime_url,
@@ -2503,6 +2522,7 @@ impl TaskManager {
             workspace: request.workspace.clone(),
             events: self.events.clone(),
             agents: self.agents.clone(),
+            tools: self.tools.clone(),
             diff_baselines: AsyncMutex::new(HashMap::new()),
             child_workspaces: AsyncMutex::new(HashMap::new()),
         });

@@ -344,6 +344,18 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         },
         "turn.submit" => turn_submit(state, &request).await,
         "turn.stop" => turn_stop(state, &request).await,
+        "tool.list" => match params::<willdeep_runtime_protocol::ListToolsParams>(&request) {
+            Ok(params) => json_result(state.tools.list(params)),
+            Err(error) => Err(error),
+        },
+        "tool.get" => match params::<IdParams>(&request) {
+            Ok(params) => match state.tools.get(params.id) {
+                Ok(Some(tool)) => json(tool),
+                Ok(None) => Err(ApiFailure::not_found("Runtime Tool activity not found")),
+                Err(error) => Err(ApiFailure::internal(error)),
+            },
+            Err(error) => Err(error),
+        },
         "approval.list" => {
             let interactions = state
                 .tasks

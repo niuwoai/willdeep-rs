@@ -249,6 +249,39 @@ pub struct RuntimeTurn {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTool {
+    pub id: uuid::Uuid,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub name: String,
+    pub status: ToolStatus,
+    pub started_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListToolsParams {
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: Option<uuid::Uuid>,
+    pub agent_id: Option<uuid::Uuid>,
+    pub status: Option<ToolStatus>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Queued,
     Running,
@@ -699,6 +732,8 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "turn.list",
     "turn.get",
     "turn.stop",
+    "tool.list",
+    "tool.get",
     "approval.list",
     "approval.resolve",
     "question.list",
@@ -930,6 +965,32 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn public_tool_activity_contains_lifecycle_but_no_payloads() {
+        let tool = RuntimeTool {
+            id: uuid::Uuid::new_v4(),
+            session_id: Some(uuid::Uuid::new_v4()),
+            turn_id: Some(uuid::Uuid::new_v4()),
+            task_id: uuid::Uuid::new_v4(),
+            agent_id: uuid::Uuid::new_v4(),
+            name: "run_command".to_owned(),
+            status: ToolStatus::Completed,
+            started_at_ms: 10,
+            completed_at_ms: Some(20),
+        };
+        let value = serde_json::to_value(&tool).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RuntimeTool>(value.clone()).unwrap(),
+            tool
+        );
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("arguments"));
+        assert!(!object.contains_key("output"));
+        assert!(!object.contains_key("workspace"));
+        assert!(SUPPORTED_OPERATIONS.contains(&"tool.list"));
+        assert!(SUPPORTED_OPERATIONS.contains(&"tool.get"));
     }
 
     #[test]

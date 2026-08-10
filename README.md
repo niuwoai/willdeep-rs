@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc10`，支持：
+当前版本为 `0.21.0-rc11`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -316,7 +316,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc10` 已覆盖 Workspace/Session/Turn/Agent/Event/Task/Approval/Question、附件与 Diff Review 公开 DTO；TUI、Web 及 `daemon sessions/session/search/turns/turn` 等 CLI 会话命令均通过共享 Runtime Client。Session 收养只传稳定 ID，私有配置路径由 Runtime 从 Core Session 恢复，不进入公共 DTO。本机客户端优先使用权限收紧的 Unix Socket 或仅限本机的 Windows Named Pipe，旧状态仍兼容回环 TCP。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc11` 已覆盖 Workspace/Session/Turn/Agent/Tool/Event/Task/Approval/Question、附件与 Diff Review 公开 DTO；Tool Activity 按 Session、Turn、Task 与 Agent 持久归属，可通过 `tool.list/get` 查询状态和耗时边界，但不会保存或返回参数、输出正文和 Workspace 路径。Session 收养只传稳定 ID，私有配置路径由 Runtime 从 Core Session 恢复。本机客户端优先使用 Unix Socket 或 Windows Named Pipe。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

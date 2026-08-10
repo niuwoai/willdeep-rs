@@ -117,6 +117,7 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
     let child_workspace = root.join("child-workspace");
     std::fs::create_dir_all(&child_workspace).unwrap();
     initialize_git_workspace(&child_workspace);
+    let tools = Arc::new(tool_store::ToolStore::open(root.join("runtime/tools.json")).unwrap());
     let sink = RuntimeEventSink {
         task_id,
         session_id: Some(session_id),
@@ -126,6 +127,7 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
         workspace: workspace.clone(),
         events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
         agents: test_agent_store(&root),
+        tools: tools.clone(),
         diff_baselines: AsyncMutex::new(HashMap::new()),
         child_workspaces: AsyncMutex::new(HashMap::new()),
     };
@@ -182,6 +184,18 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
     assert_eq!(records[0].paths, vec!["child.txt"]);
     assert_eq!(records[1].agent_id, root_agent_id);
     assert_eq!(records[1].paths, vec!["root.txt"]);
+    let tool_records = tools
+        .list(willdeep_runtime_protocol::ListToolsParams {
+            task_id: Some(task_id),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(tool_records.len(), 2);
+    assert!(tool_records.iter().all(|tool| {
+        tool.status == willdeep_runtime_protocol::ToolStatus::Completed
+            && tool.session_id == Some(session_id)
+            && tool.turn_id == Some(turn_id)
+    }));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -227,6 +241,7 @@ async fn authorization_requires_exact_local_token() {
         local_transport: Some(LocalTransportState::UnixSocket {
             path: root.join("control.sock"),
         }),
+        tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
     });
     assert!(
         runtime_capabilities(&state)
