@@ -144,6 +144,8 @@ struct App {
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
+    runtime_tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
+    runtime_artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
     runtime_agent_selected: usize,
     agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
     worktree_review: Option<crate::daemon::WorktreeReview>,
@@ -358,6 +360,8 @@ async fn event_loop(
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
                 app.runtime_agents=snapshot.agents;
+                app.runtime_tools=snapshot.tools;
+                app.runtime_artifacts=snapshot.artifacts;
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
@@ -832,6 +836,8 @@ impl App {
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
             runtime_agents: Vec::new(),
+            runtime_tools: Vec::new(),
+            runtime_artifacts: Vec::new(),
             runtime_agent_selected: 0,
             agent_detail: None,
             worktree_review: None,

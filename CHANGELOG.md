@@ -7,6 +7,10 @@
 - 协议 crate 新增稳定 `RuntimeArtifact`、`ArtifactKind`、`ListArtifactsParams` DTO，以及 `artifact.list`、`artifact.get` 操作。
 - Runtime 将工具窗口内由内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session、Turn、Task、Agent、来源快照与变更项数量。
 
+### Changed
+
+- TUI Runtime 快照直接查询结构化 Tool/Artifact，右栏展示当前工作区的工具总数、运行数、产物数和最近工具状态，不再只依赖聊天事件聚合。
+
 ### Security
 
 - Artifact 元数据不暴露 Workspace 路径、变化文件名或内容；调用方必须使用受 Workspace 授权和精确快照校验的 Diff API 获取具体内容。

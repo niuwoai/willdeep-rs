@@ -35,6 +35,8 @@ pub(crate) struct RuntimeSnapshot {
     pub attention: Vec<willdeep_core::AttentionItem>,
     pub gates: Vec<RemoteGate>,
     pub agents: Vec<RemoteAgent>,
+    pub tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
+    pub artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
 }
 
 #[derive(Clone)]
@@ -495,6 +497,8 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
                 attention: Vec::new(),
                 gates: Vec::new(),
                 agents: Vec::new(),
+                tools: Vec::new(),
+                artifacts: Vec::new(),
             });
         }
     };
@@ -537,6 +541,36 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         })
         .map(|task| task.id)
         .collect::<std::collections::HashSet<_>>();
+    let tools = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeTool>>(
+                "tool.list",
+                &willdeep_runtime_protocol::ListToolsParams {
+                    limit: Some(100),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await?,
+    )?
+    .into_iter()
+    .filter(|tool| visible_tasks.contains(&tool.task_id))
+    .collect();
+    let artifacts = api_data(
+        runtime_client(&state)?
+            .call::<_, Vec<willdeep_runtime_protocol::RuntimeArtifact>>(
+                "artifact.list",
+                &willdeep_runtime_protocol::ListArtifactsParams {
+                    limit: Some(100),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await?,
+    )?
+    .into_iter()
+    .filter(|artifact| visible_tasks.contains(&artifact.task_id))
+    .collect();
     let approvals = api_data(
         runtime_client(&state)?
             .call::<_, Vec<willdeep_runtime_protocol::PendingApproval>>(
@@ -604,6 +638,8 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         attention,
         gates,
         agents,
+        tools,
+        artifacts,
     })
 }
 

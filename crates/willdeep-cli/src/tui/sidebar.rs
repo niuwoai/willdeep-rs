@@ -338,6 +338,33 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ));
                     }
                 }
+                if !app.runtime_tools.is_empty() || !app.runtime_artifacts.is_empty() {
+                    let running = app
+                        .runtime_tools
+                        .iter()
+                        .filter(|tool| {
+                            tool.status == willdeep_runtime_protocol::ToolStatus::Running
+                        })
+                        .count();
+                    lines.push(Line::styled(
+                        format!(
+                            "  {}: {} · {}: {} · {}: {}",
+                            app.language.text("工具", "Tools", "ツール"),
+                            app.runtime_tools.len(),
+                            app.language.text("运行中", "Running", "実行中"),
+                            running,
+                            app.language.text("产物", "Artifacts", "成果物"),
+                            app.runtime_artifacts.len()
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    if let Some(tool) = app.runtime_tools.first() {
+                        lines.push(Line::styled(
+                            format!("    {} · {:?}", tool.name, tool.status),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                }
             }
             3 => {
                 lines.push(Line::raw(format!(

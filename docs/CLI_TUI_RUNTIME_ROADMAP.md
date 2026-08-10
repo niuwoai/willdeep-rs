@@ -223,7 +223,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.21.0-rc12（已完成）：新增稳定 Artifact DTO 与 `artifact.list/get`。工具窗口内经内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session/Turn/Task/Agent、来源快照和变更项数量；公开元数据不泄露 Workspace、文件名或内容，具体读取继续走 Workspace 授权与精确快照保护的 Diff API。11 类 Runtime 公共对象 DTO 至此全部完成。下一步让 TUI/Web 直接消费 Tool/Artifact 查询，并继续 Rust Client 类型化便捷方法。
+v0.21.0-rc12（已完成）：新增稳定 Artifact DTO 与 `artifact.list/get`。工具窗口内经内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session/Turn/Task/Agent、来源快照和变更项数量；公开元数据不泄露 Workspace、文件名或内容，具体读取继续走 Workspace 授权与精确快照保护的 Diff API。11 类 Runtime 公共对象 DTO 至此全部完成。TUI Runtime 快照和右栏已直接消费 Tool/Artifact 查询，显示工作区工具、运行项、产物与最近状态。下一步迁移 Web 展示，并继续 Rust Client 类型化便捷方法。
 
 v0.21.0-rc11（已完成）：新增稳定 `RuntimeTool`、状态和过滤 DTO，以及 `tool.list/get` 统一操作。Runtime 对主/子 Agent Tool Activity 建立有界持久索引，记录 Session/Turn/Task/Agent 归属与毫秒级起止时间，重启时将运行项收敛为 Interrupted。公开记录不保存参数、输出、Workspace 路径或内部错误。下一步稳定 Artifact DTO 与来源绑定，并让 TUI/Web 直接消费 Tool 查询结果。
 

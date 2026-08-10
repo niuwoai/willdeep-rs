@@ -135,6 +135,8 @@ async fn switch(
     app.runtime_attention.clear();
     app.runtime_gates.clear();
     app.runtime_agents.clear();
+    app.runtime_tools.clear();
+    app.runtime_artifacts.clear();
     runtime.relay_bridge.set_session(target.id.to_string());
     *session = target;
     Ok(format!(

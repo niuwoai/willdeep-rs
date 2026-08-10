@@ -405,6 +405,31 @@ mod tests {
                 worktree_branch: Some("willdeep/agent-test".to_owned()),
                 dedicated_worktree: true,
             });
+        app.runtime_tools
+            .push(willdeep_runtime_protocol::RuntimeTool {
+                id: uuid::Uuid::new_v4(),
+                session_id: None,
+                turn_id: None,
+                task_id: uuid::Uuid::new_v4(),
+                agent_id: uuid::Uuid::new_v4(),
+                name: "read_file".to_owned(),
+                status: willdeep_runtime_protocol::ToolStatus::Running,
+                started_at_ms: 1,
+                completed_at_ms: None,
+            });
+        app.runtime_artifacts
+            .push(willdeep_runtime_protocol::RuntimeArtifact {
+                id: uuid::Uuid::new_v4(),
+                kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+                session_id: None,
+                turn_id: None,
+                task_id: uuid::Uuid::new_v4(),
+                agent_id: uuid::Uuid::new_v4(),
+                title: "edit_file workspace changes".to_owned(),
+                source_id: "diff-1".to_owned(),
+                item_count: 1,
+                created_at: 1,
+            });
         let backend = ratatui::backend::TestBackend::new(80, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -425,6 +450,8 @@ mod tests {
         assert!(rendered.contains("root · T3/- · - · 42t/- · -s"));
         assert!(rendered.contains("inspect · T1/8 · read_file · 9t/32000t · 300s"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
+        assert!(rendered.contains("Tools: 1 · Running: 1 · Artifacts: 1"));
+        assert!(rendered.contains("read_file · Running"));
         assert_eq!(
             app.selected_runtime_agent().unwrap().label.as_deref(),
             Some("root")
