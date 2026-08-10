@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.16.0-rc5
+> 当前实施版本：v0.16.0-rc6
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -55,6 +55,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [x] `willdeep daemon start/stop/status/logs`。
 - [x] 非交互 Harness 任务由 Runtime 持有，支持提交、列表、详情、取消、终态持久化和事件回流。
 - [x] Runtime 托管任务支持持久审批与 ask_user 队列，其他 CLI 客户端可解决后恢复原 Harness。
+- [x] Runtime Root Agent 持久实体、受保护查询 API、任务状态同步和 TUI 基础状态摘要。
 - [ ] 交互 Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime 原生生命周期。
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
@@ -214,7 +215,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.16.0-rc5：Runtime 的模型轮次、工具调用、用量和完成事件已按持久游标恢复到 TUI；游标按 Session 保存，事件按 Workspace 过滤，用户消息与正式回复可在重连后恢复且不重复。下一批推进交互 Harness、子 Agent 与后台任务的 Runtime 原生生命周期。
+v0.16.0-rc6：每个 Runtime Task 已拥有持久 Root Agent；Agent 状态由结构化 Harness 事件驱动，可通过受 Token 保护的 API/CLI 查询，并在 TUI 右栏显示当前 Workspace 摘要。下一批将 `spawn_agent` 的父子生命周期和后台任务结果回流迁入 Runtime。
 
 ## 6. 建议执行顺序
 

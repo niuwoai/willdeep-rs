@@ -199,6 +199,37 @@ mod tests {
         assert!(app.sidebar_manual_scroll);
     }
     #[test]
+    fn sidebar_renders_runtime_agent_lifecycle_summary() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.runtime_agents
+            .push(crate::daemon::tui_bridge::RemoteAgent {
+                id: "abe596f8-940d-4629-9a82-339796029947".parse().unwrap(),
+                profile: Some("editor".to_owned()),
+                status: RuntimeStatus::Done,
+                current_turn: 3,
+                current_tool: None,
+                total_tokens: Some(42),
+            });
+        let backend = ratatui::backend::TestBackend::new(48, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                sidebar::render_sidebar(frame, &mut app, area);
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Runtime agents · 1"));
+        assert!(rendered.contains("abe596f8 · editor · done"));
+        assert!(rendered.contains("turn 3 · - · 42 tok"));
+    }
+    #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));

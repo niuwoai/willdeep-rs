@@ -24,7 +24,9 @@ const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 
-mod tui_bridge;
+mod agent_store;
+pub(crate) mod tui_bridge;
+use agent_store::{AgentStore, RuntimeAgentStatus};
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     resolve_remote_approval, runtime_event_head, runtime_events, runtime_snapshot,
@@ -64,6 +66,10 @@ pub enum DaemonAction {
     Tasks,
     /// Show one Runtime-owned task.
     Task { id: uuid::Uuid },
+    /// List structured agents owned by the Runtime.
+    Agents,
+    /// Show one Runtime-owned agent.
+    Agent { id: uuid::Uuid },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
     /// List approvals and questions currently blocking Runtime tasks.
@@ -108,6 +114,7 @@ struct ServerState {
     shutdown: Arc<Notify>,
     events: Arc<EventLog>,
     tasks: Arc<TaskManager>,
+    agents: Arc<AgentStore>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,6 +151,8 @@ enum RuntimeTaskStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RuntimeTask {
     pub(crate) id: uuid::Uuid,
+    #[serde(default)]
+    pub(crate) agent_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub(crate) event_start_sequence: u64,
     status: RuntimeTaskStatus,
@@ -244,6 +253,7 @@ struct TaskManager {
     path: PathBuf,
     executable: PathBuf,
     events: Arc<EventLog>,
+    agents: Arc<AgentStore>,
     runtime_url: String,
     runtime_token: String,
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
@@ -270,6 +280,8 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         } => submit(&home, workspace, profile, config, prompt).await,
         DaemonAction::Tasks => list_tasks(&home).await,
         DaemonAction::Task { id } => show_task(&home, id).await,
+        DaemonAction::Agents => list_agents(&home).await,
+        DaemonAction::Agent { id } => show_agent(&home, id).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
@@ -395,6 +407,23 @@ async fn show_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn list_agents(home: &Path) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let agents: Vec<agent_store::RuntimeAgent> = authorized_get(&state, "/v1/agents").await?;
+    for agent in agents {
+        print_agent(&agent);
+    }
+    Ok(())
+}
+
+async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let agent: agent_store::RuntimeAgent =
+        authorized_get(&state, &format!("/v1/agents/{id}")).await?;
+    print_agent(&agent);
+    Ok(())
+}
+
 async fn cancel_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
     let response = client()
@@ -446,6 +475,24 @@ fn print_task(task: &RuntimeTask) {
         task.exit_code
             .map_or_else(|| "-".to_owned(), |code| code.to_string()),
         task.workspace.display()
+    );
+}
+
+fn print_agent(agent: &agent_store::RuntimeAgent) {
+    println!(
+        "{}\t{:?}\ttask={}\tparent={}\tturn={}\ttool={}\ttokens={}\t{}",
+        agent.id,
+        agent.status,
+        agent.task_id,
+        agent
+            .parent_id
+            .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        agent.current_turn,
+        agent.current_tool.as_deref().unwrap_or("-"),
+        agent
+            .total_tokens
+            .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string()),
+        agent.workspace.display()
     );
 }
 
@@ -782,11 +829,13 @@ async fn run(home: &Path) -> Result<()> {
     };
     let shutdown_signal = Arc::new(Notify::new());
     let events = Arc::new(EventLog::open(paths.events.clone())?);
+    let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
     let tasks = Arc::new(TaskManager::open(
         paths.tasks.clone(),
         paths.interactions.clone(),
         std::env::current_exe()?,
         events.clone(),
+        agents.clone(),
         format!("http://{address}"),
         state.token.clone(),
     )?);
@@ -796,10 +845,13 @@ async fn run(home: &Path) -> Result<()> {
         shutdown: shutdown_signal.clone(),
         events: events.clone(),
         tasks: tasks.clone(),
+        agents: agents.clone(),
     });
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/events", get(events_handler))
+        .route("/v1/agents", get(agents_handler))
+        .route("/v1/agents/{id}", get(agent_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
@@ -910,6 +962,33 @@ async fn tasks_handler(
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
     Ok(Json(state.tasks.list().await).into_response())
+}
+
+async fn agents_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let agents = state
+        .agents
+        .list()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(agents).into_response())
+}
+
+async fn agent_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    state
+        .agents
+        .get(id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn task_handler(
@@ -1071,6 +1150,7 @@ struct DaemonPaths {
     log: PathBuf,
     events: PathBuf,
     tasks: PathBuf,
+    agents: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
 }
@@ -1083,6 +1163,7 @@ impl DaemonPaths {
             log: directory.join("daemon.log"),
             events: directory.join("events.ndjson"),
             tasks: directory.join("tasks.json"),
+            agents: directory.join("agents.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
             directory,
@@ -1138,6 +1219,7 @@ impl TaskManager {
         interactions_path: PathBuf,
         executable: PathBuf,
         events: Arc<EventLog>,
+        agents: Arc<AgentStore>,
         runtime_url: String,
         runtime_token: String,
     ) -> Result<Self> {
@@ -1154,6 +1236,16 @@ impl TaskManager {
                 task.status = RuntimeTaskStatus::Interrupted;
                 task.completed_at = Some(now());
                 task.error = Some("Runtime restarted while task was active".to_owned());
+                recovered = true;
+            }
+            let agent = agents.ensure_root(
+                task.id,
+                task.workspace.clone(),
+                task.profile.clone(),
+                agent_status(task.status),
+            )?;
+            if task.agent_id != Some(agent.id) {
+                task.agent_id = Some(agent.id);
                 recovered = true;
             }
         }
@@ -1179,6 +1271,7 @@ impl TaskManager {
             path,
             executable,
             events,
+            agents,
             runtime_url,
             runtime_token,
             tasks: RwLock::new(tasks),
@@ -1255,6 +1348,8 @@ impl TaskManager {
         };
         persist_tasks(&self.path, &task_snapshot)?;
         persist_interactions(&self.interactions_path, &interaction_snapshot)?;
+        self.agents
+            .set_status_for_task(interaction.task_id, agent_status(status), None)?;
         self.interaction_waiters
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime interaction waiter lock poisoned"))?
@@ -1306,6 +1401,8 @@ impl TaskManager {
         };
         persist_interactions(&self.interactions_path, &interaction_snapshot)?;
         persist_tasks(&self.path, &task_snapshot)?;
+        self.agents
+            .set_status_for_task(interaction.task_id, RuntimeAgentStatus::Running, None)?;
         let sender = self
             .interaction_waiters
             .lock()
@@ -1341,6 +1438,7 @@ impl TaskManager {
         let id = uuid::Uuid::new_v4();
         let mut task = RuntimeTask {
             id,
+            agent_id: None,
             event_start_sequence: 0,
             status: RuntimeTaskStatus::Queued,
             workspace: request.workspace.clone(),
@@ -1352,6 +1450,17 @@ impl TaskManager {
             exit_code: None,
             error: None,
         };
+        let agent = self.agents.ensure_root(
+            id,
+            request.workspace.clone(),
+            request.profile.clone(),
+            RuntimeAgentStatus::Queued,
+        )?;
+        task.agent_id = Some(agent.id);
+        self.events.append(
+            "agent.created",
+            format!("agent_id={} task_id={id} parent_id=none", agent.id),
+        )?;
         self.insert_and_persist(task.clone()).await?;
         task.event_start_sequence = self
             .events
@@ -1409,6 +1518,12 @@ impl TaskManager {
         task.pid = pid;
         task.started_at = Some(now());
         self.insert_and_persist(task.clone()).await?;
+        self.agents
+            .set_status_for_task(id, RuntimeAgentStatus::Running, None)?;
+        self.events.append(
+            "agent.running",
+            format!("agent_id={} task_id={id}", agent.id),
+        )?;
         self.events.append(
             "task.started",
             format!("task_id={id} pid={}", pid.unwrap_or_default()),
@@ -1425,6 +1540,7 @@ impl TaskManager {
                 tokio::spawn(forward_task_lines(
                     stream,
                     manager.events.clone(),
+                    Some(manager.agents.clone()),
                     id,
                     "task.output",
                 ))
@@ -1433,6 +1549,7 @@ impl TaskManager {
                 tokio::spawn(forward_task_lines(
                     stream,
                     manager.events.clone(),
+                    None,
                     id,
                     "task.stderr",
                 ))
@@ -1545,6 +1662,8 @@ impl TaskManager {
             tasks.clone()
         };
         persist_tasks(&self.path, &snapshot)?;
+        self.agents
+            .set_status_for_task(id, agent_status(status), error.clone())?;
         self.events.append(
             match status {
                 RuntimeTaskStatus::Completed => "task.completed",
@@ -1615,6 +1734,7 @@ fn validate_resolution(kind: &InteractionKind, resolution: &InteractionResolutio
 async fn forward_task_lines<R>(
     stream: R,
     events: Arc<EventLog>,
+    agents: Option<Arc<AgentStore>>,
     task_id: uuid::Uuid,
     kind: &'static str,
 ) where
@@ -1627,12 +1747,30 @@ async fn forward_task_lines<R>(
             line.truncate(MAX_EVENT_CHARS);
             line.push('…');
         }
+        if let Some(agents) = &agents
+            && agents.apply_harness_event(task_id, &line).is_err()
+        {
+            break;
+        }
         if events
             .append(kind, format!("task_id={task_id} {line}"))
             .is_err()
         {
             break;
         }
+    }
+}
+
+fn agent_status(status: RuntimeTaskStatus) -> RuntimeAgentStatus {
+    match status {
+        RuntimeTaskStatus::Queued => RuntimeAgentStatus::Queued,
+        RuntimeTaskStatus::Running | RuntimeTaskStatus::Cancelling => RuntimeAgentStatus::Running,
+        RuntimeTaskStatus::WaitingApproval => RuntimeAgentStatus::WaitingApproval,
+        RuntimeTaskStatus::WaitingAnswer => RuntimeAgentStatus::WaitingAnswer,
+        RuntimeTaskStatus::Completed => RuntimeAgentStatus::Completed,
+        RuntimeTaskStatus::Failed => RuntimeAgentStatus::Failed,
+        RuntimeTaskStatus::Cancelled => RuntimeAgentStatus::Cancelled,
+        RuntimeTaskStatus::Interrupted => RuntimeAgentStatus::Interrupted,
     }
 }
 

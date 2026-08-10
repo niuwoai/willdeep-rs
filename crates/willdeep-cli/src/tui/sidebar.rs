@@ -159,6 +159,45 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     app.language.text("失败", "Failed", "失敗"),
                     app.tools.failed
                 )));
+                if !app.runtime_agents.is_empty() {
+                    lines.push(Line::styled(
+                        format!(
+                            "  {} · {}",
+                            app.language.text(
+                                "Runtime 智能体",
+                                "Runtime agents",
+                                "Runtime エージェント"
+                            ),
+                            app.runtime_agents.len()
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    for agent in app.runtime_agents.iter().take(5) {
+                        let short = agent.id.to_string();
+                        let short = short.get(..8).unwrap_or(&short);
+                        let profile = agent.profile.as_deref().unwrap_or("root");
+                        lines.push(Line::styled(
+                            format!(
+                                "    {short} · {profile} · {}",
+                                runtime_status_label(agent.status, app.language)
+                            ),
+                            attention_style(agent.status),
+                        ));
+                        lines.push(Line::styled(
+                            format!(
+                                "      {} {} · {} · {}",
+                                app.language.text("轮次", "turn", "ターン"),
+                                agent.current_turn,
+                                agent.current_tool.as_deref().unwrap_or("-"),
+                                agent.total_tokens.map_or_else(
+                                    || "-".to_owned(),
+                                    |tokens| format!("{tokens} tok")
+                                )
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                }
             }
             3 => {
                 lines.push(Line::raw(format!(

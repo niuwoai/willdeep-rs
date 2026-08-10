@@ -26,6 +26,17 @@ impl RemoteGate {
 pub(crate) struct RuntimeSnapshot {
     pub attention: Vec<willdeep_core::AttentionItem>,
     pub gates: Vec<RemoteGate>,
+    pub agents: Vec<RemoteAgent>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteAgent {
+    pub id: uuid::Uuid,
+    pub profile: Option<String>,
+    pub status: willdeep_core::RuntimeStatus,
+    pub current_turn: u64,
+    pub current_tool: Option<String>,
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -93,10 +104,17 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             return Ok(RuntimeSnapshot {
                 attention: Vec::new(),
                 gates: Vec::new(),
+                agents: Vec::new(),
             });
         }
     };
     let workspace = workspace.canonicalize()?;
+    let agents = authorized_get::<Vec<super::agent_store::RuntimeAgent>>(&state, "/v1/agents")
+        .await?
+        .into_iter()
+        .filter(|agent| agent.workspace == workspace)
+        .map(remote_agent)
+        .collect();
     let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
     let visible_tasks = tasks
         .iter()
@@ -153,7 +171,41 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             ..item
         });
     }
-    Ok(RuntimeSnapshot { attention, gates })
+    Ok(RuntimeSnapshot {
+        attention,
+        gates,
+        agents,
+    })
+}
+
+fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
+    RemoteAgent {
+        id: agent.id,
+        profile: agent.profile,
+        status: match agent.status {
+            super::agent_store::RuntimeAgentStatus::Queued
+            | super::agent_store::RuntimeAgentStatus::Running => {
+                willdeep_core::RuntimeStatus::Working
+            }
+            super::agent_store::RuntimeAgentStatus::WaitingApproval => {
+                willdeep_core::RuntimeStatus::WaitingApproval
+            }
+            super::agent_store::RuntimeAgentStatus::WaitingAnswer => {
+                willdeep_core::RuntimeStatus::WaitingAnswer
+            }
+            super::agent_store::RuntimeAgentStatus::Completed => willdeep_core::RuntimeStatus::Done,
+            super::agent_store::RuntimeAgentStatus::Failed
+            | super::agent_store::RuntimeAgentStatus::Interrupted => {
+                willdeep_core::RuntimeStatus::Failed
+            }
+            super::agent_store::RuntimeAgentStatus::Cancelled => {
+                willdeep_core::RuntimeStatus::Cancelled
+            }
+        },
+        current_turn: agent.current_turn,
+        current_tool: agent.current_tool,
+        total_tokens: agent.total_tokens,
+    }
 }
 
 fn runtime_task_attention(task: RuntimeTask) -> willdeep_core::AttentionItem {

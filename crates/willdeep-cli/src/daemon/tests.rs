@@ -1,5 +1,9 @@
 use super::*;
 
+fn test_agent_store(root: &Path) -> Arc<AgentStore> {
+    Arc::new(AgentStore::open(root.join("agents.json")).unwrap())
+}
+
 #[test]
 fn state_round_trips_without_exposing_token_in_logs() {
     let root = std::env::temp_dir().join(format!("willdeep-daemon-{}", uuid::Uuid::new_v4()));
@@ -23,6 +27,7 @@ fn authorization_requires_exact_local_token() {
     let root = std::env::temp_dir().join(format!("willdeep-daemon-auth-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(&root);
     let state = ServerState {
         token: "expected".to_owned(),
         started_at: 0,
@@ -34,11 +39,13 @@ fn authorization_requires_exact_local_token() {
                 root.join("interactions.json"),
                 PathBuf::from("willdeep"),
                 events,
+                agents.clone(),
                 "http://127.0.0.1:1".to_owned(),
                 "test-token".to_owned(),
             )
             .unwrap(),
         ),
+        agents,
     };
     assert_eq!(
         authorize(&state, &HeaderMap::new()),
@@ -68,6 +75,51 @@ fn event_log_assigns_sequences_and_resumes_after_cursor() {
 }
 
 #[test]
+fn agent_store_persists_structured_harness_lifecycle() {
+    let root = std::env::temp_dir().join(format!("willdeep-agent-store-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("agents.json");
+    let task_id = uuid::Uuid::new_v4();
+    let store = AgentStore::open(path.clone()).unwrap();
+    let agent = store
+        .ensure_root(
+            task_id,
+            root.clone(),
+            Some("editor".to_owned()),
+            RuntimeAgentStatus::Queued,
+        )
+        .unwrap();
+    store
+        .apply_harness_event(task_id, r#"{"type":"turn_started","turn":2}"#)
+        .unwrap();
+    store
+        .apply_harness_event(task_id, r#"{"type":"tool_requested","name":"read_file"}"#)
+        .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            r#"{"type":"usage","input_tokens":10,"output_tokens":4,"total_tokens":14}"#,
+        )
+        .unwrap();
+    store
+        .set_status_for_task(task_id, RuntimeAgentStatus::Completed, None)
+        .unwrap();
+    drop(store);
+
+    let restored = AgentStore::open(path)
+        .unwrap()
+        .get(agent.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.status, RuntimeAgentStatus::Completed);
+    assert_eq!(restored.current_turn, 2);
+    assert_eq!(restored.current_tool, None);
+    assert_eq!(restored.total_tokens, Some(14));
+    assert!(restored.completed_at.is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn task_store_marks_active_tasks_interrupted_after_restart() {
     let root = std::env::temp_dir().join(format!("willdeep-tasks-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
@@ -75,6 +127,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     let id = uuid::Uuid::new_v4();
     let task = RuntimeTask {
         id,
+        agent_id: None,
         event_start_sequence: 0,
         status: RuntimeTaskStatus::Running,
         workspace: root.clone(),
@@ -88,11 +141,13 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     };
     persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(&root);
     let manager = TaskManager::open(
         path,
         root.join("interactions.json"),
         PathBuf::from("willdeep"),
         events,
+        agents,
         "http://127.0.0.1:1".to_owned(),
         "test-token".to_owned(),
     )
@@ -144,12 +199,14 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("tasks.json");
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(&root);
     let manager = Arc::new(
         TaskManager::open(
             path.clone(),
             root.join("interactions.json"),
             PathBuf::from("willdeep"),
             events,
+            agents,
             "http://127.0.0.1:1".to_owned(),
             "test-token".to_owned(),
         )
@@ -164,6 +221,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
             manager
                 .insert_and_persist(RuntimeTask {
                     id,
+                    agent_id: None,
                     event_start_sequence: 0,
                     status: RuntimeTaskStatus::Completed,
                     workspace,
@@ -191,11 +249,13 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     let root = std::env::temp_dir().join(format!("willdeep-interaction-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(&root);
     let manager = TaskManager::open(
         root.join("tasks.json"),
         root.join("interactions.json"),
         PathBuf::from("willdeep"),
         events,
+        agents,
         "http://127.0.0.1:1".to_owned(),
         "test-token".to_owned(),
     )
@@ -204,6 +264,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     manager
         .insert_and_persist(RuntimeTask {
             id: task_id,
+            agent_id: None,
             event_start_sequence: 0,
             status: RuntimeTaskStatus::Running,
             workspace: root.clone(),

@@ -124,6 +124,7 @@ struct App {
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
+    runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
@@ -392,6 +393,7 @@ async fn event_loop(
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
+                app.runtime_agents=snapshot.agents;
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
@@ -615,6 +617,7 @@ impl App {
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
+            runtime_agents: Vec::new(),
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.0-rc6] - 2026-08-10
+
+### Added
+
+- Runtime 新增持久 `RuntimeAgent` 实体；每个托管任务拥有稳定 Root Agent ID，并预留 `parent_id` 支持后续原生子 Agent 树。
+- 受 Runtime Token 保护的 `GET /v1/agents`、`GET /v1/agents/{id}` 以及 `daemon agents/agent` 查询结构化 Agent 生命周期。
+- Agent 持久记录 Workspace、Profile、状态、当前轮次、当前工具、Token 用量、完成时间和错误；Daemon 重启时将遗留活动 Agent 标记为 Interrupted。
+- TUI 右栏 Runtime 区域展示当前 Workspace 的 Agent、状态、Profile、轮次、工具和 Token 摘要。
+
+### Changed
+
+- Harness 的轮次、工具和用量事件直接驱动 Agent 状态，不通过终端文本或画面推断。
+- 旧 Runtime Task 在加载时自动补建 Root Agent 并回填 `agent_id`，保持现有任务数据向后兼容。
+
 ## [0.16.0-rc5] - 2026-08-10
 
 ### Added
