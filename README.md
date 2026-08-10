@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.14.0-rc2`，支持：
+当前版本为 `0.14.0-rc3`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -151,6 +151,7 @@ willdeep --profile some-im --workspace .
 | `Ctrl+W` | 在 Prompt 与右侧状态栏间切换焦点 |
 | `Ctrl+B` | 显示或隐藏右侧状态栏；窄终端中打开覆盖层 |
 | `Ctrl+F` | 搜索聊天记录；`Enter`/`Shift+Enter` 前后跳转，`Esc` 关闭 |
+| `Ctrl+P` | 搜索命令、Skills、会话、Agent/任务和工作区文件 |
 | `↑` / `↓` | 在 Prompt 多行之间移动光标 |
 | `←` / `→`、`Home` / `End` | 移动编辑光标；也可鼠标点击定位 |
 | `Alt+↑` / `Alt+↓` | 按显示行滚动聊天记录 |

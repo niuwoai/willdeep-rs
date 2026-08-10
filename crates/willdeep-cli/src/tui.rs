@@ -133,6 +133,10 @@ struct App {
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
     search: Option<SearchState>,
+    workspace: Option<PathBuf>,
+    palette: Option<PaletteState>,
+    palette_rect: Rect,
+    palette_hits: Vec<(u16, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +161,27 @@ struct SearchState {
     editor: PromptEditor,
     matches: Vec<usize>,
     selected: usize,
+}
+
+struct PaletteState {
+    editor: PromptEditor,
+    items: Vec<PaletteItem>,
+    filtered: Vec<usize>,
+    selected: usize,
+}
+
+struct PaletteItem {
+    label: String,
+    description: String,
+    action: PaletteAction,
+}
+
+enum PaletteAction {
+    Command(String),
+    Skill(String),
+    Session(String),
+    Task(usize),
+    File(String),
 }
 
 struct AskDialog {
@@ -297,6 +322,7 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    app.workspace = Some(session.workspace.clone());
     app.workspace_status = workspace_status(&session.workspace, language);
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
@@ -334,8 +360,13 @@ async fn event_loop(
                         let _=sender.send(decision);continue;
                     }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
+                    if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('p'){
+                        app.open_palette(&runtime.skills,store,session);
+                        continue;
+                    }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('f'){
                         app.search=Some(SearchState::default());
                         continue;
@@ -481,6 +512,10 @@ impl App {
             task_detail: None,
             task_detail_scroll: 0,
             search: None,
+            workspace: None,
+            palette: None,
+            palette_rect: Rect::default(),
+            palette_hits: Vec::new(),
         }
     }
     fn sidebar_move(&mut self, delta: isize) {
@@ -621,6 +656,188 @@ impl App {
             self.refresh_search_matches();
         }
         self.jump_to_search_match();
+    }
+    fn open_palette(&mut self, skills: &SkillCatalog, store: &SessionStore, session: &Session) {
+        let mut items = command_candidates(self.language)
+            .into_iter()
+            .map(|(command, description)| PaletteItem {
+                label: command.to_owned(),
+                description: description.to_owned(),
+                action: PaletteAction::Command(command.to_owned()),
+            })
+            .collect::<Vec<_>>();
+        items.extend(skills.list().iter().map(|skill| PaletteItem {
+            label: format!("${}", skill.identifier),
+            description: format!("{} · {}", skill.name, skill.description),
+            action: PaletteAction::Skill(skill.identifier.clone()),
+        }));
+        items.push(PaletteItem {
+            label: session.title.clone(),
+            description: format!(
+                "{} · {}",
+                self.language
+                    .text("当前会话", "Current session", "現在のセッション"),
+                session.id
+            ),
+            action: PaletteAction::Session(session.id.to_string()),
+        });
+        if let Ok(sessions) = store.list() {
+            items.extend(
+                sessions
+                    .into_iter()
+                    .filter(|candidate| candidate.id != session.id)
+                    .take(30)
+                    .map(|candidate| PaletteItem {
+                        label: candidate.title,
+                        description: format!(
+                            "{} · {} · {}",
+                            self.language.text("会话", "Session", "セッション"),
+                            candidate.id,
+                            candidate.workspace.display()
+                        ),
+                        action: PaletteAction::Session(candidate.id.to_string()),
+                    }),
+            );
+        }
+        items.extend(
+            self.background_tasks
+                .iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let kind = if task.kind == willdeep_core::BackgroundTaskKind::Subagent {
+                        self.language
+                            .text("子 Agent", "Subagent", "サブエージェント")
+                    } else {
+                        self.language
+                            .text("后台任务", "Background task", "バックグラウンドタスク")
+                    };
+                    PaletteItem {
+                        label: task.id.clone(),
+                        description: format!("{kind} · {:?} · {}", task.status, task.label),
+                        action: PaletteAction::Task(index),
+                    }
+                }),
+        );
+        if let Some(workspace) = &self.workspace {
+            items.extend(workspace_files(workspace, 300).into_iter().map(|path| {
+                PaletteItem {
+                    label: path.clone(),
+                    description: self
+                        .language
+                        .text("工作区文件", "Workspace file", "ワークスペースファイル")
+                        .to_owned(),
+                    action: PaletteAction::File(path),
+                }
+            }));
+        }
+        let filtered = (0..items.len()).collect();
+        self.palette = Some(PaletteState {
+            editor: PromptEditor::default(),
+            items,
+            filtered,
+            selected: 0,
+        });
+    }
+    fn handle_palette_key(&mut self, key: KeyEvent, registry: &BackgroundTaskRegistry) {
+        if key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p'))
+        {
+            self.palette = None;
+            return;
+        }
+        let mut query_changed = false;
+        let mut activate = false;
+        if let Some(palette) = &mut self.palette {
+            match key.code {
+                KeyCode::Up | KeyCode::BackTab => {
+                    if !palette.filtered.is_empty() {
+                        palette.selected = palette
+                            .selected
+                            .checked_sub(1)
+                            .unwrap_or(palette.filtered.len() - 1);
+                    }
+                }
+                KeyCode::Down | KeyCode::Tab => {
+                    if !palette.filtered.is_empty() {
+                        palette.selected = (palette.selected + 1) % palette.filtered.len();
+                    }
+                }
+                KeyCode::Enter if !palette.filtered.is_empty() => activate = true,
+                KeyCode::Left => palette.editor.left(),
+                KeyCode::Right => palette.editor.right(),
+                KeyCode::Home => palette.editor.home(),
+                KeyCode::End => palette.editor.end(),
+                KeyCode::Backspace => {
+                    palette.editor.backspace();
+                    query_changed = true;
+                }
+                KeyCode::Delete => {
+                    palette.editor.delete();
+                    query_changed = true;
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+                {
+                    palette.editor.insert(&character.to_string());
+                    query_changed = true;
+                }
+                _ => {}
+            }
+        }
+        if query_changed {
+            self.refresh_palette_matches();
+        }
+        if activate {
+            self.activate_palette_selection(registry);
+        }
+    }
+    fn refresh_palette_matches(&mut self) {
+        let Some(palette) = &mut self.palette else {
+            return;
+        };
+        let query = palette.editor.text().trim().to_lowercase();
+        let mut ranked = palette
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let value = format!("{} {}", item.label, item.description).to_lowercase();
+                fuzzy_score(&query, &value).map(|score| (score, index))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(score, index)| (*score, *index));
+        palette.filtered = ranked.into_iter().map(|(_, index)| index).collect();
+        palette.selected = 0;
+    }
+    fn activate_palette_selection(&mut self, registry: &BackgroundTaskRegistry) {
+        let Some(palette) = self.palette.take() else {
+            return;
+        };
+        let Some(item_index) = palette.filtered.get(palette.selected).copied() else {
+            return;
+        };
+        match &palette.items[item_index].action {
+            PaletteAction::Command(command) => {
+                let suffix = if matches!(command.as_str(), "/goal" | "/mobile") {
+                    " "
+                } else {
+                    ""
+                };
+                self.input.insert(&format!("{command}{suffix}"));
+            }
+            PaletteAction::Skill(identifier) => self.input.insert(&format!("${identifier} ")),
+            PaletteAction::Session(id) => {
+                self.notice = Some(format!(
+                    "{}: {id}",
+                    self.language
+                        .text("当前会话", "Current session", "現在のセッション")
+                ));
+            }
+            PaletteAction::Task(index) => self.open_task_detail(*index, registry),
+            PaletteAction::File(path) => self.input.insert(&format!("{path} ")),
+        }
     }
     fn refresh_search_matches(&mut self) {
         let Some(search) = &mut self.search else {
@@ -928,7 +1145,16 @@ impl App {
         }
     }
     fn handle_mouse(&mut self, x: u16, y: u16, registry: &BackgroundTaskRegistry) {
-        if self.sidebar_rect.contains((x, y).into()) {
+        if self.palette.is_some() && self.palette_rect.contains((x, y).into()) {
+            if let Some((_, position)) =
+                self.palette_hits.iter().find(|(row, _)| *row == y).copied()
+            {
+                if let Some(palette) = &mut self.palette {
+                    palette.selected = position;
+                }
+                self.activate_palette_selection(registry);
+            }
+        } else if self.sidebar_rect.contains((x, y).into()) {
             self.focus = FocusPane::Sidebar;
             if let Some((_, hit)) = self.sidebar_hits.iter().find(|(row, _)| *row == y).copied() {
                 match hit {
@@ -1458,6 +1684,67 @@ fn draw(
             }
             render_sidebar(f, app, sidebar);
         }
+        app.palette_rect = Rect::default();
+        app.palette_hits.clear();
+        if let Some(palette) = &app.palette {
+            let width = f.area().width.min(92);
+            let height = f
+                .area()
+                .height
+                .min((palette.filtered.len().min(16) as u16 + 3).max(6));
+            let popup = centered_rect(width, height, f.area());
+            app.palette_rect = popup;
+            let visible = popup.height.saturating_sub(3).max(1) as usize;
+            let start = palette.selected.saturating_sub(visible - 1);
+            let mut lines = vec![Line::styled(
+                format!("› {}", palette.editor.text()),
+                Style::default().fg(Color::Yellow),
+            )];
+            for (position, item_index) in palette
+                .filtered
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible)
+            {
+                let item = &palette.items[*item_index];
+                let selected = position == palette.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::styled(
+                    format!("{} {} · {}", if selected { "▶" } else { " " }, item.label, item.description),
+                    style,
+                ));
+                app.palette_hits
+                    .push((popup.y + 2 + (position - start) as u16, position));
+            }
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .title(format!(
+                            "{} · {}/{} · ↑/↓/Tab · Enter · Esc",
+                            app.language.text("命令面板", "Command palette", "コマンドパレット"),
+                            if palette.filtered.is_empty() { 0 } else { palette.selected + 1 },
+                            palette.filtered.len()
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::LightMagenta)),
+                ),
+                popup,
+            );
+            if popup.width > 3 {
+                let cursor = UnicodeWidthStr::width(palette.editor.text())
+                    .min(popup.width.saturating_sub(4) as usize) as u16;
+                f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
+            }
+        }
         if let Some(search) = &app.search {
             let width = f.area().width.min(72);
             let popup = Rect {
@@ -1911,6 +2198,65 @@ fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
     ]
 }
 
+fn fuzzy_score(query: &str, value: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let mut score = 0;
+    let mut cursor = 0;
+    for needle in query.chars() {
+        let relative = value[cursor..].find(needle)?;
+        score += relative;
+        cursor += relative + needle.len_utf8();
+    }
+    Some(score)
+}
+
+fn workspace_files(workspace: &std::path::Path, limit: usize) -> Vec<String> {
+    const MAX_INSPECTED_ENTRIES: usize = 3_000;
+    let mut output = Vec::new();
+    let mut pending = VecDeque::from([workspace.to_path_buf()]);
+    let mut inspected = 0;
+    while let Some(directory) = pending.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            inspected += 1;
+            if inspected > MAX_INSPECTED_ENTRIES {
+                return output;
+            }
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                if !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | "target" | "node_modules" | ".build")
+                ) {
+                    pending.push_back(path);
+                }
+                continue;
+            }
+            if kind.is_file()
+                && let Ok(relative) = path.strip_prefix(workspace)
+            {
+                output.push(relative.to_string_lossy().replace('\\', "/"));
+                if output.len() >= limit {
+                    return output;
+                }
+            }
+        }
+    }
+    output
+}
+
 fn focus_label(focus: FocusPane, language: Language) -> &'static str {
     match focus {
         FocusPane::Prompt => language.text("输入", "Prompt", "入力"),
@@ -1921,13 +2267,13 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+W  输入/状态栏切换      Ctrl+B 显示或隐藏状态栏\n  Ctrl+S  文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+W  Switch Prompt/Status          Ctrl+B Show or hide Status\n  Ctrl+S  Terminal text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+W 入力/状態を切替         Ctrl+B 状態欄を表示/非表示\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
         }
     }
 }
@@ -2578,6 +2924,7 @@ mod tests {
         assert!(help.contains("Ctrl+W"));
         assert!(help.contains("Enter/Space"));
         assert!(help.contains("Ctrl+F"));
+        assert!(help.contains("Ctrl+P"));
     }
     #[test]
     fn chat_search_filters_cycles_and_scrolls_to_matching_entries() {
@@ -2619,6 +2966,54 @@ mod tests {
 
         assert_eq!(highlighted.len(), 2);
         assert!(highlighted[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+    #[test]
+    fn command_palette_fuzzy_filters_and_inserts_a_command() {
+        let workspace = std::env::temp_dir().join(format!(
+            "willdeep-palette-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = Session::new(workspace.clone(), None, "Palette test");
+        let registry = BackgroundTaskRegistry::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        app.workspace = Some(workspace.clone());
+        let store = SessionStore::new(workspace.join("home"));
+        app.open_palette(&SkillCatalog::default(), &store, &session);
+        for character in "cmp".chars() {
+            app.handle_palette_key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &registry,
+            );
+        }
+
+        let palette = app.palette.as_ref().unwrap();
+        let labels = palette
+            .filtered
+            .iter()
+            .map(|index| palette.items[*index].label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"/compress"));
+        app.handle_palette_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &registry);
+        assert_eq!(app.input.text(), "/compress");
+        assert!(app.palette.is_none());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+    #[test]
+    fn workspace_file_palette_is_bounded_and_skips_heavy_directories() {
+        let workspace = std::env::temp_dir().join(format!(
+            "willdeep-palette-files-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("target")).unwrap();
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(workspace.join("target/ignored"), "large").unwrap();
+
+        let files = workspace_files(&workspace, 10);
+        assert_eq!(files, vec!["src/main.rs"]);
+        assert_eq!(fuzzy_score("smr", "src/main.rs"), Some(7));
+        std::fs::remove_dir_all(workspace).unwrap();
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
