@@ -859,6 +859,10 @@ mod tests {
         assert_eq!(app.tools.requested, 1);
         assert_eq!(app.tools.completed, 1);
         assert!(
+            app.transcript.is_empty(),
+            "runtime rounds, agent ids and tool activity belong in the status panel, not chat"
+        );
+        assert!(
             app.progress_log
                 .iter()
                 .any(|line| line.contains("87654321"))
@@ -868,6 +872,50 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("completed"))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_chat_only_renders_the_assistant_answer() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-chat-content-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "clean runtime chat");
+        let mut app = App::new(Vec::new(), Language::En);
+        let task = uuid::Uuid::new_v4();
+        let event = |sequence, payload: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+            sequence,
+            kind: "task.output".to_owned(),
+            message: format!("task_id={task} {payload}"),
+            visible: true,
+            session_id: Some(session.id),
+        };
+
+        runtime_ui::apply_runtime_events(
+            &mut app,
+            vec![
+                event(1, serde_json::json!({"type":"turn_started","turn":9})),
+                event(
+                    2,
+                    serde_json::json!({"type":"tool_requested","name":"read_file"}),
+                ),
+                event(
+                    3,
+                    serde_json::json!({"type":"completed","text":"真实的 AI 回复"}),
+                ),
+            ],
+            &mut session,
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(app.transcript, vec!["WillDeep: 真实的 AI 回复"]);
+        assert!(app.transcript.iter().all(|line| {
+            !line.contains("turn") && !line.contains("task_id") && !line.contains(&task.to_string())
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

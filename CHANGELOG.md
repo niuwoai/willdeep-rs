@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.19.0-rc6] - 2026-08-10
+
+### Added
+
+- Runtime 新增精确快照 Commit Preview API；CLI `daemon diff-commit-preview` 与 TUI Diff Review 的 `P` 面板展示提交消息、分支、暂存/未暂存文件、Remote、推送目标和可选 Tag。
+- Commit Preview 在敏感文件或疑似凭据、冲突、空暂存区、Detached HEAD、缺失 Remote 和无效 Tag 时给出结构化阻断原因，并且不执行任何 Git 写操作。
+
+### Fixed
+
+- 增加 Runtime 聊天纯净度回归测试，锁定对话区只展示用户输入和 AI 最终回复；轮次、Task/Agent ID 和工具活动仅保留在状态层。
+
+### Security
+
+- Remote URL 在展示前移除用户信息、查询参数和片段；敏感检查只返回文件路径与规则代码，不回传或记录匹配到的凭据内容。
+
 ## [0.19.0-rc5] - 2026-08-10
 
 ### Added

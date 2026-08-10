@@ -50,6 +50,7 @@ use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
 use rendering::*;
 use runtime_ui::open_remote_gate;
+use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::handle_session_command;
 use sidebar::render_sidebar;
 use workspace_attention::workspace_attention;
@@ -186,35 +187,6 @@ enum FocusPane {
     Prompt,
     Chat,
     Sidebar,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum PromptExecution {
-    Runtime(String),
-    Local(String),
-}
-
-fn prompt_execution(prompt: &str) -> PromptExecution {
-    let value = prompt.trim();
-    if value == "/local" || value.starts_with("/local ") {
-        return PromptExecution::Local(
-            value
-                .strip_prefix("/local")
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        );
-    }
-    if value == "/runtime" || value.starts_with("/runtime ") {
-        return PromptExecution::Runtime(
-            value
-                .strip_prefix("/runtime")
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        );
-    }
-    PromptExecution::Runtime(prompt.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -476,8 +448,32 @@ async fn event_loop(
                         let mut open_file=None;
                         let mut review_action=None;
                         let mut revert_action=None;
+                        let mut commit_preview_action=None;
+                        let mut preview_draft_handled=false;
                         if let Some(review)=app.diff_review.as_mut(){
-                            if review.confirm_revert {
+                            if review.commit_preview.is_some() {
+                                if key.code==KeyCode::Esc{review.commit_preview=None;}
+                                continue;
+                            } else if let Some(draft)=review.preview_draft.as_mut() {
+                                preview_draft_handled=true;
+                                match key.code {
+                                    KeyCode::Esc=>review.preview_draft=None,
+                                    KeyCode::Tab=>draft.field=(draft.field+1)%3,
+                                    KeyCode::BackTab=>draft.field=draft.field.checked_sub(1).unwrap_or(2),
+                                    KeyCode::Enter if !draft.message.text().trim().is_empty()=>{
+                                        commit_preview_action=Some((review.snapshot.id.clone(),draft.message.text().to_owned(),draft.remote.text().to_owned(),draft.tag.text().to_owned()));
+                                        review.preview_draft=None;
+                                    },
+                                    KeyCode::Left=>draft.editor_mut().left(),
+                                    KeyCode::Right=>draft.editor_mut().right(),
+                                    KeyCode::Home=>draft.editor_mut().home(),
+                                    KeyCode::End=>draft.editor_mut().end(),
+                                    KeyCode::Backspace=>draft.editor_mut().backspace(),
+                                    KeyCode::Delete=>draft.editor_mut().delete(),
+                                    KeyCode::Char(value) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>draft.editor_mut().insert(&value.to_string()),
+                                    _=>{},
+                                }
+                            } else if review.confirm_revert {
                                 if matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')) {
                                     revert_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),review.area));
                                 }
@@ -535,6 +531,7 @@ async fn event_loop(
                                 KeyCode::Char('c')|KeyCode::Char('C') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::ChangesRequested)),
                                 KeyCode::Char('m')|KeyCode::Char('M') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Reviewed)),
                                 KeyCode::Char('r')|KeyCode::Char('R') if review.content.is_some()=>review.confirm_revert=true,
+                                KeyCode::Char('p')|KeyCode::Char('P')=>review.preview_draft=Some(CommitPreviewDraft::default()),
                                 KeyCode::Up=>review.scroll=review.scroll.saturating_sub(1),
                                 KeyCode::Down=>review.scroll=review.scroll.saturating_add(1),
                                 KeyCode::PageUp=>review.scroll=review.scroll.saturating_sub(10),
@@ -543,6 +540,7 @@ async fn event_loop(
                                 _=>{}
                             }}
                         }
+                        if preview_draft_handled&&commit_preview_action.is_none(){continue;}
                         if close{app.diff_review=None;continue;}
                         if let Some((snapshot_id,path,area))=open_file{
                             match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,area).await{
@@ -565,6 +563,13 @@ async fn event_loop(
                                     Err(error)=>app.notice=Some(format!("{}: {error}",language.text("撤销成功，但刷新 Diff 失败","Reverted, but refresh failed","取り消しましたが更新に失敗しました"))),
                                 },
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("安全撤销失败","Safe revert failed","安全な取り消しに失敗しました"))),
+                            }
+                        }
+                        if let Some((snapshot_id,message,remote,tag))=commit_preview_action{
+                            let tag=(!tag.trim().is_empty()).then_some(tag);
+                            match crate::daemon::diff_review::remote_commit_preview(&runtime.home,&session.workspace,&snapshot_id,&message,&remote,tag.as_deref()).await{
+                                Ok(preview)=>if let Some(review)=app.diff_review.as_mut(){review.commit_preview=Some(preview);},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("生成 Commit Preview 失败","Commit Preview failed","Commit Preview に失敗しました"))),
                             }
                         }
                         continue;
@@ -710,6 +715,8 @@ async fn event_loop(
                                             reviews,
                                             confirm_revert:false,
                                             verifications,
+                                            commit_preview:None,
+                                            preview_draft:None,
                                         });
                                     },
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
@@ -2490,7 +2497,19 @@ fn draw(
                 f.area().height.saturating_sub(4).min(40),
                 f.area(),
             );
-            let title = if let Some((path, _)) = &review.content {
+            let title = if review.commit_preview.is_some() {
+                app.language.text(
+                    "Commit Preview · Esc 返回 · 仅预览，未执行",
+                    "Commit Preview · Esc back · preview only",
+                    "Commit Preview · Esc 戻る · プレビューのみ",
+                ).to_owned()
+            } else if review.preview_draft.is_some() {
+                app.language.text(
+                    "Commit Preview 参数 · Tab 切换 · Enter 生成 · Esc 取消",
+                    "Commit Preview fields · Tab switch · Enter generate · Esc cancel",
+                    "Commit Preview 入力 · Tab 切替 · Enter 生成 · Esc 取消",
+                ).to_owned()
+            } else if let Some((path, _)) = &review.content {
                 if review.confirm_revert {
                     format!("⚠ Revert {path} ({:?})? Y confirm · any key cancel",review.area)
                 } else {
@@ -2515,14 +2534,18 @@ fn draw(
                 }
             } else {
                 format!(
-                    "Diff Review · {} files · +{} -{} · {} checks · ↑/↓ Enter · Esc",
+                    "Diff Review · {} files · +{} -{} · {} checks · ↑/↓ Enter · P Commit Preview · Esc",
                     review.snapshot.files.len(),
                     review.snapshot.additions,
                     review.snapshot.deletions,
                     review.verifications.len()
                 )
             };
-            let lines = if let Some((_, content)) = &review.content {
+            let lines = if let Some(preview) = &review.commit_preview {
+                commit_preview_lines(preview)
+            } else if let Some(draft) = &review.preview_draft {
+                commit_preview_draft_lines(draft)
+            } else if let Some((_, content)) = &review.content {
                 let query = review
                     .search
                     .as_ref()

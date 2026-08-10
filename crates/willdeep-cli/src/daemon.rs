@@ -237,6 +237,19 @@ pub enum DaemonAction {
         #[arg(long)]
         snapshot: String,
     },
+    /// Preview an exact commit, tag, and push target without mutating Git.
+    DiffCommitPreview {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        tag: Option<String>,
+    },
     /// Safely revert one file from an exact Diff snapshot.
     DiffRevert {
         #[arg(long)]
@@ -566,6 +579,15 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             workspace,
             snapshot,
         } => diff_review::verifications_cli(&home, workspace, snapshot).await,
+        DaemonAction::DiffCommitPreview {
+            workspace,
+            snapshot,
+            message,
+            remote,
+            tag,
+        } => {
+            diff_review::commit_preview_cli(&home, workspace, snapshot, message, remote, tag).await
+        }
         DaemonAction::DiffRevert {
             workspace,
             snapshot,
@@ -1268,6 +1290,10 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/diffs/{id}/verifications",
             get(diff_review::verifications_handler).post(diff_review::verification_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/commit-preview",
+            get(diff_review::commit_preview_handler),
         )
         .route("/v1/diffs/{id}/revert", post(diff_review::revert_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))

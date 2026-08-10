@@ -1,5 +1,34 @@
 use super::*;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PromptExecution {
+    Runtime(String),
+    Local(String),
+}
+
+pub(super) fn prompt_execution(prompt: &str) -> PromptExecution {
+    let value = prompt.trim();
+    if value == "/local" || value.starts_with("/local ") {
+        return PromptExecution::Local(
+            value
+                .strip_prefix("/local")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    if value == "/runtime" || value.starts_with("/runtime ") {
+        return PromptExecution::Runtime(
+            value
+                .strip_prefix("/runtime")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    PromptExecution::Runtime(prompt.to_owned())
+}
+
 pub(super) async fn submit_turn(
     app: &mut App,
     session: &mut Session,

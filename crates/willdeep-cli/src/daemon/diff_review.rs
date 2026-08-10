@@ -125,6 +125,46 @@ pub(crate) struct VerificationRequest {
     pub summary: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FindingSeverity {
+    Warning,
+    Blocker,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SensitiveFinding {
+    pub path: String,
+    pub code: String,
+    pub severity: FindingSeverity,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct CommitPreview {
+    pub snapshot_id: String,
+    pub workspace: PathBuf,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub message: String,
+    pub staged_files: Vec<String>,
+    pub unstaged_files: Vec<String>,
+    pub sensitive_findings: Vec<SensitiveFinding>,
+    pub remote: String,
+    pub push_target: Option<String>,
+    pub tag: Option<String>,
+    pub blockers: Vec<String>,
+    pub requires_confirmation: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CommitPreviewQuery {
+    workspace: PathBuf,
+    message: String,
+    #[serde(default = "default_remote")]
+    remote: String,
+    tag: Option<String>,
+}
+
 pub(super) async fn snapshot_cli(home: &Path, workspace: PathBuf) -> Result<()> {
     let state = ensure_running(home).await?;
     let response = client()
@@ -266,6 +306,27 @@ pub(super) async fn verifications_cli(
     Ok(())
 }
 
+pub(super) async fn commit_preview_cli(
+    home: &Path,
+    workspace: PathBuf,
+    snapshot_id: String,
+    message: String,
+    remote: String,
+    tag: Option<String>,
+) -> Result<()> {
+    let preview = remote_commit_preview(
+        home,
+        &workspace,
+        &snapshot_id,
+        &message,
+        &remote,
+        tag.as_deref(),
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    Ok(())
+}
+
 fn area_name(area: DiffArea) -> &'static str {
     match area {
         DiffArea::Staged => "staged",
@@ -386,6 +447,44 @@ pub(crate) async fn remote_verifications(
     if !response.status().is_success() {
         bail!(
             "Runtime rejected Diff verifications: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn remote_commit_preview(
+    home: &Path,
+    workspace: &Path,
+    snapshot_id: &str,
+    message: &str,
+    remote: &str,
+    tag: Option<&str>,
+) -> Result<CommitPreview> {
+    let state = ensure_running(home).await?;
+    let mut query = vec![
+        ("workspace", workspace.display().to_string()),
+        ("message", message.to_owned()),
+        ("remote", remote.to_owned()),
+    ];
+    if let Some(tag) = tag {
+        query.push(("tag", tag.to_owned()));
+    }
+    let response = client()
+        .get(format!(
+            "http://{}/v1/diffs/{snapshot_id}/commit-preview",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&query)
+        .send()
+        .await?;
+    if response.status() == StatusCode::CONFLICT {
+        bail!("Diff snapshot changed; reopen /diff before commit preview");
+    }
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Commit Preview: {}",
             response.text().await?
         );
     }
@@ -642,6 +741,21 @@ pub(super) async fn verification_handler(
     Ok((StatusCode::CREATED, Json(record)).into_response())
 }
 
+pub(super) async fn commit_preview_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Query(query): Query<CommitPreviewQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &query.workspace).await?;
+    let current = exact_snapshot(&workspace, &snapshot_id)?;
+    build_commit_preview(&workspace, current, query.message, query.remote, query.tag)
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 fn exact_snapshot(workspace: &Path, snapshot_id: &str) -> Result<DiffSnapshot, StatusCode> {
     let current = snapshot(workspace).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if current.id != snapshot_id {
@@ -722,6 +836,199 @@ fn is_safe_verification_command(command: &str) -> bool {
             || normalized
                 .strip_prefix(prefix)
                 .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    })
+}
+
+fn default_remote() -> String {
+    "origin".to_owned()
+}
+
+fn build_commit_preview(
+    workspace: &Path,
+    snapshot: DiffSnapshot,
+    message: String,
+    remote: String,
+    tag: Option<String>,
+) -> Result<CommitPreview> {
+    let message = message.trim().to_owned();
+    let remote = remote.trim().to_owned();
+    if message.len() > 2000 || !valid_git_name(&remote) {
+        bail!("invalid commit preview input");
+    }
+    let tag = tag
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let staged_files = snapshot
+        .files
+        .iter()
+        .filter(|file| file.staged)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let unstaged_files = snapshot
+        .files
+        .iter()
+        .filter(|file| file.unstaged)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let branch = git(workspace, &["branch", "--show-current"])
+        .ok()
+        .map(|value| String::from_utf8_lossy(&value).trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let remote_key = format!("remote.{remote}.url");
+    let remote_url = git(workspace, &["config", "--get", &remote_key])
+        .ok()
+        .map(|value| sanitize_remote_url(String::from_utf8_lossy(&value).trim()))
+        .filter(|value| !value.is_empty());
+    let sensitive_findings = scan_sensitive_staged_files(workspace, &snapshot.files);
+    let mut blockers = Vec::new();
+    if message.is_empty() {
+        blockers.push("commit message is empty".to_owned());
+    }
+    if staged_files.is_empty() {
+        blockers.push("no staged files".to_owned());
+    }
+    if snapshot.has_conflicts {
+        blockers.push("workspace has unresolved conflicts".to_owned());
+    }
+    if branch.is_none() {
+        blockers.push("detached HEAD has no push branch".to_owned());
+    }
+    if remote_url.is_none() {
+        blockers.push(format!("remote {remote} is not configured"));
+    }
+    if tag.as_ref().is_some_and(|value| !valid_release_tag(value)) {
+        blockers.push("tag is not a valid vMAJOR.MINOR.PATCH release tag".to_owned());
+    }
+    if sensitive_findings
+        .iter()
+        .any(|finding| finding.severity == FindingSeverity::Blocker)
+    {
+        blockers.push("staged changes contain sensitive material".to_owned());
+    }
+    let push_target = remote_url.as_ref().and_then(|url| {
+        branch
+            .as_ref()
+            .map(|branch| format!("{remote} ({url}) → refs/heads/{branch}"))
+    });
+    Ok(CommitPreview {
+        snapshot_id: snapshot.id,
+        workspace: workspace.to_path_buf(),
+        branch,
+        head: snapshot.head,
+        message,
+        staged_files,
+        unstaged_files,
+        sensitive_findings,
+        remote,
+        push_target,
+        tag,
+        blockers,
+        requires_confirmation: true,
+    })
+}
+
+fn valid_git_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+}
+
+fn valid_release_tag(value: &str) -> bool {
+    let Some(version) = value.strip_prefix('v') else {
+        return false;
+    };
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
+    let parts = core.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
+        && version
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-".contains(character))
+}
+
+fn sanitize_remote_url(value: &str) -> String {
+    let without_query = value.split(['?', '#']).next().unwrap_or(value);
+    let Some((scheme, rest)) = without_query.split_once("://") else {
+        return without_query.to_owned();
+    };
+    let host_path = rest.rsplit_once('@').map_or(rest, |(_, safe)| safe);
+    format!("{scheme}://{host_path}")
+}
+
+fn scan_sensitive_staged_files(workspace: &Path, files: &[DiffFile]) -> Vec<SensitiveFinding> {
+    let mut findings = Vec::new();
+    for file in files.iter().filter(|file| file.staged) {
+        let lower_path = file.path.to_ascii_lowercase();
+        if sensitive_path(&lower_path) {
+            findings.push(SensitiveFinding {
+                path: file.path.clone(),
+                code: "sensitive_path".to_owned(),
+                severity: FindingSeverity::Blocker,
+            });
+        }
+        let spec = format!(":{}", file.path);
+        let Ok(content) = git(workspace, &["show", &spec]) else {
+            continue;
+        };
+        if content.len() > 1024 * 1024 || content.contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&content);
+        if sensitive_content(&text) {
+            findings.push(SensitiveFinding {
+                path: file.path.clone(),
+                code: "credential_material".to_owned(),
+                severity: FindingSeverity::Blocker,
+            });
+        }
+    }
+    findings.sort_by(|left, right| left.path.cmp(&right.path).then(left.code.cmp(&right.code)));
+    findings.dedup_by(|left, right| left.path == right.path && left.code == right.code);
+    findings
+}
+
+fn sensitive_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    (name == ".env"
+        || (name.starts_with(".env.") && !name.ends_with(".example") && !name.ends_with(".sample")))
+        || [".pem", ".key", ".p12", ".pfx"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+        || matches!(
+            name,
+            "id_rsa" | "id_ed25519" | "credentials" | "credentials.json"
+        )
+}
+
+fn sensitive_content(value: &str) -> bool {
+    let uppercase = value.to_ascii_uppercase();
+    if uppercase.contains("-----BEGIN PRIVATE KEY-----")
+        || uppercase.contains("-----BEGIN RSA PRIVATE KEY-----")
+    {
+        return true;
+    }
+    value.lines().any(|line| {
+        let trimmed = line.trim();
+        let uppercase = trimmed.to_ascii_uppercase();
+        let assignment = [
+            "API_KEY",
+            "ACCESS_TOKEN",
+            "AUTH_TOKEN",
+            "PASSWORD",
+            "SECRET_KEY",
+        ]
+        .iter()
+        .any(|name| uppercase.starts_with(name));
+        assignment
+            && (trimmed.contains('=') || trimmed.contains(':'))
+            && !trimmed.contains("${")
+            && !uppercase.contains("ENV:")
+            && !uppercase.contains("EXAMPLE")
+            && !uppercase.contains("REPLACE_ME")
     })
 }
 
@@ -1190,5 +1497,60 @@ mod tests {
             StatusCode::CONFLICT
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn commit_preview_redacts_remote_credentials_and_blocks_sensitive_stage() {
+        let root = std::env::temp_dir().join(format!("willdeep-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        run_git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://token-value@github.com/example/project.git",
+            ],
+        );
+        std::fs::write(root.join(".env"), "API_KEY=real-secret\n").expect("secret");
+        run_git(&root, &["add", ".env"]);
+        let snapshot = snapshot(&root).expect("snapshot");
+
+        let preview = build_commit_preview(
+            &root,
+            snapshot,
+            "feat: preview".to_owned(),
+            "origin".to_owned(),
+            Some("v1.2.3-rc1".to_owned()),
+        )
+        .expect("preview");
+
+        assert!(
+            preview
+                .push_target
+                .as_deref()
+                .is_some_and(|target| target.contains("https://github.com/example/project.git"))
+        );
+        assert!(!preview.push_target.unwrap().contains("token-value"));
+        assert!(!preview.sensitive_findings.is_empty());
+        assert!(
+            preview
+                .blockers
+                .iter()
+                .any(|value| value.contains("sensitive"))
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn release_tag_validation_is_semver_shaped() {
+        assert!(valid_release_tag("v1.2.3"));
+        assert!(valid_release_tag("v1.2.3-rc4"));
+        assert!(!valid_release_tag("1.2.3"));
+        assert!(!valid_release_tag("v1.2"));
+        assert!(!valid_release_tag("v1.2.3;push"));
     }
 }

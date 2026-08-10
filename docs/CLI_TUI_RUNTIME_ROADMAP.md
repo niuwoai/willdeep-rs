@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc5
+> 当前实施版本：v0.19.0-rc6
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -100,7 +100,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；支持 Combined/Staged/Unstaged 范围切换和 Unicode 宽度安全双栏。
 - [x] 接受、打回、请求重改、标记已审和安全撤销单文件；撤销绑定精确快照、TUI 二次确认，未跟踪/新增内容进入可恢复回收区。
 - [x] 测试命令、退出码、失败摘要与变更集绑定；前后台测试自动绑定精确快照，摘要有界且敏感命令拒绝记录。
-- [ ] Commit Preview、敏感文件检查、Tag 和推送目标确认。
+- [x] Commit Preview、敏感文件检查、Tag 和推送目标确认；Runtime API、CLI 与 TUI 共用精确快照，只预览不执行 Git 写操作，Remote 凭据只显示脱敏结果。
 
 验收：用户可在 TUI 完成主要审查，撤销不会覆盖用户已有修改。
 
@@ -223,7 +223,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.19.0-rc5（已完成）：常见前后台测试命令自动把命令、退出码、状态与有界摘要绑定到完成时的精确 Diff 快照；Runtime API、CLI 和 TUI 共用记录，普通或疑似含凭据命令不持久化。下一步实现 Commit Preview、敏感文件检查与 Tag/推送目标确认。
+v0.19.0-rc6（已完成）：Runtime/CLI/TUI 加入只读 Commit Preview，基于精确 Diff 快照展示提交消息、分支、暂存状态、脱敏 Remote、推送目标和可选 Tag；敏感文件/凭据、冲突、空暂存区、Detached HEAD 与无效目标会阻断确认。同时增加聊天纯净度回归测试，确保轮次和内部 ID 不进入对话区。下一步完成 Diff 的 Turn/Agent 归属绑定。
+
+v0.19.0-rc5（已完成）：常见前后台测试命令自动把命令、退出码、状态与有界摘要绑定到完成时的精确 Diff 快照；Runtime API、CLI 和 TUI 共用记录，普通或疑似含凭据命令不持久化。
 
 v0.19.0-rc4（已完成）：修复 TUI/Web 隐式启动 Runtime 时启动提示穿透 Ratatui、污染 Prompt 区域；提交确认和 Turn/Agent/Runtime ID 不再进入聊天记录，AI 完成消息只显示真实返回内容。显式 `daemon start` 仍保留控制台反馈。
 
@@ -340,7 +342,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 - [ ] Worktree 创建、绑定、回收、孤儿检测、冲突检测和保守合并。
 - [ ] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
 - [ ] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
-- [ ] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
+- [x] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
 
 ### 7.10 工具与浏览器能力
 

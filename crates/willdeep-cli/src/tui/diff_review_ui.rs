@@ -13,6 +13,38 @@ pub(super) struct DiffReviewState {
     pub reviews: BTreeMap<String, crate::daemon::diff_review::ReviewDecision>,
     pub confirm_revert: bool,
     pub verifications: Vec<crate::daemon::diff_review::DiffVerificationRecord>,
+    pub commit_preview: Option<crate::daemon::diff_review::CommitPreview>,
+    pub preview_draft: Option<CommitPreviewDraft>,
+}
+
+pub(super) struct CommitPreviewDraft {
+    pub message: PromptEditor,
+    pub remote: PromptEditor,
+    pub tag: PromptEditor,
+    pub field: usize,
+}
+
+impl Default for CommitPreviewDraft {
+    fn default() -> Self {
+        let mut remote = PromptEditor::default();
+        remote.insert("origin");
+        Self {
+            message: PromptEditor::default(),
+            remote,
+            tag: PromptEditor::default(),
+            field: 0,
+        }
+    }
+}
+
+impl CommitPreviewDraft {
+    pub fn editor_mut(&mut self) -> &mut PromptEditor {
+        match self.field {
+            1 => &mut self.remote,
+            2 => &mut self.tag,
+            _ => &mut self.message,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -225,6 +257,84 @@ pub(super) fn diff_snapshot_lines(review: &DiffReviewState) -> Vec<Line<'static>
             }),
     );
     lines
+}
+
+pub(super) fn commit_preview_lines(
+    preview: &crate::daemon::diff_review::CommitPreview,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("Snapshot: {}", preview.snapshot_id)),
+        Line::from(format!(
+            "Branch: {}",
+            preview.branch.as_deref().unwrap_or("—")
+        )),
+        Line::from(format!("Message: {}", preview.message)),
+        Line::from(format!(
+            "Push target: {}",
+            preview.push_target.as_deref().unwrap_or("—")
+        )),
+        Line::from(format!("Tag: {}", preview.tag.as_deref().unwrap_or("—"))),
+        Line::from(format!("Staged files: {}", preview.staged_files.len())),
+        Line::from(format!("Unstaged files: {}", preview.unstaged_files.len())),
+        Line::default(),
+    ];
+    if preview.sensitive_findings.is_empty() {
+        lines.push(Line::styled(
+            "Sensitive scan: clear",
+            Style::default().fg(Color::Green),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Sensitive findings:",
+            Style::default().fg(Color::Red),
+        ));
+        lines.extend(preview.sensitive_findings.iter().map(|finding| {
+            Line::styled(
+                format!(
+                    "  {:?} {} · {}",
+                    finding.severity, finding.path, finding.code
+                ),
+                Style::default().fg(Color::Red),
+            )
+        }));
+    }
+    if !preview.blockers.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::styled("Blockers:", Style::default().fg(Color::Red)));
+        lines.extend(preview.blockers.iter().map(|blocker| {
+            Line::styled(format!("  • {blocker}"), Style::default().fg(Color::Red))
+        }));
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Preview only · no commit, tag, or push was executed",
+        Style::default().fg(Color::Yellow),
+    ));
+    lines
+}
+
+pub(super) fn commit_preview_draft_lines(draft: &CommitPreviewDraft) -> Vec<Line<'static>> {
+    [
+        ("Commit message", draft.message.text()),
+        ("Remote", draft.remote.text()),
+        ("Tag (optional)", draft.tag.text()),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (label, value))| {
+        Line::styled(
+            format!(
+                "{} {label}: {value}",
+                if index == draft.field { "▶" } else { " " }
+            ),
+            if index == draft.field {
+                Style::default().fg(Color::Black).bg(Color::LightCyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        )
+    })
+    .collect()
 }
 
 fn fit_diff_column(value: &str, width: usize) -> String {
