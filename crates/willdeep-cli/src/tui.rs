@@ -27,8 +27,8 @@ use willdeep_core::types::Usage;
 use willdeep_core::{
     Agent, AgentEvent, ApprovalDecision, Approver, AttentionItem, AttentionSection,
     AttentionSource, BackgroundTaskRegistry, BackgroundTaskSnapshot, BackgroundTaskStatus,
-    EventSink, Message, MessageAttachment, RuntimeStatus, Session, SessionStore, SkillCatalog,
-    UserQuestion, rollup_status, sort_attention_items,
+    EventSink, Message, MessageAttachment, RuntimeScopeKind, RuntimeStatus, Session, SessionStore,
+    SkillCatalog, StatusRollup, UserQuestion, sort_attention_items,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
@@ -36,7 +36,9 @@ use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 mod sidebar;
+mod workspace_attention;
 use sidebar::render_sidebar;
+use workspace_attention::workspace_attention;
 
 pub enum UiMessage {
     Agent(AgentEvent),
@@ -114,6 +116,7 @@ struct App {
     context_tokens: u64,
     activity_line: String,
     background_tasks: Vec<BackgroundTaskSnapshot>,
+    workspace_attention: Vec<AttentionItem>,
     background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
@@ -138,6 +141,7 @@ struct App {
     attention_read: BTreeSet<String>,
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
+    attention_detail: Option<AttentionItem>,
     search: Option<SearchState>,
     workspace: Option<PathBuf>,
     palette: Option<PaletteState>,
@@ -340,6 +344,7 @@ async fn event_loop(
     let mut app = App::new(initial_transcript, language);
     app.workspace = Some(session.workspace.clone());
     app.workspace_status = workspace_status(&session.workspace, language);
+    app.workspace_attention = workspace_attention(&session.workspace);
     app.attention_read = session.attention_read.clone();
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
@@ -381,6 +386,7 @@ async fn event_loop(
                         let _=sender.send(decision);continue;
                     }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
+                    if app.attention_detail.is_some(){if key.code==KeyCode::Esc{app.attention_detail=None;}continue;}
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
@@ -478,7 +484,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在整理思路","Working through it","考えを整理中").to_owned();app.transient_thought=Some(compact_thought(&v));},
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
-                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);}},
+                UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
@@ -537,6 +543,7 @@ impl App {
             context_tokens: 0,
             activity_line: String::new(),
             background_tasks: Vec::new(),
+            workspace_attention: Vec::new(),
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
@@ -561,6 +568,7 @@ impl App {
             attention_read: BTreeSet::new(),
             task_detail: None,
             task_detail_scroll: 0,
+            attention_detail: None,
             search: None,
             workspace: None,
             palette: None,
@@ -606,6 +614,9 @@ impl App {
                 .iter()
                 .map(AttentionItem::from_background),
         );
+        if !self.running {
+            items.extend(self.workspace_attention.iter().cloned());
+        }
         items.retain(|item| !self.attention_read.contains(&item.id));
         sort_attention_items(&mut items);
         items
@@ -637,6 +648,8 @@ impl App {
             .position(|task| task.id == item.id)
         {
             self.open_task_detail(index, registry);
+        } else {
+            self.attention_detail = Some(item);
         }
     }
     fn attention_stop(&mut self, registry: &BackgroundTaskRegistry) {
@@ -661,7 +674,7 @@ impl App {
         };
         if !matches!(
             item.status,
-            RuntimeStatus::Failed | RuntimeStatus::Cancelled
+            RuntimeStatus::Blocked | RuntimeStatus::Failed | RuntimeStatus::Cancelled
         ) {
             return false;
         }
@@ -689,10 +702,7 @@ impl App {
         let Some(item) = self.selected_attention() else {
             return false;
         };
-        if matches!(
-            item.status,
-            RuntimeStatus::Done | RuntimeStatus::Cancelled | RuntimeStatus::Failed
-        ) {
+        if item.status != RuntimeStatus::Working {
             self.attention_read.insert(item.id);
             let remaining = self.attention_items().len();
             self.attention_selected = self.attention_selected.min(remaining.saturating_sub(1));
@@ -2264,6 +2274,38 @@ fn draw(
                             .border_style(Style::default().fg(Color::Yellow)),
                     )
                     .scroll((app.task_detail_scroll.min(u16::MAX as usize) as u16, 0))
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
+        }
+        if let Some(detail) = &app.attention_detail {
+            let content = format!(
+                "{} · {}\n\n{}\n\n{}",
+                attention_source_label(detail.source, app.language),
+                runtime_status_label(detail.status, app.language),
+                detail.title,
+                detail.detail
+            );
+            let popup = centered_rect(
+                f.area().width.min(82),
+                (visual_lines(&content, f.area().width.min(80) as usize) as u16 + 2)
+                    .min(f.area().height)
+                    .max(1),
+                f.area(),
+            );
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .title(app.language.text(
+                                "Inbox 详情 · Esc 关闭",
+                                "Inbox detail · Esc closes",
+                                "Inbox 詳細 · Esc で閉じる",
+                            ))
+                            .borders(Borders::ALL)
+                            .border_style(attention_style(detail.status)),
+                    )
                     .wrap(Wrap { trim: false }),
                 popup,
             );

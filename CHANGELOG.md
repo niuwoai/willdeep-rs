@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.15.0-rc4] - 2026-08-10
+
+### Added
+
+- Git 未合并冲突和待审 Diff 进入 Attention Inbox；条目 ID 包含真实暂存/未暂存差异及受限未跟踪内容签名。
+- Inbox 的 Worktree/Diff 条目支持精确详情、标记已读，新内容不会错误继承旧 Diff 的已读状态。
+- 子 Agent 因审批拒绝时结构化上报 `blocked`，可在权限条件改变后重试。
+- Core 新增 Agent→Session→Workspace 状态树，TUI 运行状态使用相同优先级逐层上卷。
+
 ## [0.15.0-rc3] - 2026-08-10
 
 ### Added

@@ -10,13 +10,31 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     app.attention_selected = app
         .attention_selected
         .min(attention.len().saturating_sub(1));
-    let agent_status = rollup_status(
-        std::iter::once(if app.running {
+    let mut agents = vec![StatusRollup::leaf(
+        RuntimeScopeKind::Agent,
+        "main",
+        if app.running {
             RuntimeStatus::Working
         } else {
             RuntimeStatus::Idle
-        })
-        .chain(attention.iter().map(|item| item.status)),
+        },
+    )];
+    agents.extend(
+        attention
+            .iter()
+            .map(|item| StatusRollup::leaf(RuntimeScopeKind::Agent, item.id.clone(), item.status)),
+    );
+    let session = StatusRollup::group(
+        RuntimeScopeKind::Session,
+        "current",
+        RuntimeStatus::Idle,
+        agents,
+    );
+    let workspace = StatusRollup::group(
+        RuntimeScopeKind::Workspace,
+        "current",
+        RuntimeStatus::Idle,
+        vec![session],
     );
     let titles = [
         app.language.text("工作区", "Workspace", "ワークスペース"),
@@ -127,7 +145,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                 lines.push(Line::raw(format!(
                     "  {}: {}",
                     app.language.text("智能体", "Agent", "エージェント"),
-                    runtime_status_label(agent_status, app.language)
+                    runtime_status_label(workspace.status, app.language)
                 )));
                 lines.push(Line::raw(format!(
                     "  {}: {}/{}",

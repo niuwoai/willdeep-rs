@@ -62,6 +62,53 @@ pub enum AttentionSource {
     DiffReview,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeScopeKind {
+    Agent,
+    Session,
+    Workspace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusRollup {
+    pub kind: RuntimeScopeKind,
+    pub id: String,
+    pub own_status: RuntimeStatus,
+    pub status: RuntimeStatus,
+    pub children: Vec<StatusRollup>,
+}
+
+impl StatusRollup {
+    pub fn leaf(kind: RuntimeScopeKind, id: impl Into<String>, status: RuntimeStatus) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            own_status: status,
+            status,
+            children: Vec::new(),
+        }
+    }
+
+    pub fn group(
+        kind: RuntimeScopeKind,
+        id: impl Into<String>,
+        own_status: RuntimeStatus,
+        children: Vec<Self>,
+    ) -> Self {
+        let status = rollup_status(
+            std::iter::once(own_status).chain(children.iter().map(|child| child.status)),
+        );
+        Self {
+            kind,
+            id: id.into(),
+            own_status,
+            status,
+            children,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionItem {
     pub id: String,
@@ -102,6 +149,7 @@ impl AttentionItem {
         };
         let status = match task.status {
             BackgroundTaskStatus::Running => RuntimeStatus::Working,
+            BackgroundTaskStatus::Blocked => RuntimeStatus::Blocked,
             BackgroundTaskStatus::Completed => RuntimeStatus::Done,
             BackgroundTaskStatus::Failed
             | BackgroundTaskStatus::TimedOut
@@ -199,5 +247,30 @@ mod tests {
         assert_eq!(items[0].status, RuntimeStatus::WaitingApproval);
         assert_eq!(items[1].status, RuntimeStatus::WaitingAnswer);
         assert_eq!(items[2].status, RuntimeStatus::Done);
+    }
+
+    #[test]
+    fn rolls_agent_state_through_session_and_workspace() {
+        let session = StatusRollup::group(
+            RuntimeScopeKind::Session,
+            "session-1",
+            RuntimeStatus::Idle,
+            vec![
+                StatusRollup::leaf(RuntimeScopeKind::Agent, "main", RuntimeStatus::Working),
+                StatusRollup::leaf(
+                    RuntimeScopeKind::Agent,
+                    "reviewer",
+                    RuntimeStatus::WaitingApproval,
+                ),
+            ],
+        );
+        let workspace = StatusRollup::group(
+            RuntimeScopeKind::Workspace,
+            "workspace-1",
+            RuntimeStatus::Idle,
+            vec![session],
+        );
+        assert_eq!(workspace.status, RuntimeStatus::WaitingApproval);
+        assert_eq!(workspace.children[0].status, RuntimeStatus::WaitingApproval);
     }
 }

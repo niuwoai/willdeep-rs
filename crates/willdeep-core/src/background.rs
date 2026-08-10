@@ -23,6 +23,7 @@ pub enum BackgroundTaskKind {
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
+    Blocked,
     Completed,
     Failed,
     Killed,

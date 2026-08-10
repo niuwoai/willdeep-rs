@@ -9,7 +9,7 @@ use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
 };
 use crate::provider::Provider;
-use crate::tools::{ApprovalMode, ToolRegistry};
+use crate::tools::{ApprovalMode, ToolError, ToolRegistry};
 
 #[derive(Clone)]
 pub struct SubagentProfile {
@@ -118,18 +118,9 @@ impl SubagentCatalog {
                     let prompt = prompt.clone();
                     let approved_target = approved_target.clone();
                     async move {
-                        match run_profile(workspace, profile, prompt, approved_target).await {
-                            Ok(report) => TaskResult {
-                                status: BackgroundTaskStatus::Completed,
-                                exit_code: Some(0),
-                                output: report,
-                            },
-                            Err(error) => TaskResult {
-                                status: BackgroundTaskStatus::Failed,
-                                exit_code: Some(1),
-                                output: error.to_string(),
-                            },
-                        }
+                        subagent_task_result(
+                            run_profile(workspace, profile, prompt, approved_target).await,
+                        )
                     }
                 },
             );
@@ -139,6 +130,26 @@ impl SubagentCatalog {
         } else {
             run_profile(workspace, profile, prompt, approved_target).await
         }
+    }
+}
+
+fn subagent_task_result(result: Result<String, AgentError>) -> TaskResult {
+    match result {
+        Ok(report) => TaskResult {
+            status: BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output: report,
+        },
+        Err(AgentError::Tool(ToolError::ApprovalDenied(message))) => TaskResult {
+            status: BackgroundTaskStatus::Blocked,
+            exit_code: None,
+            output: message,
+        },
+        Err(error) => TaskResult {
+            status: BackgroundTaskStatus::Failed,
+            exit_code: Some(1),
+            output: error.to_string(),
+        },
     }
 }
 
@@ -302,6 +313,16 @@ mod tests {
             ),
             root,
         )
+    }
+
+    #[test]
+    fn approval_denial_marks_background_subagent_blocked() {
+        let result = subagent_task_result(Err(AgentError::Tool(ToolError::ApprovalDenied(
+            "write access needed".to_owned(),
+        ))));
+        assert_eq!(result.status, BackgroundTaskStatus::Blocked);
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.output, "write access needed");
     }
 
     #[tokio::test]

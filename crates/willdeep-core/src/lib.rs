@@ -12,8 +12,8 @@ pub mod types;
 
 pub use agent::{Agent, AgentConfig, AgentError, AgentEvent, AgentOutcome, EventSink};
 pub use attention::{
-    AttentionItem, AttentionSection, AttentionSource, RuntimeStatus, rollup_status,
-    sort_attention_items,
+    AttentionItem, AttentionSection, AttentionSource, RuntimeScopeKind, RuntimeStatus,
+    StatusRollup, rollup_status, sort_attention_items,
 };
 pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,

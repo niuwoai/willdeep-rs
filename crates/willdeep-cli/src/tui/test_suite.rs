@@ -552,6 +552,27 @@ mod tests {
         assert!(app.attention_items().is_empty());
     }
     #[test]
+    fn workspace_attention_opens_exact_detail_and_can_be_marked_read() {
+        let registry = BackgroundTaskRegistry::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        app.workspace_attention.push(AttentionItem {
+            id: "diff-review:abc".to_owned(),
+            source: AttentionSource::DiffReview,
+            title: "2 changed files ready for review".to_owned(),
+            detail: "M src/a.rs · ?? docs/b.md".to_owned(),
+            status: RuntimeStatus::WaitingApproval,
+            elapsed_millis: None,
+        });
+
+        app.attention_activate(&registry);
+        let detail = app.attention_detail.as_ref().expect("detail");
+        assert_eq!(detail.id, "diff-review:abc");
+        assert!(detail.detail.contains("src/a.rs"));
+        app.attention_detail = None;
+        assert!(app.attention_mark_read());
+        assert!(app.attention_items().is_empty());
+    }
+    #[test]
     fn mouse_click_inserts_command_candidate() {
         let registry = BackgroundTaskRegistry::default();
         let skills = SkillCatalog::default();
