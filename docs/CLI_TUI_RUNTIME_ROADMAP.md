@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc26
+> 当前实施版本：v0.21.0-rc27
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc27（已完成）：新增只读 `git_log` 与 `git_blame` Harness 工具。Log 使用参数化参数支持路径、数量、作者和时间过滤，最多返回 100 条；Blame 必须绑定工作区内既有文件，默认最多 200 行、显式范围最多 2000 行。两者均不经 Shell 拼接、以 `--` 隔离路径并继续受统一输出上限约束；真实临时仓库测试覆盖过滤、范围和目录逃逸。
+
 v0.21.0-rc26（已完成）：新增顶层 `willdeep session list|get|turns|stop`，复用统一 Runtime Client 和稳定公开 DTO。Stop 先读取目标 Session 的 `active_turn_id`，再用独立 Request ID 调用 `turn.stop`；空闲 Session 明确拒绝，避免猜测最近 Turn 或误停其他会话。命令解析、目标选择和隔离 Daemon 启停均已验证。
 
 v0.21.0-rc25（已完成）：新增 `willdeep completions bash|zsh|fish|powershell` 与 `willdeep man`。补全和 roff 文档均从当前 Clap 命令树生成，自动覆盖 `run`、Runtime、配置、集成和全局参数，避免静态脚本与实际 CLI 漂移；四类 Shell 与 man 内容均有生成回归测试。
@@ -415,7 +417,8 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 ### 7.10 工具与浏览器能力
 
 - [x] 文件、Git、Shell、Web Search/Fetch、MCP、Skills、后台任务和子 Agent 基础工具。
-- [ ] 符号索引、引用查找、诊断、结构化测试结果、Git Log/Blame、下载和转换工具。
+- [x] Git Log/Blame 有界只读历史工具。
+- [ ] 符号索引、引用查找、诊断、结构化测试结果、下载和转换工具。
 - [x] Web Fetch 支持常用同域重定向。
 - [x] 跨域重定向风险控制、循环/次数/大小/超时限制和 HTML 正文。
 - [ ] PDF 正文提取和引用来源结构化输出。

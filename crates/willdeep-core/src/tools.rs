@@ -339,6 +339,16 @@ impl ToolRegistry {
                 json!({"type":"object","properties":{"path":{"type":"string"},"staged":{"type":"boolean"},"stat_only":{"type":"boolean"}},"additionalProperties":false}),
             ),
             definition(
+                "git_log",
+                "Return bounded commit history, optionally restricted to one workspace path. Read-only.",
+                json!({"type":"object","properties":{"path":{"type":"string"},"max_count":{"type":"integer","minimum":1,"maximum":100},"author":{"type":"string"},"since":{"type":"string","description":"Git date expression such as 2 weeks ago or 2026-01-01."}},"additionalProperties":false}),
+            ),
+            definition(
+                "git_blame",
+                "Return bounded line attribution for one workspace file. Read-only.",
+                json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}),
+            ),
+            definition(
                 "list_worktrees",
                 "List Git worktrees with path, HEAD, branch, detached and prunable state. Read-only.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -444,6 +454,8 @@ impl ToolRegistry {
             "list_directory" => self.list_directory(parse(call)?).await,
             "git_status" => self.git_status().await,
             "git_diff" => self.git_diff(parse(call)?).await,
+            "git_log" => self.git_log(parse(call)?).await,
+            "git_blame" => self.git_blame(parse(call)?).await,
             "list_worktrees" => self.list_worktrees().await,
             "create_worktree" => self.create_worktree(parse(call)?).await,
             "get_job_output" => self.get_job_output(parse(call)?),
@@ -734,6 +746,69 @@ impl ToolRegistry {
         Ok(truncate_bytes(
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ))
+    }
+
+    async fn git_log(&self, args: GitLogArgs) -> Result<String, ToolError> {
+        let mut command = Command::new("git");
+        command.args([
+            "log",
+            "--no-color",
+            "--date=iso-strict",
+            "--format=%H%x09%an%x09%aI%x09%s",
+        ]);
+        command.arg(format!(
+            "--max-count={}",
+            args.max_count.unwrap_or(20).clamp(1, 100)
+        ));
+        if let Some(author) = args
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            command.arg(format!("--author={author}"));
+        }
+        if let Some(since) = args
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            command.arg(format!("--since={since}"));
+        }
+        if let Some(path) = args.path.as_deref() {
+            self.resolve_existing(path)?;
+            command.args(["--", path]);
+        }
+        let output = command.current_dir(&self.workspace).output().await?;
+        git_output(output)
+    }
+
+    async fn git_blame(&self, args: GitBlameArgs) -> Result<String, ToolError> {
+        self.resolve_existing(&args.path)?;
+        let start = args.start_line.unwrap_or(1);
+        let end = args.end_line;
+        if start == 0 || end.is_some_and(|end| end < start || end.saturating_sub(start) >= 2_000) {
+            return Err(ToolError::Io(std::io::Error::other(
+                "git_blame lines must be a 1-based ordered range of at most 2000 lines",
+            )));
+        }
+        let range = end.map_or_else(|| format!("{start},+200"), |end| format!("{start},{end}"));
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "color.ui=false",
+                "blame",
+                "--date=iso-strict",
+                "-L",
+                &range,
+                "--",
+                &args.path,
+            ])
+            .current_dir(&self.workspace)
+            .output()
+            .await?;
+        git_output(output)
     }
 
     async fn list_worktrees(&self) -> Result<String, ToolError> {
@@ -1764,6 +1839,17 @@ fn truncate_bytes(value: String) -> String {
     format!("{}\n[output truncated]", &value[..boundary])
 }
 
+fn git_output(output: std::process::Output) -> Result<String, ToolError> {
+    if !output.status.success() {
+        return Err(ToolError::Io(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )));
+    }
+    Ok(truncate_bytes(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
 #[cfg(windows)]
 fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("powershell.exe");
@@ -1847,6 +1933,21 @@ struct GitDiffArgs {
     path: Option<String>,
     staged: Option<bool>,
     stat_only: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitLogArgs {
+    path: Option<String>,
+    max_count: Option<usize>,
+    author: Option<String>,
+    since: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitBlameArgs {
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1944,6 +2045,19 @@ mod tests {
         path
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn read_file_matches_swift_line_number_contract() {
         let root = workspace("read");
@@ -1959,6 +2073,64 @@ mod tests {
             .await
             .expect("read");
         assert_eq!(output, "     2  two\n     3  three\n");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn git_history_tools_are_bounded_read_only_and_path_scoped() {
+        let root = workspace("git-history");
+        git(&root, &["init"]);
+        git(&root, &["config", "user.name", "WillDeep Test"]);
+        git(&root, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(root.join("history.txt"), "first\nsecond\n").expect("first fixture");
+        git(&root, &["add", "history.txt"]);
+        git(&root, &["commit", "-m", "initial history"]);
+        std::fs::write(root.join("history.txt"), "first\nchanged\n").expect("second fixture");
+        git(&root, &["add", "history.txt"]);
+        git(&root, &["commit", "-m", "update history"]);
+
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
+        let log = registry
+            .git_log(GitLogArgs {
+                path: Some("history.txt".to_owned()),
+                max_count: Some(1),
+                author: Some("WillDeep Test".to_owned()),
+                since: None,
+            })
+            .await
+            .expect("git log");
+        assert!(log.contains("update history"));
+        assert!(!log.contains("initial history"));
+        assert_eq!(log.lines().count(), 1);
+
+        let blame = registry
+            .git_blame(GitBlameArgs {
+                path: "history.txt".to_owned(),
+                start_line: None,
+                end_line: None,
+            })
+            .await
+            .expect("git blame");
+        assert!(blame.contains("WillDeep Test"));
+        assert!(blame.contains("first"));
+        assert!(blame.contains("changed"));
+
+        let invalid_range = registry
+            .git_blame(GitBlameArgs {
+                path: "history.txt".to_owned(),
+                start_line: Some(3),
+                end_line: Some(2),
+            })
+            .await;
+        assert!(invalid_range.is_err());
+        let escape = registry
+            .git_blame(GitBlameArgs {
+                path: "../../etc/passwd".to_owned(),
+                start_line: None,
+                end_line: None,
+            })
+            .await;
+        assert!(matches!(escape, Err(ToolError::OutsideWorkspace(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
