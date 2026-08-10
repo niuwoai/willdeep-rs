@@ -561,7 +561,7 @@ async fn event_loop(
                             let request=crate::daemon::diff_review::RevertRequest{workspace:session.workspace.clone(),path,area};
                             match crate::daemon::diff_review::remote_revert(&runtime.home,&snapshot_id,&request).await{
                                 Ok(result)=>match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await{
-                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
+                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();review.verifications.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
                                     Err(error)=>app.notice=Some(format!("{}: {error}",language.text("撤销成功，但刷新 Diff 失败","Reverted, but refresh failed","取り消しましたが更新に失敗しました"))),
                                 },
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("安全撤销失败","Safe revert failed","安全な取り消しに失敗しました"))),
@@ -696,6 +696,7 @@ async fn event_loop(
                                 match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
                                     Ok(snapshot)=>{
                                         let reviews=crate::daemon::diff_review::remote_reviews(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default().into_iter().map(|record|(record.path,record.decision)).collect();
+                                        let verifications=crate::daemon::diff_review::remote_verifications(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default();
                                         app.diff_review=Some(DiffReviewState{
                                             snapshot,
                                             selected:0,
@@ -708,6 +709,7 @@ async fn event_loop(
                                             search_selected:0,
                                             reviews,
                                             confirm_revert:false,
+                                            verifications,
                                         });
                                     },
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
@@ -2513,10 +2515,11 @@ fn draw(
                 }
             } else {
                 format!(
-                    "Diff Review · {} files · +{} -{} · ↑/↓ Enter · Esc",
+                    "Diff Review · {} files · +{} -{} · {} checks · ↑/↓ Enter · Esc",
                     review.snapshot.files.len(),
                     review.snapshot.additions,
-                    review.snapshot.deletions
+                    review.snapshot.deletions,
+                    review.verifications.len()
                 )
             };
             let lines = if let Some((_, content)) = &review.content {
@@ -2537,48 +2540,7 @@ fn draw(
                     .min(lines.len().saturating_sub(viewport.max(1)));
                 lines
             } else {
-                review
-                    .snapshot
-                    .files
-                    .iter()
-                    .enumerate()
-                    .map(|(index, file)| {
-                        let marker = if index == review.selected { "▶" } else { " " };
-                        let stage = match (file.staged, file.unstaged) {
-                            (true, true) => "S+U",
-                            (true, false) => "S",
-                            (false, true) => "U",
-                            (false, false) => "-",
-                        };
-                        let style = if index == review.selected {
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::LightCyan)
-                        } else if file.binary {
-                            Style::default().fg(Color::Magenta)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        };
-                        let decision = review.reviews.get(&file.path).map_or("", |decision| match decision {
-                            crate::daemon::diff_review::ReviewDecision::Accepted => " [accepted]",
-                            crate::daemon::diff_review::ReviewDecision::Rejected => " [rejected]",
-                            crate::daemon::diff_review::ReviewDecision::ChangesRequested => " [changes]",
-                            crate::daemon::diff_review::ReviewDecision::Reviewed => " [reviewed]",
-                        });
-                        Line::styled(
-                            format!(
-                                "{marker} {:?} [{stage}] +{} -{} {}{}{}",
-                                file.kind,
-                                file.additions,
-                                file.deletions,
-                                file.path,
-                                if file.binary { " [binary]" } else { "" },
-                                decision
-                            ),
-                            style,
-                        )
-                    })
-                    .collect::<Vec<_>>()
+                diff_snapshot_lines(review)
             };
             f.render_widget(Clear, popup);
             f.render_widget(

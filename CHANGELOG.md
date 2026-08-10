@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.19.0-rc5] - 2026-08-10
+
+### Added
+
+- Core `run_command` 新增结构化验证报告器，自动识别常见前后台测试命令并上报命令、退出码、Passed/Failed/TimedOut/LaunchFailed 与失败摘要。
+- Runtime 新增精确 Diff Snapshot Verification 持久化 API；CLI `daemon diff-verifications` 和 TUI Diff Review 展示最近验证结果。
+
+### Security
+
+- 验证摘要限制为 8 KiB、40 行且保持 UTF-8 边界；普通 Shell 不记录，命令出现 API Key、Token、Secret、Password 或 Authorization 标记时拒绝持久化。
+
 ## [0.19.0-rc4] - 2026-08-10
 
 ### Fixed

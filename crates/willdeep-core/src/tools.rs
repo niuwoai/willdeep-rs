@@ -28,6 +28,25 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandVerification {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub status: VerificationStatus,
+    pub summary: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationStatus {
+    Passed,
+    Failed,
+    TimedOut,
+    LaunchFailed,
+}
+
+type VerificationReporter = Arc<dyn Fn(CommandVerification) + Send + Sync>;
 const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
 const MAX_WEB_MAX_CHARS: usize = 100_000;
 const MAX_WEB_REDIRECTS: usize = 8;
@@ -127,6 +146,7 @@ pub struct ToolRegistry {
     write_target: Option<PathBuf>,
     always_allowed: Arc<Mutex<HashSet<String>>>,
     always_allow_path: Option<PathBuf>,
+    verification_reporter: Option<VerificationReporter>,
 }
 
 impl ToolRegistry {
@@ -153,6 +173,7 @@ impl ToolRegistry {
             write_target: None,
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
             always_allow_path: None,
+            verification_reporter: None,
         })
     }
 
@@ -175,6 +196,13 @@ impl ToolRegistry {
     }
     pub fn with_background_tasks(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
         self.background = registry;
+        self
+    }
+    pub fn with_verification_reporter<F>(mut self, reporter: F) -> Self
+    where
+        F: Fn(CommandVerification) + Send + Sync + 'static,
+    {
+        self.verification_reporter = Some(Arc::new(reporter));
         self
     }
     pub fn with_always_allow_store(mut self, path: PathBuf) -> Result<Self, ToolError> {
@@ -908,12 +936,14 @@ impl ToolRegistry {
         if args.run_in_background.unwrap_or(false) {
             let command = args.command;
             let workspace = self.workspace.clone();
+            let verification_reporter = self.verification_reporter.clone();
             let id = self.background.start_retriable(
                 BackgroundTaskKind::Shell,
                 description,
                 move || {
                     let command = command.clone();
                     let workspace = workspace.clone();
+                    let verification_reporter = verification_reporter.clone();
                     async move {
                         let mut process = platform_shell(&command);
                         process
@@ -922,39 +952,44 @@ impl ToolRegistry {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .kill_on_drop(true);
-                        let output = match tokio::time::timeout(
+                        let result = match tokio::time::timeout(
                             std::time::Duration::from_secs(timeout),
                             async { process.spawn()?.wait_with_output().await },
                         )
                         .await
                         {
-                            Ok(Ok(output)) => output,
-                            Ok(Err(error)) => {
-                                return TaskResult {
-                                    status: BackgroundTaskStatus::LaunchFailed,
-                                    exit_code: Some(-1),
-                                    output: error.to_string(),
-                                };
+                            Ok(Ok(output)) => {
+                                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                                TaskResult {
+                                    status: if output.status.success() {
+                                        BackgroundTaskStatus::Completed
+                                    } else {
+                                        BackgroundTaskStatus::Failed
+                                    },
+                                    exit_code: output.status.code(),
+                                    output: text,
+                                }
                             }
-                            Err(_) => {
-                                return TaskResult {
-                                    status: BackgroundTaskStatus::TimedOut,
-                                    exit_code: None,
-                                    output: format!("command timed out after {timeout} seconds"),
-                                };
-                            }
-                        };
-                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                        text.push_str(&String::from_utf8_lossy(&output.stderr));
-                        TaskResult {
-                            status: if output.status.success() {
-                                BackgroundTaskStatus::Completed
-                            } else {
-                                BackgroundTaskStatus::Failed
+                            Ok(Err(error)) => TaskResult {
+                                status: BackgroundTaskStatus::LaunchFailed,
+                                exit_code: Some(-1),
+                                output: error.to_string(),
                             },
-                            exit_code: output.status.code(),
-                            output: text,
-                        }
+                            Err(_) => TaskResult {
+                                status: BackgroundTaskStatus::TimedOut,
+                                exit_code: None,
+                                output: format!("command timed out after {timeout} seconds"),
+                            },
+                        };
+                        report_verification(
+                            verification_reporter.as_ref(),
+                            &command,
+                            result.exit_code,
+                            verification_status(&result.status),
+                            &result.output,
+                        );
+                        result
                     }
                 },
             );
@@ -970,18 +1005,42 @@ impl ToolRegistry {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let child = command.spawn()?;
-        let output = tokio::time::timeout(
+        let output = match tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
             child.wait_with_output(),
         )
         .await
-        .map_err(|_| ToolError::CommandTimeout(timeout))??;
-        Ok(truncate_bytes(format!(
+        {
+            Ok(output) => output?,
+            Err(_) => {
+                report_verification(
+                    self.verification_reporter.as_ref(),
+                    &args.command,
+                    None,
+                    VerificationStatus::TimedOut,
+                    &format!("command timed out after {timeout} seconds"),
+                );
+                return Err(ToolError::CommandTimeout(timeout));
+            }
+        };
+        let text = format!(
             "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        )))
+        );
+        report_verification(
+            self.verification_reporter.as_ref(),
+            &args.command,
+            output.status.code(),
+            if output.status.success() {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            },
+            &text,
+        );
+        Ok(truncate_bytes(text))
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
@@ -1294,6 +1353,103 @@ fn command_signature(command: &str) -> Option<String> {
     }
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty()).then(|| format!("command-exact:{normalized}"))
+}
+
+fn verification_status(status: &BackgroundTaskStatus) -> VerificationStatus {
+    match status {
+        BackgroundTaskStatus::Completed => VerificationStatus::Passed,
+        BackgroundTaskStatus::TimedOut => VerificationStatus::TimedOut,
+        BackgroundTaskStatus::LaunchFailed => VerificationStatus::LaunchFailed,
+        BackgroundTaskStatus::Failed
+        | BackgroundTaskStatus::Killed
+        | BackgroundTaskStatus::Blocked
+        | BackgroundTaskStatus::Running => VerificationStatus::Failed,
+    }
+}
+
+fn report_verification(
+    reporter: Option<&VerificationReporter>,
+    command: &str,
+    exit_code: Option<i32>,
+    status: VerificationStatus,
+    output: &str,
+) {
+    let Some(reporter) = reporter else {
+        return;
+    };
+    if !is_verification_command(command) || contains_sensitive_command(command) {
+        return;
+    }
+    let summary = output
+        .lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    reporter(CommandVerification {
+        command: command.trim().to_owned(),
+        exit_code,
+        status,
+        summary: truncate_utf8_bytes(summary, MAX_VERIFICATION_SUMMARY_BYTES),
+    });
+}
+
+fn is_verification_command(command: &str) -> bool {
+    let normalized = command.trim_start().to_ascii_lowercase();
+    [
+        "cargo test",
+        "cargo nextest",
+        "go test",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "ruby test",
+        "bundle exec rspec",
+        "bundle exec rake test",
+        "swift test",
+        "xcodebuild test",
+        "yarn test",
+        "yarn run test",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "pnpm run test",
+        "dotnet test",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "make test",
+    ]
+    .iter()
+    .any(|prefix| {
+        normalized == *prefix
+            || normalized
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    })
+}
+
+fn contains_sensitive_command(command: &str) -> bool {
+    let uppercase = command.to_ascii_uppercase();
+    ["API_KEY", "TOKEN=", "SECRET=", "PASSWORD=", "AUTHORIZATION"]
+        .iter()
+        .any(|marker| uppercase.contains(marker))
+}
+
+fn truncate_utf8_bytes(mut value: String, limit: usize) -> String {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 fn is_test_inspection_pipeline(command: &str) -> bool {
@@ -2021,5 +2177,42 @@ mod tests {
         assert!(!is_test_inspection_pipeline("cargo test > result.txt"));
         assert!(!is_test_inspection_pipeline("cargo test && touch owned"));
         assert!(!is_test_inspection_pipeline("cargo test $(danger)"));
+    }
+
+    #[test]
+    fn verification_reporting_is_bounded_and_rejects_sensitive_commands() {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        let reporter: VerificationReporter = Arc::new(move |value| {
+            sink.lock().unwrap().push(value);
+        });
+        report_verification(
+            Some(&reporter),
+            "cargo test --workspace",
+            Some(1),
+            VerificationStatus::Failed,
+            &"失败".repeat(10_000),
+        );
+        report_verification(
+            Some(&reporter),
+            "API_KEY=secret cargo test",
+            Some(0),
+            VerificationStatus::Passed,
+            "ok",
+        );
+        report_verification(
+            Some(&reporter),
+            "cargo build",
+            Some(0),
+            VerificationStatus::Passed,
+            "ok",
+        );
+
+        let values = reported.lock().unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].command, "cargo test --workspace");
+        assert_eq!(values[0].exit_code, Some(1));
+        assert!(values[0].summary.len() <= MAX_VERIFICATION_SUMMARY_BYTES);
+        assert!(std::str::from_utf8(values[0].summary.as_bytes()).is_ok());
     }
 }

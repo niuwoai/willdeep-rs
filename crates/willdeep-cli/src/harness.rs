@@ -321,11 +321,29 @@ pub(crate) async fn build(
     let background_tasks = Arc::new(BackgroundTaskRegistry::default());
     let command_watcher =
         daemon::start_agent_command_watcher(runtime_connection.as_ref(), background_tasks.clone())?;
+    let verification_home = home.to_path_buf();
+    let verification_workspace = workspace.clone();
     let tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
         .with_skills(skills.clone())
         .with_mcp(mcp)
         .with_background_tasks(background_tasks.clone())
+        .with_verification_reporter(move |verification| {
+            let home = verification_home.clone();
+            let workspace = verification_workspace.clone();
+            let Ok(snapshot) = daemon::diff_review::snapshot(&workspace) else {
+                return;
+            };
+            tokio::spawn(async move {
+                let _ = daemon::diff_review::remote_record_verification(
+                    &home,
+                    &workspace,
+                    snapshot.id,
+                    verification,
+                )
+                .await;
+            });
+        })
         .with_web_tools(web_tools)
         .with_always_allow_store(home.join("always-allow.json"))?;
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);

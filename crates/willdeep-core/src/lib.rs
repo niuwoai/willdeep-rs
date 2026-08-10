@@ -28,7 +28,8 @@ pub use session::{Session, SessionStore};
 pub use skills::SkillCatalog;
 pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
 pub use tools::{
-    ApprovalDecision, ApprovalMode, Approver, ToolRegistry, UserQuestion, WebToolConfig,
+    ApprovalDecision, ApprovalMode, Approver, CommandVerification, ToolRegistry, UserQuestion,
+    VerificationStatus, WebToolConfig,
 };
 pub use types::{Message, MessageAttachment, Role, ToolCall};
 

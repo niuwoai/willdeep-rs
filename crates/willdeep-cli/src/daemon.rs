@@ -230,6 +230,13 @@ pub enum DaemonAction {
         #[arg(long)]
         note: Option<String>,
     },
+    /// List test verifications bound to an exact Diff snapshot.
+    DiffVerifications {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+    },
     /// Safely revert one file from an exact Diff snapshot.
     DiffRevert {
         #[arg(long)]
@@ -555,6 +562,10 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             decision,
             note,
         } => diff_review::review_cli(&home, workspace, snapshot, path, decision, note).await,
+        DaemonAction::DiffVerifications {
+            workspace,
+            snapshot,
+        } => diff_review::verifications_cli(&home, workspace, snapshot).await,
         DaemonAction::DiffRevert {
             workspace,
             snapshot,
@@ -1253,6 +1264,10 @@ async fn run(home: &Path) -> Result<()> {
         .route(
             "/v1/diffs/{id}/reviews",
             get(diff_review::reviews_handler).post(diff_review::review_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/verifications",
+            get(diff_review::verifications_handler).post(diff_review::verification_handler),
         )
         .route("/v1/diffs/{id}/revert", post(diff_review::revert_handler))
         .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))

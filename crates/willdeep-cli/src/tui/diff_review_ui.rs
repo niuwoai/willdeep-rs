@@ -12,6 +12,7 @@ pub(super) struct DiffReviewState {
     pub search_selected: usize,
     pub reviews: BTreeMap<String, crate::daemon::diff_review::ReviewDecision>,
     pub confirm_revert: bool,
+    pub verifications: Vec<crate::daemon::diff_review::DiffVerificationRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -147,6 +148,83 @@ pub(super) fn diff_side_by_side_rows(content: &str, width: u16) -> Vec<String> {
         index += 1;
     }
     rows
+}
+
+pub(super) fn diff_snapshot_lines(review: &DiffReviewState) -> Vec<Line<'static>> {
+    let mut lines = review
+        .verifications
+        .iter()
+        .rev()
+        .take(3)
+        .map(|verification| {
+            let color = match verification.outcome {
+                crate::daemon::diff_review::VerificationOutcome::Passed => Color::Green,
+                _ => Color::Red,
+            };
+            Line::styled(
+                format!(
+                    "check {:?} · exit={} · {}",
+                    verification.outcome,
+                    verification
+                        .exit_code
+                        .map_or_else(|| "—".to_owned(), |code| code.to_string()),
+                    verification.command
+                ),
+                Style::default().fg(color),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(
+        review
+            .snapshot
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                let marker = if index == review.selected { "▶" } else { " " };
+                let stage = match (file.staged, file.unstaged) {
+                    (true, true) => "S+U",
+                    (true, false) => "S",
+                    (false, true) => "U",
+                    (false, false) => "-",
+                };
+                let style = if index == review.selected {
+                    Style::default().fg(Color::Black).bg(Color::LightCyan)
+                } else if file.binary {
+                    Style::default().fg(Color::Magenta)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                let decision =
+                    review
+                        .reviews
+                        .get(&file.path)
+                        .map_or("", |decision| match decision {
+                            crate::daemon::diff_review::ReviewDecision::Accepted => " [accepted]",
+                            crate::daemon::diff_review::ReviewDecision::Rejected => " [rejected]",
+                            crate::daemon::diff_review::ReviewDecision::ChangesRequested => {
+                                " [changes]"
+                            }
+                            crate::daemon::diff_review::ReviewDecision::Reviewed => " [reviewed]",
+                        });
+                Line::styled(
+                    format!(
+                        "{marker} {:?} [{stage}] +{} -{} {}{}{}",
+                        file.kind,
+                        file.additions,
+                        file.deletions,
+                        file.path,
+                        if file.binary { " [binary]" } else { "" },
+                        decision
+                    ),
+                    style,
+                )
+            }),
+    );
+    lines
 }
 
 fn fit_diff_column(value: &str, width: usize) -> String {

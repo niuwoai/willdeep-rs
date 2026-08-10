@@ -95,6 +95,36 @@ pub(crate) struct RevertResult {
     pub recovery_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VerificationOutcome {
+    Passed,
+    Failed,
+    TimedOut,
+    LaunchFailed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct DiffVerificationRecord {
+    pub id: uuid::Uuid,
+    pub snapshot_id: String,
+    pub workspace: PathBuf,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub outcome: VerificationOutcome,
+    pub summary: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct VerificationRequest {
+    pub workspace: PathBuf,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub outcome: VerificationOutcome,
+    pub summary: String,
+}
+
 pub(super) async fn snapshot_cli(home: &Path, workspace: PathBuf) -> Result<()> {
     let state = ensure_running(home).await?;
     let response = client()
@@ -217,6 +247,25 @@ pub(super) async fn revert_cli(
     Ok(())
 }
 
+pub(super) async fn verifications_cli(
+    home: &Path,
+    workspace: PathBuf,
+    snapshot_id: String,
+) -> Result<()> {
+    for record in remote_verifications(home, &workspace, &snapshot_id).await? {
+        println!(
+            "{:?}\texit={}\t{}\t{}",
+            record.outcome,
+            record
+                .exit_code
+                .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+            record.command,
+            record.summary.lines().last().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 fn area_name(area: DiffArea) -> &'static str {
     match area {
         DiffArea::Staged => "staged",
@@ -319,6 +368,30 @@ pub(crate) async fn remote_reviews(
     Ok(response.json().await?)
 }
 
+pub(crate) async fn remote_verifications(
+    home: &Path,
+    workspace: &Path,
+    snapshot_id: &str,
+) -> Result<Vec<DiffVerificationRecord>> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .get(format!(
+            "http://{}/v1/diffs/{snapshot_id}/verifications",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .query(&[("workspace", workspace.display().to_string())])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Diff verifications: {}",
+            response.text().await?
+        );
+    }
+    Ok(response.json().await?)
+}
+
 pub(crate) async fn remote_revert(
     home: &Path,
     snapshot_id: &str,
@@ -339,6 +412,46 @@ pub(crate) async fn remote_revert(
     }
     if !response.status().is_success() {
         bail!("Runtime rejected Diff revert: {}", response.text().await?);
+    }
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn remote_record_verification(
+    home: &Path,
+    workspace: &Path,
+    snapshot_id: String,
+    verification: willdeep_core::CommandVerification,
+) -> Result<DiffVerificationRecord> {
+    let state = ensure_running(home).await?;
+    let outcome = match verification.status {
+        willdeep_core::VerificationStatus::Passed => VerificationOutcome::Passed,
+        willdeep_core::VerificationStatus::Failed => VerificationOutcome::Failed,
+        willdeep_core::VerificationStatus::TimedOut => VerificationOutcome::TimedOut,
+        willdeep_core::VerificationStatus::LaunchFailed => VerificationOutcome::LaunchFailed,
+    };
+    let response = client()
+        .post(format!(
+            "http://{}/v1/diffs/{}/verifications",
+            state.address, snapshot_id
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&VerificationRequest {
+            workspace: workspace.to_path_buf(),
+            command: verification.command,
+            exit_code: verification.exit_code,
+            outcome,
+            summary: verification.summary,
+        })
+        .send()
+        .await?;
+    if response.status() == StatusCode::CONFLICT {
+        bail!("Workspace changed before verification could be bound to its Diff");
+    }
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Diff verification: {}",
+            response.text().await?
+        );
     }
     Ok(response.json().await?)
 }
@@ -477,6 +590,58 @@ pub(super) async fn revert_handler(
     .into_response())
 }
 
+pub(super) async fn verifications_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &query.workspace).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    let records = load_verifications(&verification_store_path(&state.home))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|record| record.snapshot_id == snapshot_id && record.workspace == workspace)
+        .collect::<Vec<_>>();
+    Ok(Json(records).into_response())
+}
+
+pub(super) async fn verification_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<String>,
+    Json(mut request): Json<VerificationRequest>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let workspace = authorized_workspace(&state, &request.workspace).await?;
+    exact_snapshot(&workspace, &snapshot_id)?;
+    request.command = request.command.trim().to_owned();
+    if !is_safe_verification_command(&request.command) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if request.command.len() > 2048 || request.summary.len() > 8192 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let record = DiffVerificationRecord {
+        id: uuid::Uuid::new_v4(),
+        snapshot_id,
+        workspace,
+        command: request.command,
+        exit_code: request.exit_code,
+        outcome: request.outcome,
+        summary: request.summary,
+        created_at: now(),
+    };
+    let _guard = state.diff_review_lock.lock().await;
+    let path = verification_store_path(&state.home);
+    let mut records = load_verifications(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    records.push(record.clone());
+    records.drain(..records.len().saturating_sub(500));
+    write_json_atomic(&path, &records).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(record)).into_response())
+}
+
 fn exact_snapshot(workspace: &Path, snapshot_id: &str) -> Result<DiffSnapshot, StatusCode> {
     let current = snapshot(workspace).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if current.id != snapshot_id {
@@ -504,6 +669,60 @@ fn load_reviews(path: &Path) -> Result<Vec<DiffReviewRecord>> {
         return Ok(Vec::new());
     }
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn verification_store_path(home: &Path) -> PathBuf {
+    home.join("runtime/diff-verifications.json")
+}
+
+fn load_verifications(path: &Path) -> Result<Vec<DiffVerificationRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn is_safe_verification_command(command: &str) -> bool {
+    let uppercase = command.to_ascii_uppercase();
+    if ["API_KEY", "TOKEN=", "SECRET=", "PASSWORD=", "AUTHORIZATION"]
+        .iter()
+        .any(|marker| uppercase.contains(marker))
+    {
+        return false;
+    }
+    let normalized = command.trim_start().to_ascii_lowercase();
+    [
+        "cargo test",
+        "cargo nextest",
+        "go test",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "ruby test",
+        "bundle exec rspec",
+        "bundle exec rake test",
+        "swift test",
+        "xcodebuild test",
+        "yarn test",
+        "yarn run test",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "pnpm run test",
+        "dotnet test",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "make test",
+    ]
+    .iter()
+    .any(|prefix| {
+        normalized == *prefix
+            || normalized
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    })
 }
 
 async fn authorized_workspace(
