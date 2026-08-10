@@ -36,10 +36,27 @@ fn state_round_trips_without_exposing_token_in_logs() {
         address: "127.0.0.1:9847".parse().unwrap(),
         token: "private-token".to_owned(),
         started_at: 10,
+        local_transport: Some(LocalTransportState::UnixSocket {
+            path: root.join("control.sock"),
+        }),
     };
     write_state(&path, &state).unwrap();
     assert_eq!(load_state(&path).unwrap(), state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_state_without_local_transport_remains_readable() {
+    let state: DaemonState = serde_json::from_value(serde_json::json!({
+        "schema": STATE_SCHEMA,
+        "version": "0.20.0",
+        "pid": 42,
+        "address": "127.0.0.1:9847",
+        "token": "private-token",
+        "started_at": 10
+    }))
+    .unwrap();
+    assert_eq!(state.local_transport, None);
 }
 
 #[test]
@@ -207,7 +224,15 @@ async fn authorization_requires_exact_local_token() {
         ),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
         idempotency: Arc::new(control_api::IdempotencyStore::default()),
+        local_transport: Some(LocalTransportState::UnixSocket {
+            path: root.join("control.sock"),
+        }),
     });
+    assert!(
+        runtime_capabilities(&state)
+            .transports
+            .contains(&willdeep_runtime_protocol::TransportKind::UnixSocket)
+    );
     assert_eq!(
         authorize(&state, &HeaderMap::new()),
         Err(StatusCode::UNAUTHORIZED)

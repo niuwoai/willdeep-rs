@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc8
+> 当前实施版本：v0.21.0-rc9
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -65,7 +65,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
 - [x] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线，并按 Workspace 过滤和去重。
 - [x] 受 Token 保护的 SSE 实时事件推送；按游标分页补读、慢客户端日志追赶、断线重连去重与 TUI 轮询降级。
-- [ ] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
+- [x] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
 - [ ] 无损优雅升级与版本交接。
 
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc9（已完成）：Runtime Daemon 在 Unix 平台新增权限为 `0600` 的本地 Socket，在 Windows 平台新增拒绝远程连接的随机 Named Pipe；共享 Runtime Client、CLI、TUI 与 Web 优先使用本地传输，旧版 daemon 状态继续回退到受 Token 保护的回环 TCP。能力协商只报告当前实际传输，Unix 清理拒绝覆盖或删除普通文件。macOS 真实 Socket 往返、旧状态兼容和 Windows GNU 目标交叉编译纳入验证。下一步迁移带私有配置引用的 Session 收养和剩余 CLI 兼容命令，并继续稳定 Tool、Artifact DTO。
+
 v0.21.0-rc8（已完成）：协议 crate 新增 Session Search Result、文本/图片附件、Turn Submit/List 参数 DTO，以及 `session.search`、`turn.list` 稳定操作。统一 API 实现组合搜索、Turn 提交/列表/查询/停止；TUI Session 搜索和 TUI/Web Turn bridge 使用共享 Runtime Client。提交入口限制 Prompt、附件数量、文本长度、图片 MIME/尺寸与总载荷，并拒绝客户端夹带 Workspace/权限字段。下一步实现 Unix Socket 与 Windows Named Pipe，并继续迁移带私有配置引用的 Session 收养和 CLI 兼容命令。
 
 v0.21.0-rc7（已完成）：统一 API 实现 Session 创建、重命名、Fork、归档/恢复、删除和导出，修改操作纳入跨重启 Request ID 幂等；协议 crate 新增严格拒绝未知字段的 Session 管理参数 DTO。Web Session 列表、重命名、Fork、归档、删除和导出 bridge 改用共享 Runtime Client，浏览器 Workspace 白名单校验保持在调用前。下一步迁移 Session 创建/Turn 提交与搜索，并实现 Unix Socket 与 Windows Named Pipe。
@@ -279,7 +281,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
 3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
 4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
-5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
+5. [x] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [x] 实现 Agent Mission Control、预算限制、失败熔断、独立详情、补充指令和结果回流。
 7. [-] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并；已完成内容指纹快照、统一 API/CLI 与首版 TUI Unified Review。
 8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。

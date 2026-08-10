@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.21.0-rc9] - 2026-08-11
+
+### Added
+
+- Runtime Daemon 在 Unix 平台监听权限为 `0600` 的本地 Socket，在 Windows 平台监听拒绝远程客户端的随机 Named Pipe；共享 Runtime Client 支持两种本地传输。
+
+### Changed
+
+- CLI、TUI 与 Web 的 Runtime 控制客户端优先读取 daemon 状态中的本地端点，旧版状态仍自动回退到受 Token 保护的回环 TCP。
+- 能力协商只报告当前进程实际启用的本地传输；关闭 Daemon 时安全清理自有 Unix Socket。
+
+### Fixed
+
+- `daemon stop` 正确接受关闭端点返回的 HTTP 202 空响应，不再在 Daemon 已退出后误报 JSON 解码失败。
+
+### Security
+
+- Unix Socket 启动时拒绝覆盖同名普通文件，仅在确认目标仍为 Socket 后清理；Windows Named Pipe 禁止远程客户端连接，所有传输继续要求随机 Runtime Token。
+
 ## [0.21.0-rc8] - 2026-08-11
 
 ### Added

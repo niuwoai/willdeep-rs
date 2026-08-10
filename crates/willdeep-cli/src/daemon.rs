@@ -32,15 +32,18 @@ mod control_api;
 pub(crate) mod diff_review;
 mod event_stream;
 mod herdr;
+mod local_transport;
 mod session_store;
 pub(crate) mod tui_bridge;
 mod workspace_store;
 mod worktree_maintenance;
 mod worktree_review;
+
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
+use local_transport::LocalTransportState;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
@@ -457,6 +460,8 @@ struct DaemonState {
     address: SocketAddr,
     token: String,
     started_at: u64,
+    #[serde(default)]
+    local_transport: Option<LocalTransportState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -479,6 +484,7 @@ struct ServerState {
     workspaces: Arc<workspace_store::WorkspaceStore>,
     diff_review_lock: Arc<tokio::sync::Mutex<()>>,
     idempotency: Arc<control_api::IdempotencyStore>,
+    local_transport: Option<LocalTransportState>,
 }
 
 type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
@@ -1393,6 +1399,22 @@ async fn capabilities_cli(home: &Path) -> Result<()> {
 }
 
 fn runtime_client(state: &DaemonState) -> Result<willdeep_runtime_client::RuntimeClient> {
+    #[cfg(unix)]
+    if let Some(LocalTransportState::UnixSocket { path }) = &state.local_transport {
+        return Ok(willdeep_runtime_client::RuntimeClient::new_unix_socket(
+            path,
+            state.token.clone(),
+        )?);
+    }
+    #[cfg(windows)]
+    if let Some(LocalTransportState::WindowsNamedPipe { name }) = &state.local_transport {
+        return Ok(
+            willdeep_runtime_client::RuntimeClient::new_windows_named_pipe(
+                name,
+                state.token.clone(),
+            )?,
+        );
+    }
     Ok(willdeep_runtime_client::RuntimeClient::new(
         format!("http://{}", state.address),
         state.token.clone(),
@@ -1408,18 +1430,10 @@ async fn stop(home: &Path) -> Result<()> {
             return Ok(());
         }
     };
-    let response = client()
-        .post(format!("http://{}/v1/shutdown", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
+    runtime_client(&state)?
+        .post_empty("/v1/shutdown")
         .await
         .context("contact Runtime Daemon")?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime Daemon rejected shutdown: HTTP {}",
-            response.status()
-        );
-    }
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !paths.state.exists() {
@@ -1486,13 +1500,16 @@ async fn run(home: &Path) -> Result<()> {
         .context("bind Runtime Daemon control endpoint")?;
     let address = listener.local_addr()?;
     let started_at = now();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let (local_listener, local_transport) = local_transport::bind(&paths.local_socket, &token)?;
     let state = DaemonState {
         schema: STATE_SCHEMA,
         version: willdeep_core::VERSION.to_owned(),
         pid: std::process::id(),
         address,
-        token: uuid::Uuid::new_v4().simple().to_string(),
+        token,
         started_at,
+        local_transport: Some(local_transport),
     };
     write_state(&paths.state, &state)?;
     let cleanup = StateCleanup {
@@ -1500,6 +1517,7 @@ async fn run(home: &Path) -> Result<()> {
         token: state.token.clone(),
         lock_path: paths.lock.clone(),
         lock_token,
+        local_socket: paths.local_socket.clone(),
     };
     let lock_heartbeat = spawn_lock_heartbeat(paths.lock.clone(), cleanup.lock_token.clone());
     let shutdown_signal = Arc::new(Notify::new());
@@ -1525,7 +1543,7 @@ async fn run(home: &Path) -> Result<()> {
     tasks.report_herdr_state().await;
     let server_state = Arc::new(ServerState {
         home: home.to_path_buf(),
-        token: state.token,
+        token: state.token.clone(),
         started_at,
         shutdown: shutdown_signal.clone(),
         events: events.clone(),
@@ -1538,6 +1556,7 @@ async fn run(home: &Path) -> Result<()> {
         idempotency: Arc::new(control_api::IdempotencyStore::open(
             paths.idempotency.clone(),
         )?),
+        local_transport: state.local_transport.clone(),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
@@ -1721,15 +1740,18 @@ async fn run(home: &Path) -> Result<()> {
         format!("pid={} address={address}", std::process::id()),
     )?;
     eprintln!(
-        "WillDeep Runtime Daemon {} listening on {} (pid {})",
+        "WillDeep Runtime Daemon {} listening on {} and local transport (pid {})",
         willdeep_core::VERSION,
         address,
         std::process::id()
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown_signal.notified().await })
-        .await
-        .context("run Runtime Daemon control server")?;
+    let tcp_shutdown = shutdown_signal.clone();
+    let local_shutdown = shutdown_signal.clone();
+    let tcp_server = axum::serve(listener, app.clone())
+        .with_graceful_shutdown(async move { tcp_shutdown.notified().await });
+    let local_server = axum::serve(local_listener, app)
+        .with_graceful_shutdown(async move { local_shutdown.notified().await });
+    tokio::try_join!(tcp_server, local_server).context("run Runtime Daemon control servers")?;
     tasks.cancel_all().await;
     events.append("daemon.stopped", format!("pid={}", std::process::id()))?;
     lock_heartbeat.abort();
@@ -1768,11 +1790,26 @@ async fn capabilities_handler(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<uuid::Uuid>().ok());
     Ok(Json(willdeep_runtime_protocol::ApiResponse::ok(
-        willdeep_runtime_protocol::RuntimeCapabilities::current(willdeep_core::VERSION),
+        runtime_capabilities(&state),
         willdeep_core::VERSION,
         request_id,
     ))
     .into_response())
+}
+
+fn runtime_capabilities(state: &ServerState) -> willdeep_runtime_protocol::RuntimeCapabilities {
+    let mut capabilities =
+        willdeep_runtime_protocol::RuntimeCapabilities::current(willdeep_core::VERSION);
+    match state.local_transport {
+        Some(LocalTransportState::UnixSocket { .. }) => capabilities
+            .transports
+            .push(willdeep_runtime_protocol::TransportKind::UnixSocket),
+        Some(LocalTransportState::WindowsNamedPipe { .. }) => capabilities
+            .transports
+            .push(willdeep_runtime_protocol::TransportKind::WindowsNamedPipe),
+        None => {}
+    }
+    capabilities
 }
 
 async fn server_version_header(request: Request, next: middleware::Next) -> Response {
@@ -1793,7 +1830,7 @@ async fn shutdown_handler(
     let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         tasks.cancel_all().await;
-        shutdown.notify_one();
+        shutdown.notify_waiters();
     });
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -1993,30 +2030,13 @@ async fn probe(state: &DaemonState) -> Result<Health> {
     if state.schema != STATE_SCHEMA {
         bail!("unsupported state schema {}", state.schema);
     }
-    let response = client()
-        .get(format!("http://{}/v1/health", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("health endpoint returned HTTP {}", response.status());
-    }
-    Ok(response.json().await?)
+    Ok(runtime_client(state)?.get_json("/v1/health").await?)
 }
 
 async fn fetch_events(state: &DaemonState, after: u64) -> Result<Vec<RuntimeEvent>> {
-    let response = client()
-        .get(format!(
-            "http://{}/v1/events?after={after}&limit=200",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("events endpoint returned HTTP {}", response.status());
-    }
-    Ok(response.json().await?)
+    Ok(runtime_client(state)?
+        .get_json(&format!("/v1/events?after={after}&limit=200"))
+        .await?)
 }
 
 fn client() -> reqwest::Client {
@@ -2039,6 +2059,7 @@ struct DaemonPaths {
     runtime_sessions: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
+    local_socket: PathBuf,
 }
 
 impl DaemonPaths {
@@ -2055,6 +2076,7 @@ impl DaemonPaths {
             runtime_sessions: directory.join("sessions.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
+            local_socket: directory.join("control.sock"),
             directory,
         }
     }
@@ -2773,6 +2795,7 @@ struct StateCleanup {
     token: String,
     lock_path: PathBuf,
     lock_token: String,
+    local_socket: PathBuf,
 }
 
 impl Drop for StateCleanup {
@@ -2781,6 +2804,7 @@ impl Drop for StateCleanup {
             let _ = std::fs::remove_file(&self.path);
         }
         remove_owned_lock(&self.lock_path, &self.lock_token);
+        local_transport::remove_if_owned(&self.local_socket);
     }
 }
 

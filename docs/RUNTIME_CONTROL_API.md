@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc8
+> 当前实现版本：v0.21.0-rc9
 
 ## 1. 目标
 
@@ -31,7 +31,7 @@ X-WillDeep-Request-Id: <optional UUID>
 - `transports`：当前真实可用的传输方式；
 - `limits`：事件页、Prompt、附件和 Worktree Patch 等服务端限制。
 
-服务端不能提前声明尚未实现的 Unix Socket 或 Windows Named Pipe；完成后才加入 `transports`。
+服务端只声明当前进程实际启用的传输。Unix 客户端优先连接 Runtime 目录内权限为 `0600` 的 Socket；Windows 客户端优先连接拒绝远程连接的随机 Named Pipe。回环 TCP 作为旧状态兼容和诊断回退继续受随机 Token 保护。
 
 ## 3. 稳定对象
 
@@ -86,7 +86,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc8",
+    "server_version": "0.21.0-rc9",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -104,7 +104,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc8"
+    "server_version": "0.21.0-rc9"
   }
 }
 ```
@@ -135,7 +135,7 @@ diff.revert
 2. [x] 受 Token 的能力协商端点；
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
 4. [x] Workspace、Session、Agent、Turn、Task、Approval、Question、Event 与 Diff Review 共享 DTO；
-5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码和 Workspace/会话/Agent/任务/交互/Diff DTO，剩余 Tool、Artifact 与本地传输继续进行；
+5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码、Unix Socket、Windows Named Pipe 和 Workspace/会话/Agent/任务/交互/Diff DTO，剩余 Tool 与 Artifact 继续进行；
 6. [-] TUI/Web 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent、Task、Inbox、Workspace、Diff Center、Session 搜索、Turn 提交/停止与控制，以及 Web Session 管理和 Turn 提交/停止已迁移；带私有配置引用的 Session 收养和部分 CLI 兼容命令继续迁移；Web/TUI 事件补读已迁移；
-7. [ ] Unix Socket 与 Windows Named Pipe；
+7. [x] Unix Socket 与 Windows Named Pipe；
 8. [ ] Swift FFI、移动端和自动化兼容验证。

@@ -1,5 +1,5 @@
 use super::*;
-use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode, RuntimeCapabilities};
+use willdeep_runtime_protocol::{ApiRequest, ApiResponse, ErrorCode};
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
 const MAX_TURN_PROMPT_BYTES: usize = 1024 * 1024;
@@ -234,7 +234,7 @@ async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Respon
 
 async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
     let result = match request.operation.as_str() {
-        "runtime.capabilities" => json(RuntimeCapabilities::current(willdeep_core::VERSION)),
+        "runtime.capabilities" => json(runtime_capabilities(state)),
         "runtime.status" => json(serde_json::json!({
             "status": "ok",
             "version": willdeep_core::VERSION,

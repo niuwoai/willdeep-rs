@@ -35,6 +35,38 @@ impl RuntimeClient {
         })
     }
 
+    #[cfg(unix)]
+    pub fn new_unix_socket(
+        path: impl Into<std::path::PathBuf>,
+        token: impl Into<String>,
+    ) -> Result<Self, ClientError> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .unix_socket(path.into())
+            .build()?;
+        Ok(Self {
+            base_url: "http://localhost".to_owned(),
+            token: token.into(),
+            http,
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn new_windows_named_pipe(
+        name: impl Into<std::ffi::OsString>,
+        token: impl Into<String>,
+    ) -> Result<Self, ClientError> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .windows_named_pipe(name.into())
+            .build()?;
+        Ok(Self {
+            base_url: "http://localhost".to_owned(),
+            token: token.into(),
+            http,
+        })
+    }
+
     pub async fn capabilities(
         &self,
         request_id: Option<uuid::Uuid>,
@@ -47,6 +79,34 @@ impl RuntimeClient {
             request = request.header(REQUEST_ID_HEADER, request_id.to_string());
         }
         decode_response(request.send().await?).await
+    }
+
+    pub async fn get_json<T>(&self, path: &str) -> Result<T, ClientError>
+    where
+        T: DeserializeOwned,
+    {
+        decode_raw_response(
+            self.http
+                .get(format!("{}{}", self.base_url, normalized_path(path)))
+                .header(TOKEN_HEADER, &self.token)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    pub async fn post_empty(&self, path: &str) -> Result<(), ClientError> {
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, normalized_path(path)))
+            .header(TOKEN_HEADER, &self.token)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ClientError::HttpStatus(response.status().as_u16()))
+        }
     }
 
     pub async fn call<P, T>(
@@ -103,11 +163,29 @@ impl RuntimeClient {
     }
 }
 
+fn normalized_path(path: &str) -> String {
+    format!("/{}", path.trim_start_matches('/'))
+}
+
 async fn decode_response<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<ApiResponse<T>, ClientError> {
     let status = response.status();
     let body = response.bytes().await?;
+    serde_json::from_slice(&body).map_err(|source| ClientError::InvalidResponse {
+        status: status.as_u16(),
+        source,
+    })
+}
+
+async fn decode_raw_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, ClientError> {
+    let status = response.status();
+    let body = response.bytes().await?;
+    if !status.is_success() {
+        return Err(ClientError::HttpStatus(status.as_u16()));
+    }
     serde_json::from_slice(&body).map_err(|source| ClientError::InvalidResponse {
         status: status.as_u16(),
         source,
@@ -175,6 +253,41 @@ pub enum ClientError {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sends_http_requests_over_a_unix_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = std::path::Path::new("/private/tmp")
+            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let length = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("GET /v1/health HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-willdeep-token: secret")
+            );
+            let body = r#"{"status":"ok"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
+        let response: serde_json::Value = client.get_json("/v1/health").await.unwrap();
+        assert_eq!(response["status"], "ok");
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_non_loopback_runtime_endpoints() {
         assert!(matches!(
@@ -183,6 +296,8 @@ mod tests {
         ));
         assert!(RuntimeClient::new("http://127.0.0.1:9345", "secret").is_ok());
         assert!(RuntimeClient::new("http://[::1]:9345", "secret").is_ok());
+        #[cfg(unix)]
+        assert!(RuntimeClient::new_unix_socket("/tmp/willdeep.sock", "secret").is_ok());
     }
 
     #[tokio::test]
