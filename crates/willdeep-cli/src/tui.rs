@@ -125,6 +125,7 @@ struct App {
     sidebar_scroll: usize,
     sidebar_rect: Rect,
     sidebar_wide: bool,
+    help_visible: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +308,7 @@ async fn event_loop(
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
+                    if app.handle_help_key(key) {continue;}
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('b'){
                         if app.sidebar_wide {
                             app.sidebar_visible = !app.sidebar_visible;
@@ -441,6 +443,7 @@ impl App {
             sidebar_scroll: 0,
             sidebar_rect: Rect::default(),
             sidebar_wide: false,
+            help_visible: false,
         }
     }
     fn sidebar_move(&mut self, delta: isize) {
@@ -454,6 +457,19 @@ impl App {
     fn sidebar_toggle(&mut self) {
         self.sidebar_expanded[self.sidebar_selected] =
             !self.sidebar_expanded[self.sidebar_selected];
+    }
+    fn handle_help_key(&mut self, key: KeyEvent) -> bool {
+        if self.help_visible {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
+                self.help_visible = false;
+            }
+            return true;
+        }
+        if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('?') && self.input.is_empty()) {
+            self.help_visible = true;
+            return true;
+        }
+        false
     }
     fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
@@ -1168,12 +1184,21 @@ fn draw(
             Paragraph::new(app.input.text())
                 .block(
                     Block::default()
-                        .title(app.language.text(
-                            "输入 · Shift/Alt+Enter 换行",
-                            "Prompt · Shift/Alt+Enter newline",
-                            "入力 · Shift/Alt+Enter で改行",
-                        ))
-                        .borders(Borders::ALL),
+                        .title(if app.focus == FocusPane::Prompt {
+                            app.language.text(
+                                "输入 [焦点] · Shift/Alt+Enter 换行",
+                                "Prompt [focused] · Shift/Alt+Enter newline",
+                                "入力 [フォーカス] · Shift/Alt+Enter で改行",
+                            )
+                        } else {
+                            app.language.text("输入", "Prompt", "入力")
+                        })
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(if app.focus == FocusPane::Prompt {
+                            Color::Cyan
+                        } else {
+                            Color::DarkGray
+                        })),
                 )
                 .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0))
                 .wrap(Wrap { trim: false }),
@@ -1181,7 +1206,7 @@ fn draw(
         );
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
-        if app.focus == FocusPane::Prompt {
+        if app.focus == FocusPane::Prompt && !app.help_visible {
             f.set_cursor_position((cursor_x, cursor_y));
         }
         let status = app.notice.take().unwrap_or_else(|| {
@@ -1197,15 +1222,19 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+O",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · F1",
                     app.language.text("运行中", "Running", "実行中"),
+                    app.language.text("焦点", "Focus", "フォーカス"),
+                    focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
                     app.language.text("最近", "latest", "直近")
                 )
             } else {
                 format!(
-                    "{} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {}",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
+                    app.language.text("焦点", "Focus", "フォーカス"),
+                    focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
                     app.language.text("最近", "latest", "直近"),
                     app.language
@@ -1355,6 +1384,29 @@ fn draw(
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan)),
                 ),
+                popup,
+            );
+        }
+        if app.help_visible {
+            let popup = centered_rect(
+                f.area().width.min(88),
+                f.area().height.min(28),
+                f.area(),
+            );
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(help_content(app.language))
+                    .block(
+                        Block::default()
+                            .title(app.language.text(
+                                "快捷键帮助 · F1/?/Esc 关闭",
+                                "Keyboard help · F1/?/Esc closes",
+                                "キーボードヘルプ · F1/?/Esc で閉じる",
+                            ))
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::LightCyan)),
+                    )
+                    .wrap(Wrap { trim: false }),
                 popup,
             );
         }
@@ -1571,6 +1623,27 @@ fn command_candidates(language: Language) -> [(&'static str, &'static str); 6] {
             language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
         ),
     ]
+}
+
+fn focus_label(focus: FocusPane, language: Language) -> &'static str {
+    match focus {
+        FocusPane::Prompt => language.text("输入", "Prompt", "入力"),
+        FocusPane::Sidebar => language.text("状态栏", "Status", "ステータス"),
+    }
+}
+
+fn help_content(language: Language) -> &'static str {
+    match language {
+        Language::ZhCn => {
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+W  输入/状态栏切换      Ctrl+B 显示或隐藏状态栏\n  Ctrl+S  文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  鼠标点击聚焦，滚轮切换分组"
+        }
+        Language::En => {
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+W  Switch Prompt/Status          Ctrl+B Show or hide Status\n  Ctrl+S  Terminal text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click to focus, use the wheel to move between sections"
+        }
+        Language::Ja => {
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+W 入力/状態を切替         Ctrl+B 状態欄を表示/非表示\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  クリックでフォーカス、ホイールでセクション移動"
+        }
+    }
 }
 
 fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
@@ -2104,6 +2177,25 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Sidebar);
         app.handle_mouse(5, 22);
         assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[test]
+    fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(app.help_visible);
+        assert!(app.handle_help_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.help_visible);
+
+        app.input.insert("这是什么");
+        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)));
+    }
+    #[test]
+    fn help_documents_current_focus_and_sidebar_shortcuts() {
+        assert_eq!(focus_label(FocusPane::Sidebar, Language::ZhCn), "状态栏");
+        let help = help_content(Language::ZhCn);
+        assert!(help.contains("Ctrl+W"));
+        assert!(help.contains("Enter/Space"));
+        assert!(!help.contains("Ctrl+F"));
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {

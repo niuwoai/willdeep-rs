@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.13.0-rc5
+> 最后更新：2026-08-10 | 当前版本：v0.14.0-rc1
 
 ## 项目简介
 
@@ -23,11 +23,13 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 临时单行思考摘要，以及 Web 单行工作状态、逐轮工具轨迹与停止生成；
 - Web/TUI 独立聊天历史滚动与 TUI 常用 Markdown 终端渲染；
 - TUI 可切换终端原生文本选择与复制模式；
+- TUI 全局快捷键帮助、Prompt/状态栏焦点高亮与状态行焦点提示；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
 - MCP stdio 工具发现、注册和调用。
 - `/goal` 命令模式和 `$skill-name` 显式技能触发；
+- 分阶段 CLI/TUI/Runtime 产品路线图与逐项验收状态；
 - `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
 - 区分角色的 TUI 配色；
 - macOS Universal、Windows x64、Linux AMD64/ARM64 自动构建与 tag 发布。

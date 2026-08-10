@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.0-rc1] - 2026-08-10
+
+### Added
+
+- 新增 `docs/CLI_TUI_RUNTIME_ROADMAP.md`，记录从 TUI 交互、Attention Inbox、Runtime Daemon 到 Agent Mission Control、Review、统一 API、移动端、Workflow 和 Herdr 互操作的完整实施计划与验收标准。
+- TUI 增加 `F1` 全局快捷键帮助；空 Prompt 时也可用 `?` 打开，避免拦截普通文本中的问号。
+- Prompt 与状态栏使用明确的焦点边框和标题，底部状态行同步显示当前焦点及帮助入口。
+
+### Changed
+
+- 当前开发阶段进入 v0.14.0，按路线图推进 TUI 交互基础收尾。
+
 ## [0.13.0-rc5] - 2026-08-10
 
 ### Added
