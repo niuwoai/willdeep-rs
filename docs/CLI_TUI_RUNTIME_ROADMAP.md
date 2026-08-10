@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.15.0-rc2
+> 当前实施版本：v0.15.0-rc3
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -45,7 +45,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [x] 统一 `idle/working/blocked/waiting_approval/waiting_answer/failed/done/cancelled/unknown` 状态。
 - [x] 右栏增加“需要你处理”“正在工作”“最近完成”。
 - [ ] 审批、ask_user、失败任务、阻塞子 Agent、Worktree 冲突和待审 Diff 统一进入 Inbox。
-- [-] 支持允许、拒绝、回答、重试、停止、标记已读和精确跳转。
+- [x] 支持允许、拒绝、回答、重试、停止、标记已读和精确跳转。
 - [ ] Agent → 会话 → Workspace 的状态优先级聚合。
 
 验收：用户无需轮询输出即可处理所有阻塞项，每个条目能跳回准确上下文。
@@ -172,4 +172,4 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.15.0-rc2：Attention Inbox 支持键盘/鼠标条目选择、自动滚动、后台任务与子 Agent 详情跳转、停止运行项和标记已读；TUI 主文件已拆分测试与侧栏模块。下一步实现可重试任务、持久已读状态以及 Worktree/Diff 来源。
+v0.15.0-rc3：Inbox 已读状态随会话持久化，后台 Shell 与子 Agent 使用可重放启动器进行真实重试，任务结束触发终端提示；下一步补齐 Worktree 冲突、待审 Diff 来源和会话/Workspace 状态上卷。

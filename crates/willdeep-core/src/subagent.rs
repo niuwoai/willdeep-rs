@@ -94,11 +94,6 @@ impl SubagentCatalog {
         let workspace = self.workspace.clone();
         let prompt = args.prompt;
         let profile_id = profile.id.clone();
-        let task = async move {
-            run_profile(workspace, profile, prompt, approved_target)
-                .await
-                .map_err(|error| error.to_string())
-        };
         if args.run_in_background.unwrap_or(false) {
             let running = self
                 .background
@@ -114,21 +109,27 @@ impl SubagentCatalog {
                     "at most 3 background subagents may run concurrently".to_owned(),
                 ));
             }
-            let id = self.background.start(
+            let id = self.background.start_retriable(
                 BackgroundTaskKind::Subagent,
                 format!("{label} · {profile_id}"),
-                async move {
-                    match task.await {
-                        Ok(report) => TaskResult {
-                            status: BackgroundTaskStatus::Completed,
-                            exit_code: Some(0),
-                            output: report,
-                        },
-                        Err(error) => TaskResult {
-                            status: BackgroundTaskStatus::Failed,
-                            exit_code: Some(1),
-                            output: error,
-                        },
+                move || {
+                    let workspace = workspace.clone();
+                    let profile = profile.clone();
+                    let prompt = prompt.clone();
+                    let approved_target = approved_target.clone();
+                    async move {
+                        match run_profile(workspace, profile, prompt, approved_target).await {
+                            Ok(report) => TaskResult {
+                                status: BackgroundTaskStatus::Completed,
+                                exit_code: Some(0),
+                                output: report,
+                            },
+                            Err(error) => TaskResult {
+                                status: BackgroundTaskStatus::Failed,
+                                exit_code: Some(1),
+                                output: error.to_string(),
+                            },
+                        }
                     }
                 },
             );
@@ -136,7 +137,7 @@ impl SubagentCatalog {
                 "Subagent started: {id}. Its report will be delivered automatically to the main harness."
             ))
         } else {
-            task.await.map_err(AgentError::Subagent)
+            run_profile(workspace, profile, prompt, approved_target).await
         }
     }
 }

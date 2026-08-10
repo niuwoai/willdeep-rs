@@ -340,6 +340,7 @@ async fn event_loop(
     let mut app = App::new(initial_transcript, language);
     app.workspace = Some(session.workspace.clone());
     app.workspace_status = workspace_status(&session.workspace, language);
+    app.attention_read = session.attention_read.clone();
     app.context_window = runtime.context_window.max(1);
     app.background_tasks = runtime.background_tasks.snapshots();
     let mut background_rx = runtime.background_tasks.subscribe();
@@ -431,7 +432,18 @@ async fn event_loop(
                             KeyCode::Enter=>app.sidebar_activate(&runtime.background_tasks),
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
                             KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>app.attention_stop(&runtime.background_tasks),
-                            KeyCode::Char('m')|KeyCode::Char('M') if app.sidebar_selected==1=>app.attention_mark_read(),
+                            KeyCode::Char('r')|KeyCode::Char('R') if app.sidebar_selected==1=>{
+                                if app.attention_retry(&runtime.background_tasks){
+                                    session.attention_read=app.attention_read.clone();
+                                    store.save(session)?;
+                                }
+                            },
+                            KeyCode::Char('m')|KeyCode::Char('M') if app.sidebar_selected==1=>{
+                                if app.attention_mark_read(){
+                                    session.attention_read=app.attention_read.clone();
+                                    store.save(session)?;
+                                }
+                            },
                             _=>{}
                         }
                         continue;
@@ -486,6 +498,7 @@ async fn event_loop(
                 app.background_tasks=runtime.background_tasks.snapshots();
                 app.background_notices.push_back(event.notice);
                 app.notice=Some(format!("{} finished · returning result to main harness",event.snapshot.id));
+                execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
                 if !app.running && let Some(notice)=app.background_notices.pop_front(){dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}
             },
         }
@@ -642,9 +655,39 @@ impl App {
             ));
         }
     }
-    fn attention_mark_read(&mut self) {
+    fn attention_retry(&mut self, registry: &BackgroundTaskRegistry) -> bool {
         let Some(item) = self.selected_attention() else {
-            return;
+            return false;
+        };
+        if !matches!(
+            item.status,
+            RuntimeStatus::Failed | RuntimeStatus::Cancelled
+        ) {
+            return false;
+        }
+        let Some(retried_id) = registry.retry(&item.id) else {
+            self.notice = Some(
+                self.language
+                    .text(
+                        "这个任务没有可重放的启动信息",
+                        "This task has no replayable launcher",
+                        "このタスクには再実行情報がありません",
+                    )
+                    .to_owned(),
+            );
+            return false;
+        };
+        self.attention_read.insert(item.id);
+        self.notice = Some(format!(
+            "{}: {retried_id}",
+            self.language
+                .text("已重新启动任务", "Task restarted", "タスクを再実行しました")
+        ));
+        true
+    }
+    fn attention_mark_read(&mut self) -> bool {
+        let Some(item) = self.selected_attention() else {
+            return false;
         };
         if matches!(
             item.status,
@@ -653,7 +696,9 @@ impl App {
             self.attention_read.insert(item.id);
             let remaining = self.attention_items().len();
             self.attention_selected = self.attention_selected.min(remaining.saturating_sub(1));
+            return true;
         }
+        false
     }
     fn sidebar_toggle(&mut self) {
         self.sidebar_expanded[self.sidebar_selected] =
@@ -2567,13 +2612,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，M 已读     Space 折叠，Esc 返回输入\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, M Read    Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、M 既読      Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }

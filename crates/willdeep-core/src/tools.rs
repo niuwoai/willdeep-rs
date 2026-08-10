@@ -908,20 +908,24 @@ impl ToolRegistry {
         if args.run_in_background.unwrap_or(false) {
             let command = args.command;
             let workspace = self.workspace.clone();
-            let id = self
-                .background
-                .start(BackgroundTaskKind::Shell, description, async move {
-                    let mut process = platform_shell(&command);
-                    process
-                        .current_dir(workspace)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .kill_on_drop(true);
-                    let output =
-                        match tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
-                            process.spawn()?.wait_with_output().await
-                        })
+            let id = self.background.start_retriable(
+                BackgroundTaskKind::Shell,
+                description,
+                move || {
+                    let command = command.clone();
+                    let workspace = workspace.clone();
+                    async move {
+                        let mut process = platform_shell(&command);
+                        process
+                            .current_dir(workspace)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .kill_on_drop(true);
+                        let output = match tokio::time::timeout(
+                            std::time::Duration::from_secs(timeout),
+                            async { process.spawn()?.wait_with_output().await },
+                        )
                         .await
                         {
                             Ok(Ok(output)) => output,
@@ -940,18 +944,20 @@ impl ToolRegistry {
                                 };
                             }
                         };
-                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    TaskResult {
-                        status: if output.status.success() {
-                            BackgroundTaskStatus::Completed
-                        } else {
-                            BackgroundTaskStatus::Failed
-                        },
-                        exit_code: output.status.code(),
-                        output: text,
+                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                        text.push_str(&String::from_utf8_lossy(&output.stderr));
+                        TaskResult {
+                            status: if output.status.success() {
+                                BackgroundTaskStatus::Completed
+                            } else {
+                                BackgroundTaskStatus::Failed
+                            },
+                            exit_code: output.status.code(),
+                            output: text,
+                        }
                     }
-                });
+                },
+            );
             return Ok(format!(
                 "Background task started: {id}. Completion will be delivered automatically; use get_job_output for details."
             ));
@@ -1929,6 +1935,19 @@ mod tests {
             background
                 .output(&event.snapshot.id, 20)
                 .expect("output")
+                .contains("background-ok")
+        );
+        let retried = background.retry(&event.snapshot.id).expect("retry command");
+        let retried_event = events.recv().await.expect("retry completion");
+        assert_eq!(retried_event.snapshot.id, retried);
+        assert_eq!(
+            retried_event.snapshot.status,
+            BackgroundTaskStatus::Completed
+        );
+        assert!(
+            background
+                .output(&retried, 20)
+                .unwrap()
                 .contains("background-ok")
         );
         std::fs::remove_dir_all(root).expect("cleanup");

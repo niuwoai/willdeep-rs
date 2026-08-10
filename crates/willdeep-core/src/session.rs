@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +20,8 @@ pub struct Session {
     pub created_at: u64,
     pub updated_at: u64,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub attention_read: BTreeSet<String>,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
@@ -35,6 +38,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            attention_read: BTreeSet::new(),
             swift_source: None,
         }
     }
@@ -196,6 +200,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         created_at: updated,
         updated_at: updated,
         messages,
+        attention_read: BTreeSet::new(),
         swift_source: Some(path.to_path_buf()),
     })
 }
@@ -247,6 +252,16 @@ mod tests {
         let loaded = store.load(session.id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);
+        assert!(loaded.attention_read.is_empty());
+        session.attention_read.insert("job_123".to_owned());
+        store.save(&mut session).unwrap();
+        assert!(
+            store
+                .load(session.id)
+                .unwrap()
+                .attention_read
+                .contains("job_123")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

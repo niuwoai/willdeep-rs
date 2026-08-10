@@ -216,6 +216,7 @@ mod tests {
         assert!(help.contains("Ctrl+W"));
         assert!(help.contains("Enter 详情"));
         assert!(help.contains("K 停止"));
+        assert!(help.contains("R 重试"));
         assert!(help.contains("M 已读"));
         assert!(help.contains("Ctrl+F"));
         assert!(help.contains("Ctrl+P"));
@@ -543,11 +544,11 @@ mod tests {
         app.attention_activate(&registry);
         assert_eq!(app.task_detail.as_ref().unwrap().snapshot.id, "job_failed");
         app.task_detail = None;
-        app.attention_mark_read();
+        assert!(app.attention_mark_read());
         assert_eq!(app.selected_attention().unwrap().id, "job_done");
         app.attention_move(-1);
         assert_eq!(app.selected_attention().unwrap().id, "job_done");
-        app.attention_mark_read();
+        assert!(app.attention_mark_read());
         assert!(app.attention_items().is_empty());
     }
     #[test]

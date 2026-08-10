@@ -3,7 +3,7 @@ members = ["crates/willdeep-core", "crates/willdeep-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.15.0-rc2"
+version = "0.15.0-rc3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/niuwoai/willdeep-rs"

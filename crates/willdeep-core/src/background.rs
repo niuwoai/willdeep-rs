@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -6,6 +8,9 @@ use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+type TaskFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
+type TaskLauncher = Arc<dyn Fn() -> TaskFuture + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +52,7 @@ struct TaskRecord {
     started: Instant,
     output: String,
     cancel: watch::Sender<bool>,
+    retry: Option<TaskLauncher>,
 }
 
 struct RegistryState {
@@ -127,12 +133,47 @@ impl BackgroundTaskRegistry {
             .is_some_and(|task| task.cancel.send(true).is_ok())
     }
 
+    pub fn retry(&self, id: &str) -> Option<String> {
+        let (kind, label, launcher) = {
+            let state = self.inner.lock().expect("background registry");
+            let task = state.tasks.iter().find(|task| task.snapshot.id == id)?;
+            if task.snapshot.status == BackgroundTaskStatus::Running {
+                return None;
+            }
+            (
+                task.snapshot.kind.clone(),
+                task.snapshot.label.clone(),
+                task.retry.clone()?,
+            )
+        };
+        let future = launcher();
+        Some(self.launch(kind, label, future, Some(launcher)))
+    }
+
     /// Internal lifecycle entry. Callers must complete their own approval
     /// before registering work; no command-launch API is publicly exported.
-    pub(crate) fn start<F>(&self, kind: BackgroundTaskKind, label: String, future: F) -> String
+    pub(crate) fn start_retriable<F, Fut>(
+        &self,
+        kind: BackgroundTaskKind,
+        label: String,
+        launcher: F,
+    ) -> String
     where
-        F: std::future::Future<Output = TaskResult> + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = TaskResult> + Send + 'static,
     {
+        let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
+        let future = launcher();
+        self.launch(kind, label, future, Some(launcher))
+    }
+
+    fn launch(
+        &self,
+        kind: BackgroundTaskKind,
+        label: String,
+        future: TaskFuture,
+        retry: Option<TaskLauncher>,
+    ) -> String {
         let prefix = if kind == BackgroundTaskKind::Shell {
             "job"
         } else {
@@ -160,6 +201,7 @@ impl BackgroundTaskRegistry {
                 started: Instant::now(),
                 output: String::new(),
                 cancel,
+                retry,
             });
         let registry = self.clone();
         let task_id = id.clone();
@@ -248,19 +290,22 @@ fn truncate(value: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[tokio::test]
     async fn completed_task_publishes_notice_and_output() {
         let registry = BackgroundTaskRegistry::default();
         let mut events = registry.subscribe();
-        let id = registry.start(BackgroundTaskKind::Subagent, "scout".to_owned(), async {
-            TaskResult {
-                status: BackgroundTaskStatus::Completed,
-                exit_code: Some(0),
-                output: "found src/main.rs".to_owned(),
-            }
-        });
+        let id =
+            registry.start_retriable(BackgroundTaskKind::Subagent, "scout".to_owned(), || async {
+                TaskResult {
+                    status: BackgroundTaskStatus::Completed,
+                    exit_code: Some(0),
+                    output: "found src/main.rs".to_owned(),
+                }
+            });
 
         let event = events.recv().await.expect("event");
         assert_eq!(event.snapshot.id, id);
@@ -276,13 +321,52 @@ mod tests {
     async fn cancellation_moves_task_to_killed() {
         let registry = BackgroundTaskRegistry::default();
         let mut events = registry.subscribe();
-        let id = registry.start(
+        let id = registry.start_retriable(
             BackgroundTaskKind::Shell,
             "long command".to_owned(),
-            async { std::future::pending::<TaskResult>().await },
+            || async { std::future::pending::<TaskResult>().await },
         );
         assert!(registry.kill(&id));
         let event = events.recv().await.expect("event");
         assert_eq!(event.snapshot.status, BackgroundTaskStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn retry_replays_launcher_as_a_new_task() {
+        let registry = BackgroundTaskRegistry::default();
+        let mut events = registry.subscribe();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let launch_attempts = attempts.clone();
+        let id = registry.start_retriable(
+            BackgroundTaskKind::Shell,
+            "flaky command".to_owned(),
+            move || {
+                let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    TaskResult {
+                        status: if attempt == 0 {
+                            BackgroundTaskStatus::Failed
+                        } else {
+                            BackgroundTaskStatus::Completed
+                        },
+                        exit_code: Some(if attempt == 0 { 1 } else { 0 }),
+                        output: format!("attempt {attempt}"),
+                    }
+                }
+            },
+        );
+        assert_eq!(
+            events.recv().await.unwrap().snapshot.status,
+            BackgroundTaskStatus::Failed
+        );
+
+        let retried = registry.retry(&id).expect("retriable task");
+        assert_ne!(retried, id);
+        assert_eq!(
+            events.recv().await.unwrap().snapshot.status,
+            BackgroundTaskStatus::Completed
+        );
+        assert_eq!(registry.output(&retried, 5).as_deref(), Some("attempt 1"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
