@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use globset::Glob;
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
@@ -846,7 +847,11 @@ impl ToolRegistry {
             .await?;
         let client = web_client()?;
         let mut redirects = 0;
+        let mut visited = HashSet::new();
         let response = loop {
+            if !visited.insert(redirect_key(&url)) {
+                return Err(ToolError::Network("redirect loop detected".to_owned()));
+            }
             let response = client
                 .get(url.clone())
                 .send()
@@ -905,15 +910,7 @@ impl ToolRegistry {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ToolError::Network(error.to_string()))?;
-        if bytes.len() > MAX_WEB_RESPONSE_BYTES {
-            return Err(ToolError::Network(
-                "response exceeds the 3 MiB limit".to_owned(),
-            ));
-        }
+        let bytes = read_web_response(response).await?;
         let raw = String::from_utf8_lossy(&bytes);
         let text = if is_html {
             html_to_text(&raw)
@@ -1573,6 +1570,32 @@ fn same_hostname(left: &reqwest::Url, right: &reqwest::Url) -> bool {
         .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
+fn redirect_key(url: &reqwest::Url) -> String {
+    let mut normalized = url.clone();
+    normalized.set_fragment(None);
+    normalized.to_string()
+}
+
+async fn read_web_response(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
+    let mut output = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ToolError::Network(error.to_string()))?;
+        append_web_chunk(&mut output, &chunk)?;
+    }
+    Ok(output)
+}
+
+fn append_web_chunk(output: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ToolError> {
+    if output.len().saturating_add(chunk.len()) > MAX_WEB_RESPONSE_BYTES {
+        return Err(ToolError::Network(
+            "response exceeds the 3 MiB limit".to_owned(),
+        ));
+    }
+    output.extend_from_slice(chunk);
+    Ok(())
+}
+
 async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(ToolError::Network(
@@ -2064,6 +2087,23 @@ mod tests {
         let other = reqwest::Url::parse("https://cdn.example.com/new").expect("other URL");
         assert!(same_hostname(&http, &https));
         assert!(!same_hostname(&https, &other));
+    }
+
+    #[test]
+    fn redirect_loop_key_ignores_client_side_fragments() {
+        let first = reqwest::Url::parse("https://example.com/page#first").unwrap();
+        let second = reqwest::Url::parse("https://example.com/page#second").unwrap();
+        assert_eq!(redirect_key(&first), redirect_key(&second));
+    }
+
+    #[test]
+    fn chunked_web_response_stops_at_the_hard_byte_limit() {
+        let mut output = vec![0; MAX_WEB_RESPONSE_BYTES - 2];
+        append_web_chunk(&mut output, &[1, 2]).unwrap();
+        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
+        let error = append_web_chunk(&mut output, &[3]).unwrap_err();
+        assert!(error.to_string().contains("3 MiB"));
+        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
     }
 
     #[tokio::test]

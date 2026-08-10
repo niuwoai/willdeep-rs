@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 globset = "0.4"
 ignore = "0.4"
 regex = "1.11"

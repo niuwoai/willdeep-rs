@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc22
+> 当前实施版本：v0.21.0-rc23
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc23（已完成）：Web Fetch 在每次重定向前重新做公网 DNS/IP 校验，同域自动跟随、跨域重新审批并拒绝 HTTPS 降级；新增去 Fragment 的环路即时检测。响应体改为流式分块读取，对无 `Content-Length` 的服务器也在超过 3 MiB 时立即中止；保留 8 次跳转、30 秒请求超时和 HTML 可读正文清洗。
+
 v0.21.0-rc22（已完成）：新增 `willdeep config init/check/show`。Init 以私有权限创建示例配置且拒绝覆盖；Check 复用严格 TOML、版本、Provider/Subagent/MCP 与敏感文件权限校验；Show 只输出验证后的配置并强制脱敏内联 API Key。`agent.spawn` 设计审计确认不能把调用方的 `target_file` 直接视为已批准写目标，公开创建能力须接入结构化目标授权后再开放编辑型 Profile。
 
 v0.21.0-rc21（已完成）：稳定 Worktree Review/Merge/Audit/Quarantine 请求与返回 DTO，并将四个此前只列入能力清单、尚未由统一 Dispatch 实现的操作正式接入；Merge/Quarantine 纳入持久幂等。Rust Client 增加对应类型化方法，CLI/TUI bridge 从旧专用 HTTP 端点迁移。`ApiResponse::into_result()` 与标准 `ApiError` 统一成功/错误信封解包，避免各模块复制逻辑。下一步审计阶段 7 所有宣称支持的操作是否真实 Dispatch，并补 `agent.spawn`。
@@ -409,7 +411,8 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 - [x] 文件、Git、Shell、Web Search/Fetch、MCP、Skills、后台任务和子 Agent 基础工具。
 - [ ] 符号索引、引用查找、诊断、结构化测试结果、Git Log/Blame、下载和转换工具。
 - [x] Web Fetch 支持常用同域重定向。
-- [ ] 跨域重定向风险控制、循环/次数/大小/超时限制、HTML 正文、PDF 和引用来源。
+- [x] 跨域重定向风险控制、循环/次数/大小/超时限制和 HTML 正文。
+- [ ] PDF 正文提取和引用来源结构化输出。
 - [ ] 浏览器截图与自动化；Cookie 和登录态必须明确授权并防止 SSRF/云元数据访问。
 - [ ] 盘点 Xedit 工具并以统一权限描述逐项迁移。
 

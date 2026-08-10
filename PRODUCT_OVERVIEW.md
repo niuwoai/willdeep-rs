@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc22
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc23
 
 ## 项目简介
 
@@ -11,6 +11,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Chat Completions、Responses、Anthropic Messages 三协议；
 - some.im 与 BYOK Provider；
 - 文件搜索、读取、创建和精确编辑；
+- Web Fetch 对每次跳转重做公网目标校验，同域自动跟随、跨域重新审批，并以环路、次数、超时和流式 3 MiB 硬限制约束响应；
 - Git 状态与 Shell 命令；
 - 多轮 Tool Call Harness；
 - 工作区路径边界和写操作审批；
