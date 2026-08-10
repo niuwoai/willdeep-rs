@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.19.0-rc8`，支持：
+当前版本为 `0.20.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -36,6 +36,8 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime TUI 聊天区只显示用户消息和 AI 最终回复；轮次、Task/Agent ID、工具活动和提交状态仅进入活动状态层。
 - Runtime 在可能写入工作区的主/子 Agent 工具调用前后采集内容指纹，将真实变化路径绑定到 Session、Turn、Task、Agent 和 Tool；CLI `daemon diff-attributions` 与 TUI Diff Review 可沿快照链查看归属，调用窗口外已有脏文件不会被误算。
 - TUI Inbox 的已完成 Runtime 任务仅保留 5 分钟；点击或 Enter 打开等待审批的任务时，直接进入可执行 Allow、Disallow、Always Allow 的审批框。
+- Runtime 持久 Workspace 注册表、默认工作区切换与受 Token 保护的 CRUD API；每个 Workspace 保存独立访问策略、默认 Provider、Skill/MCP 允许列表。
+- Workspace 的 `read-only` 策略由 Runtime 服务端注入，客户端无法自报可写；Shell、文件写入、Worktree 创建、MCP 和 Editor 子 Agent 会在审批前被拒绝。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
 - Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。
@@ -61,6 +63,10 @@ willdeep daemon tasks
 willdeep daemon task <task-id>
 willdeep daemon agents
 willdeep daemon agent <agent-id>
+willdeep daemon register-workspace . --name "项目" --access workspace-write --provider-profile some-im --skill reader --mcp-server docs
+willdeep daemon workspaces
+willdeep daemon activate-workspace <workspace-id>
+willdeep daemon remove-workspace <workspace-id> --yes
 willdeep daemon create-session --workspace . --profile some-im --title "长期任务"
 willdeep daemon sessions
 willdeep daemon session <session-id>
@@ -89,6 +95,8 @@ willdeep daemon stop
 ```
 
 本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Daemon 通过短周期心跳续租单实例锁；异常退出后，一次 `daemon start` 会等待旧租约过期并安全接管。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
+
+任务或 Session 首次使用目录时会自动注册 Workspace；也可用 `register-workspace` 显式保存名称、`read-only/workspace-write`、默认 Provider Profile、Skill 与 MCP 允许列表。`activate-workspace` 只改变新客户端使用的默认项，已启动任务继续绑定原规范化根目录。`remove-workspace --yes` 仅移除注册信息，不删除文件、Session 或历史；再次使用该目录时会以保守默认值重新注册。Workspace 策略由 Runtime 在任务入队时覆盖客户端输入：`read-only` 会拒绝所有可写工具和 MCP，非空 Skill/MCP 列表作为允许列表，空列表保持全局配置兼容行为。
 
 Runtime 事件按递增序号写入私有 NDJSON 日志。`GET /v1/events/stream?after=<序号>` 使用 SSE 先分页补齐持久事件，再实时推送新事件；慢客户端落后广播窗口时自动从日志追赶并按序号去重。TUI 默认使用该实时通道，连接旧 Daemon 时回退到轮询接口。`attach --after <序号>` 同样按游标补读并持续跟随；按 `Ctrl+C` 只断开当前客户端，Daemon 继续运行。
 

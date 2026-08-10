@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.0-rc1] - 2026-08-11
+
+### Added
+
+- Runtime 新增持久 Workspace 注册表与受 Token 保护的注册、更新、列表、激活、移除 API；CLI 增加 `register-workspace`、`workspaces`、`activate-workspace` 和 `remove-workspace`。
+- 每个 Workspace 独立保存规范化根目录、访问策略、默认 Provider Profile、Skill 与 MCP 允许列表；任务和 Session 首次使用目录时自动注册。
+
+### Changed
+
+- 激活 Workspace 只改变默认项，已入队 Task 和既有 Session 继续绑定原根目录；移除注册不会删除工作区文件、Session 或历史。
+
+### Security
+
+- Workspace 策略字段不接受客户端反序列化，并由 Runtime 在任务入队时强制覆盖；只读策略会在审批前拒绝 Shell、文件写入、Worktree 创建、MCP 调用和 Editor 子 Agent。
+- Workspace 注册表使用 Runtime 私有原子写入机制，不存储 Provider Key、Prompt 或文件正文。
+
 ## [0.19.0-rc8] - 2026-08-10
 
 ### Fixed

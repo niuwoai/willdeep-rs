@@ -32,6 +32,7 @@ mod event_stream;
 mod herdr;
 mod session_store;
 pub(crate) mod tui_bridge;
+mod workspace_store;
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
@@ -44,6 +45,7 @@ pub(crate) use tui_bridge::{
     search_remote_sessions, set_remote_session_archived, start_runtime_event_follower,
     stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
+pub(crate) use workspace_store::WorkspaceAccess;
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,
@@ -203,6 +205,31 @@ pub enum DaemonAction {
     },
     /// List persistent interactive Runtime Sessions.
     Sessions,
+    /// List registered Runtime Workspaces.
+    Workspaces,
+    /// Register or update a Runtime Workspace and its independent settings.
+    RegisterWorkspace {
+        #[arg(value_name = "PATH")]
+        root: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum, default_value_t = workspace_store::WorkspaceAccess::WorkspaceWrite)]
+        access: workspace_store::WorkspaceAccess,
+        #[arg(long)]
+        provider_profile: Option<String>,
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        #[arg(long = "mcp-server")]
+        mcp_servers: Vec<String>,
+    },
+    /// Make one registered Workspace the default for new clients.
+    ActivateWorkspace { id: uuid::Uuid },
+    /// Remove a Workspace registration without deleting files or Sessions.
+    RemoveWorkspace {
+        id: uuid::Uuid,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show one persistent Runtime Session.
     Session { id: uuid::Uuid },
     /// Search persistent Runtime Sessions by title or message text.
@@ -395,6 +422,7 @@ struct ServerState {
     agents: Arc<AgentStore>,
     agent_commands: Arc<AgentCommandStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
+    workspaces: Arc<workspace_store::WorkspaceStore>,
     diff_review_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -448,6 +476,12 @@ pub(crate) struct SubmitTask {
     #[serde(default)]
     pub(crate) attachments: Vec<willdeep_core::MessageAttachment>,
     pub(crate) workspace: PathBuf,
+    #[serde(skip)]
+    pub(crate) workspace_access: Option<WorkspaceAccess>,
+    #[serde(skip)]
+    pub(crate) workspace_skills: Option<Vec<String>>,
+    #[serde(skip)]
+    pub(crate) workspace_mcp_servers: Option<Vec<String>>,
     pub(crate) profile: Option<String>,
     #[serde(default)]
     pub(crate) model: Option<String>,
@@ -538,6 +572,7 @@ struct TaskManager {
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
+    workspaces: Arc<workspace_store::WorkspaceStore>,
     runtime_url: String,
     runtime_token: String,
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
@@ -579,6 +614,30 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             session_store::create_session_cli(&home, workspace, profile, model, config, title).await
         }
         DaemonAction::Sessions => session_store::list_sessions_cli(&home).await,
+        DaemonAction::Workspaces => workspace_store::list_cli(&home).await,
+        DaemonAction::RegisterWorkspace {
+            root,
+            name,
+            access,
+            provider_profile,
+            skills,
+            mcp_servers,
+        } => {
+            workspace_store::register_cli(
+                &home,
+                root,
+                name,
+                access,
+                provider_profile,
+                skills,
+                mcp_servers,
+            )
+            .await
+        }
+        DaemonAction::ActivateWorkspace { id } => workspace_store::activate_cli(&home, id).await,
+        DaemonAction::RemoveWorkspace { id, yes } => {
+            workspace_store::remove_cli(&home, id, yes).await
+        }
         DaemonAction::Session { id } => session_store::show_session_cli(&home, id).await,
         DaemonAction::SearchSessions {
             query,
@@ -743,10 +802,11 @@ async fn submit(
     prompt: Vec<String>,
 ) -> Result<()> {
     let prompt = prompt.join(" ");
+    let workspace = workspace_store::resolve_cli_root(home, workspace).await?;
     let task = submit_runtime_prompt(
         home,
         &RuntimeSubmitOptions {
-            workspace: workspace.unwrap_or(std::env::current_dir()?),
+            workspace,
             profile,
             model,
             config,
@@ -781,6 +841,9 @@ pub(crate) async fn submit_runtime_prompt(
             prompt,
             attachments,
             workspace: options.workspace.canonicalize()?,
+            workspace_access: None,
+            workspace_skills: None,
+            workspace_mcp_servers: None,
             profile: options.profile.clone(),
             model: options.model.clone(),
             config: options.config.clone(),
@@ -1313,6 +1376,7 @@ async fn run(home: &Path) -> Result<()> {
         agents: agents.clone(),
         agent_commands: agent_commands.clone(),
         sessions: sessions.clone(),
+        workspaces: tasks.workspaces.clone(),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
     let scheduler_state = server_state.clone();
@@ -1359,6 +1423,18 @@ async fn run(home: &Path) -> Result<()> {
         )
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))
+        .route(
+            "/v1/workspaces",
+            get(workspace_store::list_handler).post(workspace_store::register_handler),
+        )
+        .route(
+            "/v1/workspaces/{id}",
+            get(workspace_store::get_handler).delete(workspace_store::remove_handler),
+        )
+        .route(
+            "/v1/workspaces/{id}/activate",
+            post(workspace_store::activate_handler),
+        )
         .route(
             "/v1/agents/{id}/stop",
             post(agent_control::stop_agent_handler),
@@ -1601,9 +1677,20 @@ async fn task_handler(
 async fn submit_task_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SubmitTask>,
+    Json(mut request): Json<SubmitTask>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
+    let workspace = state
+        .workspaces
+        .ensure_registered(&request.workspace)
+        .map_err(|error| {
+            eprintln!("register submitted Runtime Workspace: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
+    request.workspace = workspace.root;
+    if request.profile.is_none() {
+        request.profile = workspace.provider_profile;
+    }
     let task = state.tasks.submit(request).await.map_err(|error| {
         eprintln!("Runtime task submission failed: {error:#}");
         StatusCode::BAD_REQUEST
@@ -1888,12 +1975,16 @@ impl TaskManager {
                 ),
             )?;
         }
+        let workspaces = Arc::new(workspace_store::WorkspaceStore::open(
+            home.join("runtime/workspaces.json"),
+        )?);
         Ok(Self {
             path,
             home,
             events,
             agents,
             sessions,
+            workspaces,
             runtime_url,
             runtime_token,
             tasks: RwLock::new(tasks),
@@ -2071,10 +2162,14 @@ impl TaskManager {
         if request.prompt.trim().is_empty() && request.attachments.is_empty() {
             bail!("task prompt and attachments must not both be empty");
         }
-        request.workspace = request
-            .workspace
-            .canonicalize()
-            .with_context(|| format!("invalid workspace: {}", request.workspace.display()))?;
+        let workspace = self.workspaces.ensure_registered(&request.workspace)?;
+        request.workspace = workspace.root;
+        request.workspace_access = Some(workspace.access);
+        request.workspace_skills = Some(workspace.skills);
+        request.workspace_mcp_servers = Some(workspace.mcp_servers);
+        if request.profile.is_none() {
+            request.profile = workspace.provider_profile;
+        }
         if let Some(config) = request.config.as_mut() {
             *config = config
                 .canonicalize()

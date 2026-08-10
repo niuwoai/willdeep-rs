@@ -64,6 +64,27 @@ fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
     assert!(!tui_bridge::runtime_task_visible(&task(699), 1_000));
 }
 
+#[test]
+fn submitted_workspace_policy_cannot_be_supplied_by_client_json() {
+    let request: SubmitTask = serde_json::from_value(serde_json::json!({
+        "prompt": "inspect",
+        "attachments": [],
+        "workspace": std::env::temp_dir(),
+        "workspace_access": "workspace_write",
+        "workspace_skills": ["untrusted"],
+        "workspace_mcp_servers": ["untrusted"],
+        "profile": null,
+        "model": null,
+        "config": null,
+        "session_id": null,
+        "turn_id": null
+    }))
+    .unwrap();
+    assert_eq!(request.workspace_access, None);
+    assert_eq!(request.workspace_skills, None);
+    assert_eq!(request.workspace_mcp_servers, None);
+}
+
 #[tokio::test]
 async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata() {
     let root = std::env::temp_dir().join(format!(
@@ -164,6 +185,9 @@ fn authorization_requires_exact_local_token() {
         sessions: Arc::new(
             session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root)
                 .unwrap(),
+        ),
+        workspaces: Arc::new(
+            workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
         ),
         diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
     };

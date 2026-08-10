@@ -1177,6 +1177,12 @@ async fn authorized_workspace(
     let requested = requested
         .canonicalize()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let registered = state
+        .workspaces
+        .list()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .iter()
+        .any(|workspace| workspace.root == requested);
     let session_allowed = state
         .sessions
         .list()
@@ -1189,7 +1195,7 @@ async fn authorized_workspace(
         .await
         .iter()
         .any(|task| task.workspace == requested);
-    if session_allowed || task_allowed {
+    if registered || session_allowed || task_allowed {
         Ok(requested)
     } else {
         Err(StatusCode::FORBIDDEN)

@@ -53,6 +53,7 @@ const MAX_WEB_REDIRECTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalMode {
+    ReadOnly,
     Strict,
     Smart,
     WorkspaceAccess,
@@ -108,6 +109,8 @@ pub enum ToolError {
     OutsideWorkspace(String),
     #[error("approval denied: {0}")]
     ApprovalDenied(String),
+    #[error("read-only Workspace policy blocks tool: {0}")]
+    ReadOnlyPolicy(String),
     #[error("file already exists: {0}")]
     FileAlreadyExists(String),
     #[error("exact edit text was not found in {0}")]
@@ -237,6 +240,9 @@ impl ToolRegistry {
     }
 
     pub async fn approve_subagent_editor(&self, requested: &str) -> Result<PathBuf, ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly {
+            return Err(ToolError::ReadOnlyPolicy("editor subagent".to_owned()));
+        }
         let target = self.resolve_existing(requested)?;
         if !target.is_file() {
             return Err(ToolError::Io(std::io::Error::new(
@@ -420,6 +426,14 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly
+            && (matches!(
+                call.name.as_str(),
+                "run_command" | "create_file" | "edit_file" | "create_worktree"
+            ) || self.mcp.handles(&call.name))
+        {
+            return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
+        }
         match call.name.as_str() {
             "list_skills" => self.list_skills(parse(call)?),
             "read_skill" => self.read_skill(parse(call)?),
@@ -1952,6 +1966,35 @@ mod tests {
             std::fs::read_to_string(root.join("file.txt")).expect("read"),
             "alpha gamma"
         );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_blocks_write_capable_tools_before_approval() {
+        let root = workspace("read-only");
+        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::ReadOnly).expect("registry");
+        let result = registry
+            .execute(&ToolCall {
+                id: "write".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments: serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "unchanged",
+                    "new_string": "changed"
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(matches!(result, Err(ToolError::ReadOnlyPolicy(_))));
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).expect("read"),
+            "unchanged"
+        );
+        assert!(matches!(
+            registry.approve_subagent_editor("file.txt").await,
+            Err(ToolError::ReadOnlyPolicy(_))
+        ));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

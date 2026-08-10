@@ -740,6 +740,9 @@ impl RuntimeSessionStore {
                 prompt: turn.prompt.clone(),
                 attachments: turn.attachments.clone(),
                 workspace: session.workspace.clone(),
+                workspace_access: None,
+                workspace_skills: None,
+                workspace_mcp_servers: None,
                 profile: session.profile.clone(),
                 model: session.model.clone(),
                 config: session.config.clone(),
@@ -1003,9 +1006,20 @@ pub(super) async fn sessions_handler(
 pub(super) async fn create_session_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<CreateRuntimeSession>,
+    Json(mut request): Json<CreateRuntimeSession>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
+    let workspace = state
+        .workspaces
+        .ensure_registered(&request.workspace)
+        .map_err(|error| {
+            eprintln!("register Runtime Session Workspace: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
+    request.workspace = workspace.root;
+    if request.profile.is_none() {
+        request.profile = workspace.provider_profile;
+    }
     let (session, created) = state.sessions.ensure(request).map_err(|error| {
         eprintln!("create Runtime Session: {error:#}");
         StatusCode::BAD_REQUEST
@@ -1322,14 +1336,13 @@ pub(super) async fn create_session_cli(
     title: Option<String>,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
+    let workspace = workspace_store::resolve_cli_root(home, workspace).await?;
     let response = client()
         .post(format!("http://{}/v1/sessions", state.address))
         .header(TOKEN_HEADER, &state.token)
         .json(&CreateRuntimeSession {
             id: None,
-            workspace: workspace
-                .unwrap_or(std::env::current_dir()?)
-                .canonicalize()?,
+            workspace,
             profile,
             model,
             config,

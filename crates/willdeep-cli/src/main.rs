@@ -316,6 +316,9 @@ async fn run() -> Result<()> {
             harness::HarnessFrontend::Runtime {
                 connection,
                 sink: Arc::new(TerminalSink { json: cli.json }),
+                read_only: true,
+                allowed_skills: Vec::new(),
+                allowed_mcp_servers: Vec::new(),
             }
         } else if interactive_tui {
             harness::HarnessFrontend::Tui {

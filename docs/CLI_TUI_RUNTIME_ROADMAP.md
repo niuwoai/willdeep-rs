@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc8
+> 当前实施版本：v0.20.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -106,8 +106,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 6：Workspace 与 Worktree（v0.20.0）
 
-- [ ] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP。
-- [ ] 切换时重新建立路径边界，旧 Workspace 的任务继续运行。
+- [-] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、服务端只读策略、默认 Provider 与 Skill/MCP 允许列表已完成，待接入 TUI/Web 工作区选择器。
+- [-] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；Runtime 激活操作不改变已入队任务的规范化根目录，待客户端切换时自动重连视图和 Session。
 - [ ] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批。
 - [ ] 孤儿 Worktree 检测与保守清理。
 
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.20.0-rc1（已完成）：新增持久 Workspace 注册表与受 Token 保护的注册、更新、列表、激活、删除 API/CLI；任务和 Session 自动收养目录，默认 Provider、Skill/MCP 允许列表进入 Harness。访问策略只能由 Runtime 注册表注入，客户端字段不参与反序列化；只读策略在审批前阻止 Shell、文件写入、Worktree、MCP 和 Editor 子 Agent。切换默认 Workspace 不修改既有 Task/Session 根目录，删除注册不删除文件或历史。下一步接入 TUI/Web Workspace 切换器与路径边界重建。
 
 v0.19.0-rc8（已完成）：TUI Inbox 的完成/取消 Runtime 任务仅保留 5 分钟；等待审批/回答的任务详情与实际 Interaction 建立 Task ID 关联，点击任务或按 Enter 会直接打开可操作的审批/回答框。下一步继续阶段 6 的 Workspace 注册表。
 

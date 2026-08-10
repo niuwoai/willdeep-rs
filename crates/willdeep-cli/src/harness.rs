@@ -28,6 +28,9 @@ pub(crate) enum HarnessFrontend {
     Runtime {
         connection: RuntimeConnection,
         sink: Arc<dyn EventSink>,
+        read_only: bool,
+        allowed_skills: Vec<String>,
+        allowed_mcp_servers: Vec<String>,
     },
 }
 
@@ -72,7 +75,7 @@ pub(crate) async fn execute_runtime(
         api: None,
         workspace: Some(request.workspace.clone()),
         web_workspaces: Vec::new(),
-        full_auto: false,
+        full_auto: request.workspace_access == Some(crate::daemon::WorkspaceAccess::WorkspaceWrite),
         max_turns: None,
         max_output_tokens: None,
         json: true,
@@ -97,7 +100,13 @@ pub(crate) async fn execute_runtime(
         home,
         language,
         resumed.as_ref(),
-        HarnessFrontend::Runtime { connection, sink },
+        HarnessFrontend::Runtime {
+            connection,
+            sink,
+            read_only: request.workspace_access == Some(crate::daemon::WorkspaceAccess::ReadOnly),
+            allowed_skills: request.workspace_skills.unwrap_or_default(),
+            allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
+        },
     )
     .await?;
     let mut session = resumed.unwrap_or_else(|| {
@@ -278,7 +287,15 @@ pub(crate) async fn build(
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
-    let approval_mode = if cli.full_auto {
+    let approval_mode = if matches!(
+        &frontend,
+        HarnessFrontend::Runtime {
+            read_only: true,
+            ..
+        }
+    ) {
+        ApprovalMode::ReadOnly
+    } else if cli.full_auto {
         ApprovalMode::WorkspaceAccess
     } else {
         match configured_approval {
@@ -288,12 +305,24 @@ pub(crate) async fn build(
             _ => bail!("agent.approval must be `strict`, `smart`, or `workspace-write`"),
         }
     };
-    let skills = Arc::new(willdeep_core::SkillCatalog::discover(
-        &workspace,
-        &loaded.file.skills.roots,
-    ));
+    let (allowed_skills, allowed_mcp_servers) = match &frontend {
+        HarnessFrontend::Runtime {
+            allowed_skills,
+            allowed_mcp_servers,
+            ..
+        } => (allowed_skills.as_slice(), allowed_mcp_servers.as_slice()),
+        _ => (&[][..], &[][..]),
+    };
+    let skills = Arc::new(
+        willdeep_core::SkillCatalog::discover(&workspace, &loaded.file.skills.roots)
+            .allow_only(allowed_skills),
+    );
+    let mut mcp_servers = loaded.file.mcp_servers.clone();
+    if !allowed_mcp_servers.is_empty() {
+        mcp_servers.retain(|name, _| allowed_mcp_servers.contains(name));
+    }
     let mcp = Arc::new(
-        willdeep_core::McpRegistry::connect(&loaded.file.mcp_servers)
+        willdeep_core::McpRegistry::connect(&mcp_servers)
             .await
             .context("initialize MCP servers")?,
     );
@@ -312,7 +341,9 @@ pub(crate) async fn build(
             Arc::new(crate::tui::TuiSink { ui: tx, relay }),
             None,
         ),
-        HarnessFrontend::Runtime { connection, sink } => (
+        HarnessFrontend::Runtime {
+            connection, sink, ..
+        } => (
             daemon::runtime_approver(Some(&connection))?.context("initialize Runtime approver")?,
             sink,
             Some(connection),
