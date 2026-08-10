@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc7
+> 当前实施版本：v0.19.0-rc8
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.19.0-rc8（已完成）：TUI Inbox 的完成/取消 Runtime 任务仅保留 5 分钟；等待审批/回答的任务详情与实际 Interaction 建立 Task ID 关联，点击任务或按 Enter 会直接打开可操作的审批/回答框。下一步继续阶段 6 的 Workspace 注册表。
 
 v0.19.0-rc7（已完成）：Runtime 在主/子 Agent 的潜在写工具调用窗口前后采集内容指纹，新增持久 Diff Attribution 链和受保护 API/CLI；TUI Diff Review 在文件行展示最近责任 Agent 与工具。预先存在但窗口内未变化的脏文件不会被误归属。阶段 5 已完成，下一步进入多 Workspace/Worktree 注册、切换和权限隔离。
 

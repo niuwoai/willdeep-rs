@@ -52,7 +52,7 @@ use rendering::*;
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::handle_session_command;
-use sidebar::render_sidebar;
+use sidebar::{render_attention_detail, render_sidebar};
 use workspace_attention::workspace_attention;
 
 pub enum UiMessage {
@@ -415,7 +415,15 @@ async fn event_loop(
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
-                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills),
+                    MouseEventKind::Down(_)=>{
+                        app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        if app.attention_detail.is_some()
+                            && let Some(gate)=app.selected_remote_gate()
+                        {
+                            app.attention_detail=None;
+                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                        }
+                    },
                     MouseEventKind::ScrollUp if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_sub(3),
                     MouseEventKind::ScrollDown if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(-3),
@@ -574,7 +582,16 @@ async fn event_loop(
                         }
                         continue;
                     }
-                    if app.attention_detail.is_some(){if key.code==KeyCode::Esc{app.attention_detail=None;}continue;}
+                    if app.attention_detail.is_some(){
+                        if key.code==KeyCode::Esc{app.attention_detail=None;}
+                        else if key.code==KeyCode::Enter
+                            && let Some(gate)=app.selected_remote_gate()
+                        {
+                            app.attention_detail=None;
+                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                        }
+                        continue;
+                    }
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
@@ -913,15 +930,26 @@ impl App {
         self.attention_items().get(self.attention_selected).cloned()
     }
     fn selected_remote_gate(&self) -> Option<crate::daemon::RemoteGate> {
-        let id = self
-            .selected_attention()?
+        let item = self.selected_attention()?;
+        if let Some(id) = item
             .id
-            .strip_prefix("runtime-interaction:")?
+            .strip_prefix("runtime-interaction:")
+            .and_then(|value| value.parse::<uuid::Uuid>().ok())
+        {
+            return self
+                .runtime_gates
+                .iter()
+                .find(|gate| gate.id() == id)
+                .cloned();
+        }
+        let task_id = item
+            .id
+            .strip_prefix("runtime-task:")?
             .parse::<uuid::Uuid>()
             .ok()?;
         self.runtime_gates
             .iter()
-            .find(|gate| gate.id() == id)
+            .find(|gate| gate.task_id() == task_id)
             .cloned()
     }
     fn selected_runtime_task_id(&self) -> Option<uuid::Uuid> {
@@ -2631,38 +2659,7 @@ fn draw(
                 popup,
             );
         }
-        if let Some(detail) = &app.attention_detail {
-            let content = format!(
-                "{} · {}\n\n{}\n\n{}",
-                attention_source_label(detail.source, app.language),
-                runtime_status_label(detail.status, app.language),
-                detail.title,
-                detail.detail
-            );
-            let popup = centered_rect(
-                f.area().width.min(82),
-                (visual_lines(&content, f.area().width.min(80) as usize) as u16 + 2)
-                    .min(f.area().height)
-                    .max(1),
-                f.area(),
-            );
-            f.render_widget(Clear, popup);
-            f.render_widget(
-                Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(app.language.text(
-                                "Inbox 详情 · Esc 关闭",
-                                "Inbox detail · Esc closes",
-                                "Inbox 詳細 · Esc で閉じる",
-                            ))
-                            .borders(Borders::ALL)
-                            .border_style(attention_style(detail.status)),
-                    )
-                    .wrap(Wrap { trim: false }),
-                popup,
-            );
-        }
+        render_attention_detail(f, app);
         app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {
             let content = approval_content(description, *always, app.language);

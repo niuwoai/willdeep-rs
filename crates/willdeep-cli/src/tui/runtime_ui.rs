@@ -295,6 +295,7 @@ pub(super) fn open_remote_gate(
     match gate {
         crate::daemon::RemoteGate::Approval {
             id,
+            task_id: _,
             description,
             always_allow_available,
         } => {
@@ -326,6 +327,7 @@ pub(super) fn open_remote_gate(
         }
         crate::daemon::RemoteGate::Question {
             id,
+            task_id: _,
             question,
             options,
             multi_select,

@@ -5,11 +5,13 @@ use futures_util::StreamExt;
 pub(crate) enum RemoteGate {
     Approval {
         id: uuid::Uuid,
+        task_id: uuid::Uuid,
         description: String,
         always_allow_available: bool,
     },
     Question {
         id: uuid::Uuid,
+        task_id: uuid::Uuid,
         question: String,
         options: Vec<String>,
         multi_select: bool,
@@ -20,6 +22,12 @@ impl RemoteGate {
     pub(crate) fn id(&self) -> uuid::Uuid {
         match self {
             Self::Approval { id, .. } | Self::Question { id, .. } => *id,
+        }
+    }
+
+    pub(crate) fn task_id(&self) -> uuid::Uuid {
+        match self {
+            Self::Approval { task_id, .. } | Self::Question { task_id, .. } => *task_id,
         }
     }
 }
@@ -517,6 +525,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
     let mut attention = tasks
         .into_iter()
         .filter(|task| visible_tasks.contains(&task.id))
+        .filter(|task| runtime_task_visible(task, now()))
         .filter(|task| task.status != RuntimeTaskStatus::Queued)
         .map(runtime_task_attention)
         .collect::<Vec<_>>();
@@ -526,6 +535,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             InteractionKind::Approval { description, .. } => {
                 gates.push(RemoteGate::Approval {
                     id: interaction.id,
+                    task_id: interaction.task_id,
                     description: description.clone(),
                     always_allow_available: matches!(
                         interaction.kind,
@@ -544,6 +554,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             } => {
                 gates.push(RemoteGate::Question {
                     id: interaction.id,
+                    task_id: interaction.task_id,
                     question: question.clone(),
                     options: options.clone(),
                     multi_select: *multi_select,
@@ -668,6 +679,15 @@ fn runtime_task_attention(task: RuntimeTask) -> willdeep_core::AttentionItem {
             .started_at
             .map(|started| now().saturating_sub(started).saturating_mul(1_000)),
     }
+}
+
+pub(super) fn runtime_task_visible(task: &RuntimeTask, timestamp: u64) -> bool {
+    !matches!(
+        task.status,
+        RuntimeTaskStatus::Completed | RuntimeTaskStatus::Cancelled
+    ) || task
+        .completed_at
+        .is_some_and(|completed| timestamp.saturating_sub(completed) <= 5 * 60)
 }
 
 pub(crate) async fn resolve_remote_approval(

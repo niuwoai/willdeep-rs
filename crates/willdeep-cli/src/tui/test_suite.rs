@@ -649,6 +649,7 @@ mod tests {
     fn runtime_attention_selects_remote_gate_and_task_actions() {
         let mut app = App::new(Vec::new(), Language::En);
         let interaction_id = uuid::Uuid::new_v4();
+        let task_id = uuid::Uuid::new_v4();
         app.runtime_attention.push(AttentionItem {
             id: format!("runtime-interaction:{interaction_id}"),
             source: AttentionSource::Approval,
@@ -659,14 +660,13 @@ mod tests {
         });
         app.runtime_gates.push(crate::daemon::RemoteGate::Approval {
             id: interaction_id,
+            task_id,
             description: "run tests".to_owned(),
             always_allow_available: true,
         });
         assert_eq!(app.selected_remote_gate().unwrap().id(), interaction_id);
 
-        let task_id = uuid::Uuid::new_v4();
         app.runtime_attention.clear();
-        app.runtime_gates.clear();
         app.runtime_attention.push(AttentionItem {
             id: format!("runtime-task:{task_id}"),
             source: AttentionSource::BackgroundShell,
@@ -675,6 +675,7 @@ mod tests {
             status: RuntimeStatus::Working,
             elapsed_millis: None,
         });
+        assert_eq!(app.selected_remote_gate().unwrap().id(), interaction_id);
         assert_eq!(app.selected_runtime_task_id(), Some(task_id));
     }
 

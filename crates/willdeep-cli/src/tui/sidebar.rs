@@ -1,5 +1,60 @@
 use super::*;
 
+pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &App) {
+    let Some(detail) = &app.attention_detail else {
+        return;
+    };
+    let actionable = app.selected_remote_gate().is_some();
+    let content = format!(
+        "{} · {}\n\n{}\n\n{}{}",
+        attention_source_label(detail.source, app.language),
+        runtime_status_label(detail.status, app.language),
+        detail.title,
+        detail.detail,
+        if actionable {
+            app.language.text(
+                "\n\nEnter 打开审批",
+                "\n\nEnter opens approval",
+                "\n\nEnter で承認を開く",
+            )
+        } else {
+            ""
+        }
+    );
+    let popup = centered_rect(
+        f.area().width.min(82),
+        (visual_lines(&content, f.area().width.min(80) as usize) as u16 + 2)
+            .min(f.area().height)
+            .max(1),
+        f.area(),
+    );
+    f.render_widget(Clear, popup);
+    let title = if actionable {
+        app.language.text(
+            "Inbox 详情 · Enter 审批 · Esc 关闭",
+            "Inbox detail · Enter approve · Esc closes",
+            "Inbox 詳細 · Enter 承認 · Esc 閉じる",
+        )
+    } else {
+        app.language.text(
+            "Inbox 详情 · Esc 关闭",
+            "Inbox detail · Esc closes",
+            "Inbox 詳細 · Esc で閉じる",
+        )
+    };
+    f.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(attention_style(detail.status)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 impl App {
     pub(super) fn attention_items(&self) -> Vec<AttentionItem> {
         let mut items = Vec::new();
