@@ -184,4 +184,56 @@ mod tests {
         assert!(RuntimeClient::new("http://127.0.0.1:9345", "secret").is_ok());
         assert!(RuntimeClient::new("http://[::1]:9345", "secret").is_ok());
     }
+
+    #[tokio::test]
+    async fn ndjson_decoder_handles_split_utf8_and_multiple_envelopes() {
+        let first = ApiResponse::ok(
+            willdeep_runtime_protocol::RuntimeEvent {
+                sequence: 7,
+                timestamp: 1,
+                kind: "模型.事件".to_owned(),
+                message: "中文消息".to_owned(),
+            },
+            "test",
+            None,
+        );
+        let second = ApiResponse::ok(
+            willdeep_runtime_protocol::RuntimeEvent {
+                sequence: 8,
+                timestamp: 2,
+                kind: "task.completed".to_owned(),
+                message: "done".to_owned(),
+            },
+            "test",
+            None,
+        );
+        let payload = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        let split = payload.find("中文").unwrap() + 1;
+        let chunks = futures_util::stream::iter(vec![
+            Ok::<_, reqwest::Error>(Bytes::copy_from_slice(&payload.as_bytes()[..split])),
+            Ok::<_, reqwest::Error>(Bytes::copy_from_slice(&payload.as_bytes()[split..])),
+        ]);
+        let mut stream = NdjsonEventStream {
+            chunks: Box::pin(chunks),
+            buffer: Vec::new(),
+            max_line_bytes: DEFAULT_MAX_NDJSON_LINE_BYTES,
+        };
+        let first: ApiResponse<willdeep_runtime_protocol::RuntimeEvent> =
+            stream.next().await.unwrap().unwrap();
+        let second: ApiResponse<willdeep_runtime_protocol::RuntimeEvent> =
+            stream.next().await.unwrap().unwrap();
+        assert!(matches!(first, ApiResponse::Ok { data, .. } if data.sequence == 7));
+        assert!(matches!(second, ApiResponse::Ok { data, .. } if data.sequence == 8));
+        assert!(
+            stream
+                .next::<willdeep_runtime_protocol::RuntimeEvent>()
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

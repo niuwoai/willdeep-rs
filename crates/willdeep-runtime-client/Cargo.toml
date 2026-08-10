@@ -15,3 +15,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 willdeep-runtime-protocol.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc2
+> 当前实现版本：v0.21.0-rc3
 
 ## 1. 目标
 
@@ -78,7 +78,7 @@ event.stream
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc2",
+    "server_version": "0.21.0-rc3",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -96,7 +96,7 @@ event.stream
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc2"
+    "server_version": "0.21.0-rc3"
   }
 }
 ```
@@ -126,8 +126,8 @@ event.stream
 1. [x] 协议 crate、版本、对象类别、操作名、能力、错误码和响应信封；
 2. [x] 受 Token 的能力协商端点；
 3. [x] `willdeep api` JSON/NDJSON 统一入口；
-4. [ ] Session、Agent、Turn、Approval、Event 共享 DTO；
-5. [-] Rust Client Library；已实现统一调用、能力协商和 NDJSON 解码，稳定对象 DTO 与全部客户端迁移继续进行；
-6. [ ] TUI/Web 从手写 HTTP 调用迁移到 Client；
+4. [-] Session、Agent、Turn、Approval、Event 共享 DTO；Session、Agent、Turn、Event 已完成，Approval/Question 待迁移；
+5. [-] Rust Client Library；已实现统一调用、能力协商、NDJSON 解码和首批稳定 DTO，剩余对象与传输继续进行；
+6. [-] TUI/Web 从手写 HTTP 调用迁移到 Client；TUI 事件、Agent 观察/控制、审批和回答已迁移，Session/Task/Diff 与 Web 待迁移；
 7. [ ] Unix Socket 与 Windows Named Pipe；
 8. [ ] Swift FFI、移动端和自动化兼容验证。

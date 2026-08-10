@@ -1,5 +1,4 @@
 use super::*;
-use futures_util::StreamExt;
 
 #[derive(Clone)]
 pub(crate) enum RemoteGate {
@@ -391,98 +390,66 @@ async fn follow_runtime_events_once(
     tx: &tokio::sync::mpsc::UnboundedSender<Vec<RemoteRuntimeEvent>>,
 ) -> Result<()> {
     let state = load_state(&DaemonPaths::new(home).state)?;
-    let response = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .build()?
-        .get(format!(
-            "http://{}/v1/events/stream?after={}&limit=1000",
-            state.address, *cursor
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if response.status() == StatusCode::NOT_FOUND {
-        let events = runtime_events(home, *cursor, workspace).await?;
-        *cursor = events
-            .iter()
-            .map(|event| event.sequence)
-            .max()
-            .unwrap_or(*cursor);
-        let _ = tx.send(events);
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        return Ok(());
-    }
-    if !response.status().is_success() {
-        bail!("Runtime event stream returned HTTP {}", response.status());
-    }
-    let mut stream = response.bytes_stream();
-    let mut decoder = SseDecoder::default();
+    let mut stream = match runtime_client(&state)?
+        .stream_events(*cursor, 1_000, None)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(willdeep_runtime_client::ClientError::HttpStatus(404)) => {
+            let events = runtime_events(home, *cursor, workspace).await?;
+            *cursor = events
+                .iter()
+                .map(|event| event.sequence)
+                .max()
+                .unwrap_or(*cursor);
+            let _ = tx.send(events);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut visible_tasks = HashMap::<uuid::Uuid, Option<uuid::Uuid>>::new();
-    while let Some(chunk) = stream.next().await {
-        for event in decoder.push(&chunk?) {
-            *cursor = (*cursor).max(event.sequence);
-            let session_id = if let Some(task_id) = event_task_id(&event.message) {
-                if let Some(session_id) = visible_tasks.get(&task_id) {
-                    *session_id
-                } else {
-                    let task =
-                        authorized_get::<RuntimeTask>(&state, &format!("/v1/tasks/{task_id}"))
-                            .await
-                            .ok();
-                    let session_id = task
-                        .as_ref()
-                        .filter(|task| task.workspace == workspace)
-                        .and_then(|task| task.session_id);
-                    if task.is_some() {
-                        visible_tasks.insert(task_id, session_id);
-                    }
-                    session_id
-                }
-            } else {
-                None
-            };
-            if tx
-                .send(vec![RemoteRuntimeEvent {
-                    sequence: event.sequence,
-                    kind: event.kind,
-                    message: event.message,
-                    visible: session_id.is_some(),
-                    session_id,
-                }])
-                .is_err()
-            {
-                return Ok(());
+    while let Some(response) = stream.next::<RuntimeEvent>().await? {
+        let event = match response {
+            willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => data,
+            willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+                bail!("Runtime event stream failed: {}", error.message)
             }
+        };
+        *cursor = (*cursor).max(event.sequence);
+        let session_id = if let Some(task_id) = event_task_id(&event.message) {
+            if let Some(session_id) = visible_tasks.get(&task_id) {
+                *session_id
+            } else {
+                let task = authorized_get::<RuntimeTask>(&state, &format!("/v1/tasks/{task_id}"))
+                    .await
+                    .ok();
+                let session_id = task
+                    .as_ref()
+                    .filter(|task| task.workspace == workspace)
+                    .and_then(|task| task.session_id);
+                if task.is_some() {
+                    visible_tasks.insert(task_id, session_id);
+                }
+                session_id
+            }
+        } else {
+            None
+        };
+        if tx
+            .send(vec![RemoteRuntimeEvent {
+                sequence: event.sequence,
+                kind: event.kind,
+                message: event.message,
+                visible: session_id.is_some(),
+                session_id,
+            }])
+            .is_err()
+        {
+            return Ok(());
         }
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct SseDecoder {
-    buffer: Vec<u8>,
-}
-
-impl SseDecoder {
-    fn push(&mut self, chunk: &[u8]) -> Vec<RuntimeEvent> {
-        self.buffer.extend_from_slice(chunk);
-        let mut events = Vec::new();
-        while let Some(end) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.buffer.drain(..=end).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            let Some(data) = line.strip_prefix(b"data:") else {
-                continue;
-            };
-            let data = data.strip_prefix(b" ").unwrap_or(data);
-            if let Ok(event) = serde_json::from_slice::<RuntimeEvent>(data) {
-                events.push(event);
-            }
-        }
-        events
-    }
 }
 
 fn event_task_id(message: &str) -> Option<uuid::Uuid> {
@@ -506,10 +473,21 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         }
     };
     let workspace = workspace.canonicalize()?;
-    let mut agents = authorized_get::<Vec<super::agent_store::RuntimeAgent>>(&state, "/v1/agents")
-        .await?
+    let response: willdeep_runtime_protocol::ApiResponse<
+        Vec<willdeep_runtime_protocol::RuntimeAgent>,
+    > = runtime_client(&state)?
+        .call("agent.list", &serde_json::json!({}), None)
+        .await?;
+    let mut agents = api_data(response)?
         .into_iter()
-        .filter(|agent| agent.workspace == workspace)
+        .filter(|agent| {
+            agent
+                .workspace
+                .as_deref()
+                .map(Path::new)
+                .and_then(|path| path.canonicalize().ok())
+                .is_some_and(|path| path == workspace)
+        })
         .map(remote_agent)
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| (agent.parent_id.is_some(), agent.parent_id, agent.id));
@@ -592,26 +570,32 @@ pub(crate) async fn instruct_remote_agent(
     id: uuid::Uuid,
     message: String,
 ) -> Result<()> {
-    super::agent_control::instruct_agent(home, id, message).await
+    let state = ensure_running(home).await?;
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(
+                "agent.prompt",
+                &serde_json::json!({"id": id, "message": message}),
+                None,
+            )
+            .await?;
+    api_data(response).map(|_| ())
 }
 
 async fn control_remote_agent(home: &Path, id: uuid::Uuid, action: &str) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Agent {action}: {}",
-            response.text().await?
-        );
-    }
-    Ok(())
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(
+                format!("agent.{action}"),
+                &serde_json::json!({"id": id}),
+                None,
+            )
+            .await?;
+    api_data(response).map(|_| ())
 }
 
-fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
+fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
     RemoteAgent {
         id: agent.id,
         parent_id: agent.parent_id,
@@ -619,25 +603,25 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
         background: agent.background,
         profile: agent.profile,
         status: match agent.status {
-            super::agent_store::RuntimeAgentStatus::Queued
-            | super::agent_store::RuntimeAgentStatus::Running => {
+            willdeep_runtime_protocol::AgentStatus::Queued
+            | willdeep_runtime_protocol::AgentStatus::Running => {
                 willdeep_core::RuntimeStatus::Working
             }
-            super::agent_store::RuntimeAgentStatus::WaitingApproval => {
+            willdeep_runtime_protocol::AgentStatus::WaitingApproval => {
                 willdeep_core::RuntimeStatus::WaitingApproval
             }
-            super::agent_store::RuntimeAgentStatus::WaitingAnswer => {
+            willdeep_runtime_protocol::AgentStatus::WaitingAnswer => {
                 willdeep_core::RuntimeStatus::WaitingAnswer
             }
-            super::agent_store::RuntimeAgentStatus::Blocked => {
+            willdeep_runtime_protocol::AgentStatus::Blocked => {
                 willdeep_core::RuntimeStatus::Blocked
             }
-            super::agent_store::RuntimeAgentStatus::Completed => willdeep_core::RuntimeStatus::Done,
-            super::agent_store::RuntimeAgentStatus::Failed
-            | super::agent_store::RuntimeAgentStatus::Interrupted => {
+            willdeep_runtime_protocol::AgentStatus::Completed => willdeep_core::RuntimeStatus::Done,
+            willdeep_runtime_protocol::AgentStatus::Failed
+            | willdeep_runtime_protocol::AgentStatus::Interrupted => {
                 willdeep_core::RuntimeStatus::Failed
             }
-            super::agent_store::RuntimeAgentStatus::Cancelled => {
+            willdeep_runtime_protocol::AgentStatus::Cancelled => {
                 willdeep_core::RuntimeStatus::Cancelled
             }
         },
@@ -648,9 +632,18 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
         token_budget: agent.token_budget,
         timeout_seconds: agent.timeout_seconds,
         report: agent.report,
-        workspace: agent.workspace,
+        workspace: agent.workspace.map(PathBuf::from).unwrap_or_default(),
         worktree_branch: agent.worktree_branch,
         dedicated_worktree: agent.dedicated_worktree,
+    }
+}
+
+fn api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
+    match response {
+        willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+            bail!("Runtime API error: {}", error.message)
+        }
     }
 }
 
@@ -701,12 +694,21 @@ pub(crate) async fn resolve_remote_approval(
     id: uuid::Uuid,
     decision: willdeep_core::ApprovalDecision,
 ) -> Result<()> {
-    let resolution = match decision {
-        willdeep_core::ApprovalDecision::AllowOnce => InteractionResolution::AllowOnce,
-        willdeep_core::ApprovalDecision::Deny => InteractionResolution::Deny,
-        willdeep_core::ApprovalDecision::AlwaysAllow => InteractionResolution::AlwaysAllow,
+    let decision = match decision {
+        willdeep_core::ApprovalDecision::AllowOnce => "allow_once",
+        willdeep_core::ApprovalDecision::Deny => "deny",
+        willdeep_core::ApprovalDecision::AlwaysAllow => "always_allow",
     };
-    resolve_interaction_quiet(home, id, resolution).await
+    let state = ensure_running(home).await?;
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(
+                "approval.resolve",
+                &serde_json::json!({"id": id, "decision": decision}),
+                None,
+            )
+            .await?;
+    api_data(response).map(|_| ())
 }
 
 pub(crate) async fn answer_remote_question(
@@ -714,7 +716,16 @@ pub(crate) async fn answer_remote_question(
     id: uuid::Uuid,
     answer: Option<String>,
 ) -> Result<()> {
-    resolve_interaction_quiet(home, id, InteractionResolution::Answer(answer)).await
+    let state = ensure_running(home).await?;
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(
+                "question.answer",
+                &serde_json::json!({"id": id, "answer": answer}),
+                None,
+            )
+            .await?;
+    api_data(response).map(|_| ())
 }
 
 pub(crate) async fn cancel_remote_task(home: &Path, id: uuid::Uuid) -> Result<()> {
@@ -731,61 +742,4 @@ pub(crate) async fn cancel_remote_task(home: &Path, id: uuid::Uuid) -> Result<()
         );
     }
     Ok(())
-}
-
-async fn resolve_interaction_quiet(
-    home: &Path,
-    id: uuid::Uuid,
-    resolution: InteractionResolution,
-) -> Result<()> {
-    let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/interactions/{id}/resolve",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&ResolveInteraction { resolution })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected interaction resolution: HTTP {}",
-            response.status()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod stream_tests {
-    use super::*;
-
-    #[test]
-    fn sse_decoder_handles_split_utf8_and_multiple_events() {
-        let first = RuntimeEvent {
-            sequence: 7,
-            timestamp: 1,
-            kind: "模型.事件".to_owned(),
-            message: "中文消息".to_owned(),
-        };
-        let second = RuntimeEvent {
-            sequence: 8,
-            timestamp: 2,
-            kind: "task.completed".to_owned(),
-            message: "done".to_owned(),
-        };
-        let payload = format!(
-            "id: 7\nevent: runtime\ndata: {}\n\nid: 8\ndata: {}\n\n",
-            serde_json::to_string(&first).unwrap(),
-            serde_json::to_string(&second).unwrap()
-        );
-        let split = payload.find("中文").unwrap() + 1;
-        let mut decoder = SseDecoder::default();
-        assert!(decoder.push(&payload.as_bytes()[..split]).is_empty());
-        assert_eq!(
-            decoder.push(&payload.as_bytes()[split..]),
-            vec![first, second]
-        );
-    }
 }

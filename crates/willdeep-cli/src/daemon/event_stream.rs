@@ -73,6 +73,45 @@ impl EventLog {
     }
 }
 
+pub(super) fn public_event(mut event: RuntimeEvent) -> RuntimeEvent {
+    if event.kind == "task.output" {
+        event.message = redact_task_output(&event.message);
+    }
+    event.message = redact_suffix(&event.message, " root=");
+    event.message = redact_suffix(&event.message, " error=");
+    event
+}
+
+fn redact_task_output(message: &str) -> String {
+    let Some((prefix, payload)) = message.split_once(' ') else {
+        return message.to_owned();
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return prefix.to_owned();
+    };
+    if let Some(object) = value.as_object_mut() {
+        for field in [
+            "arguments",
+            "output",
+            "report",
+            "workspace",
+            "root_workspace",
+        ] {
+            object.remove(field);
+        }
+    }
+    format!(
+        "{prefix} {}",
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
+fn redact_suffix(message: &str, marker: &str) -> String {
+    message
+        .find(marker)
+        .map_or_else(|| message.to_owned(), |index| message[..index].to_owned())
+}
+
 struct LiveEventState {
     backlog: VecDeque<RuntimeEvent>,
     receiver: tokio::sync::broadcast::Receiver<RuntimeEvent>,
@@ -138,7 +177,7 @@ pub(super) async fn events_ndjson_handler(
     };
     let events = stream::unfold(live, move |mut state| async move {
         next_event(&mut state).await.map(|event| {
-            let line = Ok::<Bytes, Infallible>(ndjson_event(event, request_id));
+            let line = Ok::<Bytes, Infallible>(ndjson_event(public_event(event), request_id));
             (line, state)
         })
     });
@@ -246,5 +285,30 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["sequence"], 42);
         assert_eq!(value["meta"]["request_id"], request_id.to_string());
+    }
+
+    #[test]
+    fn public_events_remove_tool_payloads_reports_paths_and_errors() {
+        let event = public_event(RuntimeEvent {
+            sequence: 1,
+            timestamp: 2,
+            kind: "task.output".to_owned(),
+            message: concat!(
+                "task_id=abc ",
+                r#"{"type":"tool_requested","name":"run_command","arguments":{"command":"secret"},"output":"private","report":"private","workspace":"/private/path","root_workspace":"/root"}"#
+            )
+            .to_owned(),
+        });
+        assert!(event.message.contains("run_command"));
+        for secret in ["secret", "private", "/private/path", "/root"] {
+            assert!(!event.message.contains(secret));
+        }
+        let event = public_event(RuntimeEvent {
+            sequence: 2,
+            timestamp: 3,
+            kind: "task.failed".to_owned(),
+            message: "task_id=abc exit_code=1 error=/private/path token=secret".to_owned(),
+        });
+        assert_eq!(event.message, "task_id=abc exit_code=1");
     }
 }

@@ -83,6 +83,108 @@ pub enum Capability {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEvent {
+    pub sequence: u64,
+    pub timestamp: u64,
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Idle,
+    Queued,
+    Running,
+    WaitingApproval,
+    WaitingAnswer,
+    Failed,
+    Interrupted,
+    Archived,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSession {
+    pub id: uuid::Uuid,
+    pub root_agent_id: uuid::Uuid,
+    pub workspace: Option<String>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub status: SessionStatus,
+    pub active_turn_id: Option<uuid::Uuid>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatus {
+    Queued,
+    Running,
+    WaitingApproval,
+    WaitingAnswer,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTurn {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub request_id: uuid::Uuid,
+    pub queue_sequence: u64,
+    pub status: TurnStatus,
+    pub active_task_id: Option<uuid::Uuid>,
+    pub attempts: u32,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Queued,
+    Running,
+    WaitingApproval,
+    WaitingAnswer,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeAgent {
+    pub id: uuid::Uuid,
+    pub parent_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub label: Option<String>,
+    pub background: bool,
+    pub workspace: Option<String>,
+    pub root_workspace: Option<String>,
+    pub worktree_branch: Option<String>,
+    pub dedicated_worktree: bool,
+    pub profile: Option<String>,
+    pub status: AgentStatus,
+    pub current_turn: u64,
+    pub current_tool: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub max_turns: Option<u64>,
+    pub token_budget: Option<u64>,
+    pub timeout_seconds: Option<u64>,
+    pub report: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolLimits {
     pub max_event_page: u32,
     pub max_prompt_bytes: u64,
@@ -314,5 +416,40 @@ mod tests {
         assert!(!request.is_protocol_compatible());
         request.protocol_version = "invalid".to_owned();
         assert!(!request.is_protocol_compatible());
+    }
+
+    #[test]
+    fn public_session_agent_and_turn_dtos_exclude_private_request_content() {
+        let session = RuntimeSession {
+            id: uuid::Uuid::new_v4(),
+            root_agent_id: uuid::Uuid::new_v4(),
+            workspace: Some("/workspace".to_owned()),
+            profile: Some("coding".to_owned()),
+            model: Some("model".to_owned()),
+            status: SessionStatus::Idle,
+            active_turn_id: None,
+            created_at: 1,
+            updated_at: 2,
+        };
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(json.get("config").is_none());
+        assert!(json.get("last_error").is_none());
+
+        let turn = RuntimeTurn {
+            id: uuid::Uuid::new_v4(),
+            session_id: session.id,
+            request_id: uuid::Uuid::new_v4(),
+            queue_sequence: 1,
+            status: TurnStatus::Queued,
+            active_task_id: None,
+            attempts: 0,
+            created_at: 1,
+            started_at: None,
+            completed_at: None,
+        };
+        let json = serde_json::to_value(&turn).unwrap();
+        assert!(json.get("prompt").is_none());
+        assert!(json.get("attachments").is_none());
+        assert!(json.get("error").is_none());
     }
 }

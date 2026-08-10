@@ -151,19 +151,29 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             "event_sequence": state.events.latest_sequence()
         })),
         "workspace.list" => json_result(state.workspaces.list()),
-        "session.list" => json_result(state.sessions.list()),
+        "session.list" => json_result(
+            state
+                .sessions
+                .list()
+                .map(|sessions| sessions.into_iter().map(public_session).collect::<Vec<_>>()),
+        ),
         "session.get" => match params::<IdParams>(&request) {
             Ok(params) => match state.sessions.get(params.id) {
-                Ok(Some(session)) => json(session),
+                Ok(Some(session)) => json(public_session(session)),
                 Ok(None) => Err(ApiFailure::not_found("Runtime Session not found")),
                 Err(error) => Err(ApiFailure::internal(error)),
             },
             Err(error) => Err(error),
         },
-        "agent.list" => json_result(state.agents.list()),
+        "agent.list" => json_result(state.agents.list().map(|agents| {
+            agents
+                .into_iter()
+                .map(|agent| public_agent(agent, false))
+                .collect::<Vec<_>>()
+        })),
         "agent.get" => match params::<IdParams>(&request) {
             Ok(params) => match state.agents.get(params.id) {
-                Ok(Some(agent)) => json(agent),
+                Ok(Some(agent)) => json(public_agent(agent, true)),
                 Ok(None) => Err(ApiFailure::not_found("Runtime Agent not found")),
                 Err(error) => Err(ApiFailure::internal(error)),
             },
@@ -171,9 +181,13 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         },
         "agent.prompt" => agent_prompt(state, &request).await,
         "agent.wait" => agent_wait(state, &request).await,
+        "agent.stop" => agent_command(state, &request, agent_control::AgentCommandKind::Stop).await,
+        "agent.retry" => {
+            agent_command(state, &request, agent_control::AgentCommandKind::Retry).await
+        }
         "turn.get" => match params::<IdParams>(&request) {
             Ok(params) => match state.sessions.get_turn(params.id) {
-                Ok(Some(turn)) => json(turn),
+                Ok(Some(turn)) => json(public_turn(turn)),
                 Ok(None) => Err(ApiFailure::not_found("Runtime Turn not found")),
                 Err(error) => Err(ApiFailure::internal(error)),
             },
@@ -195,7 +209,13 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             Ok(params) => json_result(
                 state
                     .events
-                    .read_after(params.after, params.limit.clamp(1, 1_000)),
+                    .read_after(params.after, params.limit.clamp(1, 1_000))
+                    .map(|events| {
+                        events
+                            .into_iter()
+                            .map(event_stream::public_event)
+                            .collect::<Vec<_>>()
+                    }),
             ),
             Err(error) => Err(error),
         },
@@ -241,7 +261,7 @@ impl UnifiedResponse {
 fn is_mutating_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "agent.prompt" | "approval.resolve" | "question.answer"
+        "agent.prompt" | "agent.stop" | "agent.retry" | "approval.resolve" | "question.answer"
     )
 }
 
@@ -254,6 +274,111 @@ fn request_fingerprint(request: &ApiRequest) -> u64 {
         .unwrap_or_default()
         .hash(&mut hasher);
     hasher.finish()
+}
+
+fn public_session(
+    session: session_store::RuntimeSession,
+) -> willdeep_runtime_protocol::RuntimeSession {
+    use session_store::RuntimeSessionStatus as Source;
+    use willdeep_runtime_protocol::SessionStatus as Target;
+
+    willdeep_runtime_protocol::RuntimeSession {
+        id: session.id,
+        root_agent_id: session.root_agent_id,
+        workspace: Some(session.workspace.to_string_lossy().into_owned()),
+        profile: session.profile,
+        model: session.model,
+        status: match session.status {
+            Source::Idle => Target::Idle,
+            Source::Queued => Target::Queued,
+            Source::Running => Target::Running,
+            Source::WaitingApproval => Target::WaitingApproval,
+            Source::WaitingAnswer => Target::WaitingAnswer,
+            Source::Failed => Target::Failed,
+            Source::Interrupted => Target::Interrupted,
+            Source::Archived => Target::Archived,
+        },
+        active_turn_id: session.active_turn_id,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+    }
+}
+
+fn public_turn(turn: session_store::RuntimeTurn) -> willdeep_runtime_protocol::RuntimeTurn {
+    use session_store::RuntimeTurnStatus as Source;
+    use willdeep_runtime_protocol::TurnStatus as Target;
+
+    willdeep_runtime_protocol::RuntimeTurn {
+        id: turn.id,
+        session_id: turn.session_id,
+        request_id: turn.request_id,
+        queue_sequence: turn.queue_sequence,
+        status: match turn.status {
+            Source::Queued => Target::Queued,
+            Source::Running => Target::Running,
+            Source::WaitingApproval => Target::WaitingApproval,
+            Source::WaitingAnswer => Target::WaitingAnswer,
+            Source::Completed => Target::Completed,
+            Source::Failed => Target::Failed,
+            Source::Cancelled => Target::Cancelled,
+            Source::Interrupted => Target::Interrupted,
+        },
+        active_task_id: turn.active_task_id,
+        attempts: turn.attempts,
+        created_at: turn.created_at,
+        started_at: turn.started_at,
+        completed_at: turn.completed_at,
+    }
+}
+
+fn public_agent(
+    agent: agent_store::RuntimeAgent,
+    include_detail: bool,
+) -> willdeep_runtime_protocol::RuntimeAgent {
+    use agent_store::RuntimeAgentStatus as Source;
+    use willdeep_runtime_protocol::AgentStatus as Target;
+
+    willdeep_runtime_protocol::RuntimeAgent {
+        id: agent.id,
+        parent_id: agent.parent_id,
+        task_id: agent.task_id,
+        label: agent.label,
+        background: agent.background,
+        workspace: Some(agent.workspace.to_string_lossy().into_owned()),
+        root_workspace: include_detail
+            .then(|| {
+                agent
+                    .root_workspace
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .flatten(),
+        worktree_branch: agent.worktree_branch,
+        dedicated_worktree: agent.dedicated_worktree,
+        profile: agent.profile,
+        status: match agent.status {
+            Source::Queued => Target::Queued,
+            Source::Running => Target::Running,
+            Source::WaitingApproval => Target::WaitingApproval,
+            Source::WaitingAnswer => Target::WaitingAnswer,
+            Source::Blocked => Target::Blocked,
+            Source::Completed => Target::Completed,
+            Source::Failed => Target::Failed,
+            Source::Cancelled => Target::Cancelled,
+            Source::Interrupted => Target::Interrupted,
+        },
+        current_turn: agent.current_turn,
+        current_tool: agent.current_tool,
+        input_tokens: agent.input_tokens,
+        output_tokens: agent.output_tokens,
+        total_tokens: agent.total_tokens,
+        max_turns: agent.max_turns,
+        token_budget: agent.token_budget,
+        timeout_seconds: agent.timeout_seconds,
+        report: include_detail.then_some(agent.report).flatten(),
+        created_at: agent.created_at,
+        updated_at: agent.updated_at,
+        completed_at: agent.completed_at,
+    }
 }
 
 async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
@@ -270,6 +395,22 @@ async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     )
     .await
     .map_err(ApiFailure::from_status)?;
+    command_response(command)
+}
+
+async fn agent_command(
+    state: &ServerState,
+    request: &ApiRequest,
+    kind: agent_control::AgentCommandKind,
+) -> ApiResult {
+    let params = params::<IdParams>(request)?;
+    let command = agent_control::enqueue_agent_command_internal(state, params.id, kind, None)
+        .await
+        .map_err(ApiFailure::from_status)?;
+    command_response(command)
+}
+
+fn command_response(command: agent_control::AgentCommand) -> ApiResult {
     json(serde_json::json!({
         "id": command.id,
         "task_id": command.task_id,
@@ -297,7 +438,7 @@ async fn agent_wait(state: &ServerState, request: &ApiRequest) -> ApiResult {
                 | RuntimeAgentStatus::WaitingApproval
                 | RuntimeAgentStatus::WaitingAnswer
         ) {
-            return json(agent);
+            return json(public_agent(agent, true));
         }
         if started.elapsed() >= Duration::from_millis(timeout_ms) {
             return Err(ApiFailure {

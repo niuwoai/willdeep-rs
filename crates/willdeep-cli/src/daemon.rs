@@ -481,13 +481,7 @@ struct ServerState {
     idempotency: Arc<control_api::IdempotencyStore>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct RuntimeEvent {
-    sequence: u64,
-    timestamp: u64,
-    kind: String,
-    message: String,
-}
+type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

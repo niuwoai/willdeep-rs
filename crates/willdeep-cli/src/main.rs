@@ -796,18 +796,16 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         AgentEvent::ToolRequested(call) => serde_json::json!({
             "type": "tool_requested",
             "id": call.id,
-            "name": call.name,
-            "arguments": call.arguments
+            "name": call.name
         }),
         AgentEvent::ToolCompleted {
             call,
-            output,
+            output: _,
             is_error,
         } => serde_json::json!({
             "type": "tool_completed",
             "id": call.id,
             "name": call.name,
-            "output": output,
             "is_error": is_error
         }),
         AgentEvent::Usage(usage) => serde_json::json!({
@@ -832,8 +830,8 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             max_turns,
             token_budget,
             timeout_seconds,
-            workspace,
-            root_workspace,
+            workspace: _,
+            root_workspace: _,
             worktree_branch,
             dedicated_worktree,
         } => serde_json::json!({
@@ -844,13 +842,15 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "background": background,
             "max_turns": max_turns,
             "token_budget": token_budget,
-            "timeout_seconds": timeout_seconds
-            ,"workspace": workspace
-            ,"root_workspace": root_workspace
-            ,"worktree_branch": worktree_branch
-            ,"dedicated_worktree": dedicated_worktree
+            "timeout_seconds": timeout_seconds,
+            "worktree_branch": worktree_branch,
+            "dedicated_worktree": dedicated_worktree
         }),
-        AgentEvent::SubagentCompleted { id, status, report } => serde_json::json!({
+        AgentEvent::SubagentCompleted {
+            id,
+            status,
+            report: _,
+        } => serde_json::json!({
             "type": "subagent_completed",
             "id": id,
             "status": match status {
@@ -858,8 +858,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
                 SubagentLifecycleStatus::Blocked => "blocked",
                 SubagentLifecycleStatus::Cancelled => "cancelled",
                 SubagentLifecycleStatus::Failed => "failed",
-            },
-            "report": report
+            }
         }),
         AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
             "type": "subagent_turn_started",

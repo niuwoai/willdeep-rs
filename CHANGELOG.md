@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.21.0-rc3] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增稳定 `RuntimeSession`、`RuntimeTurn`、`RuntimeAgent`、`RuntimeEvent` 及对应状态枚举；公开 DTO 不包含配置文件、队列 Prompt、附件、消息边界或内部错误字段。
+- Runtime Client 新增跨 Chunk NDJSON UTF-8/多信封解码测试，覆盖流式网络切包边界。
+
+### Changed
+
+- 统一 API 的 Session/Turn/Agent 查询与 Agent Wait 改为公开 DTO；Agent 列表不返回报告，只有显式 `agent.get`/`agent.wait` 返回有界报告详情。
+- TUI 实时事件改用共享 Runtime Client 的 NDJSON 流；Agent 列表、补充 Prompt、停止、重试、审批和问题回答也改走统一 API，旧 SSE 仅保留服务端兼容端点。
+- `agent.stop` 与 `agent.retry` 加入统一调度和 Request ID 幂等范围。
+
+### Security
+
+- 新写入的 Tool 事件不再持久化工具参数和输出，子 Agent 事件不再持久化报告及 Workspace 路径。
+- 统一 `event.list` 和 NDJSON 流会在读取边界净化旧日志中的 Tool 参数/输出、Agent 报告、Workspace 路径及内部错误，保留工具名称、状态和 AI 正式回复。
+
 ## [0.21.0-rc2] - 2026-08-11
 
 ### Added
