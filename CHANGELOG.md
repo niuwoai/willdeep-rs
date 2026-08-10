@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0-rc28] - 2026-08-11
+
+### Added
+
+- 新增 `willdeep doctor [--json]`，离线检查配置、Provider 完整性、工作区、Git、Web 资源和 Runtime 状态。
+
+### Security
+
+- Doctor 只报告凭据可用性，不输出 API Key、Runtime Token、环境变量名、Provider 地址或本地路径；Runtime 版本不匹配会明确告警。
+
 ## [0.21.0-rc27] - 2026-08-11
 
 ### Added

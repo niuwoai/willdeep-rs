@@ -2063,6 +2063,45 @@ struct Health {
     event_sequence: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeDiagnostic {
+    pub status: &'static str,
+    pub version: Option<String>,
+    pub uptime_seconds: Option<u64>,
+    pub transport: Option<&'static str>,
+}
+
+pub(crate) async fn diagnostic(home: &Path) -> RuntimeDiagnostic {
+    let path = DaemonPaths::new(home).state;
+    let Ok(state) = load_state(&path) else {
+        return RuntimeDiagnostic {
+            status: "stopped",
+            version: None,
+            uptime_seconds: None,
+            transport: None,
+        };
+    };
+    let transport = match &state.local_transport {
+        Some(LocalTransportState::UnixSocket { .. }) => "unix_socket",
+        Some(LocalTransportState::WindowsNamedPipe { .. }) => "windows_named_pipe",
+        None => "loopback_http",
+    };
+    match probe(&state).await {
+        Ok(health) => RuntimeDiagnostic {
+            status: "running",
+            version: Some(health.version),
+            uptime_seconds: Some(health.uptime_seconds),
+            transport: Some(transport),
+        },
+        Err(_) => RuntimeDiagnostic {
+            status: "stale",
+            version: None,
+            uptime_seconds: None,
+            transport: Some(transport),
+        },
+    }
+}
+
 async fn probe(state: &DaemonState) -> Result<Health> {
     if state.schema != STATE_SCHEMA {
         bail!("unsupported state schema {}", state.schema);

@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc27
+> 当前实施版本：v0.21.0-rc28
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -167,7 +167,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 ### 阶段 12：可观测性、诊断与 1.0 加固
 
 - [ ] 结构化日志与 Session/Agent/Turn/Tool Trace ID。
-- [ ] `willdeep doctor` 与自动脱敏的诊断包。
+- [x] `willdeep doctor` 离线就绪检查和自动脱敏 JSON 报告。
+- [ ] 可导出的自动脱敏诊断包。
 - [ ] 首 Token、轮次、工具、重试、Token、费用、压缩和队列指标。
 - [ ] Provider 健康状态、事件背压、日志与 Scrollback 上限。
 - [ ] 崩溃恢复、协议兼容和跨平台端到端测试。
@@ -222,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc28（已完成）：新增顶层 `willdeep doctor [--json]`。诊断完全离线，不联系 Provider；检查当前版本/平台、TOML 安全与 Provider 字段完整性、工作区、Git Worktree、内嵌 Web 资源、Runtime 存活/版本匹配和实际本地传输。报告只表达凭据是否可用，不输出 API Key、Runtime Token、环境变量名、Provider 地址或本地路径；旧 Runtime 版本会明确降级为 Warning。
 
 v0.21.0-rc27（已完成）：新增只读 `git_log` 与 `git_blame` Harness 工具。Log 使用参数化参数支持路径、数量、作者和时间过滤，最多返回 100 条；Blame 必须绑定工作区内既有文件，默认最多 200 行、显式范围最多 2000 行。两者均不经 Shell 拼接、以 `--` 隔离路径并继续受统一输出上限约束；真实临时仓库测试覆盖过滤、范围和目录逃逸。
 

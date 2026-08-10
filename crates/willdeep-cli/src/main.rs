@@ -14,6 +14,7 @@ use willdeep_core::{
 
 mod config;
 mod daemon;
+mod doctor;
 mod editor;
 mod harness;
 mod i18n;
@@ -194,6 +195,12 @@ enum CliCommand {
         #[command(subcommand)]
         action: integrations::IntegrationAction,
     },
+    /// Diagnose local configuration and runtime readiness without contacting a Provider.
+    Doctor {
+        /// Emit one stable JSON report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -350,6 +357,25 @@ async fn run() -> Result<()> {
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
+            CliCommand::Doctor { json } => {
+                doctor::run(doctor::DoctorOptions {
+                    config_path: cli.config.clone(),
+                    profile: cli.profile.clone(),
+                    workspace: cli.workspace.clone(),
+                    home: willdeep_home()?,
+                    api_base_present: cli
+                        .api_base
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty()),
+                    api_key_present: cli
+                        .api_key
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty()),
+                    model_present: cli.model.as_deref().is_some_and(|value| !value.is_empty()),
+                    json,
+                })
+                .await
+            }
         };
     }
     let administrative =
@@ -1241,6 +1267,26 @@ mod tests {
     }
 
     #[test]
+    fn doctor_accepts_machine_output_and_global_context_options() {
+        let cli = Cli::try_parse_from([
+            "willdeep",
+            "doctor",
+            "--json",
+            "--workspace",
+            ".",
+            "--profile",
+            "coding",
+        ])
+        .unwrap();
+        assert_eq!(cli.workspace.as_deref(), Some(std::path::Path::new(".")));
+        assert_eq!(cli.profile.as_deref(), Some("coding"));
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Doctor { json: true })
+        ));
+    }
+
+    #[test]
     fn run_attachments_load_text_and_supported_image_metadata() {
         let root = std::env::temp_dir().join(format!("willdeep-run-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1337,6 +1383,7 @@ mod tests {
         assert!(output.contains(".TH willdeep"));
         assert!(output.contains("Run one non\\-interactive coding\\-agent turn"));
         assert!(output.contains("Manage the persistent local Runtime Daemon"));
+        assert!(output.contains("Diagnose local configuration and runtime readiness"));
     }
 
     #[test]

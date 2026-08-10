@@ -26,6 +26,10 @@ const MAX_PROMPT_CHARS: usize = 100_000;
 #[folder = "../../web/dist"]
 struct WebAssets;
 
+pub(crate) fn embedded_assets_available() -> bool {
+    WebAssets::get("index.html").is_some()
+}
+
 pub struct WebConfig {
     pub listen: SocketAddr,
     pub config_path: PathBuf,

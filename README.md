@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc27`，支持：
+当前版本为 `0.21.0-rc28`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -42,6 +42,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Web 工作区选择器读取 Runtime 注册表的名称、当前项和访问模式，同时继续与 `--workspace/--web-workspace` 启动白名单取交集；被移除或未授权的目录不会因浏览器请求重新开放。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
+- `willdeep doctor [--json]` 离线检查配置、Provider 完整性、工作区、Git、内嵌 Web 资源与 Runtime 版本/传输状态，报告自动脱敏。
 - Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。
 - Runtime 后台审批与 ask_user 待处理列表、跨客户端解决和原任务续跑。
 - TUI Runtime Inbox、远端审批/回答/停止，以及 `/runtime` 可分离任务提交、附件透传和按事件游标恢复聊天时间线。
@@ -362,7 +363,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc27` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc28` 已覆盖全部 11 类公开对象 DTO。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 
