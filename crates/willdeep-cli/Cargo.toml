@@ -23,6 +23,7 @@ image.workspace = true
 http.workspace = true
 qrcode.workspace = true
 reqwest.workspace = true
+regex.workspace = true
 rust-embed.workspace = true
 ratatui.workspace = true
 serde.workspace = true

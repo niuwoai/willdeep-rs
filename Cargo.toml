@@ -3,7 +3,7 @@ members = ["crates/willdeep-core", "crates/willdeep-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0-rc1"
+version = "0.14.0-rc2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/niuwoai/willdeep-rs"
@@ -15,6 +15,7 @@ axum = "0.8"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+regex = "1.11"
 rust-embed = "8.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

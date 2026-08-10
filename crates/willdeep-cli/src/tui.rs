@@ -20,12 +20,14 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::types::Usage;
 use willdeep_core::{
     Agent, AgentEvent, ApprovalDecision, Approver, BackgroundTaskRegistry, BackgroundTaskSnapshot,
-    EventSink, Message, MessageAttachment, Session, SessionStore, SkillCatalog, UserQuestion,
+    BackgroundTaskStatus, EventSink, Message, MessageAttachment, Session, SessionStore,
+    SkillCatalog, UserQuestion,
 };
 
 use crate::editor::{DraftAttachment, PromptEditor};
@@ -126,12 +128,35 @@ struct App {
     sidebar_rect: Rect,
     sidebar_wide: bool,
     help_visible: bool,
+    sidebar_hits: Vec<(u16, SidebarHit)>,
+    sidebar_manual_scroll: bool,
+    task_detail: Option<TaskDetail>,
+    task_detail_scroll: usize,
+    search: Option<SearchState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusPane {
     Prompt,
     Sidebar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarHit {
+    Section(usize),
+    Task(usize),
+}
+
+struct TaskDetail {
+    snapshot: BackgroundTaskSnapshot,
+    output: String,
+}
+
+#[derive(Default)]
+struct SearchState {
+    editor: PromptEditor,
+    matches: Vec<usize>,
+    selected: usize,
 }
 
 struct AskDialog {
@@ -286,9 +311,9 @@ async fn event_loop(
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
-                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row),
-                    MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_move(-1),
-                    MouseEventKind::ScrollDown if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_move(1),
+                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks),
+                    MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(-3),
+                    MouseEventKind::ScrollDown if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(3),
                     MouseEventKind::ScrollUp=>app.scroll_up(3),
                     MouseEventKind::ScrollDown=>app.scroll_down(3),
                     _=>{}
@@ -308,7 +333,13 @@ async fn event_loop(
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
+                    if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
+                    if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('f'){
+                        app.search=Some(SearchState::default());
+                        continue;
+                    }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('b'){
                         if app.sidebar_wide {
                             app.sidebar_visible = !app.sidebar_visible;
@@ -333,7 +364,8 @@ async fn event_loop(
                             KeyCode::Down=>app.sidebar_move(1),
                             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT)=>app.sidebar_move(-1),
                             KeyCode::Tab=>app.sidebar_move(1),
-                            KeyCode::Enter|KeyCode::Char(' ')=>app.sidebar_toggle(),
+                            KeyCode::Enter=>app.sidebar_activate(&runtime.background_tasks),
+                            KeyCode::Char(' ')=>app.sidebar_toggle(),
                             _=>{}
                         }
                         continue;
@@ -444,10 +476,16 @@ impl App {
             sidebar_rect: Rect::default(),
             sidebar_wide: false,
             help_visible: false,
+            sidebar_hits: Vec::new(),
+            sidebar_manual_scroll: false,
+            task_detail: None,
+            task_detail_scroll: 0,
+            search: None,
         }
     }
     fn sidebar_move(&mut self, delta: isize) {
         self.focus = FocusPane::Sidebar;
+        self.sidebar_manual_scroll = false;
         self.sidebar_selected = if delta < 0 {
             self.sidebar_selected.checked_sub(1).unwrap_or(3)
         } else {
@@ -457,6 +495,71 @@ impl App {
     fn sidebar_toggle(&mut self) {
         self.sidebar_expanded[self.sidebar_selected] =
             !self.sidebar_expanded[self.sidebar_selected];
+        self.sidebar_manual_scroll = false;
+    }
+    fn sidebar_scroll_by(&mut self, delta: isize) {
+        self.focus = FocusPane::Sidebar;
+        self.sidebar_manual_scroll = true;
+        self.sidebar_scroll = if delta < 0 {
+            self.sidebar_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.sidebar_scroll.saturating_add(delta as usize)
+        };
+    }
+    fn sidebar_activate(&mut self, registry: &BackgroundTaskRegistry) {
+        if self.sidebar_selected == 2
+            && self.sidebar_expanded[2]
+            && !self.background_tasks.is_empty()
+        {
+            self.open_task_detail(0, registry);
+        } else {
+            self.sidebar_toggle();
+        }
+    }
+    fn open_task_detail(&mut self, index: usize, registry: &BackgroundTaskRegistry) {
+        let Some(snapshot) = self.background_tasks.get(index).cloned() else {
+            return;
+        };
+        let output = registry.output(&snapshot.id, 200).unwrap_or_else(|| {
+            self.language
+                .text("暂无输出", "No output", "出力なし")
+                .to_owned()
+        });
+        self.task_detail = Some(TaskDetail { snapshot, output });
+        self.task_detail_scroll = 0;
+    }
+    fn handle_task_detail_key(&mut self, key: KeyEvent, registry: &BackgroundTaskRegistry) {
+        let Some(detail) = &self.task_detail else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.task_detail = None,
+            KeyCode::Up => self.task_detail_scroll = self.task_detail_scroll.saturating_sub(1),
+            KeyCode::Down => self.task_detail_scroll = self.task_detail_scroll.saturating_add(1),
+            KeyCode::PageUp => self.task_detail_scroll = self.task_detail_scroll.saturating_sub(10),
+            KeyCode::PageDown => {
+                self.task_detail_scroll = self.task_detail_scroll.saturating_add(10)
+            }
+            KeyCode::Home => self.task_detail_scroll = 0,
+            KeyCode::End => self.task_detail_scroll = detail.output.lines().count(),
+            KeyCode::Char('k') | KeyCode::Char('K')
+                if detail.snapshot.status == BackgroundTaskStatus::Running =>
+            {
+                let id = detail.snapshot.id.clone();
+                if registry.kill(&id) {
+                    self.notice = Some(format!(
+                        "{}: {id}",
+                        self.language.text(
+                            "已请求停止任务",
+                            "Task stop requested",
+                            "タスク停止を要求しました"
+                        )
+                    ));
+                    self.task_detail = None;
+                }
+            }
+            _ => {}
+        }
     }
     fn handle_help_key(&mut self, key: KeyEvent) -> bool {
         if self.help_visible {
@@ -470,6 +573,85 @@ impl App {
             return true;
         }
         false
+    }
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f'))
+        {
+            self.search = None;
+            return;
+        }
+        let mut query_changed = false;
+        if let Some(search) = &mut self.search {
+            match key.code {
+                KeyCode::Enter if !search.matches.is_empty() => {
+                    search.selected = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        search
+                            .selected
+                            .checked_sub(1)
+                            .unwrap_or(search.matches.len() - 1)
+                    } else {
+                        (search.selected + 1) % search.matches.len()
+                    };
+                }
+                KeyCode::Left => search.editor.left(),
+                KeyCode::Right => search.editor.right(),
+                KeyCode::Home => search.editor.home(),
+                KeyCode::End => search.editor.end(),
+                KeyCode::Backspace => {
+                    search.editor.backspace();
+                    query_changed = true;
+                }
+                KeyCode::Delete => {
+                    search.editor.delete();
+                    query_changed = true;
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+                {
+                    search.editor.insert(&character.to_string());
+                    query_changed = true;
+                }
+                _ => return,
+            }
+        }
+        if query_changed {
+            self.refresh_search_matches();
+        }
+        self.jump_to_search_match();
+    }
+    fn refresh_search_matches(&mut self) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let query = search.editor.text().trim().to_lowercase();
+        search.matches = if query.is_empty() {
+            Vec::new()
+        } else {
+            self.transcript
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| value.to_lowercase().contains(&query).then_some(index))
+                .collect()
+        };
+        search.selected = 0;
+    }
+    fn jump_to_search_match(&mut self) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        let Some(entry) = search.matches.get(search.selected).copied() else {
+            return;
+        };
+        let total = rendered_transcript_height(&self.transcript, self.transcript_width);
+        let through_match =
+            rendered_transcript_height(&self.transcript[..=entry], self.transcript_width);
+        self.follow_bottom = false;
+        self.scroll_from_bottom = total
+            .saturating_sub(through_match)
+            .min(total.saturating_sub(self.viewport_height));
     }
     fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
@@ -745,9 +927,18 @@ impl App {
             Err(e) => self.notice = Some(format!("Clipboard image unavailable: {e}")),
         }
     }
-    fn handle_mouse(&mut self, x: u16, y: u16) {
+    fn handle_mouse(&mut self, x: u16, y: u16, registry: &BackgroundTaskRegistry) {
         if self.sidebar_rect.contains((x, y).into()) {
             self.focus = FocusPane::Sidebar;
+            if let Some((_, hit)) = self.sidebar_hits.iter().find(|(row, _)| *row == y).copied() {
+                match hit {
+                    SidebarHit::Section(section) => {
+                        self.sidebar_selected = section;
+                        self.sidebar_toggle();
+                    }
+                    SidebarHit::Task(index) => self.open_task_detail(index, registry),
+                }
+            }
         } else if self.prompt_rect.contains((x, y).into()) {
             self.focus = FocusPane::Prompt;
             let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
@@ -1084,7 +1275,12 @@ fn draw(
         } else {
             format!("WillDeep · history ↑{}", app.scroll_from_bottom)
         };
-        let colored = colored_transcript(&visible_transcript);
+        let search_query = app
+            .search
+            .as_ref()
+            .map(|search| search.editor.text().trim())
+            .filter(|query| !query.trim().is_empty());
+        let colored = colored_transcript(&visible_transcript, search_query);
         f.render_widget(
             Paragraph::new(colored)
                 .block(
@@ -1206,7 +1402,7 @@ fn draw(
         );
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
-        if app.focus == FocusPane::Prompt && !app.help_visible {
+        if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
         let status = app.notice.take().unwrap_or_else(|| {
@@ -1261,6 +1457,38 @@ fn draw(
                 f.render_widget(Clear, sidebar);
             }
             render_sidebar(f, app, sidebar);
+        }
+        if let Some(search) = &app.search {
+            let width = f.area().width.min(72);
+            let popup = Rect {
+                x: f.area().x + f.area().width.saturating_sub(width) / 2,
+                y: f.area().y,
+                width,
+                height: 3.min(f.area().height),
+            };
+            let position = if search.matches.is_empty() {
+                "0/0".to_owned()
+            } else {
+                format!("{}/{}", search.selected + 1, search.matches.len())
+            };
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(search.editor.text()).block(
+                    Block::default()
+                        .title(format!(
+                            "{} · {position} · Enter/Shift+Enter · Esc",
+                            app.language.text("搜索聊天", "Search chat", "チャット検索")
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                ),
+                popup,
+            );
+            if app.approval.is_none() && app.question.is_none() && popup.width > 2 {
+                let cursor = UnicodeWidthStr::width(search.editor.text())
+                    .min(popup.width.saturating_sub(3) as usize) as u16;
+                f.set_cursor_position((popup.x + 1 + cursor, popup.y + 1));
+            }
         }
         let command_matches = app.command_matches();
         if !app.command_menu_dismissed
@@ -1406,6 +1634,64 @@ fn draw(
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::LightCyan)),
                     )
+                    .wrap(Wrap { trim: false }),
+                popup,
+            );
+        }
+        if let Some(detail) = &app.task_detail {
+            let content = format!(
+                "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {:.1}s\n{}: {}\n{}: {}\n\n{}\n{}",
+                app.language.text("任务", "Task", "タスク"),
+                detail.snapshot.id,
+                app.language.text("类型", "Kind", "種類"),
+                detail.snapshot.kind,
+                app.language.text("状态", "Status", "状態"),
+                detail.snapshot.status,
+                app.language.text("耗时", "Elapsed", "経過時間"),
+                detail.snapshot.elapsed_millis as f64 / 1000.0,
+                app.language.text("退出码", "Exit code", "終了コード"),
+                detail
+                    .snapshot
+                    .exit_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "—".to_owned()),
+                app.language.text("输出字节", "Output bytes", "出力バイト"),
+                detail.snapshot.output_bytes,
+                detail.snapshot.label,
+                detail.output
+            );
+            let popup = centered_rect(
+                f.area().width.min(92),
+                f.area().height.min(30),
+                f.area(),
+            );
+            let viewport = popup.height.saturating_sub(2).max(1) as usize;
+            app.task_detail_scroll = app
+                .task_detail_scroll
+                .min(content.lines().count().saturating_sub(viewport));
+            let title = if detail.snapshot.status == BackgroundTaskStatus::Running {
+                app.language.text(
+                    "后台任务详情 · ↑/↓/PgUp/PgDn 滚动 · K 停止 · Esc 关闭",
+                    "Background task · ↑/↓/PgUp/PgDn scroll · K stop · Esc close",
+                    "バックグラウンドタスク · ↑/↓/PgUp/PgDn · K 停止 · Esc 閉じる",
+                )
+            } else {
+                app.language.text(
+                    "后台任务详情 · ↑/↓/PgUp/PgDn 滚动 · Esc 关闭",
+                    "Background task · ↑/↓/PgUp/PgDn scroll · Esc close",
+                    "バックグラウンドタスク · ↑/↓/PgUp/PgDn · Esc 閉じる",
+                )
+            };
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .title(title)
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Yellow)),
+                    )
+                    .scroll((app.task_detail_scroll.min(u16::MAX as usize) as u16, 0))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
@@ -1635,13 +1921,13 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+W  输入/状态栏切换      Ctrl+B 显示或隐藏状态栏\n  Ctrl+S  文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  鼠标点击聚焦，滚轮切换分组"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+W  输入/状态栏切换      Ctrl+B 显示或隐藏状态栏\n  Ctrl+S  文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+W  Switch Prompt/Status          Ctrl+B Show or hide Status\n  Ctrl+S  Terminal text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click to focus, use the wheel to move between sections"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+W  Switch Prompt/Status          Ctrl+B Show or hide Status\n  Ctrl+S  Terminal text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+W 入力/状態を切替         Ctrl+B 状態欄を表示/非表示\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  クリックでフォーカス、ホイールでセクション移動"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+W 入力/状態を切替         Ctrl+B 状態欄を表示/非表示\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
         }
     }
 }
@@ -1667,8 +1953,10 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     ];
     let mut lines = Vec::new();
     let mut headers = [0usize; 4];
+    let mut logical_hits = Vec::new();
     for (section, title) in titles.into_iter().enumerate() {
         headers[section] = lines.len();
+        logical_hits.push((lines.len(), SidebarHit::Section(section)));
         let selected = app.focus == FocusPane::Sidebar && app.sidebar_selected == section;
         let marker = if app.sidebar_expanded[section] {
             "▾"
@@ -1722,7 +2010,8 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                 )
             ))),
             2 => {
-                for task in app.background_tasks.iter().take(8) {
+                for (task_index, task) in app.background_tasks.iter().take(8).enumerate() {
+                    logical_hits.push((lines.len(), SidebarHit::Task(task_index)));
                     lines.push(Line::raw(format!(
                         "  {} · {:?} · {:.1}s",
                         task.id,
@@ -1753,13 +2042,22 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     }
     let viewport = area.height.saturating_sub(2).max(1) as usize;
     let selected_row = headers[app.sidebar_selected];
-    if selected_row < app.sidebar_scroll {
-        app.sidebar_scroll = selected_row;
-    } else if selected_row >= app.sidebar_scroll + viewport {
-        app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
+    if !app.sidebar_manual_scroll {
+        if selected_row < app.sidebar_scroll {
+            app.sidebar_scroll = selected_row;
+        } else if selected_row >= app.sidebar_scroll + viewport {
+            app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
+        }
     }
     let max_scroll = lines.len().saturating_sub(viewport);
     app.sidebar_scroll = app.sidebar_scroll.min(max_scroll);
+    app.sidebar_hits = logical_hits
+        .into_iter()
+        .filter_map(|(row, hit)| {
+            (row >= app.sidebar_scroll && row < app.sidebar_scroll + viewport)
+                .then_some((area.y + 1 + (row - app.sidebar_scroll) as u16, hit))
+        })
+        .collect();
     let border = if app.focus == FocusPane::Sidebar {
         Color::Cyan
     } else {
@@ -1777,8 +2075,7 @@ fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(border)),
             )
-            .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0))
-            .wrap(Wrap { trim: false }),
+            .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0)),
         area,
     );
 }
@@ -1798,7 +2095,7 @@ pub fn channel() -> (
 ) {
     mpsc::unbounded_channel()
 }
-fn colored_transcript(entries: &[String]) -> Text<'static> {
+fn colored_transcript(entries: &[String], search_query: Option<&str>) -> Text<'static> {
     let mut lines = Vec::new();
     for value in entries {
         if let Some(content) = value.strip_prefix("WillDeep: ") {
@@ -1818,11 +2115,59 @@ fn colored_transcript(entries: &[String]) -> Text<'static> {
                 .map(|line| Line::styled(line.to_owned(), style)),
         );
     }
-    Text::from(lines)
+    let mut text = Text::from(lines);
+    if let Some(query) = search_query {
+        highlight_matches(&mut text, query);
+    }
+    text
+}
+
+fn highlight_matches(text: &mut Text<'static>, query: &str) {
+    let Ok(pattern) = RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()
+    else {
+        return;
+    };
+    let highlight = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    for line in &mut text.lines {
+        let spans = std::mem::take(&mut line.spans);
+        line.spans = spans
+            .into_iter()
+            .flat_map(|span| {
+                let value = span.content.into_owned();
+                let mut output = Vec::new();
+                let mut offset = 0;
+                for found in pattern.find_iter(&value) {
+                    if found.start() > offset {
+                        output.push(Span::styled(
+                            value[offset..found.start()].to_owned(),
+                            span.style,
+                        ));
+                    }
+                    output.push(Span::styled(
+                        value[found.start()..found.end()].to_owned(),
+                        span.style.patch(highlight),
+                    ));
+                    offset = found.end();
+                }
+                if offset < value.len() {
+                    output.push(Span::styled(value[offset..].to_owned(), span.style));
+                }
+                if output.is_empty() {
+                    output.push(Span::styled(value, span.style));
+                }
+                output
+            })
+            .collect();
+    }
 }
 
 fn rendered_transcript_height(entries: &[String], width: usize) -> usize {
-    Paragraph::new(colored_transcript(entries))
+    Paragraph::new(colored_transcript(entries, None))
         .wrap(Wrap { trim: false })
         .line_count(width.max(1).min(u16::MAX as usize) as u16)
 }
@@ -2170,13 +2515,50 @@ mod tests {
     #[test]
     fn clicking_sidebar_focuses_it_and_clicking_prompt_restores_prompt_focus() {
         let mut app = App::new(Vec::new(), Language::En);
+        let registry = BackgroundTaskRegistry::default();
         app.sidebar_rect = Rect::new(80, 0, 20, 30);
         app.prompt_rect = Rect::new(0, 20, 80, 8);
 
-        app.handle_mouse(85, 5);
+        app.handle_mouse(85, 5, &registry);
         assert_eq!(app.focus, FocusPane::Sidebar);
-        app.handle_mouse(5, 22);
+        app.handle_mouse(5, 22, &registry);
         assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[test]
+    fn clicking_sidebar_hits_toggles_sections_and_opens_task_detail() {
+        let registry = BackgroundTaskRegistry::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        app.sidebar_rect = Rect::new(80, 0, 20, 30);
+        app.sidebar_hits = vec![(2, SidebarHit::Section(1)), (5, SidebarHit::Task(0))];
+        app.background_tasks.push(BackgroundTaskSnapshot {
+            id: "job_test".to_owned(),
+            kind: willdeep_core::BackgroundTaskKind::Shell,
+            label: "Run tests".to_owned(),
+            status: BackgroundTaskStatus::Completed,
+            elapsed_millis: 1200,
+            exit_code: Some(0),
+            output_bytes: 12,
+        });
+
+        app.handle_mouse(85, 2, &registry);
+        assert_eq!(app.sidebar_selected, 1);
+        assert!(!app.sidebar_expanded[1]);
+        app.handle_mouse(85, 5, &registry);
+        assert_eq!(
+            app.task_detail
+                .as_ref()
+                .map(|detail| detail.snapshot.id.as_str()),
+            Some("job_test")
+        );
+    }
+    #[test]
+    fn sidebar_wheel_scrolls_content_without_changing_selected_section() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.sidebar_selected = 2;
+        app.sidebar_scroll_by(3);
+        assert_eq!(app.sidebar_selected, 2);
+        assert_eq!(app.sidebar_scroll, 3);
+        assert!(app.sidebar_manual_scroll);
     }
     #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
@@ -2195,7 +2577,48 @@ mod tests {
         let help = help_content(Language::ZhCn);
         assert!(help.contains("Ctrl+W"));
         assert!(help.contains("Enter/Space"));
-        assert!(!help.contains("Ctrl+F"));
+        assert!(help.contains("Ctrl+F"));
+    }
+    #[test]
+    fn chat_search_filters_cycles_and_scrolls_to_matching_entries() {
+        let mut app = App::new(
+            vec![
+                "You: first".to_owned(),
+                "WillDeep: Alpha result".to_owned(),
+                "You: middle".to_owned(),
+                "WillDeep: alpha again".to_owned(),
+            ],
+            Language::En,
+        );
+        app.transcript_width = 40;
+        app.viewport_height = 2;
+        app.search = Some(SearchState::default());
+        for character in "ALPHA".chars() {
+            app.handle_search_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.matches, vec![1, 3]);
+        assert_eq!(search.selected, 0);
+        assert!(!app.follow_bottom);
+
+        app.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.search.as_ref().unwrap().selected, 1);
+        app.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.search.as_ref().unwrap().selected, 0);
+    }
+    #[test]
+    fn chat_search_highlights_matches_without_removing_markdown_styles() {
+        let text = colored_transcript(&["WillDeep: **Alpha** and alpha".to_owned()], Some("alpha"));
+        let highlighted = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.style.bg == Some(Color::Yellow))
+            .collect::<Vec<_>>();
+
+        assert_eq!(highlighted.len(), 2);
+        assert!(highlighted[0].style.add_modifier.contains(Modifier::BOLD));
     }
     #[test]
     fn transient_thought_is_single_line_and_bounded() {
