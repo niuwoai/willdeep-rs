@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
@@ -14,6 +14,7 @@ use willdeep_core::{
 };
 
 mod config;
+mod daemon;
 mod editor;
 mod i18n;
 mod mobile;
@@ -31,6 +32,9 @@ use config::{LoadedConfig, ProviderProfile, willdeep_home};
     about = "Cross-platform WillDeep coding agent"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     /// Task for the agent. Reads stdin when omitted.
     #[arg(value_name = "PROMPT", num_args = 0.., trailing_var_arg = true)]
     prompt: Vec<String>,
@@ -136,6 +140,23 @@ struct Cli {
     web_input_json: bool,
 }
 
+#[derive(Clone, Debug, Subcommand)]
+enum CliCommand {
+    /// Manage the persistent local Runtime Daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: daemon::DaemonAction,
+    },
+    /// Attach to the persistent Runtime event stream.
+    Attach {
+        /// Resume after this event sequence number.
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+    },
+    /// Confirm that this client can disconnect without stopping the Runtime.
+    Detach,
+}
+
 #[derive(Deserialize)]
 struct WebInput {
     prompt: String,
@@ -173,6 +194,13 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(command) = cli.command.clone() {
+        return match command {
+            CliCommand::Daemon { action } => daemon::handle(action).await,
+            CliCommand::Attach { after } => daemon::attach(after).await,
+            CliCommand::Detach => daemon::detach().await,
+        };
+    }
     let administrative =
         cli.list_projects || cli.list_sessions || cli.list_approvals || cli.clear_approvals;
     if cli.onboarding

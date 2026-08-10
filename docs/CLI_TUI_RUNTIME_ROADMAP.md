@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.15.0-rc4
+> 当前实施版本：v0.16.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -52,10 +52,11 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ### 阶段 2：持久化 Runtime Daemon（v0.16.0）
 
-- [ ] `willdeep daemon start/stop/status/logs`。
+- [x] `willdeep daemon start/stop/status/logs`。
 - [ ] Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime。
-- [ ] `willdeep attach/detach`，关闭 TUI 不终止任务。
-- [ ] Unix Socket 与 Windows Named Pipe；事件序列号、断线续传和去重。
+- [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
+- [ ] TUI 接入 attach/detach，关闭 TUI 不终止已迁入 Runtime 的任务。
+- [ ] Unix Socket 与 Windows Named Pipe；实时事件推送、断线续传和请求去重。
 - [ ] 单实例锁、健康检查、原子状态保存和优雅升级。
 
 验收：客户端断开后任务继续运行，重连能补齐离线事件，异常退出不破坏会话。
@@ -172,4 +173,4 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.15.0-rc4：阶段 1 已完成；审批、提问、失败/阻塞任务、Worktree 冲突和内容指纹 Diff 统一进入可操作 Inbox，状态按 Agent→会话→Workspace 上卷。下一批进入阶段 2 Runtime Daemon。
+v0.16.0-rc1：阶段 2 第一批完成；提供受本地 Token 保护的跨平台 Runtime Daemon 启停、健康状态与日志控制面，以及持久事件序列、游标补读和 attach/detach 基础。下一批迁移 Harness 与任务生命周期，并让 TUI 真正成为可分离客户端。

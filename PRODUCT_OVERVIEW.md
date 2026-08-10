@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.15.0-rc4
+> 最后更新：2026-08-10 | 当前版本：v0.16.0-rc1
 
 ## 项目简介
 
@@ -32,6 +32,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Attention Inbox 支持键盘/鼠标选择、后台任务与子 Agent 详情跳转、停止运行项和标记已读；
 - Inbox 已读状态随会话持久化，后台 Shell 与子 Agent 支持真实重试，任务结束时触发终端提示；
 - Git 冲突和待审 Diff 使用内容指纹进入 Inbox，子 Agent 审批阻塞结构化上报，状态按 Agent→会话→Workspace 上卷；
+- 跨平台 Runtime Daemon 提供 `start/status/stop/logs`，以受 Token 保护的本地回环控制 API、原子状态和私有日志独立于 TUI 运行；
+- Runtime 事件以 NDJSON 和单调序号持久化，`attach --after` 支持按游标补读并安全分离客户端；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
@@ -98,3 +100,4 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。
+- [ ] 将 Harness、任务和会话生命周期迁入 Runtime Daemon，并提供 attach/detach 与事件断线续传。

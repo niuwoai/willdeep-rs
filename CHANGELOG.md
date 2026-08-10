@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.16.0-rc1] - 2026-08-10
+
+### Added
+
+- 新增 `willdeep daemon start/status/stop/logs`，提供跨平台持久 Runtime 的首个可运行控制面。
+- Daemon 使用随机回环 TCP 端点和仅本机可读的随机控制 Token，健康响应携带当前服务版本。
+- Unix 后台进程使用独立进程组，Windows 使用 detached process flags，启动命令退出后 Runtime 仍持续运行。
+- Daemon 状态采用原子写入，Unix 状态文件和日志权限收紧为 `0600`，支持优雅关闭和失效状态恢复。
+- 新增持久化 NDJSON Runtime 事件日志与单调序号；`willdeep attach --after <cursor>` 可补齐离线事件，`Ctrl+C` 或 `willdeep detach` 不会停止 Daemon。
+
 ## [0.15.0-rc4] - 2026-08-10
 
 ### Added
