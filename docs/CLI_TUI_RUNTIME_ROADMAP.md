@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc3
+> 当前实施版本：v0.17.0-rc4
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -60,7 +60,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] Runtime Root Agent 持久实体、受保护查询 API、任务状态同步和 TUI 基础状态摘要。
 - [x] `spawn_agent` 稳定 ID、Root→Child 父子关系、Profile/模式、轮次、工具、Token 和正常完成终态进入 Runtime 与 TUI。
 - [x] 后台 Child Agent 与后台任务稳定绑定；Runtime 持久 stop/retry 命令并由原 Harness 按 Agent UUID 执行、确认，CLI/TUI 可精确控制。
-- [ ] 交互 Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime 原生生命周期。
+- [-] 主 Harness、子 Agent、后台任务、审批、MCP 和 Web 已迁入 Runtime 进程内生命周期；移动网关与跨重启执行资源恢复待完成。
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
 - [x] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线，并按 Workspace 过滤和去重。
@@ -223,22 +223,21 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc4（实施中）：已定义 Daemon 内原生 Harness 的 Invocation、Factory、Event Sink、审批、取消、生命周期和验收边界；下一步按设计抽出 CLI/Runtime 共用 Factory 与非交互执行入口，再删除 TaskManager 的每 Turn 子进程过渡层。
+v0.17.0-rc4（已完成）：CLI/Runtime 已共用 Harness Factory 与非交互执行入口；TaskManager 直接持有 Harness Future，Agent 事件直写 Runtime EventLog，每 Turn 子进程与 stdout/stderr 转写层已移除。真实进程 E2E 已覆盖完成、立即取消、`ask_user` 跨 CLI 恢复和审批跨 CLI 恢复，Task PID 保持为空。
 
 ## 6. 建议执行顺序
 
-1. 完成并发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
-2. 把交互式主 Harness 迁入 Runtime 原生生命周期，移除每 Turn 子进程过渡层。
-3. 将剩余后台 Shell、审批、MCP 和附件迁入统一生命周期。
-4. 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
-5. 完成异常退出、守护进程重启和客户端重连的端到端测试。
-6. 实现完整会话恢复、Fork、归档、导出与搜索。
-7. 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
-8. 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
-9. 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
-10. 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
-11. 补齐 Workflow、插件、Herdr 互操作和 Computer Use。
-12. 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
+1. [x] 发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
+2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
+3. [ ] 完成异常退出、守护进程重启、孤儿资源清理和客户端重连的端到端测试。
+4. [ ] 实现完整会话恢复、重命名、Fork、归档、删除、导出与搜索。
+5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
+6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
+7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
+8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
+9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
+10. [ ] 补齐 Workflow、插件、Herdr 互操作和 Computer Use。
+11. [ ] 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
 
 关键路径固定为：`Runtime 持久化 → 会话恢复 → Agent 生命周期 → Diff/Workspace → 统一 API → Web/移动端/Swift 共用内核`。Herdr、Computer Use 和客户端视觉增强可以穿插推进，但不能形成独立于 Runtime 的第二套任务状态机。
 
@@ -251,18 +250,18 @@ v0.17.0-rc4（实施中）：已定义 Daemon 内原生 Harness 的 Invocation�
 - [x] Session、Root Agent、Turn、Execution Task 的稳定身份和持久状态。
 - [x] 同一 Session 严格串行、请求幂等、取消、事件持久化和重启恢复。
 - [x] TUI 普通输入使用 Runtime Session/Turn。
-- [-] Web 使用相同 Session/Turn、历史和事件；当前批次正在移除 Web 独立 Harness 生命周期。
+- [x] Web 使用相同 Session/Turn、历史和事件；浏览器只提交与观察，不再持有独立 Harness 生命周期。
 - [ ] Headless CLI 使用相同 Runtime。
-- [ ] Harness 从每 Turn 子进程过渡为 Daemon 内原生、可恢复生命周期。
+- [x] Harness 从每 Turn 子进程过渡为 Daemon 内原生 Future；异常退出明确收敛为 Interrupted。
 - [ ] 清理孤儿任务，保护 Session 并发写入，提供状态、版本和能力诊断。
 
 ### 7.2 Web 客户端
 
-- [ ] 新建、打开和继续 Runtime Session，用户消息即时显示。
-- [ ] 提交后暴露 Session、Turn 和 Root Agent ID，SSE 按游标续传持久事件。
-- [ ] 浏览器断开后任务继续，刷新后可重新附着，停止按钮取消真实 Turn。
-- [ ] 历史会话恢复用户/助手消息、附件摘要和运行状态。
-- [ ] 思考摘要固定一行，逐轮保留精简活动与聚合工具状态。
+- [x] 新建、打开和继续 Runtime Session，用户消息即时显示。
+- [x] 提交后暴露 Session、Turn 和 Root Agent ID，SSE 按游标续传持久事件。
+- [x] 浏览器断开后任务继续，刷新后可重新附着，停止按钮取消真实 Turn。
+- [-] 历史会话已恢复用户/助手消息；附件摘要和完整运行状态恢复待补齐。
+- [x] 思考摘要固定一行，逐轮保留精简活动与聚合工具状态。
 - [x] Composer 支持多行、`/`、`$`、文本粘贴、图片粘贴、预览和删除。
 - [ ] 文本、图片、视觉模型降级、Skills 和审批全部复用 Runtime 协议。
 - [ ] 桌面三栏、平板双栏、手机单栏；保持 React、Chakra UI、纯 CSR 和完整 i18n。

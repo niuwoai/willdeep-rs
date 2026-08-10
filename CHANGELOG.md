@@ -1,10 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.17.0-rc4] - 2026-08-10
+
+### Added
+
+- 新增 CLI/Runtime 共用 Harness Factory 和非交互执行入口，统一 Provider、视觉降级、审批、Skills、MCP、Tools、子 Agent Profile、会话写入与后台结果回流。
+- 新增 Runtime 原生事件 Sink，Agent 事件直接写入持久 EventLog 并同步 AgentStore。
+
+### Changed
+
+- Runtime TaskManager 改为在 Daemon 内调度 Harness Future，不再为每个 Turn 启动 `willdeep --web-input-json` 子进程或转写 stdout/stderr。
+- 审批、`ask_user`、取消和后台 Agent 控制继续使用原持久 Runtime 状态机；其他 CLI 客户端解决交互后，同一个 Harness Future 从等待点恢复。
+
+### Fixed
+
+- Runtime 取消现在直接撤销完整 Harness Future，并通过唯一收尾路径提交终态，避免子进程退出与 Turn 状态竞争。
+
+### Security
+
+- Runtime Token 不再通过每 Turn 私有 stdin 发送给子进程，只保留在 Daemon 和 Harness 内存中，且不会传入 Shell 或 MCP 环境。
 
 ### Documentation
 
-- 定义 Daemon 内原生 Harness 的共享 Factory、Invocation、Event Sink、审批、取消、生命周期、迁移步骤和可验证验收条件，作为 v0.17.0-rc4 的实施契约。
+- 定义并完成 Daemon 内原生 Harness 的共享 Factory、Invocation、Event Sink、审批、取消、生命周期、迁移步骤和可验证验收条件。
 
 ## [0.17.0-rc3] - 2026-08-10
 

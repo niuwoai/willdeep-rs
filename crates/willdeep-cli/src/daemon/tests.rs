@@ -47,7 +47,7 @@ fn authorization_requires_exact_local_token() {
             TaskManager::open(TaskManagerOptions {
                 path: root.join("tasks.json"),
                 interactions_path: root.join("interactions.json"),
-                executable: PathBuf::from("willdeep"),
+                home: root.clone(),
                 events,
                 agents: agents.clone(),
                 sessions: test_runtime_session_store(&root),
@@ -258,7 +258,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     let manager = TaskManager::open(TaskManagerOptions {
         path,
         interactions_path: root.join("interactions.json"),
-        executable: PathBuf::from("willdeep"),
+        home: root.clone(),
         events,
         agents,
         sessions: test_runtime_session_store(&root),
@@ -315,7 +315,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     let manager = TaskManager::open(TaskManagerOptions {
         path,
         interactions_path: root.join("interactions.json"),
-        executable: PathBuf::from("willdeep"),
+        home: root.clone(),
         events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
         agents: agents.clone(),
         sessions,
@@ -379,7 +379,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
         TaskManager::open(TaskManagerOptions {
             path: path.clone(),
             interactions_path: root.join("interactions.json"),
-            executable: PathBuf::from("willdeep"),
+            home: root.clone(),
             events,
             agents,
             sessions: test_runtime_session_store(&root),
@@ -432,7 +432,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     let manager = TaskManager::open(TaskManagerOptions {
         path: root.join("tasks.json"),
         interactions_path: root.join("interactions.json"),
-        executable: PathBuf::from("willdeep"),
+        home: root.clone(),
         events,
         agents,
         sessions: test_runtime_session_store(&root),
@@ -496,27 +496,4 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     );
     assert!(manager.pending_interactions().await.is_empty());
     std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn runtime_connection_is_encoded_in_private_stdin_payload() {
-    let task_id = uuid::Uuid::new_v4();
-    let data = runtime_harness_input(
-        "safe prompt".to_owned(),
-        vec![willdeep_core::MessageAttachment::Text {
-            name: "notes.txt".to_owned(),
-            content: "attached".to_owned(),
-        }],
-        RuntimeConnection {
-            url: "http://127.0.0.1:1234".to_owned(),
-            token: "private-control-token".to_owned(),
-            task_id,
-        },
-    )
-    .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&data).unwrap();
-    assert_eq!(value["prompt"], "safe prompt");
-    assert_eq!(value["runtime"]["token"], "private-control-token");
-    assert_eq!(value["runtime"]["task_id"], task_id.to_string());
-    assert_eq!(value["attachments"][0]["content"], "attached");
 }

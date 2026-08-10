@@ -52,6 +52,7 @@ pub enum UiMessage {
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
 }
+pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
 pub struct TuiSink {
     pub ui: mpsc::UnboundedSender<UiMessage>,
     pub relay: RelayBridge,

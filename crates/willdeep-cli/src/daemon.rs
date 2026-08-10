@@ -16,7 +16,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 
 const STATE_SCHEMA: u32 = 1;
@@ -30,7 +29,7 @@ mod event_stream;
 mod session_store;
 pub(crate) mod tui_bridge;
 use agent_control::AgentCommandStore;
-pub(crate) use agent_control::start_agent_command_watcher;
+pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
 pub(crate) use tui_bridge::{
@@ -39,6 +38,29 @@ pub(crate) use tui_bridge::{
     runtime_events, runtime_snapshot, start_runtime_event_follower, stop_remote_agent,
     stop_remote_turn, submit_runtime_turn,
 };
+
+struct RuntimeEventSink {
+    task_id: uuid::Uuid,
+    events: Arc<EventLog>,
+    agents: Arc<AgentStore>,
+}
+
+#[async_trait]
+impl willdeep_core::EventSink for RuntimeEventSink {
+    async fn emit(&self, event: willdeep_core::AgentEvent) {
+        let line = crate::agent_event_json(event).to_string();
+        if self
+            .agents
+            .apply_harness_event(self.task_id, &line)
+            .is_err()
+        {
+            return;
+        }
+        let _ = self
+            .events
+            .append("task.output", format!("task_id={} {line}", self.task_id));
+    }
+}
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum DaemonAction {
@@ -205,17 +227,17 @@ pub(crate) struct RuntimeTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct SubmitTask {
-    prompt: String,
+pub(crate) struct SubmitTask {
+    pub(crate) prompt: String,
     #[serde(default)]
-    attachments: Vec<willdeep_core::MessageAttachment>,
-    workspace: PathBuf,
-    profile: Option<String>,
-    config: Option<PathBuf>,
+    pub(crate) attachments: Vec<willdeep_core::MessageAttachment>,
+    pub(crate) workspace: PathBuf,
+    pub(crate) profile: Option<String>,
+    pub(crate) config: Option<PathBuf>,
     #[serde(default)]
-    session_id: Option<uuid::Uuid>,
+    pub(crate) session_id: Option<uuid::Uuid>,
     #[serde(default)]
-    turn_id: Option<uuid::Uuid>,
+    pub(crate) turn_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone)]
@@ -293,7 +315,7 @@ struct ResolveInteraction {
 
 struct TaskManager {
     path: PathBuf,
-    executable: PathBuf,
+    home: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
@@ -916,7 +938,7 @@ async fn run(home: &Path) -> Result<()> {
     let tasks = Arc::new(TaskManager::open(TaskManagerOptions {
         path: paths.tasks.clone(),
         interactions_path: paths.interactions.clone(),
-        executable: std::env::current_exe()?,
+        home: home.to_path_buf(),
         events: events.clone(),
         agents: agents.clone(),
         sessions: sessions.clone(),
@@ -1334,7 +1356,7 @@ impl DaemonPaths {
 struct TaskManagerOptions {
     path: PathBuf,
     interactions_path: PathBuf,
-    executable: PathBuf,
+    home: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
@@ -1348,7 +1370,7 @@ impl TaskManager {
         let TaskManagerOptions {
             path,
             interactions_path,
-            executable,
+            home,
             events,
             agents,
             sessions,
@@ -1415,7 +1437,7 @@ impl TaskManager {
         }
         Ok(Self {
             path,
-            executable,
+            home,
             events,
             agents,
             sessions,
@@ -1669,57 +1691,8 @@ impl TaskManager {
             .sequence;
         self.insert_and_persist(task.clone()).await?;
 
-        let mut command = tokio::process::Command::new(&self.executable);
-        command
-            .arg("--json")
-            .arg("--no-tui")
-            .arg("--web-input-json")
-            .arg("--workspace")
-            .arg(&request.workspace)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(profile) = &request.profile {
-            command.arg("--profile").arg(profile);
-        }
-        if let Some(config) = &request.config {
-            command.arg("--config").arg(config);
-        }
-        if let Some(session_id) = request.session_id {
-            command.arg("--resume").arg(session_id.to_string());
-        }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                self.finish(id, RuntimeTaskStatus::Failed, None, Some(error.to_string()))
-                    .await?;
-                return Err(error).context("spawn Runtime Harness task");
-            }
-        };
-        let pid = child.id();
-        let mut stdin = child.stdin.take().context("open Runtime task stdin")?;
-        let input = runtime_harness_input(
-            request.prompt,
-            request.attachments,
-            RuntimeConnection {
-                url: self.runtime_url.clone(),
-                token: self.runtime_token.clone(),
-                task_id: id,
-            },
-        )?;
-        if let Err(error) = stdin.write_all(&input).await {
-            let _ = child.kill().await;
-            self.finish(id, RuntimeTaskStatus::Failed, None, Some(error.to_string()))
-                .await?;
-            return Err(error).context("send prompt to Runtime Harness task");
-        }
-        drop(stdin);
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
         task.status = RuntimeTaskStatus::Running;
-        task.pid = pid;
+        task.pid = None;
         task.started_at = Some(now());
         self.insert_and_persist(task.clone()).await?;
         self.agents
@@ -1728,10 +1701,8 @@ impl TaskManager {
             "agent.running",
             format!("agent_id={} task_id={id}", agent.id),
         )?;
-        self.events.append(
-            "task.started",
-            format!("task_id={id} pid={}", pid.unwrap_or_default()),
-        )?;
+        self.events
+            .append("task.started", format!("task_id={id} mode=in_process"))?;
         let cancellation = Arc::new(Notify::new());
         self.cancellations
             .lock()
@@ -1739,52 +1710,46 @@ impl TaskManager {
             .insert(id, cancellation.clone());
 
         let manager = self.clone();
+        let home = self.home.clone();
+        let connection = RuntimeConnection {
+            url: self.runtime_url.clone(),
+            token: self.runtime_token.clone(),
+            task_id: id,
+        };
+        let sink: Arc<dyn willdeep_core::EventSink> = Arc::new(RuntimeEventSink {
+            task_id: id,
+            events: self.events.clone(),
+            agents: self.agents.clone(),
+        });
         tokio::spawn(async move {
-            let stdout_task = stdout.map(|stream| {
-                tokio::spawn(forward_task_lines(
-                    stream,
-                    manager.events.clone(),
-                    Some(manager.agents.clone()),
-                    id,
-                    "task.output",
-                ))
-            });
-            let stderr_task = stderr.map(|stream| {
-                tokio::spawn(forward_task_lines(
-                    stream,
-                    manager.events.clone(),
-                    None,
-                    id,
-                    "task.stderr",
-                ))
-            });
-            let (status, cancelled) = tokio::select! {
-                result = child.wait() => (result, false),
+            let execution = crate::harness::execute_runtime(&home, request, connection, sink);
+            let (result, cancelled) = tokio::select! {
+                result = execution => (Some(result), false),
                 _ = cancellation.notified() => {
-                    let _ = child.kill().await;
-                    (child.wait().await, true)
+                    (None, true)
                 }
             };
-            if let Some(task) = stdout_task {
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
-            }
             if let Ok(mut cancellations) = manager.cancellations.lock() {
                 cancellations.remove(&id);
             }
-            let (final_status, code, error) = match status {
-                Ok(exit) if cancelled => (RuntimeTaskStatus::Cancelled, exit.code(), None),
-                Ok(exit) if exit.success() => (RuntimeTaskStatus::Completed, exit.code(), None),
-                Ok(exit) => (
-                    RuntimeTaskStatus::Failed,
-                    exit.code(),
-                    Some(format!("Harness exited with {exit}")),
-                ),
-                Err(error) => (RuntimeTaskStatus::Failed, None, Some(error.to_string())),
+            let (final_status, error) = match result {
+                _ if cancelled => (RuntimeTaskStatus::Cancelled, None),
+                Some(Ok(outcome)) => {
+                    let completed = serde_json::json!({
+                        "type":"completed",
+                        "turns":outcome.turns,
+                        "text":outcome.final_text,
+                        "session_id":outcome.session_id,
+                    });
+                    let _ = manager
+                        .events
+                        .append("task.output", format!("task_id={id} {completed}"));
+                    (RuntimeTaskStatus::Completed, None)
+                }
+                Some(Err(error)) => (RuntimeTaskStatus::Failed, Some(format!("{error:#}"))),
+                None => (RuntimeTaskStatus::Cancelled, None),
             };
-            if let Err(error) = manager.finish(id, final_status, code, error).await {
+            if let Err(error) = manager.finish(id, final_status, None, error).await {
                 eprintln!("persist Runtime task {id} completion: {error:#}");
             }
         });
@@ -1933,18 +1898,6 @@ impl TaskManager {
     }
 }
 
-fn runtime_harness_input(
-    prompt: String,
-    attachments: Vec<willdeep_core::MessageAttachment>,
-    runtime: RuntimeConnection,
-) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&serde_json::json!({
-        "prompt": prompt,
-        "attachments": attachments,
-        "runtime": runtime
-    }))?)
-}
-
 fn validate_resolution(kind: &InteractionKind, resolution: &InteractionResolution) -> Result<()> {
     match (kind, resolution) {
         (InteractionKind::Approval { .. }, InteractionResolution::AllowOnce)
@@ -1958,36 +1911,6 @@ fn validate_resolution(kind: &InteractionKind, resolution: &InteractionResolutio
             InteractionResolution::AlwaysAllow,
         ) => Ok(()),
         _ => bail!("resolution does not match the pending interaction"),
-    }
-}
-
-async fn forward_task_lines<R>(
-    stream: R,
-    events: Arc<EventLog>,
-    agents: Option<Arc<AgentStore>>,
-    task_id: uuid::Uuid,
-    kind: &'static str,
-) where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    const MAX_EVENT_CHARS: usize = 32_768;
-    let mut lines = tokio::io::BufReader::new(stream).lines();
-    while let Ok(Some(mut line)) = lines.next_line().await {
-        if line.len() > MAX_EVENT_CHARS {
-            line.truncate(MAX_EVENT_CHARS);
-            line.push('…');
-        }
-        if let Some(agents) = &agents
-            && agents.apply_harness_event(task_id, &line).is_err()
-        {
-            break;
-        }
-        if events
-            .append(kind, format!("task_id={task_id} {line}"))
-            .is_err()
-        {
-            break;
-        }
     }
 }
 

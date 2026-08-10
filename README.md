@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.17.0-rc3`，支持：
+当前版本为 `0.17.0-rc4`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -28,13 +28,13 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
-- Runtime 持有的非交互 Harness 任务提交、查询、取消及断线后事件补读。
+- Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。
 - Runtime 后台审批与 ask_user 待处理列表、跨客户端解决和原任务续跑。
 - TUI Runtime Inbox、远端审批/回答/停止，以及 `/runtime` 可分离任务提交、附件透传和按事件游标恢复聊天时间线。
 - Runtime Root Agent 持久生命周期、受 Token 保护的 Agent 查询 API/CLI，以及 TUI 右栏 Agent 状态摘要。
 - `spawn_agent` 稳定 UUID、Root→Child 父子关系以及子 Agent 轮次、工具、Token 和终态的 Runtime/TUI 实时展示。
 
-当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面已经可用，Harness、会话和后台任务向 Daemon 的完整迁移仍在进行。
+当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面和进程内 Harness 已经可用，会话恢复、统一客户端 API 与后台资源恢复仍在继续完善。
 
 ## Runtime Daemon
 
@@ -73,13 +73,13 @@ willdeep daemon stop
 
 Runtime 事件按递增序号写入私有 NDJSON 日志。`GET /v1/events/stream?after=<序号>` 使用 SSE 先分页补齐持久事件，再实时推送新事件；慢客户端落后广播窗口时自动从日志追赶并按序号去重。TUI 默认使用该实时通道，连接旧 Daemon 时回退到轮询接口。`attach --after <序号>` 同样按游标补读并持续跟随；按 `Ctrl+C` 只断开当前客户端，Daemon 继续运行。
 
-`daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 通过 stdin 传给 Harness，不会出现在进程参数中。任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复；`daemon cancel` 可停止仍在运行的任务。
+`daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 保留在 Runtime 内存与受保护的 Session/Turn 存储中，不会出现在进程参数中。Daemon 直接调度进程内 Harness Future；任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复，`daemon cancel` 可停止仍在运行的任务。
 
 `daemon create-session` 创建长期 Runtime Session，并同时建立同 ID 的 Core Session 和生命周期稳定的 Root Agent。`submit-turn` 使用客户端 `request_id` 幂等入队；同一 Session 的 Turn 严格串行，不同 Session 可并发。成功 Turn 写入 Core Session 后会清除队列中的私密 Prompt/附件副本；`stop-turn` 可取消排队中或运行中的 Turn。Daemon 重启后排队项继续调度，遗留活动项明确标记为 Interrupted。
 
 TUI 的普通 Prompt 默认幂等收养当前 Core Session，并把输入作为该长期 Session 的新 Turn；`/runtime <任务>` 是相同路径的明确别名，`/local <任务>` 仅让单轮使用旧进程内 Harness。重新进入同一 TUI 会话后继续复用原 Root Agent 和历史上下文。用户输入立即显示，消息文件只由后台 Harness 写入，Turn 结束时 TUI 从唯一 Core Session 历史同步，避免前后台双写产生重复或丢消息。
 
-后台 Harness 需要审批或调用 `ask_user` 时会进入 WaitingApproval/WaitingAnswer。`daemon pending` 查看待处理项，使用 `resolve` 或 `answer` 后，原任务从等待点继续。Runtime 控制 Token 只通过启动时私有 stdin 进入 Harness 内存，不会作为环境变量传给 Shell 或 MCP。
+后台 Harness 需要审批或调用 `ask_user` 时会进入 WaitingApproval/WaitingAnswer。`daemon pending` 查看待处理项，使用 `resolve` 或 `answer` 后，原进程内 Future 从等待点继续。Runtime 控制 Token 只保留在 Daemon 与 Harness 内存中，不会作为环境变量传给 Shell 或 MCP。
 
 `willdeep daemon agents` 列出 Runtime 持有的结构化 Agent；`willdeep daemon agent <id>` 查看单个 Agent 的 Workspace、Profile、状态、轮次、当前工具和 Token。后台 Child Agent 可用 `stop-agent` 精确停止，进入终态后可用 `retry-agent` 重试；重试沿用同一 Agent UUID。对应查询和控制 API 与其他 Runtime API 一样必须携带私有 `x-willdeep-token`，命令通过持久队列交给所属的原 Harness 执行并确认。
 

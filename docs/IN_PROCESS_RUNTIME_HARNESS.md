@@ -1,6 +1,6 @@
 # Daemon 内原生 Harness 设计
 
-> 状态：实施中
+> 状态：已于 v0.17.0-rc4 实施
 > 目标版本：v0.17.0-rc4
 > 上位协议：`RUNTIME_SESSION_PROTOCOL.md`
 
@@ -10,9 +10,9 @@ Runtime Daemon 必须直接持有 Harness Future、Agent、Tools、MCP、Skills�
 
 CLI、TUI、Web、移动端和 Swift App 只提交 Turn、消费事件和解决人工交互。Provider 初始化、Prompt、工具权限、会话写入和后台结果回流必须使用同一个 Harness 执行入口。
 
-## 2. 当前过渡层及问题
+## 2. 已移除的过渡层及问题
 
-当前 `TaskManager::submit` 会：
+v0.17.0-rc3 及以前的 `TaskManager::submit` 会：
 
 1. 生成 Runtime Task 并绑定 Turn；
 2. 启动当前 `willdeep` 可执行文件；
@@ -114,14 +114,14 @@ Task、Turn、Root Agent 和 Session 的终态更新必须在同一个完成路�
 
 ## 5. 分步实施
 
-1. 抽出稳定 `agent_event_json`，供 Terminal 与 Runtime Sink 共用。
-2. 抽出 `HarnessFactory`，让现有 CLI 行为在无功能变化下通过原测试。
-3. 抽出非交互 `run_harness_invocation`，统一消息写入、压缩和后台结果回流。
-4. 实现 `RuntimeEventSink`，直接写 EventLog 并同步 AgentStore。
-5. TaskManager 改为 `tokio::spawn` Harness Future，移除 stdin/stdout/stderr 转写。
-6. 用取消令牌包裹整个 Harness Future，并保持 Interaction/Agent 命令语义。
-7. 删除 `--web-input-json` Runtime 内部用途；仅在需要兼容旧客户端时保留隐藏入口。
-8. 通过全量测试和真实进程 E2E 后更新路线图状态。
+1. [x] 抽出稳定 `agent_event_json`，供 Terminal 与 Runtime Sink 共用。
+2. [x] 抽出 `HarnessFactory`，让现有 CLI 行为在无功能变化下通过原测试。
+3. [x] 抽出非交互执行入口，统一消息写入、压缩和后台结果回流。
+4. [x] 实现 `RuntimeEventSink`，直接写 EventLog 并同步 AgentStore。
+5. [x] TaskManager 改为 `tokio::spawn` Harness Future，移除 stdin/stdout/stderr 转写。
+6. [x] 用取消通知包裹整个 Harness Future，并保持 Interaction/Agent 命令语义。
+7. [x] 删除 `--web-input-json` 的 Runtime 内部用途；隐藏入口仅作为旧客户端兼容层保留。
+8. [x] 通过全量测试和真实进程 E2E，验证完成、取消、审批和 Ask User 恢复。
 
 ## 6. 验收证据
 

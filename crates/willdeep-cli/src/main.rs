@@ -8,14 +8,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalDecision, ApprovalMode, Approver,
-    BackgroundTaskRegistry, EventSink, SubagentCatalog, SubagentLifecycleStatus, ToolRegistry,
-    UserQuestion, WebToolConfig, build_provider, builtin_profiles,
+    AgentEvent, ApprovalDecision, Approver, EventSink, SubagentLifecycleStatus, UserQuestion,
 };
 
 mod config;
 mod daemon;
 mod editor;
+mod harness;
 mod i18n;
 mod mobile;
 mod onboarding;
@@ -289,45 +288,6 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     let resumed = load_session(&store, cli.resume.as_deref())?;
-    let selected_profile_name = cli.profile.as_deref().or_else(|| {
-        resumed
-            .as_ref()
-            .and_then(|session| session.profile.as_deref())
-    });
-    let profile = loaded.select_provider(selected_profile_name)?;
-    let profile_provider = profile
-        .and_then(|provider| provider.provider.as_deref())
-        .map(parse_provider)
-        .transpose()?;
-    let selected_provider = cli.provider.or(profile_provider);
-    let base = resolve_base(&cli, profile, selected_provider)?;
-    let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
-    let profile_api = profile
-        .and_then(|provider| provider.api.as_deref())
-        .map(parse_api)
-        .transpose()?;
-    let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
-    let max_turns = cli.max_turns.or(loaded.file.agent.max_turns).unwrap_or(24);
-    if !(1..=100).contains(&max_turns) {
-        bail!("--max-turns must be between 1 and 100");
-    }
-    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
-    let requested_workspace = cli
-        .workspace
-        .clone()
-        .or(project_workspace)
-        .or_else(|| resumed.as_ref().map(|session| session.workspace.clone()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let workspace = requested_workspace
-        .canonicalize()
-        .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))?;
-    let api_key = resolve_api_key(&cli, profile, kind)?;
-    let model = cli
-        .model
-        .clone()
-        .or_else(|| profile.and_then(|provider| provider.model.clone()))
-        .or_else(|| (kind == ProviderKind::SomeIm).then(|| "deepseek-v4-flash".to_owned()))
-        .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
     let web_input = if cli.web_input_json {
         let mut value = String::new();
         std::io::stdin().read_to_string(&mut value)?;
@@ -341,142 +301,29 @@ async fn run() -> Result<()> {
         read_prompt(&cli.prompt, cli.no_tui)?
     };
 
-    let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
-        some_im_base_url: base.clone(),
-        api_key: api_key.clone(),
-    });
-    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model.clone());
-    provider_config.max_output_tokens = cli
-        .max_output_tokens
-        .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
-        .unwrap_or(16_384);
-    let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
-        let vision_model = profile
-            .and_then(|value| value.vision_model.clone())
-            .unwrap_or_else(|| "qwen3-vl-plus".to_owned());
-        let mut vision_config = provider_config.clone();
-        vision_config.dialect = ApiDialect::ChatCompletions;
-        vision_config.model = vision_model.clone();
-        Some((
-            build_provider(vision_config).context("initialize some.im vision fallback")?,
-            vision_model,
-        ))
-    } else {
-        None
-    };
-    let parent_provider_config = provider_config.clone();
-    let provider = build_provider(provider_config).context("initialize provider")?;
-
-    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
-    let approval_mode = if cli.full_auto {
-        ApprovalMode::WorkspaceAccess
-    } else {
-        match configured_approval {
-            "strict" | "ask" | "request-every-time" => ApprovalMode::Strict,
-            "smart" | "auto-review" => ApprovalMode::Smart,
-            "workspace-write" | "workspace-access" => ApprovalMode::WorkspaceAccess,
-            _ => bail!("agent.approval must be `strict`, `smart`, or `workspace-write`"),
-        }
-    };
-    let skills = Arc::new(willdeep_core::SkillCatalog::discover(
-        &workspace,
-        &loaded.file.skills.roots,
-    ));
-    let mcp = Arc::new(
-        willdeep_core::McpRegistry::connect(&loaded.file.mcp_servers)
-            .await
-            .context("initialize MCP servers")?,
-    );
     let interactive_tui = prompt.is_none() && std::io::stdin().is_terminal() && !cli.no_tui;
     let (tui_tx, tui_rx) = tui::channel();
     let relay_bridge = mobile::RelayBridge::new();
-    let runtime_approver =
-        daemon::runtime_approver(web_input.as_ref().and_then(|input| input.runtime.as_ref()))?;
-    let approver: Arc<dyn Approver> = if let Some(approver) = runtime_approver {
-        approver
-    } else if interactive_tui {
-        Arc::new(tui::TuiApprover(tui_tx.clone()))
-    } else {
-        Arc::new(TerminalApprover(language))
-    };
-    let background_tasks = Arc::new(BackgroundTaskRegistry::default());
-    let _agent_command_watcher = daemon::start_agent_command_watcher(
-        web_input.as_ref().and_then(|input| input.runtime.as_ref()),
-        background_tasks.clone(),
-    )?;
-    let tools = ToolRegistry::new(&workspace, approval_mode)?
-        .with_approver(approver)
-        .with_skills(skills.clone())
-        .with_mcp(mcp)
-        .with_background_tasks(background_tasks.clone())
-        .with_web_tools(web_tools)
-        .with_always_allow_store(approval_store)?;
-    let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
-    if !skills.list().is_empty() {
-        system_prompt.push_str("\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill.\n");
-        system_prompt.push_str(&skills.summary());
-    }
-    let sink: Arc<dyn EventSink> = if interactive_tui {
-        Arc::new(tui::TuiSink {
-            ui: tui_tx.clone(),
-            relay: relay_bridge.clone(),
-        })
-    } else {
-        Arc::new(TerminalSink { json: cli.json })
-    };
-    let context_window = profile
-        .and_then(|value| value.context_window)
-        .unwrap_or(128_000);
-    let cheap_provider = if kind == ProviderKind::SomeIm {
-        let mut cheap = parent_provider_config.clone();
-        cheap.model = "glm-5".to_owned();
-        build_provider(cheap).context("initialize default subagent provider")?
-    } else {
-        provider.clone()
-    };
-    let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
-    for subagent in &mut subagent_profiles {
-        if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
-            if let Some(provider_name) = settings.provider_profile.as_deref() {
-                let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
-                if let Some(model) = &settings.model {
-                    configured.model = model.clone();
-                }
-                subagent.provider = build_provider(configured)
-                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
-            } else if let Some(model) = &settings.model {
-                let mut configured = parent_provider_config.clone();
-                configured.model = model.clone();
-                subagent.provider = build_provider(configured)
-                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
+    let frontend =
+        if let Some(connection) = web_input.as_ref().and_then(|input| input.runtime.clone()) {
+            harness::HarnessFrontend::Runtime {
+                connection,
+                sink: Arc::new(TerminalSink { json: cli.json }),
             }
-            if let Some(max_turns) = settings.max_turns {
-                subagent.max_turns = max_turns;
+        } else if interactive_tui {
+            harness::HarnessFrontend::Tui {
+                tx: tui_tx.clone(),
+                relay: relay_bridge.clone(),
             }
-            if let Some(window) = settings.context_window {
-                subagent.context_window = window;
-            }
-        }
-    }
-    let subagents = Arc::new(
-        SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
-            .with_event_sink(sink.clone()),
-    );
-    let mut agent = Agent::new(
-        provider,
-        tools,
-        AgentConfig {
-            max_turns,
-            system_prompt,
-            context_window,
-        },
-    )
-    .with_event_sink(sink)
-    .with_subagents(subagents);
-    if let Some((vision_provider, vision_model)) = image_fallback {
-        agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
-    }
-    let agent = Arc::new(agent);
+        } else {
+            harness::HarnessFrontend::Terminal { json: cli.json }
+        };
+    let built = harness::build(&cli, &loaded, &home, language, resumed.as_ref(), frontend).await?;
+    let agent = built.agent.clone();
+    let workspace = built.workspace.clone();
+    let skills = built.skills.clone();
+    let background_tasks = built.background_tasks.clone();
+    let context_window = built.context_window;
 
     let mut session = resumed.unwrap_or_else(|| {
         willdeep_core::Session::new(
@@ -511,58 +358,17 @@ async fn run() -> Result<()> {
         .await;
     }
     let prompt = prompt.context("provide a prompt argument or pipe one on stdin")?;
-    let history = session.messages.clone();
-    if web_input.is_some() && prompt.trim() == "/compress" {
-        let messages = agent.compress_history(history).await?;
-        let changed = messages.len() < session.messages.len();
-        session.messages = messages;
-        store.save(&mut session)?;
-        if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({"type":"completed","turns":0,"text":language.text(if changed {"上下文已压缩"} else {"当前上下文较短，无需压缩"},if changed {"Context compressed"} else {"Context is too short to compress"},if changed {"コンテキストを圧縮しました"} else {"コンテキストが短いため圧縮は不要です"}),"session_id":session.id})
-            );
-        }
-        return Ok(());
-    }
-    let user_message = willdeep_core::Message::user_with_attachments(
-        &prompt,
+    let allow_compress_command = web_input.is_some();
+    let outcome = harness::execute_noninteractive(
+        &built,
+        &store,
+        &mut session,
+        prompt,
         web_input.map(|input| input.attachments).unwrap_or_default(),
-    );
-    session.messages.push(user_message.clone());
-    store.save(&mut session)?;
-    let mut outcome = agent
-        .run_with_history_message(history, user_message)
-        .await?;
-    session.messages = outcome.messages.clone();
-    store.save(&mut session)?;
-    loop {
-        let events = background_tasks.drain_pending();
-        if events.is_empty() {
-            let running = background_tasks
-                .snapshots()
-                .iter()
-                .any(|task| task.status == willdeep_core::BackgroundTaskStatus::Running);
-            if !running {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            continue;
-        }
-        for event in events {
-            if !cli.json {
-                eprintln!(
-                    "[background] {} finished; continuing main harness",
-                    event.snapshot.id
-                );
-            }
-            outcome = agent
-                .run_with_history(session.messages.clone(), event.notice)
-                .await?;
-            session.messages = outcome.messages.clone();
-            store.save(&mut session)?;
-        }
-    }
+        language,
+        allow_compress_command,
+    )
+    .await?;
     if cli.json {
         println!(
             "{}",
@@ -573,7 +379,7 @@ async fn run() -> Result<()> {
                 "session_id": session.id
             })
         );
-    } else {
+    } else if !outcome.compressed {
         println!("{}", outcome.final_text);
     }
     Ok(())
@@ -890,90 +696,7 @@ struct TerminalSink {
 impl EventSink for TerminalSink {
     async fn emit(&self, event: AgentEvent) {
         if self.json {
-            let value = match event {
-                AgentEvent::TurnStarted { turn } => {
-                    serde_json::json!({"type": "turn_started", "turn": turn})
-                }
-                AgentEvent::AssistantText(text) => {
-                    serde_json::json!({"type": "assistant_text", "text": text})
-                }
-                AgentEvent::ToolRequested(call) => serde_json::json!({
-                    "type": "tool_requested",
-                    "id": call.id,
-                    "name": call.name,
-                    "arguments": call.arguments
-                }),
-                AgentEvent::ToolCompleted {
-                    call,
-                    output,
-                    is_error,
-                } => serde_json::json!({
-                    "type": "tool_completed",
-                    "id": call.id,
-                    "name": call.name,
-                    "output": output,
-                    "is_error": is_error
-                }),
-                AgentEvent::Usage(usage) => serde_json::json!({
-                    "type": "usage",
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "total_tokens": usage.total_tokens
-                }),
-                AgentEvent::CompressionStarted { estimated_tokens } => serde_json::json!({
-                    "type": "compression_started",
-                    "estimated_tokens": estimated_tokens
-                }),
-                AgentEvent::CompressionCompleted { estimated_tokens } => serde_json::json!({
-                    "type": "compression_completed",
-                    "estimated_tokens": estimated_tokens
-                }),
-                AgentEvent::SubagentStarted {
-                    id,
-                    profile,
-                    label,
-                    background,
-                } => serde_json::json!({
-                    "type": "subagent_started",
-                    "id": id,
-                    "profile": profile,
-                    "label": label,
-                    "background": background
-                }),
-                AgentEvent::SubagentCompleted { id, status } => serde_json::json!({
-                    "type": "subagent_completed",
-                    "id": id,
-                    "status": match status {
-                        SubagentLifecycleStatus::Completed => "completed",
-                        SubagentLifecycleStatus::Blocked => "blocked",
-                        SubagentLifecycleStatus::Cancelled => "cancelled",
-                        SubagentLifecycleStatus::Failed => "failed",
-                    }
-                }),
-                AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
-                    "type": "subagent_turn_started",
-                    "id": id,
-                    "turn": turn
-                }),
-                AgentEvent::SubagentToolRequested { id, name } => serde_json::json!({
-                    "type": "subagent_tool_requested",
-                    "id": id,
-                    "name": name
-                }),
-                AgentEvent::SubagentToolCompleted { id, name, is_error } => serde_json::json!({
-                    "type": "subagent_tool_completed",
-                    "id": id,
-                    "name": name,
-                    "is_error": is_error
-                }),
-                AgentEvent::SubagentUsage { id, usage } => serde_json::json!({
-                    "type": "subagent_usage",
-                    "id": id,
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "total_tokens": usage.total_tokens
-                }),
-            };
+            let value = agent_event_json(event);
             println!("{value}");
             return;
         }
@@ -1028,6 +751,93 @@ impl EventSink for TerminalSink {
     }
 }
 
+pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
+    match event {
+        AgentEvent::TurnStarted { turn } => {
+            serde_json::json!({"type": "turn_started", "turn": turn})
+        }
+        AgentEvent::AssistantText(text) => {
+            serde_json::json!({"type": "assistant_text", "text": text})
+        }
+        AgentEvent::ToolRequested(call) => serde_json::json!({
+            "type": "tool_requested",
+            "id": call.id,
+            "name": call.name,
+            "arguments": call.arguments
+        }),
+        AgentEvent::ToolCompleted {
+            call,
+            output,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_completed",
+            "id": call.id,
+            "name": call.name,
+            "output": output,
+            "is_error": is_error
+        }),
+        AgentEvent::Usage(usage) => serde_json::json!({
+            "type": "usage",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens
+        }),
+        AgentEvent::CompressionStarted { estimated_tokens } => serde_json::json!({
+            "type": "compression_started",
+            "estimated_tokens": estimated_tokens
+        }),
+        AgentEvent::CompressionCompleted { estimated_tokens } => serde_json::json!({
+            "type": "compression_completed",
+            "estimated_tokens": estimated_tokens
+        }),
+        AgentEvent::SubagentStarted {
+            id,
+            profile,
+            label,
+            background,
+        } => serde_json::json!({
+            "type": "subagent_started",
+            "id": id,
+            "profile": profile,
+            "label": label,
+            "background": background
+        }),
+        AgentEvent::SubagentCompleted { id, status } => serde_json::json!({
+            "type": "subagent_completed",
+            "id": id,
+            "status": match status {
+                SubagentLifecycleStatus::Completed => "completed",
+                SubagentLifecycleStatus::Blocked => "blocked",
+                SubagentLifecycleStatus::Cancelled => "cancelled",
+                SubagentLifecycleStatus::Failed => "failed",
+            }
+        }),
+        AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
+            "type": "subagent_turn_started",
+            "id": id,
+            "turn": turn
+        }),
+        AgentEvent::SubagentToolRequested { id, name } => serde_json::json!({
+            "type": "subagent_tool_requested",
+            "id": id,
+            "name": name
+        }),
+        AgentEvent::SubagentToolCompleted { id, name, is_error } => serde_json::json!({
+            "type": "subagent_tool_completed",
+            "id": id,
+            "name": name,
+            "is_error": is_error
+        }),
+        AgentEvent::SubagentUsage { id, usage } => serde_json::json!({
+            "type": "subagent_usage",
+            "id": id,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens
+        }),
+    }
+}
+
 fn compact_output(output: &str) -> String {
     const LIMIT: usize = 2_000;
     let mut value = output.chars().take(LIMIT).collect::<String>();
@@ -1058,6 +868,18 @@ mod tests {
         assert_eq!(
             resolve_dialect(ApiArg::Responses, ProviderKind::SomeIm),
             ApiDialect::Responses
+        );
+    }
+
+    #[test]
+    fn agent_event_json_has_stable_runtime_schema() {
+        assert_eq!(
+            agent_event_json(AgentEvent::TurnStarted { turn: 3 }),
+            serde_json::json!({"type": "turn_started", "turn": 3})
+        );
+        assert_eq!(
+            agent_event_json(AgentEvent::AssistantText("ready".to_string())),
+            serde_json::json!({"type": "assistant_text", "text": "ready"})
         );
     }
 }
