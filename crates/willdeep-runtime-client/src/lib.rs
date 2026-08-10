@@ -144,10 +144,7 @@ impl RuntimeClient {
         self.call("tool.list", params, None).await
     }
 
-    pub async fn tool(
-        &self,
-        id: uuid::Uuid,
-    ) -> Result<ApiResponse<Option<RuntimeTool>>, ClientError> {
+    pub async fn tool(&self, id: uuid::Uuid) -> Result<ApiResponse<RuntimeTool>, ClientError> {
         self.call("tool.get", &IdParams { id }, None).await
     }
 
@@ -161,7 +158,7 @@ impl RuntimeClient {
     pub async fn artifact(
         &self,
         id: uuid::Uuid,
-    ) -> Result<ApiResponse<Option<RuntimeArtifact>>, ClientError> {
+    ) -> Result<ApiResponse<RuntimeArtifact>, ClientError> {
         self.call("artifact.get", &IdParams { id }, None).await
     }
 
@@ -403,6 +400,79 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(response, ApiResponse::Ok { data, .. } if data[0].id == tool_id));
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn typed_tool_get_decodes_a_direct_object_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = std::path::Path::new("/private/tmp")
+            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let tool_id = uuid::Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(length, 0, "request ended before its JSON body arrived");
+                request.extend_from_slice(&chunk[..length]);
+                let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let body_start = request
+                .windows(4)
+                .position(|value| value == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let request: ApiRequest = serde_json::from_slice(&request[body_start..]).unwrap();
+            assert_eq!(request.operation, "tool.get");
+            assert_eq!(request.params["id"], tool_id.to_string());
+            let body = serde_json::to_string(&ApiResponse::ok(
+                RuntimeTool {
+                    id: tool_id,
+                    session_id: None,
+                    turn_id: None,
+                    task_id: uuid::Uuid::nil(),
+                    agent_id: uuid::Uuid::nil(),
+                    name: "read_file".to_owned(),
+                    status: willdeep_runtime_protocol::ToolStatus::Completed,
+                    started_at_ms: 10,
+                    completed_at_ms: Some(20),
+                },
+                "test",
+                Some(request.request_id),
+            ))
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
+        let response = client.tool(tool_id).await.unwrap();
+        assert!(matches!(response, ApiResponse::Ok { data, .. } if data.id == tool_id));
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

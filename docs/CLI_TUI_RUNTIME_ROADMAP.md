@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc15
+> 当前实施版本：v0.21.0-rc16
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc16（已完成）：修正 Rust Runtime Client 的 `tool.get` 与 `artifact.get` 返回契约：成功响应直接包含 `RuntimeTool`/`RuntimeArtifact`，不存在对象由统一 `not_found` 错误信封表达，不再错误声明为 `Option<T>`。新增 Unix Socket 真实 `tool.get` 往返测试，覆盖操作名、ID 参数与直接对象解码。下一步将 Agent、审批、提问和事件的私有参数提升为公共 DTO，并扩展类型化 Client。
 
 v0.21.0-rc15（已完成）：新增固定的 `public-api-v1.json` 跨语言兼容夹具，覆盖 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 与 Event 全部 11 类稳定公开对象及响应信封。协议测试逐类反序列化并检查夹具不含 API Key、认证头或 Runtime Token；Object、Capability 和 Transport 的未来新增值统一降级为 `unknown`，避免旧客户端整包解码失败。Swift、Android 与第三方客户端可复用同一文件建立 decoder contract test。下一步扩充修改请求夹具和 Swift 只读观察适配层。
 

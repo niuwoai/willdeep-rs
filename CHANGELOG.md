@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0-rc16] - 2026-08-11
+
+### Fixed
+
+- 修正 Rust Runtime Client 的 `tool.get` 与 `artifact.get` 类型签名：成功响应直接解码公共对象，未找到时由统一错误信封表达，不再错误要求服务端返回 `Option<T>`。
+- 新增 Unix Socket 真实 `tool.get` 往返测试，覆盖稳定操作名、ID 参数和直接对象响应解码。
+
 ## [0.21.0-rc15] - 2026-08-11
 
 ### Added
