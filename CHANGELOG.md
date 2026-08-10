@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.21.0-rc6] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增 Diff Snapshot、File Content、Review、Verification、Attribution、Commit Preview 与 Revert 稳定 DTO，并公开完整的 `diff.*` 操作集合。
+
+### Changed
+
+- TUI Diff Review Center 的快照、内容、审查、验证、归因、提交预览和撤销全部改走共享 Runtime Client，不再手写旧 Diff HTTP 请求。
+- `diff.review`、`diff.verification.record` 和 `diff.revert` 纳入持久 Request ID 幂等，陈旧 Snapshot 使用稳定 `stale_snapshot` 错误码。
+
+### Security
+
+- 统一 Diff API 复用 Runtime Workspace 授权、精确 Snapshot 校验、审查备注/验证摘要上限、敏感验证命令拒绝与 Recovery 保守撤销；客户端不能通过新增参数强制覆盖冲突。
+
 ## [0.21.0-rc5] - 2026-08-11
 
 ### Added

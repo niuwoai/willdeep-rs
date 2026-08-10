@@ -270,6 +270,224 @@ pub struct RegisterWorkspaceParams {
     pub mcp_servers: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffArea {
+    Staged,
+    Unstaged,
+    #[default]
+    Combined,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffFileKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Unmerged,
+    Untracked,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub kind: DiffFileKind,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub binary: bool,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffSnapshot {
+    pub id: String,
+    pub workspace: Option<String>,
+    pub head: Option<String>,
+    pub files: Vec<DiffFile>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub has_conflicts: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffContent {
+    pub snapshot_id: String,
+    pub path: String,
+    pub area: DiffArea,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Accepted,
+    Rejected,
+    ChangesRequested,
+    Reviewed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffReview {
+    pub id: uuid::Uuid,
+    pub snapshot_id: String,
+    pub workspace: Option<String>,
+    pub path: String,
+    pub decision: ReviewDecision,
+    pub note: Option<String>,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationOutcome {
+    Passed,
+    Failed,
+    TimedOut,
+    LaunchFailed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffVerification {
+    pub id: uuid::Uuid,
+    pub snapshot_id: String,
+    pub workspace: Option<String>,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub outcome: VerificationOutcome,
+    pub summary: String,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionConfidence {
+    ToolWindow,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffAttribution {
+    pub id: uuid::Uuid,
+    pub before_snapshot_id: String,
+    pub after_snapshot_id: String,
+    pub workspace: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub task_id: uuid::Uuid,
+    pub agent_id: uuid::Uuid,
+    pub tool: String,
+    pub paths: Vec<String>,
+    pub confidence: AttributionConfidence,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Warning,
+    Blocker,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SensitiveFinding {
+    pub path: String,
+    pub code: String,
+    pub severity: FindingSeverity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffCommitPreview {
+    pub snapshot_id: String,
+    pub workspace: Option<String>,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub message: String,
+    pub staged_files: Vec<String>,
+    pub unstaged_files: Vec<String>,
+    pub sensitive_findings: Vec<SensitiveFinding>,
+    pub remote: String,
+    pub push_target: Option<String>,
+    pub tag: Option<String>,
+    pub blockers: Vec<String>,
+    pub requires_confirmation: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffRevertResult {
+    pub previous_snapshot_id: String,
+    pub current_snapshot_id: String,
+    pub path: String,
+    pub recovery_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffSnapshotParams {
+    pub workspace: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffSnapshotQueryParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffContentParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+    pub path: String,
+    #[serde(default)]
+    pub area: DiffArea,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffReviewParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+    pub path: String,
+    pub decision: ReviewDecision,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffVerificationParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub outcome: VerificationOutcome,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffCommitPreviewParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+    pub message: String,
+    pub remote: String,
+    pub tag: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiffRevertParams {
+    pub workspace: String,
+    pub snapshot_id: String,
+    pub path: String,
+    #[serde(default)]
+    pub area: DiffArea,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolLimits {
     pub max_event_page: u32,
@@ -382,7 +600,14 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "event.list",
     "event.stream",
     "diff.snapshot",
+    "diff.content",
+    "diff.reviews",
     "diff.review",
+    "diff.verifications",
+    "diff.verification.record",
+    "diff.attributions",
+    "diff.commit_preview",
+    "diff.revert",
     "worktree.review",
     "worktree.merge",
     "worktree.audit",
@@ -596,6 +821,56 @@ mod tests {
                 "skills": [],
                 "mcp_servers": [],
                 "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn diff_contract_is_typed_and_rejects_ambiguous_mutation_params() {
+        for operation in [
+            "diff.snapshot",
+            "diff.content",
+            "diff.reviews",
+            "diff.review",
+            "diff.verifications",
+            "diff.verification.record",
+            "diff.attributions",
+            "diff.commit_preview",
+            "diff.revert",
+        ] {
+            assert!(SUPPORTED_OPERATIONS.contains(&operation));
+        }
+        let snapshot = DiffSnapshot {
+            id: "diff-1".to_owned(),
+            workspace: None,
+            head: Some("abc".to_owned()),
+            files: vec![DiffFile {
+                path: "src/lib.rs".to_owned(),
+                old_path: None,
+                kind: DiffFileKind::Modified,
+                staged: false,
+                unstaged: true,
+                binary: false,
+                additions: 2,
+                deletions: 1,
+            }],
+            additions: 2,
+            deletions: 1,
+            has_conflicts: false,
+        };
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DiffSnapshot>(encoded).unwrap(),
+            snapshot
+        );
+        assert!(
+            serde_json::from_value::<DiffRevertParams>(serde_json::json!({
+                "workspace": "/workspace",
+                "snapshot_id": "diff-1",
+                "path": "src/lib.rs",
+                "area": "combined",
+                "force": true
             }))
             .is_err()
         );

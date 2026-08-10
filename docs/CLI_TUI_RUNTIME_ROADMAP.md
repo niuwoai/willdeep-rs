@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc5
+> 当前实施版本：v0.21.0-rc6
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -119,7 +119,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 本地 JSON 请求响应与 NDJSON/流式事件协议；统一 API 使用版本化请求/响应信封，事件流按全局序号补读并逐行输出完整信封。
 - [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
 - [-] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；修改类统一请求使用 Pending→Completed 私有日志跨重启去重，不确定崩溃窗口拒绝自动重放；剩余修改操作迁移待完成。
-- [-] Rust Client Library，供 TUI、Web、Swift FFI、移动端和自动化复用；已抽出回环连接、Token、能力、统一调用和 NDJSON 解码，TUI 事件、Agent、审批和回答已迁移。
+- [-] Rust Client Library，供 TUI、Web、Swift FFI、移动端和自动化复用；已抽出回环连接、Token、能力、统一调用和 NDJSON 解码，TUI 事件、Agent、审批、回答、Workspace 与 Diff Center 已迁移。
 - [-] API Key、工具参数、Prompt 和路径按权限脱敏；公开 DTO 排除配置/队列正文/内部错误，公共事件兼容净化 Tool 参数/输出、报告、路径和错误，细粒度远程路径权限待实现。
 
 验收：所有客户端观察一致状态，TUI 不再直接持有 Harness 业务逻辑。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc6（已完成）：协议 crate 新增 Diff Snapshot、File、Content、Review、Verification、Attribution、Commit Preview 与 Revert 稳定 DTO；统一 API 覆盖全部 Diff 读写操作，TUI Diff Center bridge 改用共享 Runtime Client。审查、验证记录和安全撤销纳入跨重启 Request ID 幂等，服务端继续执行 Workspace 授权、精确 Snapshot、敏感命令过滤、内容上限和 Recovery 保守撤销。下一步迁移 Web Session 管理，并实现 Unix Socket 与 Windows Named Pipe。
 
 v0.21.0-rc1（已完成）：新增独立 `willdeep-runtime-protocol` crate，定义协议 `1.0`、11 类控制对象、稳定 namespaced operation、能力/传输/限制、统一成功/错误信封和错误码。Runtime 新增显式 Token 校验的 `GET /v1/capabilities`，支持 `x-willdeep-request-id` 回显；CLI 新增 `daemon capabilities`。旧 `/v1/*` 原始 DTO 保持兼容，下一步实现统一 `willdeep api` 调度并逐步迁移到共享 DTO。
 

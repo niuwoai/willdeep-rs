@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc5
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc6
 
 ## 项目简介
 
@@ -77,6 +77,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Session、Turn、Agent 与 Event 使用协议 crate 的公开 DTO；TUI 实时事件、Agent 观察/控制、审批和回答均通过共享 Runtime Client，公共事件边界兼容净化旧日志中的工具参数、输出、报告、路径和内部错误；
 - Task、Pending Approval 与 Pending Question 也使用公开 DTO；TUI Inbox 和 Web/TUI 事件补读通过共享 Client，修改请求以 Pending→Completed 私有日志跨 Runtime 重启去重，不确定崩溃窗口拒绝自动重放；
 - Workspace 与访问模式使用公开 DTO；注册、自动确保、激活、移除和 TUI/Web Workspace bridge 均通过共享 Client，服务端继续规范化路径并覆盖任务权限；
+- Diff Snapshot、File、Review、Verification、Attribution、Commit Preview 与 Revert 使用协议 crate 的稳定 DTO；TUI Diff Center 的全部读写均通过共享 Runtime Client，精确快照、Workspace 授权、敏感命令过滤和 Recovery 撤销语义保持不变；
 - TUI Prompt 可用 `/webapp` 在当前 Workspace 启动仅监听回环地址的内嵌 Web App，并以 `/webapp status` 查看地址和进程状态；启动继承当前配置/Profile，并等待健康检查成功后才报告完成；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；

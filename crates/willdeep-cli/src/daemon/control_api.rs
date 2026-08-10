@@ -352,6 +352,81 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             ),
             Err(error) => Err(error),
         },
+        "diff.snapshot" => {
+            match params::<willdeep_runtime_protocol::DiffSnapshotParams>(&request) {
+                Ok(params) => diff_review::unified_snapshot(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.content" => match params::<willdeep_runtime_protocol::DiffContentParams>(&request) {
+            Ok(params) => diff_review::unified_content(state, params)
+                .await
+                .map_err(ApiFailure::from_diff_status)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
+        "diff.reviews" => {
+            match params::<willdeep_runtime_protocol::DiffSnapshotQueryParams>(&request) {
+                Ok(params) => diff_review::unified_reviews(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.review" => match params::<willdeep_runtime_protocol::DiffReviewParams>(&request) {
+            Ok(params) => diff_review::unified_review(state, params)
+                .await
+                .map_err(ApiFailure::from_diff_status)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
+        "diff.verifications" => {
+            match params::<willdeep_runtime_protocol::DiffSnapshotQueryParams>(&request) {
+                Ok(params) => diff_review::unified_verifications(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.verification.record" => {
+            match params::<willdeep_runtime_protocol::DiffVerificationParams>(&request) {
+                Ok(params) => diff_review::unified_record_verification(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.attributions" => {
+            match params::<willdeep_runtime_protocol::DiffSnapshotQueryParams>(&request) {
+                Ok(params) => diff_review::unified_attributions(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.commit_preview" => {
+            match params::<willdeep_runtime_protocol::DiffCommitPreviewParams>(&request) {
+                Ok(params) => diff_review::unified_commit_preview(state, params)
+                    .await
+                    .map_err(ApiFailure::from_diff_status)
+                    .and_then(json),
+                Err(error) => Err(error),
+            }
+        }
+        "diff.revert" => match params::<willdeep_runtime_protocol::DiffRevertParams>(&request) {
+            Ok(params) => diff_review::unified_revert(state, params)
+                .await
+                .map_err(ApiFailure::from_diff_status)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
         _ => Err(ApiFailure {
             status: StatusCode::NOT_IMPLEMENTED,
             code: ErrorCode::UnsupportedOperation,
@@ -404,6 +479,9 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "workspace.remove"
             | "approval.resolve"
             | "question.answer"
+            | "diff.review"
+            | "diff.verification.record"
+            | "diff.revert"
     )
 }
 
@@ -866,6 +944,15 @@ impl ApiFailure {
 
     fn from_status(status: StatusCode) -> Self {
         match status {
+            StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE => {
+                Self::invalid("Runtime rejected invalid or oversized operation parameters")
+            }
+            StatusCode::FORBIDDEN => Self {
+                status,
+                code: ErrorCode::Forbidden,
+                message: "operation is outside an authorized Runtime Workspace".to_owned(),
+                retryable: false,
+            },
             StatusCode::NOT_FOUND => Self::not_found("Runtime object not found"),
             StatusCode::CONFLICT => Self {
                 status,
@@ -873,7 +960,26 @@ impl ApiFailure {
                 message: "Runtime object state conflicts with this operation".to_owned(),
                 retryable: false,
             },
+            StatusCode::UNPROCESSABLE_ENTITY => Self {
+                status,
+                code: ErrorCode::Conflict,
+                message: "Runtime object cannot be changed in its current state".to_owned(),
+                retryable: false,
+            },
             _ => Self::internal(format!("HTTP {status}")),
+        }
+    }
+
+    fn from_diff_status(status: StatusCode) -> Self {
+        if status == StatusCode::CONFLICT {
+            Self {
+                status,
+                code: ErrorCode::StaleSnapshot,
+                message: "Diff snapshot changed; refresh before retrying this operation".to_owned(),
+                retryable: false,
+            }
+        } else {
+            Self::from_status(status)
         }
     }
 }

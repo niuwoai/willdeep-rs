@@ -194,6 +194,312 @@ pub(crate) struct CommitPreview {
     pub requires_confirmation: bool,
 }
 
+fn public_file(file: DiffFile) -> willdeep_runtime_protocol::DiffFile {
+    use willdeep_runtime_protocol::DiffFileKind as Target;
+    willdeep_runtime_protocol::DiffFile {
+        path: file.path,
+        old_path: file.old_path,
+        kind: match file.kind {
+            DiffFileKind::Added => Target::Added,
+            DiffFileKind::Modified => Target::Modified,
+            DiffFileKind::Deleted => Target::Deleted,
+            DiffFileKind::Renamed => Target::Renamed,
+            DiffFileKind::Copied => Target::Copied,
+            DiffFileKind::Unmerged => Target::Unmerged,
+            DiffFileKind::Untracked => Target::Untracked,
+        },
+        staged: file.staged,
+        unstaged: file.unstaged,
+        binary: file.binary,
+        additions: file.additions,
+        deletions: file.deletions,
+    }
+}
+
+fn public_snapshot(snapshot: DiffSnapshot) -> willdeep_runtime_protocol::DiffSnapshot {
+    willdeep_runtime_protocol::DiffSnapshot {
+        id: snapshot.id,
+        workspace: Some(snapshot.workspace.to_string_lossy().into_owned()),
+        head: snapshot.head,
+        files: snapshot.files.into_iter().map(public_file).collect(),
+        additions: snapshot.additions,
+        deletions: snapshot.deletions,
+        has_conflicts: snapshot.has_conflicts,
+    }
+}
+
+fn public_area(area: DiffArea) -> willdeep_runtime_protocol::DiffArea {
+    match area {
+        DiffArea::Staged => willdeep_runtime_protocol::DiffArea::Staged,
+        DiffArea::Unstaged => willdeep_runtime_protocol::DiffArea::Unstaged,
+        DiffArea::Combined => willdeep_runtime_protocol::DiffArea::Combined,
+    }
+}
+
+fn local_area(area: willdeep_runtime_protocol::DiffArea) -> DiffArea {
+    match area {
+        willdeep_runtime_protocol::DiffArea::Staged => DiffArea::Staged,
+        willdeep_runtime_protocol::DiffArea::Unstaged => DiffArea::Unstaged,
+        willdeep_runtime_protocol::DiffArea::Combined => DiffArea::Combined,
+    }
+}
+
+fn public_decision(decision: ReviewDecision) -> willdeep_runtime_protocol::ReviewDecision {
+    match decision {
+        ReviewDecision::Accepted => willdeep_runtime_protocol::ReviewDecision::Accepted,
+        ReviewDecision::Rejected => willdeep_runtime_protocol::ReviewDecision::Rejected,
+        ReviewDecision::ChangesRequested => {
+            willdeep_runtime_protocol::ReviewDecision::ChangesRequested
+        }
+        ReviewDecision::Reviewed => willdeep_runtime_protocol::ReviewDecision::Reviewed,
+    }
+}
+
+fn runtime_api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
+    match response {
+        willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+            bail!("Runtime API error: {}", error.message)
+        }
+    }
+}
+
+fn local_snapshot(snapshot: willdeep_runtime_protocol::DiffSnapshot) -> Result<DiffSnapshot> {
+    use willdeep_runtime_protocol::DiffFileKind as Source;
+    Ok(DiffSnapshot {
+        id: snapshot.id,
+        workspace: PathBuf::from(
+            snapshot
+                .workspace
+                .context("Runtime omitted Diff workspace")?,
+        ),
+        head: snapshot.head,
+        files: snapshot
+            .files
+            .into_iter()
+            .map(|file| DiffFile {
+                path: file.path,
+                old_path: file.old_path,
+                kind: match file.kind {
+                    Source::Added => DiffFileKind::Added,
+                    Source::Modified => DiffFileKind::Modified,
+                    Source::Deleted => DiffFileKind::Deleted,
+                    Source::Renamed => DiffFileKind::Renamed,
+                    Source::Copied => DiffFileKind::Copied,
+                    Source::Unmerged => DiffFileKind::Unmerged,
+                    Source::Untracked => DiffFileKind::Untracked,
+                },
+                staged: file.staged,
+                unstaged: file.unstaged,
+                binary: file.binary,
+                additions: file.additions,
+                deletions: file.deletions,
+            })
+            .collect(),
+        additions: snapshot.additions,
+        deletions: snapshot.deletions,
+        has_conflicts: snapshot.has_conflicts,
+    })
+}
+
+fn public_review(record: DiffReviewRecord) -> willdeep_runtime_protocol::DiffReview {
+    use willdeep_runtime_protocol::ReviewDecision as Target;
+    willdeep_runtime_protocol::DiffReview {
+        id: record.id,
+        snapshot_id: record.snapshot_id,
+        workspace: Some(record.workspace.to_string_lossy().into_owned()),
+        path: record.path,
+        decision: match record.decision {
+            ReviewDecision::Accepted => Target::Accepted,
+            ReviewDecision::Rejected => Target::Rejected,
+            ReviewDecision::ChangesRequested => Target::ChangesRequested,
+            ReviewDecision::Reviewed => Target::Reviewed,
+        },
+        note: record.note,
+        created_at: record.created_at,
+    }
+}
+
+fn local_review(record: willdeep_runtime_protocol::DiffReview) -> Result<DiffReviewRecord> {
+    use willdeep_runtime_protocol::ReviewDecision as Source;
+    Ok(DiffReviewRecord {
+        id: record.id,
+        snapshot_id: record.snapshot_id,
+        workspace: PathBuf::from(
+            record
+                .workspace
+                .context("Runtime omitted review workspace")?,
+        ),
+        path: record.path,
+        decision: match record.decision {
+            Source::Accepted => ReviewDecision::Accepted,
+            Source::Rejected => ReviewDecision::Rejected,
+            Source::ChangesRequested => ReviewDecision::ChangesRequested,
+            Source::Reviewed => ReviewDecision::Reviewed,
+        },
+        note: record.note,
+        created_at: record.created_at,
+    })
+}
+
+fn public_verification(
+    record: DiffVerificationRecord,
+) -> willdeep_runtime_protocol::DiffVerification {
+    use willdeep_runtime_protocol::VerificationOutcome as Target;
+    willdeep_runtime_protocol::DiffVerification {
+        id: record.id,
+        snapshot_id: record.snapshot_id,
+        workspace: Some(record.workspace.to_string_lossy().into_owned()),
+        command: record.command,
+        exit_code: record.exit_code,
+        outcome: match record.outcome {
+            VerificationOutcome::Passed => Target::Passed,
+            VerificationOutcome::Failed => Target::Failed,
+            VerificationOutcome::TimedOut => Target::TimedOut,
+            VerificationOutcome::LaunchFailed => Target::LaunchFailed,
+        },
+        summary: record.summary,
+        created_at: record.created_at,
+    }
+}
+
+fn local_verification(
+    record: willdeep_runtime_protocol::DiffVerification,
+) -> Result<DiffVerificationRecord> {
+    use willdeep_runtime_protocol::VerificationOutcome as Source;
+    Ok(DiffVerificationRecord {
+        id: record.id,
+        snapshot_id: record.snapshot_id,
+        workspace: PathBuf::from(
+            record
+                .workspace
+                .context("Runtime omitted verification workspace")?,
+        ),
+        command: record.command,
+        exit_code: record.exit_code,
+        outcome: match record.outcome {
+            Source::Passed => VerificationOutcome::Passed,
+            Source::Failed => VerificationOutcome::Failed,
+            Source::TimedOut => VerificationOutcome::TimedOut,
+            Source::LaunchFailed => VerificationOutcome::LaunchFailed,
+        },
+        summary: record.summary,
+        created_at: record.created_at,
+    })
+}
+
+fn public_attribution(record: DiffAttributionRecord) -> willdeep_runtime_protocol::DiffAttribution {
+    willdeep_runtime_protocol::DiffAttribution {
+        id: record.id,
+        before_snapshot_id: record.before_snapshot_id,
+        after_snapshot_id: record.after_snapshot_id,
+        workspace: Some(record.workspace.to_string_lossy().into_owned()),
+        session_id: record.session_id,
+        turn_id: record.turn_id,
+        task_id: record.task_id,
+        agent_id: record.agent_id,
+        tool: record.tool,
+        paths: record.paths,
+        confidence: willdeep_runtime_protocol::AttributionConfidence::ToolWindow,
+        created_at: record.created_at,
+    }
+}
+
+fn local_attribution(
+    record: willdeep_runtime_protocol::DiffAttribution,
+) -> Result<DiffAttributionRecord> {
+    Ok(DiffAttributionRecord {
+        id: record.id,
+        before_snapshot_id: record.before_snapshot_id,
+        after_snapshot_id: record.after_snapshot_id,
+        workspace: PathBuf::from(
+            record
+                .workspace
+                .context("Runtime omitted attribution workspace")?,
+        ),
+        session_id: record.session_id,
+        turn_id: record.turn_id,
+        task_id: record.task_id,
+        agent_id: record.agent_id,
+        tool: record.tool,
+        paths: record.paths,
+        confidence: AttributionConfidence::ToolWindow,
+        created_at: record.created_at,
+    })
+}
+
+fn public_finding(finding: SensitiveFinding) -> willdeep_runtime_protocol::SensitiveFinding {
+    willdeep_runtime_protocol::SensitiveFinding {
+        path: finding.path,
+        code: finding.code,
+        severity: match finding.severity {
+            FindingSeverity::Warning => willdeep_runtime_protocol::FindingSeverity::Warning,
+            FindingSeverity::Blocker => willdeep_runtime_protocol::FindingSeverity::Blocker,
+        },
+    }
+}
+
+fn local_finding(finding: willdeep_runtime_protocol::SensitiveFinding) -> SensitiveFinding {
+    SensitiveFinding {
+        path: finding.path,
+        code: finding.code,
+        severity: match finding.severity {
+            willdeep_runtime_protocol::FindingSeverity::Warning => FindingSeverity::Warning,
+            willdeep_runtime_protocol::FindingSeverity::Blocker => FindingSeverity::Blocker,
+        },
+    }
+}
+
+fn public_commit_preview(preview: CommitPreview) -> willdeep_runtime_protocol::DiffCommitPreview {
+    willdeep_runtime_protocol::DiffCommitPreview {
+        snapshot_id: preview.snapshot_id,
+        workspace: Some(preview.workspace.to_string_lossy().into_owned()),
+        branch: preview.branch,
+        head: preview.head,
+        message: preview.message,
+        staged_files: preview.staged_files,
+        unstaged_files: preview.unstaged_files,
+        sensitive_findings: preview
+            .sensitive_findings
+            .into_iter()
+            .map(public_finding)
+            .collect(),
+        remote: preview.remote,
+        push_target: preview.push_target,
+        tag: preview.tag,
+        blockers: preview.blockers,
+        requires_confirmation: preview.requires_confirmation,
+    }
+}
+
+fn local_commit_preview(
+    preview: willdeep_runtime_protocol::DiffCommitPreview,
+) -> Result<CommitPreview> {
+    Ok(CommitPreview {
+        snapshot_id: preview.snapshot_id,
+        workspace: PathBuf::from(
+            preview
+                .workspace
+                .context("Runtime omitted Commit Preview workspace")?,
+        ),
+        branch: preview.branch,
+        head: preview.head,
+        message: preview.message,
+        staged_files: preview.staged_files,
+        unstaged_files: preview.unstaged_files,
+        sensitive_findings: preview
+            .sensitive_findings
+            .into_iter()
+            .map(local_finding)
+            .collect(),
+        remote: preview.remote,
+        push_target: preview.push_target,
+        tag: preview.tag,
+        blockers: preview.blockers,
+        requires_confirmation: preview.requires_confirmation,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct CommitPreviewQuery {
     workspace: PathBuf,
@@ -385,16 +691,16 @@ fn area_name(area: DiffArea) -> &'static str {
 
 pub(crate) async fn remote_snapshot(home: &Path, workspace: &Path) -> Result<DiffSnapshot> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!("http://{}/v1/diffs", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&[("workspace", workspace.display().to_string())])
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffSnapshot>(
+            "diff.snapshot",
+            &willdeep_runtime_protocol::DiffSnapshotParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+            },
+            None,
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected Diff snapshot: {}", response.text().await?);
-    }
-    Ok(response.json().await?)
+    local_snapshot(runtime_api_data(response)?)
 }
 
 pub(crate) async fn remote_content(
@@ -405,31 +711,19 @@ pub(crate) async fn remote_content(
     area: DiffArea,
 ) -> Result<String> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!(
-            "http://{}/v1/diffs/{snapshot_id}/content",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&[
-            ("workspace", workspace.display().to_string()),
-            ("path", path.to_owned()),
-            ("area", area_name(area).to_owned()),
-        ])
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffContent>(
+            "diff.content",
+            &willdeep_runtime_protocol::DiffContentParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                path: path.to_owned(),
+                area: public_area(area),
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Diff snapshot changed; reopen /diff before reviewing");
-    }
-    if !response.status().is_success() {
-        bail!("Runtime rejected Diff content: {}", response.text().await?);
-    }
-    let value: serde_json::Value = response.json().await?;
-    Ok(value
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_owned())
+    Ok(runtime_api_data(response)?.content)
 }
 
 pub(crate) async fn remote_review(
@@ -438,22 +732,20 @@ pub(crate) async fn remote_review(
     request: &ReviewRequest,
 ) -> Result<DiffReviewRecord> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/diffs/{snapshot_id}/reviews",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(request)
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffReview>(
+            "diff.review",
+            &willdeep_runtime_protocol::DiffReviewParams {
+                workspace: request.workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                path: request.path.clone(),
+                decision: public_decision(request.decision),
+                note: request.note.clone(),
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Diff snapshot changed; reopen /diff before reviewing");
-    }
-    if !response.status().is_success() {
-        bail!("Runtime rejected Diff review: {}", response.text().await?);
-    }
-    Ok(response.json().await?)
+    local_review(runtime_api_data(response)?)
 }
 
 pub(crate) async fn remote_reviews(
@@ -462,19 +754,20 @@ pub(crate) async fn remote_reviews(
     snapshot_id: &str,
 ) -> Result<Vec<DiffReviewRecord>> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!(
-            "http://{}/v1/diffs/{snapshot_id}/reviews",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&[("workspace", workspace.display().to_string())])
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, Vec<willdeep_runtime_protocol::DiffReview>>(
+            "diff.reviews",
+            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+            },
+            None,
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected Diff reviews: {}", response.text().await?);
-    }
-    Ok(response.json().await?)
+    runtime_api_data(response)?
+        .into_iter()
+        .map(local_review)
+        .collect()
 }
 
 pub(crate) async fn remote_verifications(
@@ -483,22 +776,20 @@ pub(crate) async fn remote_verifications(
     snapshot_id: &str,
 ) -> Result<Vec<DiffVerificationRecord>> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!(
-            "http://{}/v1/diffs/{snapshot_id}/verifications",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&[("workspace", workspace.display().to_string())])
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, Vec<willdeep_runtime_protocol::DiffVerification>>(
+            "diff.verifications",
+            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+            },
+            None,
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Diff verifications: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    runtime_api_data(response)?
+        .into_iter()
+        .map(local_verification)
+        .collect()
 }
 
 pub(crate) async fn remote_attributions(
@@ -507,25 +798,20 @@ pub(crate) async fn remote_attributions(
     snapshot_id: &str,
 ) -> Result<Vec<DiffAttributionRecord>> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .get(format!(
-            "http://{}/v1/diffs/{snapshot_id}/attributions",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&[("workspace", workspace.display().to_string())])
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, Vec<willdeep_runtime_protocol::DiffAttribution>>(
+            "diff.attributions",
+            &willdeep_runtime_protocol::DiffSnapshotQueryParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Diff snapshot changed; reopen /diff before reading attribution");
-    }
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Diff attribution: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    runtime_api_data(response)?
+        .into_iter()
+        .map(local_attribution)
+        .collect()
 }
 
 pub(crate) async fn remote_commit_preview(
@@ -537,33 +823,20 @@ pub(crate) async fn remote_commit_preview(
     tag: Option<&str>,
 ) -> Result<CommitPreview> {
     let state = ensure_running(home).await?;
-    let mut query = vec![
-        ("workspace", workspace.display().to_string()),
-        ("message", message.to_owned()),
-        ("remote", remote.to_owned()),
-    ];
-    if let Some(tag) = tag {
-        query.push(("tag", tag.to_owned()));
-    }
-    let response = client()
-        .get(format!(
-            "http://{}/v1/diffs/{snapshot_id}/commit-preview",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .query(&query)
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffCommitPreview>(
+            "diff.commit_preview",
+            &willdeep_runtime_protocol::DiffCommitPreviewParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                message: message.to_owned(),
+                remote: remote.to_owned(),
+                tag: tag.map(ToOwned::to_owned),
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Diff snapshot changed; reopen /diff before commit preview");
-    }
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Commit Preview: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    local_commit_preview(runtime_api_data(response)?)
 }
 
 pub(crate) async fn remote_revert(
@@ -572,22 +845,25 @@ pub(crate) async fn remote_revert(
     request: &RevertRequest,
 ) -> Result<RevertResult> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/diffs/{snapshot_id}/revert",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(request)
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffRevertResult>(
+            "diff.revert",
+            &willdeep_runtime_protocol::DiffRevertParams {
+                workspace: request.workspace.to_string_lossy().into_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                path: request.path.clone(),
+                area: public_area(request.area),
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Diff snapshot changed; reopen /diff before reverting");
-    }
-    if !response.status().is_success() {
-        bail!("Runtime rejected Diff revert: {}", response.text().await?);
-    }
-    Ok(response.json().await?)
+    let result = runtime_api_data(response)?;
+    Ok(RevertResult {
+        previous_snapshot_id: result.previous_snapshot_id,
+        current_snapshot_id: result.current_snapshot_id,
+        path: result.path,
+        recovery_path: result.recovery_path.map(PathBuf::from),
+    })
 }
 
 pub(crate) async fn remote_record_verification(
@@ -603,31 +879,34 @@ pub(crate) async fn remote_record_verification(
         willdeep_core::VerificationStatus::TimedOut => VerificationOutcome::TimedOut,
         willdeep_core::VerificationStatus::LaunchFailed => VerificationOutcome::LaunchFailed,
     };
-    let response = client()
-        .post(format!(
-            "http://{}/v1/diffs/{}/verifications",
-            state.address, snapshot_id
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&VerificationRequest {
-            workspace: workspace.to_path_buf(),
-            command: verification.command,
-            exit_code: verification.exit_code,
-            outcome,
-            summary: verification.summary,
-        })
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::DiffVerification>(
+            "diff.verification.record",
+            &willdeep_runtime_protocol::DiffVerificationParams {
+                workspace: workspace.to_string_lossy().into_owned(),
+                snapshot_id,
+                command: verification.command,
+                exit_code: verification.exit_code,
+                outcome: match outcome {
+                    VerificationOutcome::Passed => {
+                        willdeep_runtime_protocol::VerificationOutcome::Passed
+                    }
+                    VerificationOutcome::Failed => {
+                        willdeep_runtime_protocol::VerificationOutcome::Failed
+                    }
+                    VerificationOutcome::TimedOut => {
+                        willdeep_runtime_protocol::VerificationOutcome::TimedOut
+                    }
+                    VerificationOutcome::LaunchFailed => {
+                        willdeep_runtime_protocol::VerificationOutcome::LaunchFailed
+                    }
+                },
+                summary: verification.summary,
+            },
+            None,
+        )
         .await?;
-    if response.status() == StatusCode::CONFLICT {
-        bail!("Workspace changed before verification could be bound to its Diff");
-    }
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Diff verification: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    local_verification(runtime_api_data(response)?)
 }
 
 #[derive(Deserialize)]
@@ -848,6 +1127,211 @@ pub(super) async fn commit_preview_handler(
         .map(Json)
         .map(IntoResponse::into_response)
         .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+pub(super) async fn unified_snapshot(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffSnapshotParams,
+) -> Result<willdeep_runtime_protocol::DiffSnapshot, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    snapshot(&workspace)
+        .map(public_snapshot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub(super) async fn unified_content(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffContentParams,
+) -> Result<willdeep_runtime_protocol::DiffContent, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let current = exact_snapshot(&workspace, &params.snapshot_id)?;
+    if !current.files.iter().any(|file| file.path == params.path) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let area = local_area(params.area);
+    let content =
+        file_diff(&workspace, &params.path, area).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(willdeep_runtime_protocol::DiffContent {
+        snapshot_id: current.id,
+        path: params.path,
+        area: public_area(area),
+        content,
+    })
+}
+
+pub(super) async fn unified_reviews(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffSnapshotQueryParams,
+) -> Result<Vec<willdeep_runtime_protocol::DiffReview>, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    Ok(load_reviews(&review_store_path(&state.home))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|record| record.snapshot_id == params.snapshot_id && record.workspace == workspace)
+        .map(public_review)
+        .collect())
+}
+
+pub(super) async fn unified_review(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffReviewParams,
+) -> Result<willdeep_runtime_protocol::DiffReview, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let current = exact_snapshot(&workspace, &params.snapshot_id)?;
+    if !current.files.iter().any(|file| file.path == params.path) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let decision = match params.decision {
+        willdeep_runtime_protocol::ReviewDecision::Accepted => ReviewDecision::Accepted,
+        willdeep_runtime_protocol::ReviewDecision::Rejected => ReviewDecision::Rejected,
+        willdeep_runtime_protocol::ReviewDecision::ChangesRequested => {
+            ReviewDecision::ChangesRequested
+        }
+        willdeep_runtime_protocol::ReviewDecision::Reviewed => ReviewDecision::Reviewed,
+    };
+    let record = DiffReviewRecord {
+        id: uuid::Uuid::new_v4(),
+        snapshot_id: params.snapshot_id,
+        workspace,
+        path: params.path,
+        decision,
+        note: normalize_review_note(params.note)?,
+        created_at: now(),
+    };
+    let _guard = state.diff_review_lock.lock().await;
+    let path = review_store_path(&state.home);
+    let mut records = load_reviews(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    records.retain(|existing| {
+        !(existing.snapshot_id == record.snapshot_id
+            && existing.workspace == record.workspace
+            && existing.path == record.path)
+    });
+    records.push(record.clone());
+    write_json_atomic(&path, &records).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(public_review(record))
+}
+
+pub(super) async fn unified_verifications(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffSnapshotQueryParams,
+) -> Result<Vec<willdeep_runtime_protocol::DiffVerification>, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    Ok(load_verifications(&verification_store_path(&state.home))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|record| record.snapshot_id == params.snapshot_id && record.workspace == workspace)
+        .map(public_verification)
+        .collect())
+}
+
+pub(super) async fn unified_record_verification(
+    state: &ServerState,
+    mut params: willdeep_runtime_protocol::DiffVerificationParams,
+) -> Result<willdeep_runtime_protocol::DiffVerification, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    exact_snapshot(&workspace, &params.snapshot_id)?;
+    params.command = params.command.trim().to_owned();
+    if !is_safe_verification_command(&params.command) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if params.command.len() > 2048 || params.summary.len() > 8192 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let record = DiffVerificationRecord {
+        id: uuid::Uuid::new_v4(),
+        snapshot_id: params.snapshot_id,
+        workspace,
+        command: params.command,
+        exit_code: params.exit_code,
+        outcome: match params.outcome {
+            willdeep_runtime_protocol::VerificationOutcome::Passed => VerificationOutcome::Passed,
+            willdeep_runtime_protocol::VerificationOutcome::Failed => VerificationOutcome::Failed,
+            willdeep_runtime_protocol::VerificationOutcome::TimedOut => {
+                VerificationOutcome::TimedOut
+            }
+            willdeep_runtime_protocol::VerificationOutcome::LaunchFailed => {
+                VerificationOutcome::LaunchFailed
+            }
+        },
+        summary: params.summary,
+        created_at: now(),
+    };
+    let _guard = state.diff_review_lock.lock().await;
+    let path = verification_store_path(&state.home);
+    let mut records = load_verifications(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    records.push(record.clone());
+    records.drain(..records.len().saturating_sub(500));
+    write_json_atomic(&path, &records).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(public_verification(record))
+}
+
+pub(super) async fn unified_attributions(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffSnapshotQueryParams,
+) -> Result<Vec<willdeep_runtime_protocol::DiffAttribution>, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    exact_snapshot(&workspace, &params.snapshot_id)?;
+    let _guard = attribution_store_lock().lock().await;
+    Ok(attribution_lineage(
+        load_attributions(&attribution_store_path(&state.home))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        &workspace,
+        &params.snapshot_id,
+    )
+    .into_iter()
+    .map(public_attribution)
+    .collect())
+}
+
+pub(super) async fn unified_commit_preview(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffCommitPreviewParams,
+) -> Result<willdeep_runtime_protocol::DiffCommitPreview, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let current = exact_snapshot(&workspace, &params.snapshot_id)?;
+    build_commit_preview(
+        &workspace,
+        current,
+        params.message,
+        params.remote,
+        params.tag,
+    )
+    .map(public_commit_preview)
+    .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+pub(super) async fn unified_revert(
+    state: &ServerState,
+    params: willdeep_runtime_protocol::DiffRevertParams,
+) -> Result<willdeep_runtime_protocol::DiffRevertResult, StatusCode> {
+    let workspace = authorized_workspace(state, Path::new(&params.workspace)).await?;
+    let _guard = state.diff_review_lock.lock().await;
+    let current = exact_snapshot(&workspace, &params.snapshot_id)?;
+    let file = current
+        .files
+        .iter()
+        .find(|file| file.path == params.path)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if file.kind == DiffFileKind::Unmerged {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let recovery_path = safe_revert(
+        &state.home,
+        &workspace,
+        file,
+        local_area(params.area),
+        &params.snapshot_id,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = snapshot(&workspace).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(willdeep_runtime_protocol::DiffRevertResult {
+        previous_snapshot_id: params.snapshot_id,
+        current_snapshot_id: updated.id,
+        path: params.path,
+        recovery_path: recovery_path.map(|path| path.to_string_lossy().into_owned()),
+    })
 }
 
 fn exact_snapshot(workspace: &Path, snapshot_id: &str) -> Result<DiffSnapshot, StatusCode> {
