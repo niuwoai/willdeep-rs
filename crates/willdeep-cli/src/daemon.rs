@@ -36,7 +36,8 @@ use event_stream::EventLog;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     ensure_runtime_session, resolve_remote_approval, retry_remote_agent, runtime_event_head,
-    runtime_snapshot, start_runtime_event_follower, stop_remote_agent, submit_runtime_turn,
+    runtime_events, runtime_snapshot, start_runtime_event_follower, stop_remote_agent,
+    stop_remote_turn, submit_runtime_turn,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -943,6 +944,10 @@ async fn run(home: &Path) -> Result<()> {
             let turn_id = claimed.metadata.id;
             match scheduler_state.tasks.submit(claimed.request).await {
                 Ok(task) => {
+                    if task.status == RuntimeTaskStatus::Cancelled {
+                        let _ = scheduler_state.tasks.schedule_session(session_id);
+                        continue;
+                    }
                     let _ = scheduler_state.events.append(
                         "turn.started",
                         format!(
@@ -1641,8 +1646,22 @@ impl TaskManager {
             format!("agent_id={} task_id={id} parent_id=none", agent.id),
         )?;
         self.insert_and_persist(task.clone()).await?;
-        if let Some(turn_id) = task.turn_id {
-            self.sessions.bind_task(turn_id, id)?;
+        if let Some(turn_id) = task.turn_id
+            && !self.sessions.bind_task(turn_id, id)?
+        {
+            task.status = RuntimeTaskStatus::Cancelled;
+            task.completed_at = Some(now());
+            self.insert_and_persist(task.clone()).await?;
+            self.agents.set_status_for_task(
+                id,
+                RuntimeAgentStatus::Cancelled,
+                Some("Turn was cancelled before task startup".to_owned()),
+            )?;
+            self.events.append(
+                "task.cancelled",
+                format!("task_id={id} session_id={} turn_id={turn_id} exit_code=none error=cancelled before startup", task.session_id.map_or_else(|| "none".to_owned(), |value| value.to_string())),
+            )?;
+            return Ok(task);
         }
         task.event_start_sequence = self
             .events

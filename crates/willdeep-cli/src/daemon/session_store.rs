@@ -361,24 +361,34 @@ impl RuntimeSessionStore {
         Ok(Some(claimed))
     }
 
-    pub fn bind_task(&self, turn_id: uuid::Uuid, task_id: uuid::Uuid) -> Result<()> {
+    pub fn bind_task(&self, turn_id: uuid::Uuid, task_id: uuid::Uuid) -> Result<bool> {
+        let mut sessions = self.lock()?;
+        let Some(session) = sessions
+            .values_mut()
+            .find(|session| session.active_turn_id == Some(turn_id))
+        else {
+            return Ok(false);
+        };
         let mut turns = self.turns_lock()?;
         let turn = turns.get_mut(&turn_id).context("Runtime Turn not found")?;
+        if turn.metadata.status != RuntimeTurnStatus::Queued {
+            return Ok(false);
+        }
+        let session_id = turn.metadata.session_id;
+        if session.id != session_id {
+            return Ok(false);
+        }
         turn.metadata.status = RuntimeTurnStatus::Running;
         turn.metadata.active_task_id = Some(task_id);
         turn.metadata.started_at = Some(now());
         turn.metadata.completed_at = None;
         turn.metadata.error = None;
-        let session_id = turn.metadata.session_id;
         persist_turns(&self.turns_path, &turns)?;
         drop(turns);
-        let mut sessions = self.lock()?;
-        let session = sessions
-            .get_mut(&session_id)
-            .context("Runtime Session not found")?;
         session.status = RuntimeSessionStatus::Running;
         session.updated_at = now();
-        persist_sessions(&self.path, &sessions)
+        persist_sessions(&self.path, &sessions)?;
+        Ok(true)
     }
 
     pub fn complete_task(
@@ -1045,7 +1055,7 @@ mod tests {
         assert_eq!(claimed.request.prompt, "first");
         assert!(store.claim_next(session.id).unwrap().is_none());
         let task_id = uuid::Uuid::new_v4();
-        store.bind_task(first.id, task_id).unwrap();
+        assert!(store.bind_task(first.id, task_id).unwrap());
         assert_eq!(
             store.get_turn(first.id).unwrap().unwrap().status,
             RuntimeTurnStatus::Running
@@ -1115,6 +1125,7 @@ mod tests {
             store.get(session.id).unwrap().unwrap().status,
             RuntimeSessionStatus::Idle
         );
+        assert!(!store.bind_task(first.id, uuid::Uuid::new_v4()).unwrap());
         assert_eq!(
             store.claim_next(session.id).unwrap().unwrap().metadata.id,
             second.id

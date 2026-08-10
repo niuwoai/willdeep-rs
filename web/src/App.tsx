@@ -4,6 +4,7 @@ import { detectLanguage, languageLabels, languages, messages, type Language } fr
 
 type Workspace = { path: string; name: string };
 type Session = { id: string; title: string; workspace: string; updated_at: number };
+type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
 type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
@@ -29,6 +30,8 @@ export function App() {
   const [busy, setBusy] = useState(false); const [activity, setActivity] = useState(""); const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null); const endRef = useRef<HTMLDivElement | null>(null);
   const activeRunRef = useRef<string | null>(null);
+  const activeTurnRef = useRef<string | null>(null);
+  const pendingStopRef = useRef(false);
   const chatViewportRef = useRef<HTMLDivElement | null>(null); const followBottomRef = useRef(true);
 
   useEffect(() => { document.title = t.documentTitle; document.documentElement.lang = language; localStorage.setItem("willdeep.language", language); }, [language, t.documentTitle]);
@@ -45,9 +48,41 @@ export function App() {
     setChat((current) => current.map((message) => message.id === runId ? { ...message, steps: updater(message.steps ?? []) } : message));
   }
 
-  function stop() {
-    abortRef.current?.abort(); setActivity(t.stopped); setBusy(false); abortRef.current = null;
+  async function stopRemoteTurn(turnId: string) {
+    const response = await fetch(`/api/turns/${encodeURIComponent(turnId)}/stop`, { method: "POST" });
+    if (!response.ok) throw new Error(await response.text());
+    abortRef.current?.abort(); setActivity(t.stopped); setBusy(false); abortRef.current = null; activeTurnRef.current = null;
     if (activeRunRef.current) updateRun(activeRunRef.current, (steps) => steps.map((step) => step.status === "active" ? { ...step, label: t.stopped, status: "failed" } : step));
+  }
+
+  async function stop() {
+    pendingStopRef.current = true;
+    setActivity(t.stopping);
+    const turnId = activeTurnRef.current;
+    if (!turnId) return;
+    try {
+      await stopRemoteTurn(turnId);
+    } catch (reason) {
+      pendingStopRef.current = false;
+      setError(`${t.requestFailed}: ${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  }
+
+  async function loadSession(id: string) {
+    if (busy) return;
+    setError("");
+    try {
+      const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`);
+      setSessionId(detail.id);
+      setChat(detail.messages.map((message, index) => ({
+        id: `${detail.id}-${index}`,
+        role: message.role,
+        content: `${message.content}${message.attachment_count ? `\n[${message.attachment_count} ${t.attachmentCount}]` : ""}`,
+      })));
+      followBottomRef.current = true;
+    } catch (reason) {
+      setError(`${t.loadFailed}: ${reason instanceof Error ? reason.message : String(reason)}`);
+    }
   }
 
   function attachImage(file: File) {
@@ -91,7 +126,11 @@ export function App() {
         for (const frame of frames) {
           const line = frame.split("\n").find((value) => value.startsWith("data: ")); if (!line) continue;
           const event = JSON.parse(line.slice(6));
-          if (event.type === "completed") { answer = event.text || t.emptyReply; setSessionId(event.session_id || ""); }
+          if (event.type === "submitted") {
+            setSessionId(event.session_id || ""); activeTurnRef.current = event.turn_id || null;
+            if (pendingStopRef.current && activeTurnRef.current) await stopRemoteTurn(activeTurnRef.current);
+          }
+          else if (event.type === "completed") { answer = event.text || t.emptyReply; setSessionId(event.session_id || ""); activeTurnRef.current = null; }
           else if (event.type === "error") throw new Error(event.message);
           else if (event.type === "thought") setActivity(event.text || t.thinking);
           else if (event.type === "turn_started") { setActivity(event.label); updateRun(runId, (steps) => [...steps.map((step) => step.status === "active" ? { ...step, status: "done" as const } : step), { id: nextId("turn"), label: event.label, status: "active" }]); }
@@ -102,9 +141,10 @@ export function App() {
       }
       updateRun(runId, (steps) => steps.map((step) => step.status === "active" ? { ...step, status: "done" } : step));
       setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: answer || t.emptyReply }]);
+      json<Session[]>("/api/sessions").then(setSessions).catch(() => undefined);
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(`${t.requestFailed}: ${reason instanceof Error ? reason.message : String(reason)}`);
-    } finally { if (abortRef.current === controller) abortRef.current = null; if (activeRunRef.current === runId) activeRunRef.current = null; setBusy(false); setActivity(""); }
+    } finally { if (abortRef.current === controller) abortRef.current = null; if (activeRunRef.current === runId) activeRunRef.current = null; activeTurnRef.current = null; pendingStopRef.current = false; setBusy(false); setActivity(""); }
   }
 
   return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
@@ -112,8 +152,8 @@ export function App() {
       <Heading size="lg">{t.appName}</Heading><Text color="#718096" mb="8">{t.webHarness}</Text>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
       <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.path} value={item.path}>{item.name}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
-      <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" onClick={() => { setSessionId(item.id); setChat([]); }}>{item.title}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>
+      <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
+      <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => <Button key={item.id} size="sm" variant={sessionId === item.id ? "subtle" : "ghost"} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id)}>{item.title}</Button>)}{!visibleSessions.length && <Text color="#657386" fontSize="sm">{t.noSessions}</Text>}</VStack>
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="6" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
@@ -127,7 +167,7 @@ export function App() {
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
         <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" _focus={{ boxShadow: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
         <Text className="send-hint">{t.sendHint}</Text>
-        <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? stop : () => void send()} disabled={!busy && !prompt.trim() && !attachments.length}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
+        <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && !prompt.trim() && !attachments.length}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
       </Box>
     </Container>
   </Flex>;

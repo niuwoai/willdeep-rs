@@ -127,6 +127,19 @@ pub(crate) async fn submit_runtime_turn(
     Ok(RemoteRuntimeTurn { id: turn.id })
 }
 
+pub(crate) async fn stop_remote_turn(home: &Path, id: uuid::Uuid) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!("http://{}/v1/turns/{id}/stop", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!("Runtime rejected Turn stop: {}", response.text().await?);
+    }
+    Ok(())
+}
+
 pub(crate) async fn runtime_event_head(home: &Path) -> Result<u64> {
     let state = match load_state(&DaemonPaths::new(home).state) {
         Ok(state) => state,

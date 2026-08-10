@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc2
+> 当前实施版本：v0.17.0-rc3
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -73,7 +73,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 - [x] 按 `RUNTIME_SESSION_PROTOCOL.md` 建立稳定 Session / Root Agent / Turn / Execution Task 身份与持久状态机。
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
-- [-] TUI 与 Web 改用统一 Runtime Session/Turn；TUI 普通 Prompt 与 `/runtime` 已完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 尚待完成，当前仍保留每 Turn 启动独立 CLI Harness 的过渡执行层。
+- [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
 - [ ] 会话选择器以及 `sessions/resume/rename/fork/archive/delete/export`。
 - [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
 - [ ] 从指定轮次 Fork，并可切换模型或 Provider。
@@ -221,12 +221,12 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.17.0-rc2：TUI 普通 Prompt 默认提交到长期 Runtime Session/Turn，`/runtime` 复用同一路径，新增 `/local <任务>` 作为单轮进程内兼容入口；命令候选、面板与帮助同步说明。真实 PTY + 模拟 Provider E2E 验证无前缀 Prompt 生成 Completed Turn、唯一 Root Agent 和完整 `system/user/assistant` 历史；并据此修复中间事件用 TUI 旧快照覆盖 Harness 历史的竞态。下一步把 Web 接入相同 Session/Turn API，并逐步移除每 Turn 子进程过渡层。
+v0.17.0-rc3：Web 不再自行启动和持有独立 Harness 子进程，而是创建或收养 Core Session、提交 Runtime Turn，并将持久 Runtime 事件转换为浏览器 SSE；提交事件暴露稳定 Session/Turn/Root Agent ID，停止按钮调用真实 Turn Stop API，断开 SSE 不取消后台任务，历史会话从 Core Session 恢复。真实进程 E2E 验证成功回答、版本头、历史恢复和立即停止，并据此修复调度器领取 Turn 到绑定 Task 之间取消仍会启动 Harness 的竞态。下一步把 Runtime 当前持有的每 Turn Harness 子进程迁为 Daemon 内原生 Harness 生命周期。
 
 ## 6. 建议执行顺序
 
-1. 完成并发布 `v0.17.0-rc2`：普通 TUI Prompt 默认走 Runtime，保留 `/local` 单轮兼容模式。
-2. 将 Web 迁移到同一 Session/Turn，并逐步把交互式主 Harness 迁入 Runtime 原生生命周期。
+1. 完成并发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
+2. 把交互式主 Harness 迁入 Runtime 原生生命周期，移除每 Turn 子进程过渡层。
 3. 将剩余后台 Shell、审批、MCP 和附件迁入统一生命周期。
 4. 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 5. 完成异常退出、守护进程重启和客户端重连的端到端测试。
@@ -239,3 +239,136 @@ v0.17.0-rc2：TUI 普通 Prompt 默认提交到长期 Runtime Session/Turn，`/r
 12. 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
 
 关键路径固定为：`Runtime 持久化 → 会话恢复 → Agent 生命周期 → Diff/Workspace → 统一 API → Web/移动端/Swift 共用内核`。Herdr、Computer Use 和客户端视觉增强可以穿插推进，但不能形成独立于 Runtime 的第二套任务状态机。
+
+## 7. 完整产品交付清单
+
+本节是面向最终产品的逐项清单。上面的版本阶段决定实施顺序，本节防止某项体验或安全能力在跨版本推进中被遗漏。
+
+### 7.1 统一 Runtime
+
+- [x] Session、Root Agent、Turn、Execution Task 的稳定身份和持久状态。
+- [x] 同一 Session 严格串行、请求幂等、取消、事件持久化和重启恢复。
+- [x] TUI 普通输入使用 Runtime Session/Turn。
+- [-] Web 使用相同 Session/Turn、历史和事件；当前批次正在移除 Web 独立 Harness 生命周期。
+- [ ] Headless CLI 使用相同 Runtime。
+- [ ] Harness 从每 Turn 子进程过渡为 Daemon 内原生、可恢复生命周期。
+- [ ] 清理孤儿任务，保护 Session 并发写入，提供状态、版本和能力诊断。
+
+### 7.2 Web 客户端
+
+- [ ] 新建、打开和继续 Runtime Session，用户消息即时显示。
+- [ ] 提交后暴露 Session、Turn 和 Root Agent ID，SSE 按游标续传持久事件。
+- [ ] 浏览器断开后任务继续，刷新后可重新附着，停止按钮取消真实 Turn。
+- [ ] 历史会话恢复用户/助手消息、附件摘要和运行状态。
+- [ ] 思考摘要固定一行，逐轮保留精简活动与聚合工具状态。
+- [x] Composer 支持多行、`/`、`$`、文本粘贴、图片粘贴、预览和删除。
+- [ ] 文本、图片、视觉模型降级、Skills 和审批全部复用 Runtime 协议。
+- [ ] 桌面三栏、平板双栏、手机单栏；保持 React、Chakra UI、纯 CSR 和完整 i18n。
+- [ ] 单用户且不内置认证，明确依赖 Nginx、VPN 或 SSH Tunnel，并提供安全部署说明。
+
+### 7.3 TUI 聊天区与 Composer
+
+- [x] 聊天滚动、搜索、最后一行完整显示、基础 Markdown、工具活动聚合和原生文本选择。
+- [ ] 自动跟随可解除，新消息提示，按消息/轮次跳转，折叠长输出和代码块语法高亮。
+- [ ] 表格横向查看，复制单条消息/代码块，导出 Markdown/JSON。
+- [x] 多行编辑、鼠标定位、历史、文本/图片粘贴、附件删除、`/` 命令和 `$` Skills 候选。
+- [ ] 选择、撤销/重做、按词移动、文件拖放、`@` 文件引用和路径补全。
+- [ ] 大段粘贴折叠卡片、草稿自动保存、Token/附件/上下文占用提示。
+
+### 7.4 TUI 状态侧栏
+
+- [x] 焦点切换、折叠展开、滚动、Attention Inbox、后台任务与 Agent 基础状态。
+- [ ] Session、Turn、后台任务和 Agent 树分组，显示模型、Token、费用、耗时、Diff 与待审批项。
+- [ ] 查看详情、跳转轮次、停止、重试、重新运行和补充 Prompt。
+- [ ] 可调宽度以及紧凑、标准、详细三种密度。
+
+### 7.5 审批与 Ask User
+
+- [x] Allow once、Disallow、窄作用域 Always Allow、智能审核和规则管理。
+- [x] 工作区内安全写入及已确认的测试/只读过滤命令免审。
+- [ ] 统一风险分类器覆盖只读、测试、格式化、网络、MCP、工作区外写入和破坏性操作。
+- [ ] Always Allow 可按命令、工具、Session、Workspace 和永久规则精确授权，并可撤销和审计。
+- [x] Ask User 支持候选、自由输入、单选和多选。
+- [ ] 支持默认项、危险标记、超时、持久等待、移动通知和回答后恢复原 Turn。
+- [ ] TUI、Web、CLI 和移动端共享完全相同的审批/提问状态机。
+
+### 7.6 流式过程与多模态
+
+- [x] Provider SSE、思考摘要、工具状态、TUI/Web 图片粘贴和视觉模型降级基础链路。
+- [ ] 统一事件序号、断线续传、去重、背压和慢消费者保护。
+- [ ] 明确区分思考、工具、审批、提问、后台任务和整理答案阶段。
+- [ ] CLI 参数附件、文件拖放、图片压缩/格式转换、大文件摘要、哈希去重和持久附件。
+- [ ] 发送附件前明确目标 Provider，并让视觉解析结果可查看和修正。
+
+### 7.7 后台任务与子 Agent
+
+- [x] 后台 Shell、完成/失败回流、主 Harness 唤醒、基础 `spawn_agent` 和稳定 Child Agent ID。
+- [ ] Runtime 原生调度、等待/订阅、优先级、并发上限、日志分页、取消、重试和重新附着。
+- [ ] 内置 deep-research、scout、reader、editor、tester、reviewer 和 general Profile。
+- [ ] TOML Profile 定义 Provider、模型、Prompt、工具、Skills、权限、预算和递归能力。
+- [ ] 主 Agent 自动或用户显式选择 Profile，子 Agent 结构化回流，支持并行和依赖图。
+- [ ] 限制最大深度、并发、轮次、Token、费用和时长，并对连续失败熔断。
+
+### 7.8 Agent Team 与 Herdr 借鉴
+
+- [ ] Agent Team、共享任务看板、消息传递、自动汇总和可观察任务图。
+- [ ] 每个 Agent 可绑定独立 Workspace、Worktree、PTY 和模型 Profile。
+- [ ] TUI 可用树或网格查看、切换、接管、停止和重试 Agent。
+- [ ] Agent 独立提交，Review Agent 审查，合并前检测 Worktree 冲突。
+- [ ] Runtime/PTY/Agent Team 保持跨平台；Tmux 和 Herdr 仅作为可选适配器。
+- [ ] Herdr 生命周期上报、Pane 关联、精确跳转及外部 Codex/Claude/OpenCode Agent 启动。
+
+### 7.9 Workspace、Git 与 Review Center
+
+- [ ] 注册、删除、切换和多 Workspace Session，每个 Workspace 有独立权限、Provider、Skills 和 MCP。
+- [ ] 只读/可写策略、路径边界重建、任务跨切换继续运行和并发修改保护。
+- [ ] Worktree 创建、绑定、回收、孤儿检测、冲突检测和保守合并。
+- [ ] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
+- [ ] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
+- [ ] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
+
+### 7.10 工具与浏览器能力
+
+- [x] 文件、Git、Shell、Web Search/Fetch、MCP、Skills、后台任务和子 Agent 基础工具。
+- [ ] 符号索引、引用查找、诊断、结构化测试结果、Git Log/Blame、下载和转换工具。
+- [x] Web Fetch 支持常用同域重定向。
+- [ ] 跨域重定向风险控制、循环/次数/大小/超时限制、HTML 正文、PDF 和引用来源。
+- [ ] 浏览器截图与自动化；Cookie 和登录态必须明确授权并防止 SSRF/云元数据访问。
+- [ ] 盘点 Xedit 工具并以统一权限描述逐项迁移。
+
+### 7.11 远程、移动与 Computer Use
+
+- [ ] Rust 客户端通过 `j.niuwoai.com` WebSocket 注册、心跳、重连、确认和去重。
+- [ ] 移动端查看 Session/Agent/Inbox，回答问题、审批、停止、重试并接收后台完成通知。
+- [ ] 网关只中继，不保存 Provider Key；多设备冲突、附件和端到端安全有明确协议。
+- [ ] macOS Computer Use 接入 Accessibility、ScreenCaptureKit 和受控输入，所有动作结构化、可审计、可停止。
+- [ ] Windows UI Automation 与 Linux Wayland/X11 按能力协商降级。
+- [ ] Computer Use 使用独立权限域且不能绕过 Workspace、审批或敏感信息策略。
+
+### 7.12 CLI、配置、Skills 与上下文
+
+- [ ] `willdeep run`、stdin、JSON/NDJSON、quiet、稳定退出码、Session 继续/查询/停止和附件参数。
+- [ ] Bash、Zsh、Fish、PowerShell 补全和 man page。
+- [x] TOML Provider/Profile、API Base、API Key 环境变量引用和 some.im 区分。
+- [ ] 多 Provider 能力、视觉回退、审批、Workspace、Runtime、Web、移动网关和分层覆盖配置。
+- [ ] `config init/check/show`，系统 Keychain/Secret Service，严格避免密钥进入仓库或日志。
+- [x] Skills 名称/描述发现、按需正文读取和 `$` 触发。
+- [ ] Skills 分层、版本、参数、权限、安装、更新、禁用和执行审计。
+- [x] `/compress` 手动压缩。
+- [ ] 自动阈值、关键事实保留、工具摘要、可查看/撤销压缩和 Provider Context 自适应。
+
+### 7.13 跨平台、质量与发布
+
+- [x] macOS、Windows x64、Linux AMD64/ARM64 标签构建和 GitHub Release 工作流。
+- [ ] 统一 PTY、剪贴板、图片粘贴、系统通知和文件打开抽象。
+- [ ] Runtime 单测、进程 E2E、TUI PTY E2E、Web SSE/停止/恢复 E2E 和跨平台 CI。
+- [ ] Clippy、格式化、依赖审计、配置兼容、崩溃恢复和长时间资源上限测试。
+- [ ] Release 校验和、安装脚本、包管理器、快速开始、配置、安全、Profile 和协议文档。
+- [ ] 每批代码同步版本、CHANGELOG、PRODUCT_OVERVIEW、本路线图、测试、Commit、Tag 和推送。
+
+### 7.14 Swift Harness 替换验收
+
+- [ ] Swift App 先只读观察 Rust Runtime，双读验证 Session、Agent、审批和事件一致性。
+- [ ] Rust 接管后台任务、子 Agent 和持久事件，再接管完整 Harness、Tools、Skills、MCP 与 Provider。
+- [ ] 完成数据迁移、故障回退和跨平台一致性测试后移除 Swift 旧 Harness。
+- [ ] 替换前必须证明会话、附件、审批、事件和用户已有修改在迁移与回退中零丢失。

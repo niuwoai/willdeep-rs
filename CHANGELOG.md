@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.17.0-rc3] - 2026-08-10
+
+### Added
+
+- Web 新增持久 Session 历史读取和真实 Runtime Turn 停止 API；SSE 提交事件返回稳定 Session、Turn 和 Root Agent ID。
+- 路线图加入覆盖 Runtime、Web/TUI、审批、多模态、后台任务、Agent Team、Workspace、远程、Computer Use、CLI、Skills、质量和 Swift 替换的完整逐项交付清单。
+
+### Changed
+
+- Web 聊天改为创建或收养 Core Session 并提交统一 Runtime Turn，转发持久 Runtime 事件；浏览器断开只分离观察者，后台任务继续执行。
+- Web 历史会话从 Core Session 恢复用户与助手消息，完成后刷新会话列表；API 响应统一暴露 `X-App-Version`。
+
+### Fixed
+
+- Web 停止按钮即使在 Turn ID 返回前被点击，也会等待提交完成后取消真实 Turn，避免只中断浏览器而留下后台任务继续运行。
+- 修复 Runtime 在 Turn 已被调度器领取但尚未绑定 Task 时取消，仍可能启动 Harness 并把 Cancelled 覆盖成 Completed 的竞态；Task 绑定现在会原子复核 Turn 与 Session 所有权。
+
 ## [0.17.0-rc2] - 2026-08-10
 
 ### Added

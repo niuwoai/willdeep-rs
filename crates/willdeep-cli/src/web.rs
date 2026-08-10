@@ -1,26 +1,23 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::i18n::Language;
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json, Router, middleware};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use willdeep_core::{MessageAttachment, SessionStore, SkillCatalog};
+use willdeep_core::{MessageAttachment, Role, Session, SessionStore, SkillCatalog};
 
 const MAX_PROMPT_CHARS: usize = 100_000;
 
@@ -65,6 +62,19 @@ struct SessionSummary {
 }
 
 #[derive(Serialize)]
+struct SessionDetail {
+    id: String,
+    messages: Vec<SessionMessage>,
+}
+
+#[derive(Serialize)]
+struct SessionMessage {
+    role: &'static str,
+    content: String,
+    attachment_count: usize,
+}
+
+#[derive(Serialize)]
 struct WorkspaceSummary {
     path: String,
     name: String,
@@ -101,11 +111,14 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/health", get(health))
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/sessions", get(sessions))
+        .route("/api/sessions/{id}", get(session_detail))
+        .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces))
         .route("/api/composer", get(composer))
         .route("/", get(index))
         .route("/{*path}", get(asset))
         .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(server_version_header))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
@@ -162,6 +175,14 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status":"ok","version":willdeep_core::VERSION}))
 }
 
+async fn server_version_header(request: Request, next: middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    if let Ok(value) = header::HeaderValue::from_str(willdeep_core::VERSION) {
+        response.headers_mut().insert("x-app-version", value);
+    }
+    response
+}
+
 async fn workspaces(State(state): State<Arc<WebState>>) -> Json<Vec<WorkspaceSummary>> {
     Json(
         state
@@ -197,6 +218,50 @@ async fn sessions(
     Ok(Json(values))
 }
 
+async fn session_detail(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<SessionDetail>, WebError> {
+    let session = SessionStore::new(&state.home)
+        .load(id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !state.workspaces.contains(&session.workspace) {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    let messages = session
+        .messages
+        .into_iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant if !message.content.trim().is_empty() => "assistant",
+                _ => return None,
+            };
+            Some(SessionMessage {
+                role,
+                content: message.content,
+                attachment_count: message.attachments.len(),
+            })
+        })
+        .collect();
+    Ok(Json(SessionDetail {
+        id: session.id.to_string(),
+        messages,
+    }))
+}
+
+async fn stop_turn(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, WebError> {
+    crate::daemon::stop_remote_turn(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
 async fn chat_stream(
     State(state): State<Arc<WebState>>,
     Json(input): Json<ChatRequest>,
@@ -204,7 +269,7 @@ async fn chat_stream(
     validate_chat(&state, &input)?;
     let workspace = select_workspace(&state.workspaces, input.workspace.as_deref())?.clone();
     let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(run_harness(state, input, workspace, tx));
+    tokio::spawn(run_runtime_turn(state, input, workspace, tx));
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(10))
@@ -238,13 +303,13 @@ fn validate_chat(state: &WebState, input: &ChatRequest) -> Result<(), WebError> 
     Ok(())
 }
 
-async fn run_harness(
+async fn run_runtime_turn(
     state: Arc<WebState>,
     input: ChatRequest,
     workspace: PathBuf,
     tx: mpsc::Sender<Result<Event, Infallible>>,
 ) {
-    let result = run_harness_inner(state, input, workspace, &tx).await;
+    let result = run_runtime_turn_inner(state, input, workspace, &tx).await;
     if let Err(error) = result {
         send_event(
             &tx,
@@ -254,7 +319,7 @@ async fn run_harness(
     }
 }
 
-async fn run_harness_inner(
+async fn run_runtime_turn_inner(
     state: Arc<WebState>,
     input: ChatRequest,
     workspace: PathBuf,
@@ -266,93 +331,173 @@ async fn run_harness_inner(
         .acquire_owned()
         .await
         .map_err(|error| WebError::internal(error.to_string()))?;
-    let executable = std::env::current_exe()
-        .context("resolve WillDeep executable")
+    let store = SessionStore::new(&state.home);
+    let mut session = if let Some(raw_id) = input.session_id.as_deref() {
+        let id = uuid::Uuid::parse_str(raw_id)
+            .map_err(|_| WebError::bad_request("session_id must be a UUID"))?;
+        store
+            .load(id)
+            .map_err(|_| WebError::bad_request("session_id was not found"))?
+    } else {
+        Session::new(
+            workspace.clone(),
+            state.profile.clone(),
+            input.prompt.trim(),
+        )
+    };
+    let event_head = crate::daemon::runtime_event_head(&state.home)
+        .await
         .map_err(WebError::from_anyhow)?;
-    let mut command = Command::new(executable);
-    command.args([
-        "--config",
-        state.config_path.to_string_lossy().as_ref(),
-        "--workspace",
-        workspace.to_string_lossy().as_ref(),
-        "--json",
-        "--no-tui",
-    ]);
-    if let Some(profile) = &state.profile {
-        command.args(["--profile", profile]);
+    let needs_adoption_save = !session.runtime_managed;
+    session.runtime_managed = true;
+    if session.runtime_event_cursor == 0 {
+        session.runtime_event_cursor = event_head;
     }
-    if let Some(session) = input.session_id.as_deref() {
-        command.args(["--resume", session]);
+    if needs_adoption_save {
+        store
+            .save(&mut session)
+            .map_err(|error| WebError::internal(error.to_string()))?;
     }
-    command.arg("--web-input-json");
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("start WillDeep harness")
-        .map_err(WebError::from_anyhow)?;
-    let payload = serde_json::to_vec(
-        &serde_json::json!({"prompt":input.prompt.trim(),"attachments":input.attachments}),
+    let remote_session = crate::daemon::ensure_runtime_session(
+        &state.home,
+        session.id,
+        &workspace,
+        session.profile.clone(),
+        Some(state.config_path.clone()),
+        session.title.clone(),
     )
-    .map_err(|error| WebError::internal(error.to_string()))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| WebError::internal("harness stdin unavailable"))?;
-    stdin
-        .write_all(&payload)
-        .await
-        .map_err(|error| WebError::internal(error.to_string()))?;
-    stdin
-        .shutdown()
-        .await
-        .map_err(|error| WebError::internal(error.to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| WebError::internal("harness stdout unavailable"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| WebError::internal("harness stderr unavailable"))?;
-    let stderr_task = tokio::spawn(async move {
-        let mut value = String::new();
-        let _ = stderr.read_to_string(&mut value).await;
-        value
-    });
-    let mut lines = BufReader::new(stdout).lines();
+    .await
+    .map_err(WebError::from_anyhow)?;
+    let turn = crate::daemon::submit_runtime_turn(
+        &state.home,
+        remote_session.id,
+        input.prompt.trim().to_owned(),
+        input.attachments,
+    )
+    .await
+    .map_err(WebError::from_anyhow)?;
+    send_event(
+        tx,
+        serde_json::json!({
+            "type":"submitted",
+            "session_id":remote_session.id,
+            "turn_id":turn.id,
+            "root_agent_id":remote_session.root_agent_id,
+        }),
+    )
+    .await;
+    relay_runtime_turn(
+        &state,
+        &workspace,
+        event_head,
+        remote_session.id,
+        turn.id,
+        Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
+        tx,
+    )
+    .await
+}
+
+async fn relay_runtime_turn(
+    state: &WebState,
+    workspace: &std::path::Path,
+    mut cursor: u64,
+    session_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    language: Language,
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<(), WebError> {
+    let mut task_id = None;
+    let mut final_text = None;
     loop {
-        let line = tokio::select! {
-            _ = tx.closed() => {
-                let _ = child.kill().await;
+        if tx.is_closed() {
+            return Ok(());
+        }
+        let events = crate::daemon::runtime_events(&state.home, cursor, workspace)
+            .await
+            .map_err(WebError::from_anyhow)?;
+        for event in events {
+            cursor = cursor.max(event.sequence);
+            if event.kind == "turn.started"
+                && event_uuid(&event.message, "turn_id") == Some(turn_id)
+            {
+                task_id = event_uuid(&event.message, "task_id");
+            }
+            if event.kind == "task.output"
+                && task_id.is_some()
+                && event_uuid(&event.message, "task_id") == task_id
+                && let Some(value) = runtime_output_payload(&event.message)
+            {
+                if value.get("type").and_then(|value| value.as_str()) == Some("completed") {
+                    final_text = value
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned);
+                } else if let Some(client) = client_event(value, language) {
+                    send_event(tx, client).await;
+                }
+            }
+            if matches!(
+                event.kind.as_str(),
+                "turn.completed" | "turn.cancelled" | "turn.interrupted" | "turn.failed"
+            ) && event_uuid(&event.message, "turn_id") == Some(turn_id)
+            {
+                if event.kind == "turn.completed" {
+                    let text = final_text
+                        .or_else(|| latest_assistant_text(&state.home, session_id))
+                        .unwrap_or_default();
+                    send_event(
+                        tx,
+                        serde_json::json!({
+                            "type":"completed",
+                            "text":text,
+                            "session_id":session_id,
+                            "turn_id":turn_id,
+                        }),
+                    )
+                    .await;
+                } else {
+                    send_event(
+                        tx,
+                        serde_json::json!({
+                            "type":"error",
+                            "message":event.kind,
+                            "session_id":session_id,
+                            "turn_id":turn_id,
+                        }),
+                    )
+                    .await;
+                }
                 return Ok(());
             }
-            line = lines.next_line() => line.map_err(|error| WebError::internal(error.to_string()))?,
-        };
-        let Some(line) = line else { break };
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
-            && let Some(client) = client_event(
-                value,
-                Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
-            )
-        {
-            send_event(tx, client).await;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| WebError::internal(error.to_string()))?;
-    let stderr = stderr_task.await.unwrap_or_default();
-    if !status.success() {
-        return Err(WebError::internal(format!(
-            "harness failed: {}",
-            truncate(&stderr, 1000)
-        )));
-    }
-    Ok(())
+}
+
+fn runtime_output_payload(message: &str) -> Option<serde_json::Value> {
+    let (_, payload) = message.split_once(' ')?;
+    serde_json::from_str(payload).ok()
+}
+
+fn event_uuid(message: &str, key: &str) -> Option<uuid::Uuid> {
+    message.split_whitespace().find_map(|part| {
+        let (candidate, value) = part.split_once('=')?;
+        (candidate == key)
+            .then(|| uuid::Uuid::parse_str(value).ok())
+            .flatten()
+    })
+}
+
+fn latest_assistant_text(home: &std::path::Path, session_id: uuid::Uuid) -> Option<String> {
+    SessionStore::new(home)
+        .load(session_id)
+        .ok()?
+        .messages
+        .into_iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant && !message.content.trim().is_empty())
+        .map(|message| message.content)
 }
 
 fn state_language(state: &WebState) -> Language {
@@ -588,5 +733,24 @@ mod tests {
             "Review Rust code"
         );
         assert!(safe_skill_description(&"x".repeat(500)).chars().count() <= 320);
+    }
+
+    #[test]
+    fn runtime_event_metadata_and_payload_are_parsed_without_exposing_prefixes() {
+        let task_id = uuid::Uuid::new_v4();
+        let turn_id = uuid::Uuid::new_v4();
+        let message = format!(
+            "session_id={} turn_id={turn_id} task_id={task_id}",
+            uuid::Uuid::new_v4()
+        );
+        assert_eq!(event_uuid(&message, "turn_id"), Some(turn_id));
+        assert_eq!(event_uuid(&message, "task_id"), Some(task_id));
+
+        let output = format!(
+            "task_id={task_id} {}",
+            serde_json::json!({"type":"assistant_text","text":"hello"})
+        );
+        let payload = runtime_output_payload(&output).unwrap();
+        assert_eq!(payload["text"], "hello");
     }
 }

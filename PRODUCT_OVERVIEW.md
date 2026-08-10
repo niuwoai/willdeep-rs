@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.17.0-rc2
+> 最后更新：2026-08-10 | 当前版本：v0.17.0-rc3
 
 ## 项目简介
 
@@ -46,6 +46,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - `spawn_agent` 通过稳定 UUID 上报启动、轮次、工具、用量和完成事件；Runtime 持久建立 Root→Child 树，TUI 分层展示前后台子 Agent 的实时状态；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
+- Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 转发 Runtime 事件，真实停止 Turn，并可加载持久历史会话；浏览器断开不再杀死后台 Harness；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
 - MCP stdio 工具发现、注册和调用。
@@ -111,4 +112,4 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。
-- [-] 将 Harness、任务和会话生命周期迁入 Runtime Daemon；持久 Session/Turn、attach/detach 与事件断线续传已完成，TUI/Web 迁移和 Runtime 原生进程内 Harness 尚待完成。
+- [-] 将 Harness、任务和会话生命周期迁入 Runtime Daemon；持久 Session/Turn、attach/detach、事件断线续传及 TUI/Web Session/Turn 迁移已完成，Runtime 原生进程内 Harness 尚待完成。
