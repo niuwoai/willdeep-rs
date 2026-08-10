@@ -33,6 +33,7 @@ mod herdr;
 mod session_store;
 pub(crate) mod tui_bridge;
 mod workspace_store;
+mod worktree_review;
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
@@ -49,6 +50,7 @@ pub(crate) use workspace_store::WorkspaceAccess;
 pub(crate) use workspace_store::{
     RuntimeWorkspace, activate_remote_workspace, ensure_remote_workspace, remote_workspaces,
 };
+pub(crate) use worktree_review::{WorktreeReview, remote_merge, remote_review};
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,
@@ -217,6 +219,16 @@ pub enum DaemonAction {
     Agents,
     /// Show one Runtime-owned agent.
     Agent { id: uuid::Uuid },
+    /// Preview an exact Diff and conflict check for a child Agent worktree.
+    AgentWorktreeReview { id: uuid::Uuid },
+    /// Apply an exact reviewed child Agent patch to its root Workspace.
+    MergeAgentWorktree {
+        id: uuid::Uuid,
+        #[arg(long)]
+        review: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Create a persistent interactive Runtime Session.
     CreateSession {
         #[arg(long)]
@@ -631,6 +643,10 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
+        DaemonAction::AgentWorktreeReview { id } => worktree_review::review_cli(&home, id).await,
+        DaemonAction::MergeAgentWorktree { id, review, yes } => {
+            worktree_review::merge_cli(&home, id, review, yes).await
+        }
         DaemonAction::CreateSession {
             workspace,
             profile,
@@ -1450,6 +1466,14 @@ async fn run(home: &Path) -> Result<()> {
         )
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))
+        .route(
+            "/v1/agents/{id}/worktree-review",
+            get(worktree_review::review_handler),
+        )
+        .route(
+            "/v1/agents/{id}/worktree-merge",
+            post(worktree_review::merge_handler),
+        )
         .route(
             "/v1/workspaces",
             get(workspace_store::list_handler).post(workspace_store::register_handler),

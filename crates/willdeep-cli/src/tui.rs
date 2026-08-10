@@ -37,6 +37,7 @@ use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 mod activity;
 mod agent_commands;
+mod agent_worktree_ui;
 mod command_catalog;
 mod diff_review_ui;
 mod dispatch;
@@ -48,6 +49,7 @@ mod workspace_attention;
 mod workspace_commands;
 use activity::ToolActivity;
 use agent_commands::handle_agent_command;
+use agent_worktree_ui::render_agent_overlays;
 use command_catalog::command_candidates;
 use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
@@ -143,6 +145,7 @@ struct App {
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_agent_selected: usize,
     agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
+    worktree_review: Option<crate::daemon::WorktreeReview>,
     diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
@@ -394,7 +397,30 @@ async fn event_loop(
                         let _=sender.send(decision);continue;
                     }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
-                    if app.agent_detail.is_some(){if key.code==KeyCode::Esc{app.agent_detail=None;}continue;}
+                    if let Some(review)=app.worktree_review.clone(){
+                        match key.code {
+                            KeyCode::Esc=>app.worktree_review=None,
+                            KeyCode::Char('m')|KeyCode::Char('M') if review.can_merge=>{
+                                match crate::daemon::remote_merge(&runtime.home,review.agent_id,review.id).await {
+                                    Ok(result)=>{app.notice=Some(format!("{} · {}",language.text("Worktree 已合并","Worktree merged","Worktree をマージしました"),result.root_snapshot_id));app.worktree_review=None;app.agent_detail=None;},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("合并失败","Merge failed","マージ失敗"))),
+                                }
+                            }
+                            _=>{}
+                        }
+                        continue;
+                    }
+                    if let Some(agent)=app.agent_detail.clone(){
+                        match key.code {
+                            KeyCode::Esc=>app.agent_detail=None,
+                            KeyCode::Char('w')|KeyCode::Char('W') if agent.dedicated_worktree=>match crate::daemon::remote_review(&runtime.home,agent.id).await {
+                                Ok(review)=>app.worktree_review=Some(review),
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("Worktree 审查失败","Worktree review failed","Worktree レビュー失敗"))),
+                            },
+                            _=>{}
+                        }
+                        continue;
+                    }
                     if app.diff_review.is_some(){
                         let mut close=false;
                         let mut open_file=None;
@@ -802,6 +828,7 @@ impl App {
             runtime_agents: Vec::new(),
             runtime_agent_selected: 0,
             agent_detail: None,
+            worktree_review: None,
             diff_review: None,
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
@@ -2588,51 +2615,7 @@ fn draw(
                 popup,
             );
         }
-        if let Some(agent) = &app.agent_detail {
-            let content = format!(
-                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {:?}\n{}: {}/{}\n{}: {}/{}\n{}: {}s\n{}: {}\n\n{}",
-                app.language.text("Agent", "Agent", "エージェント"),
-                agent.id,
-                app.language.text("父级", "Parent", "親"),
-                agent.parent_id.map_or_else(|| "—".to_owned(), |id| id.to_string()),
-                app.language.text("Profile", "Profile", "プロファイル"),
-                agent.profile.as_deref().unwrap_or("—"),
-                app.language.text("标签", "Label", "ラベル"),
-                agent.label.as_deref().unwrap_or("—"),
-                app.language.text("状态", "Status", "状態"),
-                agent.status,
-                app.language.text("轮次", "Turns", "ターン"),
-                agent.current_turn,
-                agent.max_turns.map_or_else(|| "—".to_owned(), |value| value.to_string()),
-                app.language.text("Token", "Tokens", "トークン"),
-                agent.total_tokens.map_or_else(|| "—".to_owned(), |value| value.to_string()),
-                agent.token_budget.map_or_else(|| "—".to_owned(), |value| value.to_string()),
-                app.language.text("时限", "Timeout", "タイムアウト"),
-                agent.timeout_seconds.map_or_else(|| "—".to_owned(), |value| value.to_string()),
-                app.language.text("当前工具", "Current tool", "現在のツール"),
-                agent.current_tool.as_deref().unwrap_or("—"),
-                agent.report.as_deref().unwrap_or_else(|| app.language.text("尚无结果报告", "No result report yet", "結果レポートはまだありません"))
-            );
-            let popup = centered_rect(
-                f.area().width.min(92),
-                (visual_lines(&content, f.area().width.min(90) as usize) as u16 + 2)
-                    .min(f.area().height)
-                    .max(1),
-                f.area(),
-            );
-            f.render_widget(Clear, popup);
-            f.render_widget(
-                Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(app.language.text("Agent 详情 · Esc 关闭", "Agent details · Esc close", "Agent 詳細 · Esc で閉じる"))
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::LightCyan)),
-                    )
-                    .wrap(Wrap { trim: false }),
-                popup,
-            );
-        }
+        render_agent_overlays(f, app);
         render_attention_detail(f, app);
         app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {

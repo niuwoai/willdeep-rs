@@ -23,6 +23,34 @@ pub(crate) struct SubagentWorktreeManager {
     root: PathBuf,
 }
 
+pub(crate) async fn worktree_result_note(
+    prepared: &PreparedSubagentWorkspace,
+) -> Result<Option<String>, AgentError> {
+    if !prepared.dedicated {
+        return Ok(None);
+    }
+    let status = git_stdout(&prepared.workspace, &["status", "--short"]).await?;
+    let branch = prepared.branch.as_deref().unwrap_or("unknown");
+    let status = bounded_status(status.trim(), 16 * 1024);
+    Ok(Some(format!(
+        "[WillDeep Worktree]\nworkspace: {}\nbranch: {}\nchanges:\n{}",
+        prepared.workspace.display(),
+        branch,
+        if status.is_empty() { "(none)" } else { &status }
+    )))
+}
+
+fn bounded_status(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}\n[status truncated]", &value[..boundary])
+}
+
 impl SubagentWorktreeManager {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self { root }

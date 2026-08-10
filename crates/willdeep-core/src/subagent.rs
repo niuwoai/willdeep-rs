@@ -16,6 +16,7 @@ use crate::background::{
 use crate::provider::Provider;
 use crate::subagent_worktree::{
     PreparedSubagentWorkspace, SubagentWorktreeManager, SubagentWorktreePolicy,
+    worktree_result_note,
 };
 use crate::tools::{ApprovalMode, ToolError, ToolRegistry};
 
@@ -212,6 +213,7 @@ impl SubagentCatalog {
             let lifecycle_dedicated_worktree = prepared.dedicated;
             let instruction_inbox = Arc::new(AgentInstructionInbox::default());
             let runner_instruction_inbox = instruction_inbox.clone();
+            let runner_prepared = prepared.clone();
             let id = self.background.start_retriable_with_lifecycle(
                 agent_id,
                 BackgroundTaskKind::Subagent,
@@ -226,6 +228,7 @@ impl SubagentCatalog {
                     let sink = runner_sink.clone();
                     let failures = failures.clone();
                     let instruction_inbox = runner_instruction_inbox.clone();
+                    let prepared = runner_prepared.clone();
                     async move {
                         let result = run_profile(
                             workspace,
@@ -237,6 +240,7 @@ impl SubagentCatalog {
                             Some(instruction_inbox),
                         )
                         .await;
+                        let result = attach_worktree_report(result, &prepared).await;
                         record_profile_result(&failures, &profile_id, &result);
                         subagent_task_result(result)
                     }
@@ -305,6 +309,7 @@ impl SubagentCatalog {
                 None,
             )
             .await;
+            let result = attach_worktree_report(result, &prepared).await;
             record_profile_result(&self.failures, &profile_id, &result);
             self.sink
                 .emit(AgentEvent::SubagentCompleted {
@@ -340,6 +345,17 @@ impl SubagentCatalog {
         })?;
         manager.prepare(&self.workspace, agent_id, policy).await
     }
+}
+
+async fn attach_worktree_report(
+    result: Result<String, AgentError>,
+    prepared: &PreparedSubagentWorkspace,
+) -> Result<String, AgentError> {
+    let report = result?;
+    let Some(note) = worktree_result_note(prepared).await? else {
+        return Ok(report);
+    };
+    Ok(format!("{report}\n\n{note}"))
 }
 
 fn remap_approved_target(

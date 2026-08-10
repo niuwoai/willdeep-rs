@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.20.0-rc4
+> 当前实施版本：v0.20.0-rc5
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -108,7 +108,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [x] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、TUI 与 Web 选择器共用同一来源，Web 仍受启动路径白名单上界约束。
 - [x] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；TUI 切换恢复目标 Session/游标并重启事件与状态订阅，跨路径后禁用启动时绑定旧根目录的 Local Harness，Runtime 激活不改变既有任务根目录。
-- [-] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批；Editor 已默认使用专属分支和 Worktree，Runtime 生命周期及 Diff 归因已绑定真实 Child 路径，结构化 Diff 回传与合并审批待完成。
+- [x] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批；Editor 默认使用专属分支和 Worktree，Runtime 生命周期及 Diff 归因绑定真实 Child 路径，完成报告回流 Worktree 状态；Runtime/CLI/TUI 以 Child/Root 精确快照 Review ID、`git apply --check` 和显式批准执行保守合并。
 - [ ] 孤儿 Worktree 检测与保守清理。
 
 验收：多 Workspace 不突破隔离，多 Agent 能安全并行修改。
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.20.0-rc5（已完成）：子 Agent 完成报告附带有界 Worktree 状态；新增受 Token 保护的 Worktree Review/合并 API，以及 `agent-worktree-review`、`merge-agent-worktree --review <ID> --yes` CLI。Review ID 同时绑定 Agent、Child 快照、Root 快照和二进制补丁，TUI Agent 详情以 `W` 审查、`M` 显式批准；Root/Child 任一变化、同文件冲突、未跟踪文件、未解决冲突或超过 2 MiB 的补丁都会阻断，合并不提交、不推送、不清理 Worktree。下一步实现孤儿 Worktree 检测与保守清理。
 
 v0.20.0-rc4（已完成）：内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；已审批目标按根工作区相对路径安全映射，Runtime Child Agent 持久记录实际 Workspace、根 Workspace、分支和隔离模式，写工具 Diff 归因改在 Child Worktree 内采集。`[subagents.<profile>].worktree` 可显式选择 `shared` 或 `dedicated`；任务结束不自动删除 Worktree。下一步实现结构化 Diff 回流、冲突预检和合并审批。
 

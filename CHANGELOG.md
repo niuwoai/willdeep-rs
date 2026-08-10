@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.20.0-rc5] - 2026-08-11
+
+### Added
+
+- 子 Agent 成功报告附带最多 16 KiB 的 Worktree 路径、分支和 `git status --short` 状态，可靠回流主 Harness。
+- 新增受 Token 保护的 Agent Worktree Review/合并 API、CLI `agent-worktree-review` 与 `merge-agent-worktree --review <ID> --yes`，以及 TUI Agent 详情 `W` 审查、`M` 批准合并。
+
+### Changed
+
+- Review ID 精确绑定 Agent、Child Diff 快照、Root Diff 快照和二进制补丁；任一侧变化后旧 Review 自动失效，合并只应用工作区补丁，不自动 Commit、Push 或清理 Worktree。
+
+### Security
+
+- 合并前执行 `git apply --check`，同文件并发修改、Child 未解决冲突、未跟踪文件、不可表示变更和超过 2 MiB 的补丁全部阻断；CLI 必须同时提供精确 Review ID 和 `--yes`，TUI 必须先打开 Review 再显式按 `M`。
+
 ## [0.20.0-rc4] - 2026-08-11
 
 ### Added

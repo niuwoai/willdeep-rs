@@ -382,6 +382,9 @@ mod tests {
                 token_budget: None,
                 timeout_seconds: None,
                 report: None,
+                workspace: PathBuf::from("/workspace"),
+                worktree_branch: None,
+                dedicated_worktree: false,
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -398,6 +401,9 @@ mod tests {
                 token_budget: Some(32_000),
                 timeout_seconds: Some(300),
                 report: Some("found src/main.rs".to_owned()),
+                workspace: PathBuf::from("/worktrees/agent"),
+                worktree_branch: Some("willdeep/agent-test".to_owned()),
+                dedicated_worktree: true,
             });
         let backend = ratatui::backend::TestBackend::new(80, 32);
         let mut terminal = Terminal::new(backend).unwrap();

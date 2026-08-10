@@ -53,6 +53,9 @@ pub(crate) struct RemoteAgent {
     pub token_budget: Option<u64>,
     pub timeout_seconds: Option<u64>,
     pub report: Option<String>,
+    pub workspace: PathBuf,
+    pub worktree_branch: Option<String>,
+    pub dedicated_worktree: bool,
 }
 
 #[derive(Clone)]
@@ -645,6 +648,9 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
         token_budget: agent.token_budget,
         timeout_seconds: agent.timeout_seconds,
         report: agent.report,
+        workspace: agent.workspace,
+        worktree_branch: agent.worktree_branch,
+        dedicated_worktree: agent.dedicated_worktree,
     }
 }
 
