@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc28
+> 当前实施版本：v0.21.0-rc29
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -168,7 +168,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [ ] 结构化日志与 Session/Agent/Turn/Tool Trace ID。
 - [x] `willdeep doctor` 离线就绪检查和自动脱敏 JSON 报告。
-- [ ] 可导出的自动脱敏诊断包。
+- [x] 可导出的自动脱敏 ZIP 诊断包，默认排除日志、Prompt、工具载荷和本地路径。
 - [ ] 首 Token、轮次、工具、重试、Token、费用、压缩和队列指标。
 - [ ] Provider 健康状态、事件背压、日志与 Scrollback 上限。
 - [ ] 崩溃恢复、协议兼容和跨平台端到端测试。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc29（已完成）：`willdeep doctor --bundle PATH` 可导出标准 ZIP 诊断包，包含稳定 Doctor 报告、仅计数的配置结构摘要和安全说明。包明确排除配置值、Provider/Profile 名称、模型、地址、API Key、Runtime Token、Prompt、工具载荷、日志和本地路径；同目录临时文件写入并同步后以硬链接原子发布，权限为 `0600`，目标存在时拒绝覆盖。ZIP 条目、CRC、EOCD、脱敏、权限和覆盖竞态边界均有回归测试。
 
 v0.21.0-rc28（已完成）：新增顶层 `willdeep doctor [--json]`。诊断完全离线，不联系 Provider；检查当前版本/平台、TOML 安全与 Provider 字段完整性、工作区、Git Worktree、内嵌 Web 资源、Runtime 存活/版本匹配和实际本地传输。报告只表达凭据是否可用，不输出 API Key、Runtime Token、环境变量名、Provider 地址或本地路径；旧 Runtime 版本会明确降级为 Warning。
 

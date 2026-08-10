@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0-rc29] - 2026-08-11
+
+### Added
+
+- `willdeep doctor --bundle PATH` 可导出标准 ZIP 诊断包，包含诊断报告、配置结构统计和安全说明。
+
+### Security
+
+- 诊断包默认排除配置值、Profile 名称、Provider 地址、模型、凭据、Prompt、工具载荷、日志和本地路径；以私有权限原子创建并拒绝覆盖已有文件。
+
 ## [0.21.0-rc28] - 2026-08-11
 
 ### Added

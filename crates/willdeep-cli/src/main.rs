@@ -200,6 +200,9 @@ enum CliCommand {
         /// Emit one stable JSON report.
         #[arg(long)]
         json: bool,
+        /// Write a private, shareable ZIP diagnostic bundle without logs or local paths.
+        #[arg(long, value_name = "PATH")]
+        bundle: Option<PathBuf>,
     },
 }
 
@@ -357,7 +360,7 @@ async fn run() -> Result<()> {
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
-            CliCommand::Doctor { json } => {
+            CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {
                     config_path: cli.config.clone(),
                     profile: cli.profile.clone(),
@@ -373,6 +376,7 @@ async fn run() -> Result<()> {
                         .is_some_and(|value| !value.is_empty()),
                     model_present: cli.model.as_deref().is_some_and(|value| !value.is_empty()),
                     json,
+                    bundle,
                 })
                 .await
             }
@@ -1272,6 +1276,8 @@ mod tests {
             "willdeep",
             "doctor",
             "--json",
+            "--bundle",
+            "diagnostics.zip",
             "--workspace",
             ".",
             "--profile",
@@ -1282,7 +1288,11 @@ mod tests {
         assert_eq!(cli.profile.as_deref(), Some("coding"));
         assert!(matches!(
             cli.command,
-            Some(CliCommand::Doctor { json: true })
+            Some(CliCommand::Doctor {
+                json: true,
+                bundle: Some(ref path)
+            })
+            if path == std::path::Path::new("diagnostics.zip")
         ));
     }
 
