@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.16.0-rc1`，支持：
+当前版本为 `0.16.0-rc2`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -28,6 +28,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
+- Runtime 持有的非交互 Harness 任务提交、查询、取消及断线后事件补读。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面已经可用，Harness、会话和后台任务向 Daemon 的完整迁移仍在进行。
 
@@ -39,6 +40,10 @@ Daemon 管理命令不要求先配置 Provider，可独立启动和检查：
 willdeep daemon start
 willdeep daemon status
 willdeep daemon logs --lines 100
+willdeep daemon submit --workspace . --profile some-im "检查项目并运行测试"
+willdeep daemon tasks
+willdeep daemon task <task-id>
+willdeep daemon cancel <task-id>
 willdeep attach --after 0
 willdeep detach
 willdeep daemon stop
@@ -47,6 +52,8 @@ willdeep daemon stop
 本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
 
 Runtime 事件按递增序号写入私有 NDJSON 日志。`attach --after <序号>` 会补读该序号之后的事件并持续跟随；按 `Ctrl+C` 只断开当前客户端，Daemon 继续运行。
+
+`daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 通过 stdin 传给 Harness，不会出现在进程参数中。任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复；`daemon cancel` 可停止仍在运行的任务。
 
 ## 构建
 

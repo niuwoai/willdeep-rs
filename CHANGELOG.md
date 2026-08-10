@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.0-rc2] - 2026-08-10
+
+### Added
+
+- Runtime 新增持久任务模型与 `daemon submit/tasks/task/cancel`，非交互 Harness 由 Daemon 持有，提交客户端退出后继续执行。
+- Prompt 通过私有 stdin 传给 Harness 子进程，不出现在进程参数；模型事件、最终结果、session_id、错误和退出状态回流持久事件日志。
+- 任务支持 Queued、Running、Cancelling、Completed、Failed、Cancelled、Interrupted 状态，Daemon 异常重启时将未完成记录安全标记为 Interrupted。
+- Daemon 新增跨平台单实例租约锁、并发启动协调和失效锁恢复；停止 Runtime 时主动取消其持有的 Harness 进程。
+
+### Changed
+
+- 所有 Runtime 本地 API 响应统一携带 `X-WillDeep-Version`，任务元数据使用私有原子 JSON 文件保存。
+
 ## [0.16.0-rc1] - 2026-08-10
 
 ### Added
