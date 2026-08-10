@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use base64::Engine;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
@@ -145,6 +145,13 @@ struct Cli {
 enum CliCommand {
     /// Run one non-interactive coding-agent turn.
     Run(RunArgs),
+    /// Generate a completion script from the current command tree.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Render the current command tree as a roff man page.
+    Man,
     /// Create, validate, or inspect the TOML configuration.
     Config {
         #[command(subcommand)]
@@ -324,6 +331,8 @@ async fn run() -> Result<()> {
     if let Some(command) = cli.command.clone() {
         return match command {
             CliCommand::Run(_) => unreachable!("run command is normalized above"),
+            CliCommand::Completions { shell } => generate_completions(shell),
+            CliCommand::Man => generate_man_page(),
             CliCommand::Config { action } => config::handle(action, cli.config.as_deref()),
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Api {
@@ -557,6 +566,19 @@ async fn run() -> Result<()> {
         println!("{}", outcome.final_text);
     }
     Ok(())
+}
+
+fn generate_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_owned();
+    clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
+    Ok(())
+}
+
+fn generate_man_page() -> Result<()> {
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut std::io::stdout())
+        .context("render willdeep man page")
 }
 
 fn completion_json(outcome: &harness::HarnessOutcome, session_id: uuid::Uuid) -> serde_json::Value {
@@ -1263,6 +1285,35 @@ mod tests {
         assert_eq!(value["text"], "done");
         assert_eq!(value["session_id"], session_id.to_string());
         assert!(value.as_object().is_some_and(|object| object.len() == 4));
+    }
+
+    #[test]
+    fn every_supported_shell_generates_a_completion_script() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+        ] {
+            let mut command = Cli::command();
+            let mut output = Vec::new();
+            clap_complete::generate(shell, &mut command, "willdeep", &mut output);
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("willdeep"), "missing command for {shell:?}");
+            assert!(output.len() > 100, "completion too short for {shell:?}");
+        }
+    }
+
+    #[test]
+    fn generated_man_page_documents_run_and_runtime_commands() {
+        let mut output = Vec::new();
+        clap_mangen::Man::new(Cli::command())
+            .render(&mut output)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(".TH willdeep"));
+        assert!(output.contains("Run one non\\-interactive coding\\-agent turn"));
+        assert!(output.contains("Manage the persistent local Runtime Daemon"));
     }
 
     #[test]

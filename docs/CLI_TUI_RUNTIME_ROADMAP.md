@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc24
+> 当前实施版本：v0.21.0-rc25
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc25（已完成）：新增 `willdeep completions bash|zsh|fish|powershell` 与 `willdeep man`。补全和 roff 文档均从当前 Clap 命令树生成，自动覆盖 `run`、Runtime、配置、集成和全局参数，避免静态脚本与实际 CLI 漂移；四类 Shell 与 man 内容均有生成回归测试。
+
 v0.21.0-rc24（已完成）：新增正式 `willdeep run` 非交互入口，复用同一 Harness 与 Session Store。支持参数或 stdin/`--input` Prompt、可重复文本/PNG/JPEG/WebP/GIF 附件、`--session ID|latest`、text/单对象 JSON/逐事件 NDJSON 和静默模式；全局 Provider/Workspace 参数可放在子命令后。退出码按输入、Provider、策略拒绝和 Harness/Tool 错误稳定分域，机器输出不混入工具参数或报告。
 
 v0.21.0-rc23（已完成）：Web Fetch 在每次重定向前重新做公网 DNS/IP 校验，同域自动跟随、跨域重新审批并拒绝 HTTPS 降级；新增去 Fragment 的环路即时检测。响应体改为流式分块读取，对无 `Content-Length` 的服务器也在超过 3 MiB 时立即中止；保留 8 次跳转、30 秒请求超时和 HTML 可读正文清洗。
@@ -431,7 +433,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 
 - [x] `willdeep run`、stdin、JSON/NDJSON、quiet、稳定退出码、Session 继续和附件参数。
 - [ ] 顶层 Session 查询/停止命令（底层 Runtime Session/Turn API 已具备）。
-- [ ] Bash、Zsh、Fish、PowerShell 补全和 man page。
+- [x] Bash、Zsh、Fish、PowerShell 补全和 man page。
 - [x] TOML Provider/Profile、API Base、API Key 环境变量引用和 some.im 区分。
 - [ ] 多 Provider 能力、视觉回退、审批、Workspace、Runtime、Web、移动网关和分层覆盖配置。
 - [x] `config init/check/show`，严格校验并脱敏输出，避免密钥进入仓库或日志。

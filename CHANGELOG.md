@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0-rc25] - 2026-08-11
+
+### Added
+
+- 新增 Bash、Zsh、Fish 和 PowerShell 动态补全脚本生成命令。
+- 新增由当前 Clap 命令树生成的 roff man page。
+
 ## [0.21.0-rc24] - 2026-08-11
 
 ### Added

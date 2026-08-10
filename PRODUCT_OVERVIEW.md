@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc24
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc25
 
 ## 项目简介
 
@@ -17,6 +17,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 工作区路径边界和写操作审批；
 - 人类输出与 NDJSON 自动化输出；
 - `willdeep run` 支持 Prompt/stdin、文本与图片附件、Session 续接、text/JSON/NDJSON、静默模式和稳定退出码；
+- Bash、Zsh、Fish、PowerShell 补全和 roff man page 从同一 Clap 命令树生成；
 - TOML 多 Provider Profile 与安全凭据引用；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
 - Ratatui 多轮 TUI、可滚动聊天记录、聚合工具活动和界面内审批；

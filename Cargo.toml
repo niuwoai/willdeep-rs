@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.21.0-rc24"
+version = "0.21.0-rc25"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/niuwoai/willdeep-rs"
@@ -19,6 +19,8 @@ anyhow = "1.0"
 axum = "0.8"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 regex = "1.11"
 rust-embed = "8.7"
