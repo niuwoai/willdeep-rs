@@ -137,11 +137,21 @@ struct App {
     palette: Option<PaletteState>,
     palette_rect: Rect,
     palette_hits: Vec<(u16, usize)>,
+    transcript_rect: Rect,
+    command_rect: Rect,
+    command_hits: Vec<(u16, usize)>,
+    skill_rect: Rect,
+    skill_hits: Vec<(u16, usize)>,
+    approval_rect: Rect,
+    question_rect: Rect,
+    question_hits: Vec<(u16, usize)>,
+    search_rect: Rect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusPane {
     Prompt,
+    Chat,
     Sidebar,
 }
 
@@ -337,9 +347,13 @@ async fn event_loop(
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
-                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks),
+                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills),
+                    MouseEventKind::ScrollUp if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(-3),
                     MouseEventKind::ScrollDown if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(3),
+                    MouseEventKind::ScrollUp if app.transcript_rect.contains((mouse.column,mouse.row).into())=>{app.focus=FocusPane::Chat;app.scroll_up(3);},
+                    MouseEventKind::ScrollDown if app.transcript_rect.contains((mouse.column,mouse.row).into())=>{app.focus=FocusPane::Chat;app.scroll_down(3);},
                     MouseEventKind::ScrollUp=>app.scroll_up(3),
                     MouseEventKind::ScrollDown=>app.scroll_down(3),
                     _=>{}
@@ -385,7 +399,18 @@ async fn event_loop(
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('w'){
                         app.sidebar_visible=true;
-                        app.focus=if app.focus==FocusPane::Prompt {FocusPane::Sidebar}else{FocusPane::Prompt};
+                        app.cycle_focus();
+                        continue;
+                    }
+                    if app.focus==FocusPane::Chat {
+                        match key.code {
+                            KeyCode::Esc=>app.focus=FocusPane::Prompt,
+                            KeyCode::Up=>app.scroll_up(1),
+                            KeyCode::Down=>app.scroll_down(1),
+                            KeyCode::Home=>app.scroll_to_top(),
+                            KeyCode::End=>app.scroll_to_bottom(),
+                            _=>{}
+                        }
                         continue;
                     }
                     if app.focus==FocusPane::Sidebar {
@@ -516,6 +541,15 @@ impl App {
             palette: None,
             palette_rect: Rect::default(),
             palette_hits: Vec::new(),
+            transcript_rect: Rect::default(),
+            command_rect: Rect::default(),
+            command_hits: Vec::new(),
+            skill_rect: Rect::default(),
+            skill_hits: Vec::new(),
+            approval_rect: Rect::default(),
+            question_rect: Rect::default(),
+            question_hits: Vec::new(),
+            search_rect: Rect::default(),
         }
     }
     fn sidebar_move(&mut self, delta: isize) {
@@ -525,6 +559,13 @@ impl App {
             self.sidebar_selected.checked_sub(1).unwrap_or(3)
         } else {
             (self.sidebar_selected + 1) % 4
+        };
+    }
+    fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            FocusPane::Prompt => FocusPane::Chat,
+            FocusPane::Chat => FocusPane::Sidebar,
+            FocusPane::Sidebar => FocusPane::Prompt,
         };
     }
     fn sidebar_toggle(&mut self) {
@@ -1144,8 +1185,71 @@ impl App {
             Err(e) => self.notice = Some(format!("Clipboard image unavailable: {e}")),
         }
     }
-    fn handle_mouse(&mut self, x: u16, y: u16, registry: &BackgroundTaskRegistry) {
-        if self.palette.is_some() && self.palette_rect.contains((x, y).into()) {
+    fn handle_mouse(
+        &mut self,
+        x: u16,
+        y: u16,
+        registry: &BackgroundTaskRegistry,
+        skills: &SkillCatalog,
+    ) {
+        if self.search.is_some() && self.search_rect.contains((x, y).into()) {
+            if let Some(search) = &mut self.search {
+                search.editor.set_cursor_visual(
+                    0,
+                    x.saturating_sub(self.search_rect.x + 1) as usize,
+                    self.search_rect.width.saturating_sub(2).max(1) as usize,
+                );
+            }
+        } else if self.approval.is_some()
+            && self.approval_rect.contains((x, y).into())
+            && y >= self.approval_rect.bottom().saturating_sub(2)
+        {
+            let Some((_, always, sender)) = self.approval.take() else {
+                return;
+            };
+            let relative = x.saturating_sub(self.approval_rect.x) as usize;
+            let width = self.approval_rect.width.max(1) as usize;
+            let decision = if always {
+                match relative.saturating_mul(3) / width {
+                    0 => ApprovalDecision::AllowOnce,
+                    1 => ApprovalDecision::AlwaysAllow,
+                    _ => ApprovalDecision::Deny,
+                }
+            } else if relative < width / 2 {
+                ApprovalDecision::AllowOnce
+            } else {
+                ApprovalDecision::Deny
+            };
+            let _ = sender.send(decision);
+        } else if self.question.is_some() && self.question_rect.contains((x, y).into()) {
+            if let Some((_, selected)) = self
+                .question_hits
+                .iter()
+                .find(|(row, _)| *row == y)
+                .copied()
+            {
+                let multi = self
+                    .question
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.request.multi_select);
+                if multi {
+                    if let Some(dialog) = &mut self.question {
+                        dialog.selected = selected;
+                        dialog.checked[selected] = !dialog.checked[selected];
+                    }
+                } else if let Some(dialog) = self.question.take() {
+                    let answer = dialog.request.options.get(selected).cloned();
+                    let _ = dialog.sender.send(answer);
+                }
+            } else if y >= self.question_rect.bottom().saturating_sub(2) {
+                let code = if x < self.question_rect.x + self.question_rect.width / 2 {
+                    KeyCode::Esc
+                } else {
+                    KeyCode::Enter
+                };
+                self.handle_question_key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
+        } else if self.palette.is_some() && self.palette_rect.contains((x, y).into()) {
             if let Some((_, position)) =
                 self.palette_hits.iter().find(|(row, _)| *row == y).copied()
             {
@@ -1153,6 +1257,19 @@ impl App {
                     palette.selected = position;
                 }
                 self.activate_palette_selection(registry);
+            }
+        } else if self.command_rect.contains((x, y).into()) {
+            if let Some((_, selected)) =
+                self.command_hits.iter().find(|(row, _)| *row == y).copied()
+            {
+                self.command_selected = selected;
+                self.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+        } else if self.skill_rect.contains((x, y).into()) {
+            if let Some((_, selected)) = self.skill_hits.iter().find(|(row, _)| *row == y).copied()
+            {
+                self.skill_selected = selected;
+                self.handle_skill_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), skills);
             }
         } else if self.sidebar_rect.contains((x, y).into()) {
             self.focus = FocusPane::Sidebar;
@@ -1165,6 +1282,8 @@ impl App {
                     SidebarHit::Task(index) => self.open_task_detail(index, registry),
                 }
             }
+        } else if self.transcript_rect.contains((x, y).into()) {
+            self.focus = FocusPane::Chat;
         } else if self.prompt_rect.contains((x, y).into()) {
             self.focus = FocusPane::Prompt;
             let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
@@ -1480,6 +1599,7 @@ fn draw(
             ));
         }
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
+        app.transcript_rect = areas[0];
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
         app.transcript_height =
             rendered_transcript_height(&visible_transcript, app.transcript_width);
@@ -1497,9 +1617,23 @@ fn draw(
                 )
                 .to_owned()
         } else if app.follow_bottom {
-            "WillDeep".to_owned()
+            if app.focus == FocusPane::Chat {
+                app.language
+                    .text("WillDeep [焦点]", "WillDeep [focused]", "WillDeep [フォーカス]")
+                    .to_owned()
+            } else {
+                "WillDeep".to_owned()
+            }
         } else {
-            format!("WillDeep · history ↑{}", app.scroll_from_bottom)
+            format!(
+                "WillDeep{} · history ↑{}",
+                if app.focus == FocusPane::Chat {
+                    app.language.text(" [焦点]", " [focused]", " [フォーカス]")
+                } else {
+                    ""
+                },
+                app.scroll_from_bottom
+            )
         };
         let search_query = app
             .search
@@ -1513,7 +1647,11 @@ fn draw(
                     Block::default()
                         .title(title)
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Blue)),
+                        .border_style(Style::default().fg(if app.focus == FocusPane::Chat {
+                            Color::Cyan
+                        } else {
+                            Color::Blue
+                        })),
                 )
                 .scroll((offset, 0))
                 .wrap(Wrap { trim: false }),
@@ -1745,6 +1883,7 @@ fn draw(
                 f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
             }
         }
+        app.search_rect = Rect::default();
         if let Some(search) = &app.search {
             let width = f.area().width.min(72);
             let popup = Rect {
@@ -1753,6 +1892,7 @@ fn draw(
                 width,
                 height: 3.min(f.area().height),
             };
+            app.search_rect = popup;
             let position = if search.matches.is_empty() {
                 "0/0".to_owned()
             } else {
@@ -1777,6 +1917,8 @@ fn draw(
                 f.set_cursor_position((popup.x + 1 + cursor, popup.y + 1));
             }
         }
+        app.command_rect = Rect::default();
+        app.command_hits.clear();
         let command_matches = app.command_matches();
         if !app.command_menu_dismissed
             && !command_matches.is_empty()
@@ -1791,6 +1933,7 @@ fn draw(
                 width,
                 height,
             };
+            app.command_rect = popup;
             let lines = command_matches
                 .iter()
                 .enumerate()
@@ -1811,6 +1954,9 @@ fn draw(
                     ])
                 })
                 .collect::<Vec<_>>();
+            app.command_hits = (0..command_matches.len())
+                .map(|position| (popup.y + 1 + position as u16, position))
+                .collect();
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(lines).block(
@@ -1826,6 +1972,8 @@ fn draw(
                 popup,
             );
         }
+        app.skill_rect = Rect::default();
+        app.skill_hits.clear();
         let skill_matches = app.skill_matches(skills);
         if !app.skill_menu_dismissed
             && app.input.marker_query('$').is_some()
@@ -1840,6 +1988,7 @@ fn draw(
                 width,
                 height,
             };
+            app.skill_rect = popup;
             let lines = skill_matches
                 .iter()
                 .enumerate()
@@ -1864,6 +2013,9 @@ fn draw(
                     ])
                 })
                 .collect::<Vec<_>>();
+            app.skill_hits = (0..skill_matches.len())
+                .map(|position| (popup.y + 1 + position as u16, position))
+                .collect();
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(lines).block(
@@ -1983,9 +2135,11 @@ fn draw(
                 popup,
             );
         }
+        app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {
             let content = approval_content(description, *always, app.language);
             let popup = centered_rect(f.area().width.min(76), 9.min(f.area().height), f.area());
+            app.approval_rect = popup;
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(content)
@@ -2002,6 +2156,8 @@ fn draw(
                 popup,
             );
         }
+        app.question_rect = Rect::default();
+        app.question_hits.clear();
         if let Some(dialog) = &app.question {
             let options = dialog
                 .request
@@ -2047,10 +2203,26 @@ fn draw(
                 dialog.answer.text(),
                 help
             );
-            let height = (content.lines().count() as u16 + 2)
+            let popup_width = f.area().width.min(84);
+            let content_width = popup_width.saturating_sub(2).max(1) as usize;
+            let height = (visual_lines(&content, content_width) as u16 + 2)
                 .min(f.area().height)
                 .max(8);
-            let popup = centered_rect(f.area().width.min(84), height, f.area());
+            let popup = centered_rect(popup_width, height, f.area());
+            app.question_rect = popup;
+            app.question_hits = (0..dialog.request.options.len())
+                .map(|index| {
+                    (
+                        question_option_row(
+                            popup.y,
+                            &dialog.request.question,
+                            content_width,
+                            index,
+                        ),
+                        index,
+                    )
+                })
+                .collect();
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(content)
@@ -2260,6 +2432,7 @@ fn workspace_files(workspace: &std::path::Path, limit: usize) -> Vec<String> {
 fn focus_label(focus: FocusPane, language: Language) -> &'static str {
     match focus {
         FocusPane::Prompt => language.text("输入", "Prompt", "入力"),
+        FocusPane::Chat => language.text("聊天", "Chat", "チャット"),
         FocusPane::Sidebar => language.text("状态栏", "Status", "ステータス"),
     }
 }
@@ -2267,13 +2440,13 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  ↑/↓ 或 Tab/Shift+Tab 选择分组\n  Enter/Space 折叠或展开         Esc 返回输入\n  点击标题折叠，点击任务看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  ↑/↓ or Tab/Shift+Tab Select section\n  Enter/Space Collapse or expand        Esc Return to Prompt\n  Click headers to toggle, tasks for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  ↑/↓ または Tab/Shift+Tab セクション選択\n  Enter/Space 折りたたみ          Esc 入力へ戻る\n  見出しで開閉、タスクで詳細、ホイールでスクロール"
         }
     }
 }
@@ -2683,6 +2856,13 @@ fn visual_lines(text: &str, width: usize) -> usize {
         .sum()
 }
 
+fn question_option_row(popup_y: u16, question: &str, width: usize, index: usize) -> u16 {
+    popup_y
+        .saturating_add(2)
+        .saturating_add(visual_lines(question, width).min(u16::MAX as usize) as u16)
+        .saturating_add(index.min(u16::MAX as usize) as u16)
+}
+
 #[cfg(test)]
 mod command_tests {
     use super::*;
@@ -2859,20 +3039,35 @@ mod tests {
         assert_eq!(app.sidebar_selected, 0);
     }
     #[test]
+    fn focus_cycles_through_prompt_chat_and_sidebar() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPane::Chat);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPane::Sidebar);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[test]
     fn clicking_sidebar_focuses_it_and_clicking_prompt_restores_prompt_focus() {
         let mut app = App::new(Vec::new(), Language::En);
         let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
         app.sidebar_rect = Rect::new(80, 0, 20, 30);
         app.prompt_rect = Rect::new(0, 20, 80, 8);
+        app.transcript_rect = Rect::new(0, 0, 80, 20);
 
-        app.handle_mouse(85, 5, &registry);
+        app.handle_mouse(85, 5, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Sidebar);
-        app.handle_mouse(5, 22, &registry);
+        app.handle_mouse(5, 22, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Prompt);
+        app.handle_mouse(5, 5, &registry, &skills);
+        assert_eq!(app.focus, FocusPane::Chat);
     }
     #[test]
     fn clicking_sidebar_hits_toggles_sections_and_opens_task_detail() {
         let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
         let mut app = App::new(Vec::new(), Language::En);
         app.sidebar_rect = Rect::new(80, 0, 20, 30);
         app.sidebar_hits = vec![(2, SidebarHit::Section(1)), (5, SidebarHit::Task(0))];
@@ -2886,10 +3081,10 @@ mod tests {
             output_bytes: 12,
         });
 
-        app.handle_mouse(85, 2, &registry);
+        app.handle_mouse(85, 2, &registry, &skills);
         assert_eq!(app.sidebar_selected, 1);
         assert!(!app.sidebar_expanded[1]);
-        app.handle_mouse(85, 5, &registry);
+        app.handle_mouse(85, 5, &registry, &skills);
         assert_eq!(
             app.task_detail
                 .as_ref()
@@ -3094,5 +3289,92 @@ mod tests {
         app.handle_question_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         app.handle_question_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(receiver.await.expect("answer").as_deref(), Some("A, B"));
+    }
+    #[tokio::test]
+    async fn mouse_can_resolve_approval_and_single_choice_question() {
+        let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        let (approval_sender, approval_receiver) = oneshot::channel();
+        app.approval = Some(("Run tests".to_owned(), true, approval_sender));
+        app.approval_rect = Rect::new(10, 10, 60, 9);
+        app.handle_mouse(35, 18, &registry, &skills);
+        assert_eq!(
+            approval_receiver.await.unwrap(),
+            ApprovalDecision::AlwaysAllow
+        );
+
+        let (question_sender, question_receiver) = oneshot::channel();
+        app.question = Some(AskDialog {
+            request: UserQuestion {
+                question: "Choose".to_owned(),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                multi_select: false,
+            },
+            selected: 0,
+            checked: vec![false, false],
+            answer: PromptEditor::default(),
+            sender: question_sender,
+        });
+        app.question_rect = Rect::new(10, 10, 60, 10);
+        app.question_hits = vec![(13, 0), (14, 1)];
+        app.handle_mouse(20, 14, &registry, &skills);
+        assert_eq!(question_receiver.await.unwrap().as_deref(), Some("B"));
+    }
+    #[tokio::test]
+    async fn mouse_can_toggle_and_submit_multi_choice_question() {
+        let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        let (sender, receiver) = oneshot::channel();
+        app.question = Some(AskDialog {
+            request: UserQuestion {
+                question: "Choose".to_owned(),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                multi_select: true,
+            },
+            selected: 0,
+            checked: vec![false, false],
+            answer: PromptEditor::default(),
+            sender,
+        });
+        app.question_rect = Rect::new(10, 10, 60, 10);
+        app.question_hits = vec![(13, 0), (14, 1)];
+
+        app.handle_mouse(20, 13, &registry, &skills);
+        assert!(app.question.as_ref().unwrap().checked[0]);
+        app.handle_mouse(60, 18, &registry, &skills);
+        assert_eq!(receiver.await.unwrap().as_deref(), Some("A"));
+    }
+    #[test]
+    fn mouse_can_place_cursor_in_chat_search() {
+        let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        let mut search = SearchState::default();
+        search.editor.insert("abc");
+        app.search = Some(search);
+        app.search_rect = Rect::new(10, 2, 40, 3);
+
+        app.handle_mouse(12, 3, &registry, &skills);
+        app.handle_search_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert_eq!(app.search.as_ref().unwrap().editor.text(), "aXbc");
+    }
+    #[test]
+    fn wrapped_question_offsets_mouse_option_rows() {
+        assert_eq!(question_option_row(10, "123456789", 4, 0), 15);
+        assert_eq!(question_option_row(10, "123456789", 4, 1), 16);
+    }
+    #[test]
+    fn mouse_click_inserts_command_candidate() {
+        let registry = BackgroundTaskRegistry::default();
+        let skills = SkillCatalog::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/com");
+        app.command_rect = Rect::new(0, 0, 60, 4);
+        app.command_hits = vec![(1, 0)];
+
+        app.handle_mouse(5, 1, &registry, &skills);
+        assert_eq!(app.input.text(), "/compress");
     }
 }
