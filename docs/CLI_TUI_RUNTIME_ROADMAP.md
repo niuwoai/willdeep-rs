@@ -180,8 +180,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 以下能力不单独阻塞某个大版本，可随 Runtime 阶段逐批交付，但必须复用统一事件和状态模型：
 
-- [ ] Headless/CI 模式、稳定退出码、`--json`、`--ndjson` 和安静输出模式。
-- [ ] Bash、Zsh、Fish 与 PowerShell 命令补全。
+- [x] Headless/CI `willdeep run`、稳定退出码、`--output json|ndjson` 和 `--quiet`。
+- [x] Bash、Zsh、Fish 与 PowerShell 命令补全，并由同一 Clap 命令树生成 man page。
 - [ ] 跨会话 Prompt 历史、全文搜索和安全清理。
 - [ ] 长会话虚拟滚动，工具输出按活动组聚合并默认显示摘要。
 - [ ] 可展开查看工具原始参数、输出、错误和审批依据。
@@ -324,7 +324,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
 5. [x] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [x] 实现 Agent Mission Control、预算限制、失败熔断、独立详情、补充指令和结果回流。
-7. [-] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并；已完成内容指纹快照、统一 API/CLI 与首版 TUI Unified Review。
+7. [x] 实现 Diff Review Center、多 Workspace、安全 Worktree 审查/合并/隔离与孤儿审计。
 8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
 9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
 10. [-] Herdr 首批状态上报已完成；继续补齐 Pane 关联、跳转、Workflow、插件和 Computer Use。
@@ -412,11 +412,11 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 
 ### 7.9 Workspace、Git 与 Review Center
 
-- [ ] 注册、删除、切换和多 Workspace Session，每个 Workspace 有独立权限、Provider、Skills 和 MCP。
-- [ ] 只读/可写策略、路径边界重建、任务跨切换继续运行和并发修改保护。
-- [ ] Worktree 创建、绑定、回收、孤儿检测、冲突检测和保守合并。
-- [ ] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
-- [ ] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
+- [x] 注册、删除、切换和多 Workspace Session，每个 Workspace 有独立权限、Provider、Skills 和 MCP。
+- [x] 只读/可写策略、路径边界重建、任务跨切换继续运行和基于精确快照的并发修改保护。
+- [x] Worktree 创建、绑定、回收、孤儿检测、冲突检测、保守合并和可恢复隔离。
+- [x] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
+- [x] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
 - [x] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
 
 ### 7.10 工具与浏览器能力
