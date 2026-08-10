@@ -89,6 +89,9 @@ pub enum DaemonAction {
         /// Provider profile from config.toml.
         #[arg(long)]
         profile: Option<String>,
+        /// Optional model override for the selected Provider profile.
+        #[arg(long)]
+        model: Option<String>,
         /// TOML configuration path inherited by the task.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -111,6 +114,8 @@ pub enum DaemonAction {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         config: Option<PathBuf>,
         #[arg(long)]
         title: Option<String>,
@@ -121,8 +126,20 @@ pub enum DaemonAction {
     Session { id: uuid::Uuid },
     /// Search persistent Runtime Sessions by title or message text.
     SearchSessions {
-        #[arg(value_name = "QUERY", num_args = 1.., trailing_var_arg = true)]
+        #[arg(value_name = "QUERY", num_args = 0.., trailing_var_arg = true)]
         query: Vec<String>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        updated_after: Option<u64>,
+        #[arg(long)]
+        updated_before: Option<u64>,
     },
     /// Rename a persistent Runtime Session.
     RenameSession {
@@ -137,6 +154,10 @@ pub enum DaemonAction {
         title: Option<String>,
         #[arg(long, value_name = "TURN_ID")]
         through_turn: Option<uuid::Uuid>,
+        #[arg(long, value_name = "PROFILE")]
+        provider_profile: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Archive an inactive Runtime Session.
     ArchiveSession { id: uuid::Uuid },
@@ -272,6 +293,8 @@ pub(crate) struct SubmitTask {
     pub(crate) attachments: Vec<willdeep_core::MessageAttachment>,
     pub(crate) workspace: PathBuf,
     pub(crate) profile: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
     pub(crate) config: Option<PathBuf>,
     #[serde(default)]
     pub(crate) session_id: Option<uuid::Uuid>,
@@ -283,6 +306,7 @@ pub(crate) struct SubmitTask {
 pub(crate) struct RuntimeSubmitOptions {
     pub workspace: PathBuf,
     pub profile: Option<String>,
+    pub model: Option<String>,
     pub config: Option<PathBuf>,
 }
 
@@ -380,9 +404,10 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Submit {
             workspace,
             profile,
+            model,
             config,
             prompt,
-        } => submit(&home, workspace, profile, config, prompt).await,
+        } => submit(&home, workspace, profile, model, config, prompt).await,
         DaemonAction::Tasks => list_tasks(&home).await,
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
@@ -390,13 +415,34 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::CreateSession {
             workspace,
             profile,
+            model,
             config,
             title,
-        } => session_store::create_session_cli(&home, workspace, profile, config, title).await,
+        } => {
+            session_store::create_session_cli(&home, workspace, profile, model, config, title).await
+        }
         DaemonAction::Sessions => session_store::list_sessions_cli(&home).await,
         DaemonAction::Session { id } => session_store::show_session_cli(&home, id).await,
-        DaemonAction::SearchSessions { query } => {
-            session_store::search_sessions_cli(&home, query).await
+        DaemonAction::SearchSessions {
+            query,
+            workspace,
+            status,
+            profile,
+            model,
+            updated_after,
+            updated_before,
+        } => {
+            session_store::search_sessions_cli(
+                &home,
+                query,
+                workspace,
+                status,
+                profile,
+                model,
+                updated_after,
+                updated_before,
+            )
+            .await
         }
         DaemonAction::RenameSession { id, title } => {
             session_store::rename_session_cli(&home, id, title).await
@@ -405,7 +451,12 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             id,
             title,
             through_turn,
-        } => session_store::fork_session_cli(&home, id, title, through_turn).await,
+            provider_profile,
+            model,
+        } => {
+            session_store::fork_session_cli(&home, id, title, through_turn, provider_profile, model)
+                .await
+        }
         DaemonAction::ArchiveSession { id } => {
             session_store::archive_session_cli(&home, id, false).await
         }
@@ -488,6 +539,7 @@ async fn submit(
     home: &Path,
     workspace: Option<PathBuf>,
     profile: Option<String>,
+    model: Option<String>,
     config: Option<PathBuf>,
     prompt: Vec<String>,
 ) -> Result<()> {
@@ -497,6 +549,7 @@ async fn submit(
         &RuntimeSubmitOptions {
             workspace: workspace.unwrap_or(std::env::current_dir()?),
             profile,
+            model,
             config,
         },
         prompt,
@@ -530,6 +583,7 @@ pub(crate) async fn submit_runtime_prompt(
             attachments,
             workspace: options.workspace.canonicalize()?,
             profile: options.profile.clone(),
+            model: options.model.clone(),
             config: options.config.clone(),
             session_id: None,
             turn_id: None,

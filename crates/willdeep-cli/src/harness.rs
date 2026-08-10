@@ -67,7 +67,7 @@ pub(crate) async fn execute_runtime(
         profile: request.profile.clone(),
         api_base: None,
         api_key: None,
-        model: None,
+        model: request.model.clone(),
         provider: None,
         api: None,
         workspace: Some(request.workspace.clone()),

@@ -103,6 +103,8 @@ pub(crate) async fn fork_remote_session(
     id: uuid::Uuid,
     title: Option<String>,
     through_turn_id: Option<uuid::Uuid>,
+    provider_profile: Option<String>,
+    model: Option<String>,
 ) -> Result<uuid::Uuid> {
     let state = ensure_running(home).await?;
     let response = client()
@@ -111,6 +113,8 @@ pub(crate) async fn fork_remote_session(
         .json(&session_store::ForkRuntimeSession {
             title,
             through_turn_id,
+            provider_profile,
+            model,
         })
         .send()
         .await?;
@@ -159,12 +163,15 @@ pub(crate) async fn export_remote_session(
     authorized_get(&state, &format!("/v1/sessions/{id}/export")).await
 }
 
-pub(crate) async fn search_remote_sessions(home: &Path, query: &str) -> Result<serde_json::Value> {
+pub(crate) async fn search_remote_sessions(
+    home: &Path,
+    parameters: &[(String, String)],
+) -> Result<serde_json::Value> {
     let state = ensure_running(home).await?;
     let response = client()
         .get(format!("http://{}/v1/sessions/search", state.address))
         .header(TOKEN_HEADER, &state.token)
-        .query(&[("q", query)])
+        .query(parameters)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -207,6 +214,7 @@ pub(crate) async fn ensure_runtime_session(
     id: uuid::Uuid,
     workspace: &Path,
     profile: Option<String>,
+    model: Option<String>,
     config: Option<PathBuf>,
     title: String,
 ) -> Result<RemoteRuntimeSession> {
@@ -218,6 +226,7 @@ pub(crate) async fn ensure_runtime_session(
             id: Some(id),
             workspace: workspace.canonicalize()?,
             profile,
+            model,
             config,
             title: Some(title),
         })

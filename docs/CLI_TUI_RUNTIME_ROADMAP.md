@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc7
+> 当前实施版本：v0.17.0-rc8
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -78,8 +78,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
 - [x] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 支持同 Workspace 原地切换并按 Session 隔离聊天事件。
 - [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
-- [-] 已按持久消息边界支持从指定已完成 Turn 精确 Fork；Fork 时切换模型或 Provider 待完成。
-- [-] 受 Token CLI/TUI 已支持标题与消息内容搜索，Web 支持当前 Workspace 标题筛选；Workspace、状态、模型和时间组合筛选待完成。
+- [x] 已按持久消息边界支持从指定已完成 Turn 精确 Fork，并可为新 Session 覆盖 Provider Profile 和模型。
+- [x] 受 Token CLI/TUI 支持标题、消息内容、Workspace、状态、Provider Profile、模型和更新时间组合搜索；Web 保持当前 Workspace 标题筛选，不向未认证浏览器下发消息摘要。
 - [ ] 安全的自动标题与会话数据迁移版本。
 
 验收：任意会话可恢复、Fork、归档和导出，安全策略与系统 Prompt 始终使用当前版本。
@@ -223,14 +223,14 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc7（已完成）：Runtime Turn 持久记录 Core 消息起止边界，支持从指定已完成 Turn 精确 Fork；TUI 支持同 Workspace 原地切换 Session，Runtime 聊天事件按 Session 精确隔离。Store、TUI 状态切换与跨 Session 事件隔离测试，以及 release CLI/Web 进程级回归均已通过。下一步补齐组合筛选及模型/Provider Fork 选项。
+v0.17.0-rc8（已完成）：Runtime Session 持久化模型覆盖，Fork 可同时选择指定 Turn、Provider Profile 和模型；CLI/TUI 支持文本、Workspace、状态、Profile、模型及时间范围组合搜索。模型覆盖从 Session 调度到原生 Harness 的链路、过滤组合和 TUI 参数解析均由测试覆盖。
 
 ## 6. 建议执行顺序
 
 1. [x] 发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
 2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
 3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
-4. [-] 已实现完整会话 Rename、快照/指定 Turn Fork、TUI 原地切换、归档、删除、导出和基础全文搜索；下一步完成模型/Provider Fork 选项与组合筛选。
+4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
 5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
 6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
 7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。

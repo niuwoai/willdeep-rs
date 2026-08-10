@@ -14,9 +14,9 @@ pub(super) async fn handle_session_command(
     let arguments = value.strip_prefix("/session").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let usage = app.language.text(
-        "用法：/session switch <会话ID> | rename <名称> | fork [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search <关键词> | export <路径> | delete <其他会话ID>",
-        "Usage: /session switch <session-id> | rename <title> | fork [title] | fork-turn <turn-id> [title] | archive | unarchive | search <query> | export <path> | delete <other-session-id>",
-        "使用法：/session switch <セッションID> | rename <名前> | fork [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search <検索語> | export <パス> | delete <別セッションID>",
+        "用法：/session switch <会话ID> | rename <名称> | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search <关键词> | export <路径> | delete <其他会话ID>",
+        "Usage: /session switch <session-id> | rename <title> | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search <query> | export <path> | delete <other-session-id>",
+        "使用法：/session switch <セッションID> | rename <名前> | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search <検索語> | export <パス> | delete <別セッションID>",
     );
     let result = match action {
         "switch" if !rest.trim().is_empty() => switch(app, session, store, runtime, rest).await?,
@@ -56,8 +56,16 @@ async fn rename(
 }
 
 async fn fork(app: &App, session: &Session, runtime: &TuiRuntime, title: &str) -> Result<String> {
-    let title = (!title.trim().is_empty()).then(|| title.trim().to_owned());
-    let id = crate::daemon::fork_remote_session(&runtime.home, session.id, title, None).await?;
+    let options = parse_fork_options(title)?;
+    let id = crate::daemon::fork_remote_session(
+        &runtime.home,
+        session.id,
+        options.title,
+        options.through_turn_id,
+        options.provider_profile,
+        options.model,
+    )
+    .await?;
     Ok(format!(
         "{}: {id}",
         app.language.text(
@@ -80,8 +88,15 @@ async fn fork_turn(
         .unwrap_or((arguments.trim(), ""));
     let turn_id = uuid::Uuid::parse_str(turn_id).context("invalid Runtime Turn ID")?;
     let title = (!title.trim().is_empty()).then(|| title.trim().to_owned());
-    let id =
-        crate::daemon::fork_remote_session(&runtime.home, session.id, title, Some(turn_id)).await?;
+    let id = crate::daemon::fork_remote_session(
+        &runtime.home,
+        session.id,
+        title,
+        Some(turn_id),
+        None,
+        None,
+    )
+    .await?;
     Ok(format!(
         "{}: {id}",
         app.language.text(
@@ -90,6 +105,51 @@ async fn fork_turn(
             "指定ターンまでの分岐セッションを作成しました"
         )
     ))
+}
+
+#[derive(Default)]
+pub(super) struct ForkOptions {
+    pub(super) title: Option<String>,
+    pub(super) through_turn_id: Option<uuid::Uuid>,
+    pub(super) provider_profile: Option<String>,
+    pub(super) model: Option<String>,
+}
+
+pub(super) fn parse_fork_options(arguments: &str) -> Result<ForkOptions> {
+    let mut options = ForkOptions::default();
+    let mut title = Vec::new();
+    let mut values = arguments.split_whitespace();
+    while let Some(value) = values.next() {
+        match value {
+            "--through" => {
+                let value = values
+                    .next()
+                    .context("--through requires a Runtime Turn ID")?;
+                options.through_turn_id =
+                    Some(uuid::Uuid::parse_str(value).context("invalid Runtime Turn ID")?);
+            }
+            "--profile" => {
+                options.provider_profile = Some(
+                    values
+                        .next()
+                        .context("--profile requires a Provider profile")?
+                        .to_owned(),
+                );
+            }
+            "--model" => {
+                options.model = Some(
+                    values
+                        .next()
+                        .context("--model requires a model")?
+                        .to_owned(),
+                );
+            }
+            value if value.starts_with("--") => bail!("unknown Fork option: {value}"),
+            value => title.push(value),
+        }
+    }
+    options.title = (!title.is_empty()).then(|| title.join(" "));
+    Ok(options)
 }
 
 async fn switch(
@@ -162,7 +222,8 @@ async fn archive(
 }
 
 async fn search(app: &App, runtime: &TuiRuntime, query: &str) -> Result<String> {
-    let value = crate::daemon::search_remote_sessions(&runtime.home, query).await?;
+    let parameters = parse_search_options(query)?;
+    let value = crate::daemon::search_remote_sessions(&runtime.home, &parameters).await?;
     let rows = value
         .as_array()
         .into_iter()
@@ -194,6 +255,42 @@ async fn search(app: &App, runtime: &TuiRuntime, query: &str) -> Result<String> 
     } else {
         rows.join("\n")
     })
+}
+
+pub(super) fn parse_search_options(arguments: &str) -> Result<Vec<(String, String)>> {
+    let mut parameters = Vec::new();
+    let mut query = Vec::new();
+    let mut values = arguments.split_whitespace();
+    while let Some(value) = values.next() {
+        let key = match value {
+            "--workspace" => Some("workspace"),
+            "--status" => Some("status"),
+            "--profile" => Some("profile"),
+            "--model" => Some("model"),
+            "--after" => Some("updated_after"),
+            "--before" => Some("updated_before"),
+            value if value.starts_with("--") => bail!("unknown Search option: {value}"),
+            _ => None,
+        };
+        if let Some(key) = key {
+            parameters.push((
+                key.to_owned(),
+                values
+                    .next()
+                    .with_context(|| format!("{value} requires a value"))?
+                    .to_owned(),
+            ));
+        } else {
+            query.push(value);
+        }
+    }
+    if !query.is_empty() {
+        parameters.push(("q".to_owned(), query.join(" ")));
+    }
+    if parameters.is_empty() {
+        bail!("Session search requires text or at least one filter");
+    }
+    Ok(parameters)
 }
 
 async fn export(app: &App, session: &Session, runtime: &TuiRuntime, path: &str) -> Result<String> {

@@ -74,6 +74,10 @@ struct ForkSessionRequest {
     title: Option<String>,
     #[serde(default)]
     through_turn_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    provider_profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -317,10 +321,16 @@ async fn fork_session(
     Json(request): Json<ForkSessionRequest>,
 ) -> Result<(StatusCode, Json<ForkSessionResponse>), WebError> {
     ensure_web_runtime_session(&state, id).await?;
-    let fork_id =
-        crate::daemon::fork_remote_session(&state.home, id, request.title, request.through_turn_id)
-            .await
-            .map_err(WebError::from_anyhow)?;
+    let fork_id = crate::daemon::fork_remote_session(
+        &state.home,
+        id,
+        request.title,
+        request.through_turn_id,
+        request.provider_profile,
+        request.model,
+    )
+    .await
+    .map_err(WebError::from_anyhow)?;
     Ok((
         StatusCode::CREATED,
         Json(ForkSessionResponse {
@@ -393,6 +403,7 @@ async fn ensure_web_runtime_session(state: &WebState, id: uuid::Uuid) -> Result<
         session.id,
         &session.workspace,
         session.profile,
+        None,
         Some(state.config_path.clone()),
         session.title,
     )
@@ -512,6 +523,7 @@ async fn run_runtime_turn_inner(
         session.id,
         &workspace,
         session.profile.clone(),
+        None,
         Some(state.config_path.clone()),
         session.title.clone(),
     )

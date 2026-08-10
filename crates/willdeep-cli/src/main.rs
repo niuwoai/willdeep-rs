@@ -350,6 +350,7 @@ async fn run() -> Result<()> {
                 daemon::RuntimeSubmitOptions {
                     workspace,
                     profile: runtime_profile,
+                    model: cli.model.clone(),
                     config: Some(cli.config.clone().unwrap_or(config::default_config_path()?)),
                 },
                 language,

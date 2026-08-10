@@ -27,6 +27,8 @@ pub(crate) struct RuntimeSession {
     pub root_agent_id: uuid::Uuid,
     pub workspace: PathBuf,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub config: Option<PathBuf>,
     pub status: RuntimeSessionStatus,
     pub active_turn_id: Option<uuid::Uuid>,
@@ -42,6 +44,8 @@ pub(crate) struct CreateRuntimeSession {
     pub workspace: PathBuf,
     #[serde(default)]
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub config: Option<PathBuf>,
     #[serde(default)]
@@ -107,6 +111,10 @@ pub(crate) struct ForkRuntimeSession {
     pub title: Option<String>,
     #[serde(default)]
     pub through_turn_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub provider_profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -141,6 +149,8 @@ pub(crate) struct RuntimeSessionSearchResult {
     title: String,
     workspace: PathBuf,
     status: RuntimeSessionStatus,
+    profile: Option<String>,
+    model: Option<String>,
     updated_at: u64,
     message_count: usize,
     snippet: Option<String>,
@@ -148,7 +158,20 @@ pub(crate) struct RuntimeSessionSearchResult {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SessionSearchQuery {
-    q: String,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+    #[serde(default)]
+    status: Option<RuntimeSessionStatus>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    updated_after: Option<u64>,
+    #[serde(default)]
+    updated_before: Option<u64>,
 }
 
 pub(super) struct ClaimedRuntimeTurn {
@@ -225,7 +248,9 @@ impl RuntimeSessionStore {
         Ok(self.ensure(request)?.0)
     }
 
-    pub fn ensure(&self, request: CreateRuntimeSession) -> Result<(RuntimeSession, bool)> {
+    pub fn ensure(&self, mut request: CreateRuntimeSession) -> Result<(RuntimeSession, bool)> {
+        request.profile = normalized_optional("Provider profile", request.profile)?;
+        request.model = normalized_optional("Model", request.model)?;
         let workspace = request
             .workspace
             .canonicalize()
@@ -264,6 +289,7 @@ impl RuntimeSessionStore {
             root_agent_id: uuid::Uuid::new_v4(),
             workspace,
             profile: request.profile,
+            model: request.model,
             config: request.config,
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
@@ -312,9 +338,14 @@ impl RuntimeSessionStore {
         id: uuid::Uuid,
         title: Option<String>,
         through_turn_id: Option<uuid::Uuid>,
+        provider_profile: Option<String>,
+        model: Option<String>,
     ) -> Result<RuntimeSession> {
         self.ensure_manageable(id)?;
+        let provider_profile = normalized_optional("Provider profile", provider_profile)?;
+        let model = normalized_optional("Model", model)?;
         let source = self.get(id)?.context("Runtime Session not found")?;
+        let target_profile = provider_profile.or_else(|| source.profile.clone());
         let mut core = self
             .core
             .load(id)
@@ -348,13 +379,15 @@ impl RuntimeSessionStore {
         core.runtime_event_cursor = 0;
         core.runtime_managed = true;
         core.swift_source = None;
+        core.profile = target_profile.clone();
         self.core.save(&mut core)?;
         let fork = RuntimeSession {
             schema: RUNTIME_SESSION_SCHEMA,
             id: core.id,
             root_agent_id: uuid::Uuid::new_v4(),
             workspace: source.workspace,
-            profile: source.profile,
+            profile: target_profile,
+            model: model.or(source.model),
             config: source.config,
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
@@ -436,24 +469,77 @@ impl RuntimeSessionStore {
         })
     }
 
-    pub fn search(&self, query: String) -> Result<Vec<RuntimeSessionSearchResult>> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
-            bail!("Session search query must not be empty");
-        }
-        if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+    pub fn search(&self, filters: SessionSearchQuery) -> Result<Vec<RuntimeSessionSearchResult>> {
+        let query = filters
+            .q
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty());
+        if query
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > MAX_SEARCH_QUERY_CHARS)
+        {
             bail!("Session search query is too long");
+        }
+        if filters
+            .updated_after
+            .zip(filters.updated_before)
+            .is_some_and(|(updated_after, updated_before)| updated_after > updated_before)
+        {
+            bail!("updated_after must not exceed updated_before");
+        }
+        let workspace = filters
+            .workspace
+            .map(|value| value.canonicalize())
+            .transpose()
+            .context("invalid Session search workspace")?;
+        if query.is_none()
+            && workspace.is_none()
+            && filters.status.is_none()
+            && filters.profile.is_none()
+            && filters.model.is_none()
+            && filters.updated_after.is_none()
+            && filters.updated_before.is_none()
+        {
+            bail!("Session search requires text or at least one filter");
         }
         let mut results = Vec::new();
         for session in self.list()? {
+            if workspace
+                .as_ref()
+                .is_some_and(|value| *value != session.workspace)
+                || filters.status.is_some_and(|value| value != session.status)
+                || filters.profile.as_ref().is_some_and(|value| {
+                    !session
+                        .profile
+                        .as_deref()
+                        .is_some_and(|profile| profile.eq_ignore_ascii_case(value))
+                })
+                || filters.model.as_ref().is_some_and(|value| {
+                    !session
+                        .model
+                        .as_deref()
+                        .is_some_and(|model| model.eq_ignore_ascii_case(value))
+                })
+                || filters
+                    .updated_after
+                    .is_some_and(|value| session.updated_at < value)
+                || filters
+                    .updated_before
+                    .is_some_and(|value| session.updated_at > value)
+            {
+                continue;
+            }
             let Ok(core) = self.core.load(session.id) else {
                 continue;
             };
-            let title_matches = core.title.to_lowercase().contains(&query);
-            let matching_message = core
-                .messages
-                .iter()
-                .find(|message| message.content.to_lowercase().contains(&query));
+            let title_matches = query
+                .as_ref()
+                .is_none_or(|query| core.title.to_lowercase().contains(query));
+            let matching_message = query.as_ref().and_then(|query| {
+                core.messages
+                    .iter()
+                    .find(|message| message.content.to_lowercase().contains(query))
+            });
             if !title_matches && matching_message.is_none() {
                 continue;
             }
@@ -462,6 +548,8 @@ impl RuntimeSessionStore {
                 title: core.title,
                 workspace: session.workspace,
                 status: session.status,
+                profile: session.profile,
+                model: session.model,
                 updated_at: session.updated_at.max(core.updated_at),
                 message_count: core.messages.len(),
                 snippet: matching_message.map(|message| bounded_snippet(&message.content)),
@@ -653,6 +741,7 @@ impl RuntimeSessionStore {
                 attachments: turn.attachments.clone(),
                 workspace: session.workspace.clone(),
                 profile: session.profile.clone(),
+                model: session.model.clone(),
                 config: session.config.clone(),
                 session_id: Some(session.id),
                 turn_id: Some(turn.metadata.id),
@@ -865,6 +954,20 @@ fn normalized_title(title: String) -> Result<String> {
     Ok(title)
 }
 
+fn normalized_optional(label: &str, value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        bail!("{label} must not be empty");
+    }
+    if value.chars().count() > MAX_SESSION_TITLE_CHARS {
+        bail!("{label} must not exceed {MAX_SESSION_TITLE_CHARS} characters");
+    }
+    Ok(Some(value))
+}
+
 fn default_fork_title(source: &str) -> String {
     const SUFFIX: &str = " (fork)";
     let prefix_limit = MAX_SESSION_TITLE_CHARS.saturating_sub(SUFFIX.chars().count());
@@ -951,7 +1054,7 @@ pub(super) async fn search_sessions_handler(
     Query(query): Query<SessionSearchQuery>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
-    let results = state.sessions.search(query.q).map_err(|error| {
+    let results = state.sessions.search(query).map_err(|error| {
         eprintln!("search Runtime Sessions: {error:#}");
         StatusCode::BAD_REQUEST
     })?;
@@ -985,7 +1088,13 @@ pub(super) async fn fork_session_handler(
     authorize(&state, &headers)?;
     let session = state
         .sessions
-        .fork_through(id, request.title, request.through_turn_id)
+        .fork_through(
+            id,
+            request.title,
+            request.through_turn_id,
+            request.provider_profile,
+            request.model,
+        )
         .map_err(|error| {
             eprintln!("fork Runtime Session: {error:#}");
             StatusCode::BAD_REQUEST
@@ -1208,6 +1317,7 @@ pub(super) async fn create_session_cli(
     home: &Path,
     workspace: Option<PathBuf>,
     profile: Option<String>,
+    model: Option<String>,
     config: Option<PathBuf>,
     title: Option<String>,
 ) -> Result<()> {
@@ -1221,6 +1331,7 @@ pub(super) async fn create_session_cli(
                 .unwrap_or(std::env::current_dir()?)
                 .canonicalize()?,
             profile,
+            model,
             config,
             title,
         })
@@ -1252,16 +1363,48 @@ pub(super) async fn show_session_cli(home: &Path, id: uuid::Uuid) -> Result<()> 
     Ok(())
 }
 
-pub(super) async fn search_sessions_cli(home: &Path, query: Vec<String>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn search_sessions_cli(
+    home: &Path,
+    query: Vec<String>,
+    workspace: Option<PathBuf>,
+    status: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    updated_after: Option<u64>,
+    updated_before: Option<u64>,
+) -> Result<()> {
     let query = query.join(" ");
-    if query.trim().is_empty() {
-        bail!("Session search query must not be empty");
+    let mut parameters = Vec::<(&str, String)>::new();
+    if !query.trim().is_empty() {
+        parameters.push(("q", query));
+    }
+    if let Some(workspace) = workspace {
+        parameters.push(("workspace", workspace.canonicalize()?.display().to_string()));
+    }
+    if let Some(status) = status {
+        parameters.push(("status", status));
+    }
+    if let Some(profile) = profile {
+        parameters.push(("profile", profile));
+    }
+    if let Some(model) = model {
+        parameters.push(("model", model));
+    }
+    if let Some(updated_after) = updated_after {
+        parameters.push(("updated_after", updated_after.to_string()));
+    }
+    if let Some(updated_before) = updated_before {
+        parameters.push(("updated_before", updated_before.to_string()));
+    }
+    if parameters.is_empty() {
+        bail!("Session search requires text or at least one filter");
     }
     let state = ensure_running(home).await?;
     let response = client()
         .get(format!("http://{}/v1/sessions/search", state.address))
         .header(TOKEN_HEADER, &state.token)
-        .query(&[("q", query)])
+        .query(&parameters)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -1273,9 +1416,11 @@ pub(super) async fn search_sessions_cli(home: &Path, query: Vec<String>) -> Resu
     let results: Vec<RuntimeSessionSearchResult> = response.json().await?;
     for result in results {
         println!(
-            "{}\t{:?}\tmessages={}\t{}\t{}\t{}",
+            "{}\t{:?}\tprofile={}\tmodel={}\tmessages={}\t{}\t{}\t{}",
             result.id,
             result.status,
+            result.profile.as_deref().unwrap_or("default"),
+            result.model.as_deref().unwrap_or("default"),
             result.message_count,
             result.title,
             result.workspace.display(),
@@ -1302,6 +1447,8 @@ pub(super) async fn fork_session_cli(
     id: uuid::Uuid,
     title: Option<String>,
     through_turn_id: Option<uuid::Uuid>,
+    provider_profile: Option<String>,
+    model: Option<String>,
 ) -> Result<()> {
     let session: RuntimeSession = post_session_action(
         home,
@@ -1310,6 +1457,8 @@ pub(super) async fn fork_session_cli(
         Some(&ForkRuntimeSession {
             title,
             through_turn_id,
+            provider_profile,
+            model,
         }),
     )
     .await?;
@@ -1470,9 +1619,11 @@ pub(super) async fn stop_turn_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
 
 fn print_session(session: &RuntimeSession) {
     println!(
-        "{}\t{:?}\tagent={}\tactive_turn={}\t{}",
+        "{}\t{:?}\tprofile={}\tmodel={}\tagent={}\tactive_turn={}\t{}",
         session.id,
         session.status,
+        session.profile.as_deref().unwrap_or("default"),
+        session.model.as_deref().unwrap_or("default"),
         session.root_agent_id,
         session
             .active_turn_id
@@ -1558,6 +1709,7 @@ mod tests {
                 id: None,
                 workspace,
                 profile: Some("mock".to_owned()),
+                model: Some("mock-model".to_owned()),
                 config: Some(root.join("config.toml")),
                 title: Some("Original title".to_owned()),
             })
@@ -1577,10 +1729,30 @@ mod tests {
             core_store.load(session.id).unwrap().title,
             "Renamed session"
         );
-        let title_results = store.search("renamed".to_owned()).unwrap();
+        let title_results = store
+            .search(SessionSearchQuery {
+                q: Some("renamed".to_owned()),
+                workspace: None,
+                status: None,
+                profile: None,
+                model: None,
+                updated_after: None,
+                updated_before: None,
+            })
+            .unwrap();
         assert_eq!(title_results.len(), 1);
         assert_eq!(title_results[0].id, session.id);
-        let message_results = store.search("needle".to_owned()).unwrap();
+        let message_results = store
+            .search(SessionSearchQuery {
+                q: Some("needle".to_owned()),
+                workspace: None,
+                status: None,
+                profile: None,
+                model: None,
+                updated_after: None,
+                updated_before: None,
+            })
+            .unwrap();
         assert_eq!(message_results.len(), 1);
         assert!(
             message_results[0]
@@ -1588,6 +1760,35 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("needle")
+        );
+        let filtered_results = store
+            .search(SessionSearchQuery {
+                q: None,
+                workspace: Some(root.join("workspace")),
+                status: Some(RuntimeSessionStatus::Idle),
+                profile: Some("MOCK".to_owned()),
+                model: Some("MOCK-MODEL".to_owned()),
+                updated_after: Some(0),
+                updated_before: Some(u64::MAX),
+            })
+            .unwrap();
+        assert_eq!(filtered_results.len(), 1);
+        assert_eq!(filtered_results[0].id, session.id);
+        assert_eq!(filtered_results[0].profile.as_deref(), Some("mock"));
+        assert_eq!(filtered_results[0].model.as_deref(), Some("mock-model"));
+        assert!(
+            store
+                .search(SessionSearchQuery {
+                    q: None,
+                    workspace: None,
+                    status: None,
+                    profile: Some("other".to_owned()),
+                    model: None,
+                    updated_after: None,
+                    updated_before: None,
+                })
+                .unwrap()
+                .is_empty()
         );
 
         let (queued, _) = store
@@ -1601,7 +1802,11 @@ mod tests {
             )
             .unwrap();
         assert!(store.archive(session.id).is_err());
-        assert!(store.fork_through(session.id, None, None).is_err());
+        assert!(
+            store
+                .fork_through(session.id, None, None, None, None)
+                .is_err()
+        );
         assert!(store.delete(session.id, session.id).is_err());
         store.request_cancel(queued.id).unwrap();
 
@@ -1627,7 +1832,13 @@ mod tests {
         );
 
         let fork = store
-            .fork_through(session.id, Some("Forked snapshot".to_owned()), None)
+            .fork_through(
+                session.id,
+                Some("Forked snapshot".to_owned()),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_ne!(fork.id, session.id);
         assert_ne!(fork.root_agent_id, session.root_agent_id);
@@ -1664,6 +1875,7 @@ mod tests {
                 id: None,
                 workspace: workspace.clone(),
                 profile: Some("some-im".to_owned()),
+                model: Some("qwen3".to_owned()),
                 config: Some(root.join("config.toml")),
                 title: Some("Persistent work".to_owned()),
             })
@@ -1709,6 +1921,7 @@ mod tests {
             id: Some(core.id),
             workspace: workspace.clone(),
             profile: Some("mock".to_owned()),
+            model: None,
             config: Some(root.join("config.toml")),
             title: Some("ignored for adoption".to_owned()),
         };
@@ -1737,6 +1950,7 @@ mod tests {
                 id: None,
                 workspace,
                 profile: None,
+                model: Some("source-model".to_owned()),
                 config: None,
                 title: Some("Turn boundary".to_owned()),
             })
@@ -1754,7 +1968,8 @@ mod tests {
                     },
                 )
                 .unwrap();
-            store.claim_next(session.id).unwrap().unwrap();
+            let claimed = store.claim_next(session.id).unwrap().unwrap();
+            assert_eq!(claimed.request.model.as_deref(), Some("source-model"));
             let mut core = core_store.load(session.id).unwrap();
             core.messages.push(willdeep_core::Message::user(prompt));
             core.messages
@@ -1782,8 +1997,16 @@ mod tests {
         );
 
         let fork = store
-            .fork_through(session.id, Some("Through first".to_owned()), Some(first))
+            .fork_through(
+                session.id,
+                Some("Through first".to_owned()),
+                Some(first),
+                Some("research".to_owned()),
+                Some("deep-model".to_owned()),
+            )
             .unwrap();
+        assert_eq!(fork.profile.as_deref(), Some("research"));
+        assert_eq!(fork.model.as_deref(), Some("deep-model"));
         let fork_core = core_store.load(fork.id).unwrap();
         assert_eq!(fork_core.messages.len(), 2);
         assert_eq!(fork_core.messages[0].content, "first");
@@ -1805,6 +2028,7 @@ mod tests {
                 id: None,
                 workspace,
                 profile: None,
+                model: None,
                 config: None,
                 title: None,
             })
@@ -1895,6 +2119,7 @@ mod tests {
                 id: None,
                 workspace,
                 profile: None,
+                model: None,
                 config: None,
                 title: None,
             })

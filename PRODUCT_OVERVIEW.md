@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.17.0-rc7
+> 最后更新：2026-08-10 | 当前版本：v0.17.0-rc8
 
 ## 项目简介
 
@@ -41,7 +41,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 优雅停止会先取消并收敛进程内 Harness Future，再关闭 HTTP Server，等待审批或回答的请求不会阻塞 Daemon 退出；
 - Runtime Session/Turn API 与 CLI 提供稳定 Root Agent、幂等请求 ID、持久严格串行队列、排队/运行取消、终态事件和重启恢复；成功后 Core Session 保留唯一消息历史并清除队列私密正文；
 - Runtime Session 支持 Rename、完整消息快照 Fork、Archive/Unarchive、精确确认 Delete、安全 JSON Export 和标题/消息 Search；活跃/排队会话禁止破坏性管理，Fork 不复制 Turn/Task/Interaction/游标/已读状态，Export 不包含队列私密正文或凭据；
-- CLI、TUI `/session` 与 Web 会话侧栏接入统一管理 API；支持按已完成 Turn 的持久消息边界精确 Fork，以及 TUI 在同一 Workspace 内原地切换并按 Session 隔离聊天事件；Web 仅在已允许 Workspace 内操作，匿名 Web 不开放消息摘要全文搜索端点；
+- CLI、TUI `/session` 与 Web 会话侧栏接入统一管理 API；支持按已完成 Turn 的持久消息边界精确 Fork、Fork 时覆盖 Provider Profile/模型、组合搜索，以及 TUI 在同一 Workspace 内原地切换并按 Session 隔离聊天事件；Web 仅在已允许 Workspace 内操作，匿名 Web 不开放消息摘要全文搜索端点；
 - TUI 普通 Prompt 默认幂等收养当前 Core Session 并提交长期 Session Turn，`/runtime` 为明确别名、`/local` 为单轮兼容入口；即时展示输入，终态从 Harness 独占写入的 Core 历史同步，恢复 TUI 后继续同一 Root Agent 且不会双写消息；
 - Runtime 托管任务支持持久审批和 ask_user 待处理项，可由其他 CLI 客户端允许、拒绝或自由回答后继续原 Harness；
 - TUI 右栏统一展示 Runtime 任务与待处理项，支持远端审批、回答和停止；Composer 可用 `/runtime` 提交含文本或图片附件的可分离任务；

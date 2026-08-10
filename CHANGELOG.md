@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.0-rc8] - 2026-08-10
+
+### Added
+
+- Runtime Session 持久化可选模型覆盖；创建 Session、独立 Runtime 任务及 Session Turn 均把模型传入原生 Harness。
+- CLI `fork-session` 新增 `--provider-profile`、`--model`，TUI `/session fork` 支持 `--profile`、`--model` 和 `--through`，Web Fork API 支持相同结构化字段。
+- Session Search 支持组合 Workspace、状态、Provider Profile、模型及更新时间上下界；CLI 与 TUI 均可组合文本和结构化过滤条件。
+
+### Changed
+
+- CLI Session 列表与搜索结果显示实际 Provider Profile 和模型；Fork 的 Provider 覆盖同步写入 Core Session Profile，Runtime 仍是模型覆盖的事实来源。
+
+### Security
+
+- Provider Profile 和模型覆盖统一去除首尾空白、拒绝空值并限制长度；搜索没有文本时必须至少提供一个结构化过滤条件。
+
 ## [0.17.0-rc7] - 2026-08-10
 
 ### Added

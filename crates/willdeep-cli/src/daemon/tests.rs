@@ -386,6 +386,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
             id: None,
             workspace: workspace.clone(),
             profile: None,
+            model: None,
             config: None,
             title: None,
         })

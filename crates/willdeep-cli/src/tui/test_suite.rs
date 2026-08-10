@@ -108,6 +108,7 @@ mod tests {
             runtime_submit: crate::daemon::RuntimeSubmitOptions {
                 workspace,
                 profile: None,
+                model: None,
                 config: None,
             },
             tx,
@@ -214,6 +215,34 @@ mod tests {
         assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input.text(), "/session ");
         assert!(app.transcript.is_empty());
+    }
+    #[test]
+    fn session_fork_options_select_turn_provider_model_and_title() {
+        let turn_id = uuid::Uuid::new_v4();
+        let options = session_commands::parse_fork_options(&format!(
+            "--through {turn_id} --profile research --model qwen3-max investigate branch"
+        ))
+        .unwrap();
+        assert_eq!(options.through_turn_id, Some(turn_id));
+        assert_eq!(options.provider_profile.as_deref(), Some("research"));
+        assert_eq!(options.model.as_deref(), Some("qwen3-max"));
+        assert_eq!(options.title.as_deref(), Some("investigate branch"));
+        assert!(session_commands::parse_fork_options("--model").is_err());
+        assert!(session_commands::parse_fork_options("--unknown value").is_err());
+    }
+    #[test]
+    fn session_search_options_combine_structured_filters_and_text() {
+        let parameters = session_commands::parse_search_options(
+            "--status idle --profile research --model qwen3 --after 10 --before 20 durable answer",
+        )
+        .unwrap();
+        assert!(parameters.contains(&("status".to_owned(), "idle".to_owned())));
+        assert!(parameters.contains(&("profile".to_owned(), "research".to_owned())));
+        assert!(parameters.contains(&("model".to_owned(), "qwen3".to_owned())));
+        assert!(parameters.contains(&("updated_after".to_owned(), "10".to_owned())));
+        assert!(parameters.contains(&("updated_before".to_owned(), "20".to_owned())));
+        assert!(parameters.contains(&("q".to_owned(), "durable answer".to_owned())));
+        assert!(session_commands::parse_search_options("--status").is_err());
     }
     #[test]
     fn sidebar_navigation_wraps_and_toggles_sections() {
