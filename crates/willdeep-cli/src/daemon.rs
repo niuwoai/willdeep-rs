@@ -21,6 +21,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 const STATE_SCHEMA: u32 = 1;
 const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
+const REQUEST_ID_HEADER: &str = "x-willdeep-request-id";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 const LOCK_HEARTBEAT_SECONDS: u64 = 2;
 const LOCK_RECOVERY_ATTEMPTS: usize = 120;
@@ -185,6 +186,8 @@ pub enum DaemonAction {
     Start,
     /// Show Runtime Daemon health and endpoint information.
     Status,
+    /// Show negotiated Runtime protocol objects, operations, transports and limits.
+    Capabilities,
     /// Gracefully stop the local Runtime Daemon.
     Stop,
     /// Print Runtime Daemon logs.
@@ -641,6 +644,7 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
     match action {
         DaemonAction::Start => start(&home, true).await,
         DaemonAction::Status => status(&home).await,
+        DaemonAction::Capabilities => capabilities_cli(&home).await,
         DaemonAction::Stop => stop(&home).await,
         DaemonAction::Logs { lines, follow } => logs(&home, lines, follow).await,
         DaemonAction::Submit {
@@ -1300,6 +1304,15 @@ async fn status(home: &Path) -> Result<()> {
     }
 }
 
+async fn capabilities_cli(home: &Path) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response: willdeep_runtime_protocol::ApiResponse<
+        willdeep_runtime_protocol::RuntimeCapabilities,
+    > = authorized_get(&state, "/v1/capabilities").await?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
 async fn stop(home: &Path) -> Result<()> {
     let paths = DaemonPaths::new(home);
     let state = match load_state(&paths.state) {
@@ -1474,6 +1487,7 @@ async fn run(home: &Path) -> Result<()> {
     }
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/capabilities", get(capabilities_handler))
         .route("/v1/events", get(events_handler))
         .route(
             "/v1/events/stream",
@@ -1648,6 +1662,23 @@ async fn health(
         HeaderValue::from_static(willdeep_core::VERSION),
     );
     Ok(response)
+}
+
+async fn capabilities_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let request_id = headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<uuid::Uuid>().ok());
+    Ok(Json(willdeep_runtime_protocol::ApiResponse::ok(
+        willdeep_runtime_protocol::RuntimeCapabilities::current(willdeep_core::VERSION),
+        willdeep_core::VERSION,
+        request_id,
+    ))
+    .into_response())
 }
 
 async fn server_version_header(request: Request, next: middleware::Next) -> Response {

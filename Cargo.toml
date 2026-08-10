@@ -1,9 +1,13 @@
 [workspace]
-members = ["crates/willdeep-core", "crates/willdeep-cli"]
+members = [
+    "crates/willdeep-core",
+    "crates/willdeep-runtime-protocol",
+    "crates/willdeep-cli",
+]
 resolver = "2"
 
 [workspace.package]
-version = "0.20.0-rc6"
+version = "0.21.0-rc1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/niuwoai/willdeep-rs"
@@ -34,3 +38,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 http = "1.3"
 qrcode = { version = "0.14", default-features = false }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+willdeep-runtime-protocol = { path = "crates/willdeep-runtime-protocol" }

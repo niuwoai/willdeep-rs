@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.21.0-rc1] - 2026-08-11
+
+### Added
+
+- 新增独立 `willdeep-runtime-protocol` crate，定义协议版本、11 类控制对象、稳定 namespaced operation、能力、传输类型、协议限制和统一成功/错误信封。
+- Runtime 新增受 Token 保护的 `GET /v1/capabilities`，CLI 新增 `daemon capabilities`；响应包含服务端/最低客户端协议版本、服务版本和可选请求 ID。
+
+### Changed
+
+- 阶段 7 从共享协议 crate 开始演进；现有 `/v1/*` 原始响应暂时保持兼容，后续客户端迁移不需要复制协议常量和错误语义。
+
+### Security
+
+- 能力文档与响应只描述公开协议元数据，不包含 Runtime Token、Provider Key、Prompt、工具参数、文件正文或用户路径；端点显式执行本地 Runtime Token 校验。
+
 ## [0.20.0-rc6] - 2026-08-11
 
 ### Added

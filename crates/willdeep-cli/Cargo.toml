@@ -35,3 +35,4 @@ toml.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 willdeep-core = { path = "../willdeep-core" }
+willdeep-runtime-protocol.workspace = true

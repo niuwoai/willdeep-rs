@@ -217,6 +217,16 @@ async fn authorization_requires_exact_local_token() {
     headers.insert(TOKEN_HEADER, HeaderValue::from_static("expected"));
     assert_eq!(authorize(&state, &headers), Ok(()));
     assert_eq!(
+        capabilities_handler(State(state.clone()), HeaderMap::new())
+            .await
+            .unwrap_err(),
+        StatusCode::UNAUTHORIZED
+    );
+    let capabilities = capabilities_handler(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(capabilities.status(), StatusCode::OK);
+    assert_eq!(
         worktree_review::review_handler(
             State(state.clone()),
             HeaderMap::new(),

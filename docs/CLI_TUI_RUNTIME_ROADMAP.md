@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.20.0-rc6
+> 当前实施版本：v0.21.0-rc1
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -115,10 +115,10 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 7：统一控制 API（v0.21.0）
 
-- [ ] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event。
+- [-] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event；已抽出独立协议 crate、对象类别与操作命名，具体对象 DTO 将随 Client 迁移逐项稳定。
 - [ ] 本地 JSON 请求响应与 NDJSON/流式事件协议。
 - [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
-- [ ] 幂等请求 ID、事件游标、错误码、版本协商和能力列表。
+- [-] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；已定义协议版本、统一错误码/响应信封和受 Token 能力端点，通用调用的幂等存储待实现。
 - [ ] Rust Client Library，供 TUI、Web、Swift FFI、移动端和自动化复用。
 - [ ] API Key、工具参数、Prompt 和路径按权限脱敏。
 
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc1（已完成）：新增独立 `willdeep-runtime-protocol` crate，定义协议 `1.0`、11 类控制对象、稳定 namespaced operation、能力/传输/限制、统一成功/错误信封和错误码。Runtime 新增显式 Token 校验的 `GET /v1/capabilities`，支持 `x-willdeep-request-id` 回显；CLI 新增 `daemon capabilities`。旧 `/v1/*` 原始 DTO 保持兼容，下一步实现统一 `willdeep api` 调度并逐步迁移到共享 DTO。
 
 v0.20.0-rc6（已完成）：新增受 Runtime Token 保护的 `worktrees-audit` 与 `quarantine-agent-worktree --snapshot <ID> --yes` API/CLI。审计区分 Active、Reviewable、Merged、Clean、Quarantined、Missing、Unknown；活动、未合并、冲突、未跟踪、快照变化、路径越界或无 Agent 记录全部拒绝隔离。安全对象通过 `git worktree move` 整体迁入 Recovery，文件、脏状态、Git 关联和分支完整保留，持久化失败时尝试原路回滚。验收测试证明两个专属 Worktree 可同时修改同一文件而互不影响，根工作区保持原内容；阶段 6 完成。
 

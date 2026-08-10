@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.20.0-rc6`，支持：
+当前版本为 `0.21.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -313,6 +313,8 @@ enabled = true
 子 Agent 报告会附带有界的 Worktree 路径、分支和变更列表。可用 `willdeep daemon agent-worktree-review <AGENT_ID>` 获取绑定 Child/Root 精确快照的冲突预检；确认 Review ID 未陈旧后，执行 `willdeep daemon merge-agent-worktree <AGENT_ID> --review <REVIEW_ID> --yes`。TUI 中在 Agent 详情按 `W` 打开同一审查，再按 `M` 显式批准合并。Root 或 Child 任一侧变化、同文件冲突、未跟踪文件、未解决冲突或超大补丁都会阻断，系统不会自动合并。
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
+
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。运行 `willdeep daemon capabilities` 可读取受 Token 保护的协议版本、对象类型、操作名、传输方式与大小限制；新控制端点使用带 `protocol_version`、`server_version` 和可选 `request_id` 的统一响应信封。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 
