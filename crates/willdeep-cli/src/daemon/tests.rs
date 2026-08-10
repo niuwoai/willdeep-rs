@@ -101,6 +101,55 @@ fn agent_store_persists_structured_harness_lifecycle() {
             r#"{"type":"usage","input_tokens":10,"output_tokens":4,"total_tokens":14}"#,
         )
         .unwrap();
+    let child_id = uuid::Uuid::new_v4();
+    store
+        .apply_harness_event(
+            task_id,
+            &serde_json::json!({
+                "type": "subagent_started",
+                "id": child_id,
+                "profile": "scout",
+                "label": "inspect files",
+                "background": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            &serde_json::json!({
+                "type": "subagent_turn_started",
+                "id": child_id,
+                "turn": 2
+            })
+            .to_string(),
+        )
+        .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            &serde_json::json!({
+                "type": "subagent_usage",
+                "id": child_id,
+                "input_tokens": 7,
+                "output_tokens": 2,
+                "total_tokens": 9
+            })
+            .to_string(),
+        )
+        .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            &serde_json::json!({
+                "type": "subagent_completed",
+                "id": child_id,
+                "status": "completed"
+            })
+            .to_string(),
+        )
+        .unwrap();
     store
         .set_status_for_task(task_id, RuntimeAgentStatus::Completed, None)
         .unwrap();
@@ -116,6 +165,17 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert_eq!(restored.current_tool, None);
     assert_eq!(restored.total_tokens, Some(14));
     assert!(restored.completed_at.is_some());
+    let child = AgentStore::open(root.join("agents.json"))
+        .unwrap()
+        .get(child_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.parent_id, Some(agent.id));
+    assert_eq!(child.profile.as_deref(), Some("scout"));
+    assert!(child.background);
+    assert_eq!(child.status, RuntimeAgentStatus::Completed);
+    assert_eq!(child.current_turn, 2);
+    assert_eq!(child.total_tokens, Some(9));
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -125,6 +125,71 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             };
             app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
         }
+        Some("subagent_started") => {
+            let id = short_event_agent(&value);
+            let profile = value
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .unwrap_or("agent");
+            app.record_progress(format!(
+                "Runtime · {} {id} · {profile}",
+                app.language
+                    .text("子 Agent 启动", "subagent started", "サブエージェント開始")
+            ));
+        }
+        Some("subagent_turn_started") => {
+            let id = short_event_agent(&value);
+            let turn = value
+                .get("turn")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            app.record_progress(format!(
+                "Runtime · {} {id} · {} {turn}",
+                app.language
+                    .text("子 Agent", "subagent", "サブエージェント"),
+                app.language.text("轮次", "turn", "ターン")
+            ));
+        }
+        Some("subagent_tool_requested") => {
+            let id = short_event_agent(&value);
+            if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
+                app.tools.requested(name);
+                app.record_progress(format!(
+                    "Runtime · {id} · {} {name}",
+                    app.language.text("正在使用", "using", "使用中")
+                ));
+            }
+        }
+        Some("subagent_tool_completed") => {
+            let id = short_event_agent(&value);
+            if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
+                let is_error = value
+                    .get("is_error")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                app.tools.completed(name, is_error);
+                app.record_progress(format!(
+                    "Runtime · {id} · {} {name}",
+                    if is_error {
+                        app.language.text("失败", "failed", "失敗")
+                    } else {
+                        app.language.text("已完成", "finished", "完了")
+                    }
+                ));
+            }
+        }
+        Some("subagent_completed") => {
+            let id = short_event_agent(&value);
+            let status = value
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            app.record_progress(format!(
+                "Runtime · {} {id} · {status}",
+                app.language
+                    .text("子 Agent 结束", "subagent finished", "サブエージェント完了")
+            ));
+        }
         Some("completed") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
                 let short = task.get(..8).unwrap_or(task);
@@ -138,6 +203,14 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         _ => {}
     }
     None
+}
+
+fn short_event_agent(value: &serde_json::Value) -> &str {
+    value
+        .get("id")
+        .and_then(|value| value.as_str())
+        .and_then(|id| id.get(..8))
+        .unwrap_or("agent")
 }
 
 pub(super) fn open_remote_gate(

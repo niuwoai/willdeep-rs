@@ -7,6 +7,7 @@ pub(crate) enum RuntimeAgentStatus {
     Running,
     WaitingApproval,
     WaitingAnswer,
+    Blocked,
     Completed,
     Failed,
     Cancelled,
@@ -18,6 +19,10 @@ pub(crate) struct RuntimeAgent {
     pub id: uuid::Uuid,
     pub parent_id: Option<uuid::Uuid>,
     pub task_id: uuid::Uuid,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub background: bool,
     pub workspace: PathBuf,
     pub profile: Option<String>,
     pub status: RuntimeAgentStatus,
@@ -81,6 +86,8 @@ impl AgentStore {
             id: uuid::Uuid::new_v4(),
             parent_id: None,
             task_id,
+            label: Some("root".to_owned()),
+            background: false,
             workspace,
             profile,
             status,
@@ -162,8 +169,130 @@ impl AgentStore {
                 agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
                 agent.updated_at = now();
             }),
+            Some("subagent_started") => self.create_child_from_event(task_id, &value),
+            Some("subagent_completed") => self.complete_child_from_event(&value),
+            Some("subagent_turn_started") => self.update_child_from_event(&value, |agent| {
+                agent.status = RuntimeAgentStatus::Running;
+                agent.current_turn = value
+                    .get("turn")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(agent.current_turn);
+                agent.updated_at = now();
+            }),
+            Some("subagent_tool_requested") => self.update_child_from_event(&value, |agent| {
+                agent.current_tool = value
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned);
+                agent.updated_at = now();
+            }),
+            Some("subagent_tool_completed") => self.update_child_from_event(&value, |agent| {
+                agent.current_tool = None;
+                agent.updated_at = now();
+            }),
+            Some("subagent_usage") => self.update_child_from_event(&value, |agent| {
+                agent.input_tokens = value.get("input_tokens").and_then(|value| value.as_u64());
+                agent.output_tokens = value.get("output_tokens").and_then(|value| value.as_u64());
+                agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
+                agent.updated_at = now();
+            }),
             _ => Ok(()),
         }
+    }
+
+    fn create_child_from_event(
+        &self,
+        task_id: uuid::Uuid,
+        value: &serde_json::Value,
+    ) -> Result<()> {
+        let id = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .context("subagent_started missing id")?
+            .parse::<uuid::Uuid>()
+            .context("subagent_started has invalid id")?;
+        let mut agents = self.lock()?;
+        if agents.contains_key(&id) {
+            return Ok(());
+        }
+        let parent = agents
+            .values()
+            .find(|agent| agent.task_id == task_id && agent.parent_id.is_none())
+            .context("Runtime root agent not found for subagent")?
+            .clone();
+        let timestamp = now();
+        agents.insert(
+            id,
+            RuntimeAgent {
+                id,
+                parent_id: Some(parent.id),
+                task_id,
+                label: value
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                background: value
+                    .get("background")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                workspace: parent.workspace,
+                profile: value
+                    .get("profile")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                status: RuntimeAgentStatus::Running,
+                current_turn: 0,
+                current_tool: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+                completed_at: None,
+                error: None,
+            },
+        );
+        persist_agents(&self.path, &agents)
+    }
+
+    fn complete_child_from_event(&self, value: &serde_json::Value) -> Result<()> {
+        let id = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .context("subagent_completed missing id")?
+            .parse::<uuid::Uuid>()
+            .context("subagent_completed has invalid id")?;
+        let mut agents = self.lock()?;
+        let Some(agent) = agents.get_mut(&id) else {
+            return Ok(());
+        };
+        agent.status = match value.get("status").and_then(|value| value.as_str()) {
+            Some("completed") => RuntimeAgentStatus::Completed,
+            Some("blocked") => RuntimeAgentStatus::Blocked,
+            _ => RuntimeAgentStatus::Failed,
+        };
+        agent.updated_at = now();
+        agent.completed_at = Some(now());
+        persist_agents(&self.path, &agents)
+    }
+
+    fn update_child_from_event(
+        &self,
+        value: &serde_json::Value,
+        update: impl FnOnce(&mut RuntimeAgent),
+    ) -> Result<()> {
+        let id = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .context("subagent event missing id")?
+            .parse::<uuid::Uuid>()
+            .context("subagent event has invalid id")?;
+        let mut agents = self.lock()?;
+        let Some(agent) = agents.get_mut(&id) else {
+            return Ok(());
+        };
+        update(agent);
+        persist_agents(&self.path, &agents)
     }
 
     fn update_task_agent(
@@ -172,7 +301,10 @@ impl AgentStore {
         update: impl FnOnce(&mut RuntimeAgent),
     ) -> Result<()> {
         let mut agents = self.lock()?;
-        let Some(agent) = agents.values_mut().find(|agent| agent.task_id == task_id) else {
+        let Some(agent) = agents
+            .values_mut()
+            .find(|agent| agent.task_id == task_id && agent.parent_id.is_none())
+        else {
             return Ok(());
         };
         update(agent);

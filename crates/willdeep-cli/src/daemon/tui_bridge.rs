@@ -32,6 +32,9 @@ pub(crate) struct RuntimeSnapshot {
 #[derive(Clone)]
 pub(crate) struct RemoteAgent {
     pub id: uuid::Uuid,
+    pub parent_id: Option<uuid::Uuid>,
+    pub label: Option<String>,
+    pub background: bool,
     pub profile: Option<String>,
     pub status: willdeep_core::RuntimeStatus,
     pub current_turn: u64,
@@ -109,12 +112,13 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         }
     };
     let workspace = workspace.canonicalize()?;
-    let agents = authorized_get::<Vec<super::agent_store::RuntimeAgent>>(&state, "/v1/agents")
+    let mut agents = authorized_get::<Vec<super::agent_store::RuntimeAgent>>(&state, "/v1/agents")
         .await?
         .into_iter()
         .filter(|agent| agent.workspace == workspace)
         .map(remote_agent)
-        .collect();
+        .collect::<Vec<_>>();
+    agents.sort_by_key(|agent| (agent.parent_id.is_some(), agent.parent_id, agent.id));
     let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
     let visible_tasks = tasks
         .iter()
@@ -181,6 +185,9 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
 fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
     RemoteAgent {
         id: agent.id,
+        parent_id: agent.parent_id,
+        label: agent.label,
+        background: agent.background,
         profile: agent.profile,
         status: match agent.status {
             super::agent_store::RuntimeAgentStatus::Queued
@@ -192,6 +199,9 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
             }
             super::agent_store::RuntimeAgentStatus::WaitingAnswer => {
                 willdeep_core::RuntimeStatus::WaitingAnswer
+            }
+            super::agent_store::RuntimeAgentStatus::Blocked => {
+                willdeep_core::RuntimeStatus::Blocked
             }
             super::agent_store::RuntimeAgentStatus::Completed => willdeep_core::RuntimeStatus::Done,
             super::agent_store::RuntimeAgentStatus::Failed

@@ -174,25 +174,30 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     ));
                     for agent in app.runtime_agents.iter().take(5) {
                         let short = agent.id.to_string();
-                        let short = short.get(..8).unwrap_or(&short);
+                        let short = short.get(..6).unwrap_or(&short);
                         let profile = agent.profile.as_deref().unwrap_or("root");
+                        let label = agent.label.as_deref().unwrap_or(profile);
+                        let mode = if agent.background { " bg" } else { "" };
+                        let prefix = if agent.parent_id.is_some() {
+                            "      ↳"
+                        } else {
+                            "    "
+                        };
                         lines.push(Line::styled(
                             format!(
-                                "    {short} · {profile} · {}",
+                                "{prefix} {short} · {profile}{mode} · {}",
                                 runtime_status_label(agent.status, app.language)
                             ),
                             attention_style(agent.status),
                         ));
                         lines.push(Line::styled(
                             format!(
-                                "      {} {} · {} · {}",
-                                app.language.text("轮次", "turn", "ターン"),
+                                "        {label} · T{} · {} · {}",
                                 agent.current_turn,
                                 agent.current_tool.as_deref().unwrap_or("-"),
-                                agent.total_tokens.map_or_else(
-                                    || "-".to_owned(),
-                                    |tokens| format!("{tokens} tok")
-                                )
+                                agent
+                                    .total_tokens
+                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t"))
                             ),
                             Style::default().fg(Color::DarkGray),
                         ));

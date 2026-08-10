@@ -10,7 +10,9 @@ pub mod subagent;
 pub mod tools;
 pub mod types;
 
-pub use agent::{Agent, AgentConfig, AgentError, AgentEvent, AgentOutcome, EventSink};
+pub use agent::{
+    Agent, AgentConfig, AgentError, AgentEvent, AgentOutcome, EventSink, SubagentLifecycleStatus,
+};
 pub use attention::{
     AttentionItem, AttentionSection, AttentionSource, RuntimeScopeKind, RuntimeStatus,
     StatusRollup, rollup_status, sort_attention_items,

@@ -9,8 +9,8 @@ use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
     Agent, AgentConfig, AgentEvent, ApprovalDecision, ApprovalMode, Approver,
-    BackgroundTaskRegistry, EventSink, SubagentCatalog, ToolRegistry, UserQuestion, WebToolConfig,
-    build_provider, builtin_profiles,
+    BackgroundTaskRegistry, EventSink, SubagentCatalog, SubagentLifecycleStatus, ToolRegistry,
+    UserQuestion, WebToolConfig, build_provider, builtin_profiles,
 };
 
 mod config;
@@ -454,11 +454,10 @@ async fn run() -> Result<()> {
             }
         }
     }
-    let subagents = Arc::new(SubagentCatalog::new(
-        &workspace,
-        subagent_profiles,
-        background_tasks.clone(),
-    ));
+    let subagents = Arc::new(
+        SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
+            .with_event_sink(sink.clone()),
+    );
     let mut agent = Agent::new(
         provider,
         tools,
@@ -925,6 +924,50 @@ impl EventSink for TerminalSink {
                     "type": "compression_completed",
                     "estimated_tokens": estimated_tokens
                 }),
+                AgentEvent::SubagentStarted {
+                    id,
+                    profile,
+                    label,
+                    background,
+                } => serde_json::json!({
+                    "type": "subagent_started",
+                    "id": id,
+                    "profile": profile,
+                    "label": label,
+                    "background": background
+                }),
+                AgentEvent::SubagentCompleted { id, status } => serde_json::json!({
+                    "type": "subagent_completed",
+                    "id": id,
+                    "status": match status {
+                        SubagentLifecycleStatus::Completed => "completed",
+                        SubagentLifecycleStatus::Blocked => "blocked",
+                        SubagentLifecycleStatus::Failed => "failed",
+                    }
+                }),
+                AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
+                    "type": "subagent_turn_started",
+                    "id": id,
+                    "turn": turn
+                }),
+                AgentEvent::SubagentToolRequested { id, name } => serde_json::json!({
+                    "type": "subagent_tool_requested",
+                    "id": id,
+                    "name": name
+                }),
+                AgentEvent::SubagentToolCompleted { id, name, is_error } => serde_json::json!({
+                    "type": "subagent_tool_completed",
+                    "id": id,
+                    "name": name,
+                    "is_error": is_error
+                }),
+                AgentEvent::SubagentUsage { id, usage } => serde_json::json!({
+                    "type": "subagent_usage",
+                    "id": id,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "total_tokens": usage.total_tokens
+                }),
             };
             println!("{value}");
             return;
@@ -950,6 +993,30 @@ impl EventSink for TerminalSink {
             }
             AgentEvent::CompressionCompleted { estimated_tokens } => {
                 eprintln!("[context] compressed to approximately {estimated_tokens} tokens");
+            }
+            AgentEvent::SubagentStarted {
+                id,
+                profile,
+                background,
+                ..
+            } => eprintln!("[subagent] started id={id} profile={profile} background={background}"),
+            AgentEvent::SubagentCompleted { id, status } => {
+                eprintln!("[subagent] finished id={id} status={status:?}")
+            }
+            AgentEvent::SubagentTurnStarted { id, turn } => {
+                eprintln!("[subagent] id={id} turn={turn}")
+            }
+            AgentEvent::SubagentToolRequested { id, name } => {
+                eprintln!("[subagent] id={id} tool={name}")
+            }
+            AgentEvent::SubagentToolCompleted { id, name, is_error } => eprintln!(
+                "[subagent] id={id} tool={name} status={}",
+                if is_error { "error" } else { "done" }
+            ),
+            AgentEvent::SubagentUsage { id, usage } => {
+                if let Some(total) = usage.total_tokens {
+                    eprintln!("[subagent] id={id} usage={total}");
+                }
             }
             AgentEvent::AssistantText(_) | AgentEvent::TurnStarted { .. } => {}
         }

@@ -480,13 +480,20 @@ fn print_task(task: &RuntimeTask) {
 
 fn print_agent(agent: &agent_store::RuntimeAgent) {
     println!(
-        "{}\t{:?}\ttask={}\tparent={}\tturn={}\ttool={}\ttokens={}\t{}",
+        "{}\t{:?}\ttask={}\tparent={}\tprofile={}\tlabel={}\tmode={}\tturn={}\ttool={}\ttokens={}\t{}",
         agent.id,
         agent.status,
         agent.task_id,
         agent
             .parent_id
             .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        agent.profile.as_deref().unwrap_or("-"),
+        agent.label.as_deref().unwrap_or("-"),
+        if agent.background {
+            "background"
+        } else {
+            "foreground"
+        },
         agent.current_turn,
         agent.current_tool.as_deref().unwrap_or("-"),
         agent

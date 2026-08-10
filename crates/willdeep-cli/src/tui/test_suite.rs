@@ -204,11 +204,26 @@ mod tests {
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
                 id: "abe596f8-940d-4629-9a82-339796029947".parse().unwrap(),
+                parent_id: None,
+                label: Some("root".to_owned()),
+                background: false,
                 profile: Some("editor".to_owned()),
                 status: RuntimeStatus::Done,
                 current_turn: 3,
                 current_tool: None,
                 total_tokens: Some(42),
+            });
+        app.runtime_agents
+            .push(crate::daemon::tui_bridge::RemoteAgent {
+                id: "bd9d3df1-d3c7-4b5c-8ad4-c515830b0ea8".parse().unwrap(),
+                parent_id: Some("abe596f8-940d-4629-9a82-339796029947".parse().unwrap()),
+                label: Some("inspect".to_owned()),
+                background: true,
+                profile: Some("scout".to_owned()),
+                status: RuntimeStatus::Working,
+                current_turn: 1,
+                current_tool: Some("read_file".to_owned()),
+                total_tokens: Some(9),
             });
         let backend = ratatui::backend::TestBackend::new(48, 32);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -225,9 +240,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Runtime agents · 1"));
-        assert!(rendered.contains("abe596f8 · editor · done"));
-        assert!(rendered.contains("turn 3 · - · 42 tok"));
+        assert!(rendered.contains("Runtime agents · 2"));
+        assert!(rendered.contains("abe596 · editor · done"));
+        assert!(rendered.contains("root · T3 · - · 42t"));
+        assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
+        assert!(rendered.contains("inspect · T1 · read_file · 9t"));
     }
     #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
@@ -523,6 +540,67 @@ mod tests {
         assert_eq!(
             transcript(&restored.messages),
             vec!["WillDeep: [Runtime 12345678] restored answer"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn runtime_events_render_child_agent_activity() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-child-events-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "child events");
+        let mut app = App::new(Vec::new(), Language::En);
+        let task = "12345678-0000-0000-0000-000000000000";
+        let child = "87654321-0000-0000-0000-000000000000";
+        let event = |sequence, payload: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+            sequence,
+            kind: "task.output".to_owned(),
+            message: format!("task_id={task} {payload}"),
+            visible: true,
+        };
+        runtime_ui::apply_runtime_events(
+            &mut app,
+            vec![
+                event(
+                    1,
+                    serde_json::json!({"type":"subagent_started","id":child,"profile":"scout"}),
+                ),
+                event(
+                    2,
+                    serde_json::json!({"type":"subagent_turn_started","id":child,"turn":1}),
+                ),
+                event(
+                    3,
+                    serde_json::json!({"type":"subagent_tool_requested","id":child,"name":"read_file"}),
+                ),
+                event(
+                    4,
+                    serde_json::json!({"type":"subagent_tool_completed","id":child,"name":"read_file","is_error":false}),
+                ),
+                event(
+                    5,
+                    serde_json::json!({"type":"subagent_completed","id":child,"status":"completed"}),
+                ),
+            ],
+            &mut session,
+            &store,
+        )
+        .unwrap();
+        assert_eq!(app.runtime_event_cursor, 5);
+        assert_eq!(app.tools.requested, 1);
+        assert_eq!(app.tools.completed, 1);
+        assert!(
+            app.progress_log
+                .iter()
+                .any(|line| line.contains("87654321"))
+        );
+        assert!(
+            app.progress_log
+                .iter()
+                .any(|line| line.contains("completed"))
         );
         std::fs::remove_dir_all(root).unwrap();
     }

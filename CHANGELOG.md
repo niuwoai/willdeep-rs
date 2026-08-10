@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.0-rc7] - 2026-08-10
+
+### Added
+
+- Core 新增带稳定 UUID 的子 Agent 启动、轮次、工具、用量和完成事件；前台及正常完成的后台 `spawn_agent` 均上报 Profile、Label 与运行模式。
+- Runtime 根据结构化事件创建 Child Agent，并持久关联 Root `parent_id`；子 Agent 独立记录轮次、当前工具、Token、终态与 Blocked 状态。
+- TUI Runtime 区域按父子层级展示 Root/Child Agent，标记后台模式；聊天活动栏同步子 Agent 的轮次和工具进度。
+- CLI Agent 输出补充 Profile、Label 和前台/后台模式。
+
+### Changed
+
+- `spawn_agent` 返回值同时包含稳定 Agent ID 与后台任务 ID，便于父 Harness、Runtime 和用户精确关联。
+- 子 Agent 的 Blocked 不再映射成 WaitingApproval，避免不存在待处理审批时误导用户。
+
 ## [0.16.0-rc6] - 2026-08-10
 
 ### Added

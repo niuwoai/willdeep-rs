@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::agent::{Agent, AgentConfig, AgentError};
+use crate::agent::{
+    Agent, AgentConfig, AgentError, AgentEvent, EventSink, SubagentLifecycleStatus,
+};
 use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
 };
@@ -28,6 +30,46 @@ pub struct SubagentCatalog {
     workspace: PathBuf,
     profiles: BTreeMap<String, SubagentProfile>,
     background: Arc<BackgroundTaskRegistry>,
+    sink: Arc<dyn EventSink>,
+}
+
+struct SubagentNoopSink;
+
+#[async_trait::async_trait]
+impl EventSink for SubagentNoopSink {
+    async fn emit(&self, _event: AgentEvent) {}
+}
+
+struct ChildEventSink {
+    id: uuid::Uuid,
+    parent: Arc<dyn EventSink>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for ChildEventSink {
+    async fn emit(&self, event: AgentEvent) {
+        let event = match event {
+            AgentEvent::TurnStarted { turn } => {
+                Some(AgentEvent::SubagentTurnStarted { id: self.id, turn })
+            }
+            AgentEvent::ToolRequested(call) => Some(AgentEvent::SubagentToolRequested {
+                id: self.id,
+                name: call.name,
+            }),
+            AgentEvent::ToolCompleted { call, is_error, .. } => {
+                Some(AgentEvent::SubagentToolCompleted {
+                    id: self.id,
+                    name: call.name,
+                    is_error,
+                })
+            }
+            AgentEvent::Usage(usage) => Some(AgentEvent::SubagentUsage { id: self.id, usage }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            self.parent.emit(event).await;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +94,13 @@ impl SubagentCatalog {
                 .map(|profile| (profile.id.clone(), profile))
                 .collect(),
             background,
+            sink: Arc::new(SubagentNoopSink),
         }
+    }
+
+    pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.sink = sink;
+        self
     }
 
     pub fn description(&self) -> String {
@@ -94,7 +142,17 @@ impl SubagentCatalog {
         let workspace = self.workspace.clone();
         let prompt = args.prompt;
         let profile_id = profile.id.clone();
-        if args.run_in_background.unwrap_or(false) {
+        let background = args.run_in_background.unwrap_or(false);
+        let agent_id = uuid::Uuid::new_v4();
+        self.sink
+            .emit(AgentEvent::SubagentStarted {
+                id: agent_id,
+                profile: profile_id.clone(),
+                label: label.clone(),
+                background,
+            })
+            .await;
+        if background {
             let running = self
                 .background
                 .snapshots()
@@ -109,6 +167,7 @@ impl SubagentCatalog {
                     "at most 3 background subagents may run concurrently".to_owned(),
                 ));
             }
+            let lifecycle_sink = self.sink.clone();
             let id = self.background.start_retriable(
                 BackgroundTaskKind::Subagent,
                 format!("{label} · {profile_id}"),
@@ -117,19 +176,55 @@ impl SubagentCatalog {
                     let profile = profile.clone();
                     let prompt = prompt.clone();
                     let approved_target = approved_target.clone();
+                    let sink = lifecycle_sink.clone();
                     async move {
-                        subagent_task_result(
-                            run_profile(workspace, profile, prompt, approved_target).await,
+                        let result = run_profile(
+                            workspace,
+                            profile,
+                            prompt,
+                            approved_target,
+                            sink.clone(),
+                            agent_id,
                         )
+                        .await;
+                        sink.emit(AgentEvent::SubagentCompleted {
+                            id: agent_id,
+                            status: subagent_lifecycle_status(&result),
+                        })
+                        .await;
+                        subagent_task_result(result)
                     }
                 },
             );
             Ok(format!(
-                "Subagent started: {id}. Its report will be delivered automatically to the main harness."
+                "Subagent started: agent_id={agent_id}, background_task={id}. Its report will be delivered automatically to the main harness."
             ))
         } else {
-            run_profile(workspace, profile, prompt, approved_target).await
+            let result = run_profile(
+                workspace,
+                profile,
+                prompt,
+                approved_target,
+                self.sink.clone(),
+                agent_id,
+            )
+            .await;
+            self.sink
+                .emit(AgentEvent::SubagentCompleted {
+                    id: agent_id,
+                    status: subagent_lifecycle_status(&result),
+                })
+                .await;
+            result
         }
+    }
+}
+
+fn subagent_lifecycle_status(result: &Result<String, AgentError>) -> SubagentLifecycleStatus {
+    match result {
+        Ok(_) => SubagentLifecycleStatus::Completed,
+        Err(AgentError::Tool(ToolError::ApprovalDenied(_))) => SubagentLifecycleStatus::Blocked,
+        Err(_) => SubagentLifecycleStatus::Failed,
     }
 }
 
@@ -158,6 +253,8 @@ async fn run_profile(
     profile: SubagentProfile,
     prompt: String,
     approved_target: Option<PathBuf>,
+    lifecycle_sink: Arc<dyn EventSink>,
+    agent_id: uuid::Uuid,
 ) -> Result<String, AgentError> {
     let approval = if approved_target.is_some() {
         ApprovalMode::WorkspaceAccess
@@ -180,7 +277,11 @@ async fn run_profile(
             system_prompt,
             context_window: profile.context_window,
         },
-    );
+    )
+    .with_event_sink(Arc::new(ChildEventSink {
+        id: agent_id,
+        parent: lifecycle_sink,
+    }));
     Ok(Box::pin(agent.run(prompt)).await?.final_text)
 }
 
@@ -282,6 +383,16 @@ mod tests {
     use crate::types::{Completion, Message, ToolDefinition};
 
     struct ReportProvider;
+
+    #[derive(Default)]
+    struct CaptureSink(std::sync::Mutex<Vec<AgentEvent>>);
+
+    #[async_trait]
+    impl EventSink for CaptureSink {
+        async fn emit(&self, event: AgentEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
     #[async_trait]
     impl Provider for ReportProvider {
         async fn complete(
@@ -328,6 +439,8 @@ mod tests {
     #[tokio::test]
     async fn foreground_profile_runs_in_isolated_non_nested_agent() {
         let (catalog, root) = fixture();
+        let sink = Arc::new(CaptureSink::default());
+        let catalog = catalog.with_event_sink(sink.clone());
         let report = catalog
             .run(
                 SpawnAgentArgs {
@@ -342,6 +455,34 @@ mod tests {
             .await
             .expect("run");
         assert_eq!(report, "subagent report");
+        let events = sink.0.lock().unwrap();
+        let started = events.iter().find_map(|event| match event {
+            AgentEvent::SubagentStarted {
+                id,
+                profile,
+                background,
+                ..
+            } => Some((*id, profile.as_str(), *background)),
+            _ => None,
+        });
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::SubagentCompleted { id, status } => Some((*id, *status)),
+            _ => None,
+        });
+        assert_eq!(
+            started.map(|(_, profile, background)| (profile, background)),
+            Some(("scout", false))
+        );
+        assert_eq!(
+            completed,
+            started.map(|(id, _, _)| (id, SubagentLifecycleStatus::Completed))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SubagentTurnStarted { id, turn: 1 }
+                if Some(*id) == started.map(|(id, _, _)| id)
+        )));
+        drop(events);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

@@ -33,6 +33,40 @@ pub enum AgentEvent {
     CompressionCompleted {
         estimated_tokens: u64,
     },
+    SubagentStarted {
+        id: uuid::Uuid,
+        profile: String,
+        label: String,
+        background: bool,
+    },
+    SubagentCompleted {
+        id: uuid::Uuid,
+        status: SubagentLifecycleStatus,
+    },
+    SubagentTurnStarted {
+        id: uuid::Uuid,
+        turn: usize,
+    },
+    SubagentToolRequested {
+        id: uuid::Uuid,
+        name: String,
+    },
+    SubagentToolCompleted {
+        id: uuid::Uuid,
+        name: String,
+        is_error: bool,
+    },
+    SubagentUsage {
+        id: uuid::Uuid,
+        usage: Usage,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentLifecycleStatus {
+    Completed,
+    Blocked,
+    Failed,
 }
 
 #[async_trait]

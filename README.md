@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.16.0-rc6`，支持：
+当前版本为 `0.16.0-rc7`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -32,6 +32,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime 后台审批与 ask_user 待处理列表、跨客户端解决和原任务续跑。
 - TUI Runtime Inbox、远端审批/回答/停止，以及 `/runtime` 可分离任务提交、附件透传和按事件游标恢复聊天时间线。
 - Runtime Root Agent 持久生命周期、受 Token 保护的 Agent 查询 API/CLI，以及 TUI 右栏 Agent 状态摘要。
+- `spawn_agent` 稳定 UUID、Root→Child 父子关系以及子 Agent 轮次、工具、Token 和终态的 Runtime/TUI 实时展示。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面已经可用，Harness、会话和后台任务向 Daemon 的完整迁移仍在进行。
 
