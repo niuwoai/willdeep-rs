@@ -717,6 +717,33 @@ impl App {
             search_rect: Rect::default(),
         }
     }
+    fn load_session(&mut self, session: &Session) {
+        self.transcript = transcript(&session.messages);
+        if self.transcript.is_empty() {
+            self.transcript
+                .push(welcome_message(&session.workspace, self.language));
+        }
+        self.input = PromptEditor::default();
+        self.running = false;
+        self.approval = None;
+        self.question = None;
+        self.scroll_from_bottom = 0;
+        self.follow_bottom = true;
+        self.tools = ToolActivity::default();
+        self.tools_expanded = false;
+        self.attachments.clear();
+        self.selected_attachment = 0;
+        self.notice = None;
+        self.transient_thought = None;
+        self.progress_log.clear();
+        self.search = None;
+        self.palette = None;
+        self.attention_read = session.attention_read.clone();
+        self.workspace = Some(session.workspace.clone());
+        self.workspace_status = workspace_status(&session.workspace, self.language);
+        self.workspace_attention = workspace_attention(&session.workspace);
+        self.focus = FocusPane::Prompt;
+    }
     fn sidebar_move(&mut self, delta: isize) {
         self.focus = FocusPane::Sidebar;
         self.sidebar_manual_scroll = false;

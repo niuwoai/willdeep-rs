@@ -72,6 +72,8 @@ struct RenameSessionRequest {
 #[derive(Default, Deserialize)]
 struct ForkSessionRequest {
     title: Option<String>,
+    #[serde(default)]
+    through_turn_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -315,9 +317,10 @@ async fn fork_session(
     Json(request): Json<ForkSessionRequest>,
 ) -> Result<(StatusCode, Json<ForkSessionResponse>), WebError> {
     ensure_web_runtime_session(&state, id).await?;
-    let fork_id = crate::daemon::fork_remote_session(&state.home, id, request.title)
-        .await
-        .map_err(WebError::from_anyhow)?;
+    let fork_id =
+        crate::daemon::fork_remote_session(&state.home, id, request.title, request.through_turn_id)
+            .await
+            .map_err(WebError::from_anyhow)?;
     Ok((
         StatusCode::CREATED,
         Json(ForkSessionResponse {

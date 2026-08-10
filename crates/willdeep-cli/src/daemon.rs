@@ -135,6 +135,8 @@ pub enum DaemonAction {
         id: uuid::Uuid,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long, value_name = "TURN_ID")]
+        through_turn: Option<uuid::Uuid>,
     },
     /// Archive an inactive Runtime Session.
     ArchiveSession { id: uuid::Uuid },
@@ -399,9 +401,11 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::RenameSession { id, title } => {
             session_store::rename_session_cli(&home, id, title).await
         }
-        DaemonAction::ForkSession { id, title } => {
-            session_store::fork_session_cli(&home, id, title).await
-        }
+        DaemonAction::ForkSession {
+            id,
+            title,
+            through_turn,
+        } => session_store::fork_session_cli(&home, id, title, through_turn).await,
         DaemonAction::ArchiveSession { id } => {
             session_store::archive_session_cli(&home, id, false).await
         }

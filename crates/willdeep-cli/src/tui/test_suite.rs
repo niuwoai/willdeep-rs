@@ -51,6 +51,89 @@ mod tests {
         assert!(welcome.contains("willdeep-rs"));
     }
     #[test]
+    fn loading_another_session_replaces_transient_chat_state() {
+        let workspace = std::env::temp_dir();
+        let mut target = Session::new(workspace, None, "target");
+        target.messages = vec![
+            Message::user("target question"),
+            Message::assistant("target answer", Vec::new()),
+        ];
+        target.attention_read.insert("read-item".to_owned());
+        let mut app = App::new(vec!["old session output".to_owned()], Language::En);
+        app.attachments.push(DraftAttachment {
+            message: MessageAttachment::Text {
+                name: "old.txt".to_owned(),
+                content: "old".to_owned(),
+            },
+        });
+        app.transient_thought = Some("old thought".to_owned());
+
+        app.load_session(&target);
+
+        assert_eq!(
+            app.transcript,
+            vec!["You: target question", "WillDeep: target answer"]
+        );
+        assert!(app.attachments.is_empty());
+        assert!(app.transient_thought.is_none());
+        assert!(app.attention_read.contains("read-item"));
+        assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[tokio::test]
+    async fn session_switch_replaces_the_open_session_without_restarting_tui() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-session-switch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::new(&root);
+        let mut current = Session::new(workspace.clone(), None, "current");
+        store.save(&mut current).unwrap();
+        let mut target = Session::new(workspace.clone(), None, "target");
+        target.messages.push(Message::user("restored question"));
+        target
+            .messages
+            .push(Message::assistant("restored answer", Vec::new()));
+        store.save(&mut target).unwrap();
+        let mut app = App::new(vec!["old transcript".to_owned()], Language::En);
+        app.runtime_event_cursor = 17;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let runtime = TuiRuntime {
+            home: root.clone(),
+            skills: Arc::new(SkillCatalog::default()),
+            relay_bridge: RelayBridge::new(),
+            context_window: 128_000,
+            background_tasks: Arc::new(BackgroundTaskRegistry::default()),
+            runtime_submit: crate::daemon::RuntimeSubmitOptions {
+                workspace,
+                profile: None,
+                config: None,
+            },
+            tx,
+            rx,
+        };
+
+        assert!(
+            handle_session_command(
+                &format!("/session switch {}", target.id),
+                &mut app,
+                &mut current,
+                &store,
+                &runtime,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(current.id, target.id);
+        assert_eq!(
+            app.transcript[..2],
+            ["You: restored question", "WillDeep: restored answer"]
+        );
+        assert_eq!(store.load(target.id).unwrap().runtime_event_cursor, 17);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn approval_shortcuts_are_colored_and_localized() {
         let lines = approval_content("run command", true, Language::Ja);
         let actions = lines.last().unwrap();
@@ -543,6 +626,7 @@ mod tests {
             )
             .to_owned(),
             visible: true,
+            session_id: Some(session.id),
         };
         runtime_ui::apply_runtime_events(&mut app, vec![event.clone()], &mut session, &store)
             .unwrap();
@@ -562,6 +646,34 @@ mod tests {
             transcript(&restored.messages),
             vec!["WillDeep: [Runtime 12345678] restored answer"]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_chat_ignores_events_owned_by_another_session() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-event-isolation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "current");
+        let mut app = App::new(Vec::new(), Language::En);
+        let event = crate::daemon::RemoteRuntimeEvent {
+            sequence: 1,
+            kind: "task.output".to_owned(),
+            message: format!(
+                "task_id={} {}",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({"type":"completed","text":"private other answer"})
+            ),
+            visible: true,
+            session_id: Some(uuid::Uuid::new_v4()),
+        };
+        runtime_ui::apply_runtime_events(&mut app, vec![event], &mut session, &store).unwrap();
+        assert!(app.transcript.is_empty());
+        assert!(session.messages.is_empty());
+        assert_eq!(app.runtime_event_cursor, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -587,6 +699,7 @@ mod tests {
                 serde_json::json!({"type":"completed","text":"answer"})
             ),
             visible: true,
+            session_id: Some(visible.id),
         };
         let terminal = crate::daemon::RemoteRuntimeEvent {
             sequence: 2,
@@ -597,6 +710,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ),
             visible: true,
+            session_id: Some(visible.id),
         };
 
         runtime_ui::apply_runtime_events(&mut app, vec![output], &mut visible, &store).unwrap();
@@ -640,6 +754,7 @@ mod tests {
             kind: "task.output".to_owned(),
             message: format!("task_id={task} {payload}"),
             visible: true,
+            session_id: Some(session.id),
         };
         runtime_ui::apply_runtime_events(
             &mut app,

@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.17.0-rc6`，支持：
+当前版本为 `0.17.0-rc7`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -33,7 +33,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - TUI Runtime Inbox、远端审批/回答/停止，以及 `/runtime` 可分离任务提交、附件透传和按事件游标恢复聊天时间线。
 - Runtime Root Agent 持久生命周期、受 Token 保护的 Agent 查询 API/CLI，以及 TUI 右栏 Agent 状态摘要。
 - `spawn_agent` 稳定 UUID、Root→Child 父子关系以及子 Agent 轮次、工具、Token 和终态的 Runtime/TUI 实时展示。
-- Runtime Session 重命名、完整快照 Fork、归档/取消归档、带确认删除、安全 JSON 导出和标题/消息全文搜索；CLI、TUI `/session` 与 Web 会话操作共用同一受保护状态机。
+- Runtime Session 重命名、完整快照或指定已完成 Turn 的精确 Fork、归档/取消归档、带确认删除、安全 JSON 导出和标题/消息全文搜索；CLI、TUI `/session` 与 Web 会话操作共用同一受保护状态机。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面和进程内 Harness 已经可用，会话恢复、统一客户端 API 与后台资源恢复仍在继续完善。
 
@@ -85,7 +85,7 @@ Runtime 事件按递增序号写入私有 NDJSON 日志。`GET /v1/events/stream
 
 `daemon create-session` 创建长期 Runtime Session，并同时建立同 ID 的 Core Session 和生命周期稳定的 Root Agent。`submit-turn` 使用客户端 `request_id` 幂等入队；同一 Session 的 Turn 严格串行，不同 Session 可并发。成功 Turn 写入 Core Session 后会清除队列中的私密 Prompt/附件副本；`stop-turn` 可取消排队中或运行中的 Turn。Daemon 重启后排队项继续调度，遗留 Running/Waiting 活动项明确标记为 Interrupted，并向事件日志补写可续传的 Task/Turn 中断事件。
 
-Session 管理命令只允许在没有活跃或排队 Turn 时执行 Rename、Fork、Archive 和 Delete，避免覆盖 Harness 正在写入的历史。Fork 复制 Core 消息快照并创建新的 Session/Root Agent，不复制旧 Turn、Task、Interaction、事件游标或 Inbox 已读状态。Export 不包含队列私密 Prompt、Runtime Token 或 Provider 凭据；Delete 必须显式使用 `--yes`。TUI 使用 `/session <action>`，Web 在选中会话后提供同一组操作。
+Session 管理命令只允许在没有活跃或排队 Turn 时执行 Rename、Fork、Archive 和 Delete，避免覆盖 Harness 正在写入的历史。Fork 复制 Core 消息快照并创建新的 Session/Root Agent，不复制旧 Turn、Task、Interaction、事件游标或 Inbox 已读状态；`daemon fork-session <SESSION_ID> --through-turn <TURN_ID>` 或 TUI `/session fork-turn <TURN_ID> [名称]` 可精确保留到指定已完成 Turn。TUI 可用 `/session switch <SESSION_ID>` 在同一 Workspace 内原地切换，会话聊天只消费属于当前 Session 的 Runtime 事件。Export 不包含队列私密 Prompt、Runtime Token 或 Provider 凭据；Delete 必须显式使用 `--yes`。
 
 TUI 的普通 Prompt 默认幂等收养当前 Core Session，并把输入作为该长期 Session 的新 Turn；`/runtime <任务>` 是相同路径的明确别名，`/local <任务>` 仅让单轮使用旧进程内 Harness。重新进入同一 TUI 会话后继续复用原 Root Agent 和历史上下文。用户输入立即显示，消息文件只由后台 Harness 写入，Turn 结束时 TUI 从唯一 Core Session 历史同步，避免前后台双写产生重复或丢消息。
 

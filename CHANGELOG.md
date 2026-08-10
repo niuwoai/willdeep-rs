@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.0-rc7] - 2026-08-10
+
+### Added
+
+- Runtime Turn 持久记录 Core 消息起止边界；CLI `fork-session --through-turn`、Runtime/Web Fork 请求和 TUI `/session fork-turn` 支持精确保留到指定已完成 Turn。
+- TUI 新增 `/session switch <SESSION_ID>`，可在同一 Workspace 内不退出进程切换并恢复聊天会话。
+
+### Changed
+
+- TUI Runtime 事件跟随器将可见任务关联到 Session，聊天区只渲染当前 Session 的模型、工具和子 Agent 输出。
+
+### Security
+
+- 指定 Turn Fork 不根据消息角色或文本猜测边界；旧 Turn 缺少持久边界、Turn 未完成或不属于源 Session 时一律拒绝。
+- TUI 暂不允许跨 Workspace 原地切换，避免复用旧 Workspace 的 Agent、Skills 和安全边界。
+
 ## [0.17.0-rc6] - 2026-08-10
 
 ### Added

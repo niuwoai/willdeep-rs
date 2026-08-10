@@ -2,7 +2,7 @@
 
 > 状态：实施中
 > 首个目标版本：v0.17.0
-> 最后更新：2026-08-10（v0.17.0-rc6 会话管理）
+> 最后更新：2026-08-10（v0.17.0-rc7 Turn 边界与会话切换）
 
 ## 1. 目标
 
@@ -84,7 +84,7 @@ POST /v1/turns/{turn_id}/retry
 
 - 标题和消息正文仍以 Core `SessionStore` 为唯一来源；Runtime 元数据不得复制标题或消息。
 - Rename 只更新 Core 标题，并同步推进 Runtime `updated_at`；标题去除首尾空白后必须为 1–200 个字符。
-- Fork 创建新的 Session ID 与 Root Agent ID，复制当前 Core 消息、Workspace、Profile 和配置引用，但不复制 Turn、Task、Interaction、事件游标和 Inbox 已读状态。
+- Fork 创建新的 Session ID 与 Root Agent ID，复制当前 Core 消息、Workspace、Profile 和配置引用，但不复制 Turn、Task、Interaction、事件游标和 Inbox 已读状态。请求可携带 `through_turn_id`，仅复制到该已完成 Turn 的持久 `message_end` 边界；缺失边界的旧 Turn 明确拒绝精确 Fork。
 - Archive 禁止新 Turn，但不删除历史；Unarchive 恢复为 Idle。活跃或仍有 Queued Turn 的 Session 不允许归档。
 - Delete 永久删除 Runtime Session、所属 Turn 元数据和本地 Core Session 文件；API 请求体必须携带与路径一致的 Session ID 确认。活跃或仍有 Queued Turn 的 Session 不允许删除。
 - Export 返回带 schema/version 的 JSON 快照，包含 Runtime 元数据、Core 消息和 Turn 审计元数据；不得包含已排队的私密 Prompt、附件副本、Runtime Token 或 Provider 凭据。
@@ -144,7 +144,7 @@ turn.retry_queued
 5. [ ] Web、移动端和 Swift App 接入同一协议。
 6. [x] Runtime 内原生持有 Harness，移除每 Turn 启动独立 CLI 进程的过渡实现。
 7. [x] 完成 Rename、完整快照 Fork、Archive、Delete、Export、Search 的 Runtime API、CLI 与 TUI/Web 客户端入口。
-8. [ ] 扩展到指定 Turn Fork、TUI 原地切换、模型/Provider 切换和组合搜索。
+8. [-] 已完成指定 Turn Fork、TUI 同 Workspace 原地切换与聊天事件 Session 隔离；模型/Provider 切换和组合搜索待完成。
 
 ## 9. 验收条件
 

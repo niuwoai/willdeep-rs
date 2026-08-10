@@ -75,6 +75,10 @@ pub(crate) struct RuntimeTurn {
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub message_start: Option<usize>,
+    #[serde(default)]
+    pub message_end: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +105,8 @@ pub(crate) struct RenameRuntimeSession {
 pub(crate) struct ForkRuntimeSession {
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub through_turn_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -301,13 +307,35 @@ impl RuntimeSessionStore {
         Ok(result)
     }
 
-    pub fn fork(&self, id: uuid::Uuid, title: Option<String>) -> Result<RuntimeSession> {
+    pub fn fork_through(
+        &self,
+        id: uuid::Uuid,
+        title: Option<String>,
+        through_turn_id: Option<uuid::Uuid>,
+    ) -> Result<RuntimeSession> {
         self.ensure_manageable(id)?;
         let source = self.get(id)?.context("Runtime Session not found")?;
         let mut core = self
             .core
             .load(id)
             .with_context(|| format!("load Core Session {id}"))?;
+        if let Some(turn_id) = through_turn_id {
+            let turns = self.turns_lock()?;
+            let turn = turns.get(&turn_id).context("Runtime Turn not found")?;
+            if turn.metadata.session_id != id {
+                bail!("Runtime Turn does not belong to the source Session");
+            }
+            if turn.metadata.status != RuntimeTurnStatus::Completed {
+                bail!("only a completed Runtime Turn can be used as a Fork boundary");
+            }
+            let end = turn.metadata.message_end.context(
+                "Runtime Turn predates durable message boundaries and cannot be forked exactly",
+            )?;
+            if end > core.messages.len() {
+                bail!("Runtime Turn message boundary exceeds the Core Session snapshot");
+            }
+            core.messages.truncate(end);
+        }
         let timestamp = now();
         core.id = uuid::Uuid::new_v4();
         core.title = match title {
@@ -527,6 +555,8 @@ impl RuntimeSessionStore {
             started_at: None,
             completed_at: None,
             error: None,
+            message_start: None,
+            message_end: None,
         };
         turns.insert(
             metadata.id,
@@ -604,6 +634,14 @@ impl RuntimeSessionStore {
             return Ok(None);
         };
         turn.metadata.attempts = turn.metadata.attempts.saturating_add(1);
+        turn.metadata.message_start = Some(
+            self.core
+                .load(session_id)
+                .with_context(|| format!("load Core Session {session_id}"))?
+                .messages
+                .len(),
+        );
+        turn.metadata.message_end = None;
         session.status = RuntimeSessionStatus::Queued;
         session.active_turn_id = Some(turn.metadata.id);
         session.updated_at = now();
@@ -668,6 +706,7 @@ impl RuntimeSessionStore {
         else {
             return Ok(None);
         };
+        let session_id = turn.metadata.session_id;
         turn.metadata.status = match status {
             RuntimeTaskStatus::Completed => RuntimeTurnStatus::Completed,
             RuntimeTaskStatus::Cancelled => RuntimeTurnStatus::Cancelled,
@@ -681,8 +720,14 @@ impl RuntimeSessionStore {
             // Harness process exit. Do not retain a second private copy indefinitely.
             turn.prompt.clear();
             turn.attachments.clear();
+            turn.metadata.message_end = Some(
+                self.core
+                    .load(session_id)
+                    .with_context(|| format!("load completed Core Session {session_id}"))?
+                    .messages
+                    .len(),
+            );
         }
-        let session_id = turn.metadata.session_id;
         persist_turns(&self.turns_path, &turns)?;
         drop(turns);
         let mut sessions = self.lock()?;
@@ -938,17 +983,24 @@ pub(super) async fn fork_session_handler(
     Json(request): Json<ForkRuntimeSession>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
-    let session = state.sessions.fork(id, request.title).map_err(|error| {
-        eprintln!("fork Runtime Session: {error:#}");
-        StatusCode::BAD_REQUEST
-    })?;
+    let session = state
+        .sessions
+        .fork_through(id, request.title, request.through_turn_id)
+        .map_err(|error| {
+            eprintln!("fork Runtime Session: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
     state
         .events
         .append(
             "session.forked",
             format!(
-                "source_session_id={id} session_id={} agent_id={}",
-                session.id, session.root_agent_id
+                "source_session_id={id} through_turn_id={} session_id={} agent_id={}",
+                request
+                    .through_turn_id
+                    .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                session.id,
+                session.root_agent_id
             ),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1249,9 +1301,18 @@ pub(super) async fn fork_session_cli(
     home: &Path,
     id: uuid::Uuid,
     title: Option<String>,
+    through_turn_id: Option<uuid::Uuid>,
 ) -> Result<()> {
-    let session: RuntimeSession =
-        post_session_action(home, id, "fork", Some(&ForkRuntimeSession { title })).await?;
+    let session: RuntimeSession = post_session_action(
+        home,
+        id,
+        "fork",
+        Some(&ForkRuntimeSession {
+            title,
+            through_turn_id,
+        }),
+    )
+    .await?;
     print_session(&session);
     Ok(())
 }
@@ -1540,7 +1601,7 @@ mod tests {
             )
             .unwrap();
         assert!(store.archive(session.id).is_err());
-        assert!(store.fork(session.id, None).is_err());
+        assert!(store.fork_through(session.id, None, None).is_err());
         assert!(store.delete(session.id, session.id).is_err());
         store.request_cancel(queued.id).unwrap();
 
@@ -1566,7 +1627,7 @@ mod tests {
         );
 
         let fork = store
-            .fork(session.id, Some("Forked snapshot".to_owned()))
+            .fork_through(session.id, Some("Forked snapshot".to_owned()), None)
             .unwrap();
         assert_ne!(fork.id, session.id);
         assert_ne!(fork.root_agent_id, session.root_agent_id);
@@ -1659,6 +1720,75 @@ mod tests {
         assert!(!created);
         assert_eq!(same, adopted);
         assert_eq!(store.list().unwrap(), vec![adopted]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn records_message_boundaries_and_forks_through_a_completed_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-turn-fork-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: None,
+                config: None,
+                title: Some("Turn boundary".to_owned()),
+            })
+            .unwrap();
+        let core_store = willdeep_core::SessionStore::new(&root);
+
+        let complete_turn = |prompt: &str, answer: &str| {
+            let (turn, _) = store
+                .enqueue_turn(
+                    session.id,
+                    CreateRuntimeTurn {
+                        request_id: uuid::Uuid::new_v4(),
+                        prompt: prompt.to_owned(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .unwrap();
+            store.claim_next(session.id).unwrap().unwrap();
+            let mut core = core_store.load(session.id).unwrap();
+            core.messages.push(willdeep_core::Message::user(prompt));
+            core.messages
+                .push(willdeep_core::Message::assistant(answer, Vec::new()));
+            core_store.save(&mut core).unwrap();
+            let task_id = uuid::Uuid::new_v4();
+            assert!(store.bind_task(turn.id, task_id).unwrap());
+            store
+                .complete_task(task_id, RuntimeTaskStatus::Completed, None)
+                .unwrap();
+            turn.id
+        };
+
+        let first = complete_turn("first", "first answer");
+        let second = complete_turn("second", "second answer");
+        let first_turn = store.get_turn(first).unwrap().unwrap();
+        let second_turn = store.get_turn(second).unwrap().unwrap();
+        assert_eq!(
+            (first_turn.message_start, first_turn.message_end),
+            (Some(0), Some(2))
+        );
+        assert_eq!(
+            (second_turn.message_start, second_turn.message_end),
+            (Some(2), Some(4))
+        );
+
+        let fork = store
+            .fork_through(session.id, Some("Through first".to_owned()), Some(first))
+            .unwrap();
+        let fork_core = core_store.load(fork.id).unwrap();
+        assert_eq!(fork_core.messages.len(), 2);
+        assert_eq!(fork_core.messages[0].content, "first");
+        assert_eq!(fork_core.messages[1].content, "first answer");
+        assert!(store.list_turns(fork.id).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -14,13 +14,15 @@ pub(super) async fn handle_session_command(
     let arguments = value.strip_prefix("/session").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let usage = app.language.text(
-        "用法：/session rename <名称> | fork [名称] | archive | unarchive | search <关键词> | export <路径> | delete <其他会话ID>",
-        "Usage: /session rename <title> | fork [title] | archive | unarchive | search <query> | export <path> | delete <other-session-id>",
-        "使用法：/session rename <名前> | fork [名前] | archive | unarchive | search <検索語> | export <パス> | delete <別セッションID>",
+        "用法：/session switch <会话ID> | rename <名称> | fork [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search <关键词> | export <路径> | delete <其他会话ID>",
+        "Usage: /session switch <session-id> | rename <title> | fork [title] | fork-turn <turn-id> [title] | archive | unarchive | search <query> | export <path> | delete <other-session-id>",
+        "使用法：/session switch <セッションID> | rename <名前> | fork [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search <検索語> | export <パス> | delete <別セッションID>",
     );
     let result = match action {
+        "switch" if !rest.trim().is_empty() => switch(app, session, store, runtime, rest).await?,
         "rename" if !rest.trim().is_empty() => rename(app, session, store, runtime, rest).await?,
         "fork" => fork(app, session, runtime, rest).await?,
+        "fork-turn" if !rest.trim().is_empty() => fork_turn(app, session, runtime, rest).await?,
         "archive" if rest.trim().is_empty() => archive(app, session, runtime, true).await?,
         "unarchive" if rest.trim().is_empty() => archive(app, session, runtime, false).await?,
         "search" if !rest.trim().is_empty() => search(app, runtime, rest.trim()).await?,
@@ -55,7 +57,7 @@ async fn rename(
 
 async fn fork(app: &App, session: &Session, runtime: &TuiRuntime, title: &str) -> Result<String> {
     let title = (!title.trim().is_empty()).then(|| title.trim().to_owned());
-    let id = crate::daemon::fork_remote_session(&runtime.home, session.id, title).await?;
+    let id = crate::daemon::fork_remote_session(&runtime.home, session.id, title, None).await?;
     Ok(format!(
         "{}: {id}",
         app.language.text(
@@ -63,6 +65,76 @@ async fn fork(app: &App, session: &Session, runtime: &TuiRuntime, title: &str) -
             "Forked Session created",
             "フォークセッションを作成しました"
         )
+    ))
+}
+
+async fn fork_turn(
+    app: &App,
+    session: &Session,
+    runtime: &TuiRuntime,
+    arguments: &str,
+) -> Result<String> {
+    let (turn_id, title) = arguments
+        .trim()
+        .split_once(' ')
+        .unwrap_or((arguments.trim(), ""));
+    let turn_id = uuid::Uuid::parse_str(turn_id).context("invalid Runtime Turn ID")?;
+    let title = (!title.trim().is_empty()).then(|| title.trim().to_owned());
+    let id =
+        crate::daemon::fork_remote_session(&runtime.home, session.id, title, Some(turn_id)).await?;
+    Ok(format!(
+        "{}: {id}",
+        app.language.text(
+            "已从指定轮次创建分叉会话",
+            "Forked Session created through the selected Turn",
+            "指定ターンまでの分岐セッションを作成しました"
+        )
+    ))
+}
+
+async fn switch(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &TuiRuntime,
+    id: &str,
+) -> Result<String> {
+    if app.running {
+        bail!("cannot switch Session while a local turn is running");
+    }
+    let id = uuid::Uuid::parse_str(id.trim()).context("invalid Session ID")?;
+    if id == session.id {
+        return Ok(app
+            .language
+            .text(
+                "当前已是该会话",
+                "Session is already open",
+                "このセッションは既に開いています",
+            )
+            .to_owned());
+    }
+    session.attention_read = app.attention_read.clone();
+    session.runtime_event_cursor = app.runtime_event_cursor;
+    store.save(session)?;
+    let mut target = store.load(id).context("load target Session")?;
+    if target.workspace.canonicalize()? != session.workspace.canonicalize()? {
+        bail!("TUI in-place switching currently requires the same Workspace");
+    }
+    target.runtime_event_cursor = app.runtime_event_cursor;
+    target.runtime_managed = true;
+    store.save(&mut target)?;
+    app.load_session(&target);
+    runtime.relay_bridge.set_session(target.id.to_string());
+    *session = target;
+    Ok(format!(
+        "{}: {} · {}",
+        app.language.text(
+            "已切换会话",
+            "Session switched",
+            "セッションを切り替えました"
+        ),
+        session.id,
+        session.title
     ))
 }
 

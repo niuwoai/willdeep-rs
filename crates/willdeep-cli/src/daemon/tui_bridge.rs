@@ -49,6 +49,7 @@ pub(crate) struct RemoteRuntimeEvent {
     pub kind: String,
     pub message: String,
     pub visible: bool,
+    pub session_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone)]
@@ -101,12 +102,16 @@ pub(crate) async fn fork_remote_session(
     home: &Path,
     id: uuid::Uuid,
     title: Option<String>,
+    through_turn_id: Option<uuid::Uuid>,
 ) -> Result<uuid::Uuid> {
     let state = ensure_running(home).await?;
     let response = client()
         .post(format!("http://{}/v1/sessions/{id}/fork", state.address))
         .header(TOKEN_HEADER, &state.token)
-        .json(&session_store::ForkRuntimeSession { title })
+        .json(&session_store::ForkRuntimeSession {
+            title,
+            through_turn_id,
+        })
         .send()
         .await?;
     if !response.status().is_success() {
@@ -298,19 +303,20 @@ pub(crate) async fn runtime_events(
     let visible_tasks = tasks
         .into_iter()
         .filter(|task| task.workspace == workspace)
-        .map(|task| task.id)
-        .collect::<std::collections::HashSet<_>>();
+        .map(|task| (task.id, task.session_id))
+        .collect::<HashMap<_, _>>();
     Ok(fetch_events(&state, after)
         .await?
         .into_iter()
         .map(|event| {
-            let visible = event_task_id(&event.message)
-                .is_some_and(|task_id| visible_tasks.contains(&task_id));
+            let session_id = event_task_id(&event.message)
+                .and_then(|task_id| visible_tasks.get(&task_id).copied().flatten());
             RemoteRuntimeEvent {
                 sequence: event.sequence,
                 kind: event.kind,
                 message: event.message,
-                visible,
+                visible: session_id.is_some(),
+                session_id,
             }
         })
         .collect())
@@ -387,35 +393,37 @@ async fn follow_runtime_events_once(
     }
     let mut stream = response.bytes_stream();
     let mut decoder = SseDecoder::default();
-    let mut visible_tasks = HashMap::<uuid::Uuid, bool>::new();
+    let mut visible_tasks = HashMap::<uuid::Uuid, Option<uuid::Uuid>>::new();
     while let Some(chunk) = stream.next().await {
         for event in decoder.push(&chunk?) {
             *cursor = (*cursor).max(event.sequence);
-            let visible = if let Some(task_id) = event_task_id(&event.message) {
-                if let Some(visible) = visible_tasks.get(&task_id) {
-                    *visible
+            let session_id = if let Some(task_id) = event_task_id(&event.message) {
+                if let Some(session_id) = visible_tasks.get(&task_id) {
+                    *session_id
                 } else {
                     let task =
                         authorized_get::<RuntimeTask>(&state, &format!("/v1/tasks/{task_id}"))
                             .await
                             .ok();
-                    let visible = task
+                    let session_id = task
                         .as_ref()
-                        .is_some_and(|task| task.workspace == workspace);
+                        .filter(|task| task.workspace == workspace)
+                        .and_then(|task| task.session_id);
                     if task.is_some() {
-                        visible_tasks.insert(task_id, visible);
+                        visible_tasks.insert(task_id, session_id);
                     }
-                    visible
+                    session_id
                 }
             } else {
-                false
+                None
             };
             if tx
                 .send(vec![RemoteRuntimeEvent {
                     sequence: event.sequence,
                     kind: event.kind,
                     message: event.message,
-                    visible,
+                    visible: session_id.is_some(),
+                    session_id,
                 }])
                 .is_err()
             {

@@ -59,6 +59,7 @@ pub(super) fn apply_runtime_events(
             continue;
         }
         if event.visible
+            && event.session_id == Some(session.id)
             && let Some(message) = apply_runtime_event(app, &event)
             && !session.runtime_managed
         {
