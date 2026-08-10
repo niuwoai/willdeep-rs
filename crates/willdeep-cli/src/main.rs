@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use clap::{Parser, Subcommand, ValueEnum};
+use base64::Engine;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
@@ -40,35 +41,35 @@ struct Cli {
     prompt: Vec<String>,
 
     /// TOML configuration path. Defaults to $WILLDEEP_HOME/config.toml or ~/.willdeep/config.toml.
-    #[arg(long, env = "WILLDEEP_CONFIG")]
+    #[arg(long, env = "WILLDEEP_CONFIG", global = true)]
     config: Option<PathBuf>,
 
     /// Provider profile name from the TOML configuration.
-    #[arg(long)]
+    #[arg(long, global = true)]
     profile: Option<String>,
 
     /// Provider API base, for example https://some.im/v1.
-    #[arg(long, env = "WILLDEEP_API_BASE")]
+    #[arg(long, env = "WILLDEEP_API_BASE", global = true)]
     api_base: Option<String>,
 
     /// Provider API key. Prefer the environment variable to shell history.
-    #[arg(long, env = "WILLDEEP_API_KEY", hide_env_values = true)]
+    #[arg(long, env = "WILLDEEP_API_KEY", hide_env_values = true, global = true)]
     api_key: Option<String>,
 
     /// Model identifier sent to the provider.
-    #[arg(long, env = "WILLDEEP_MODEL")]
+    #[arg(long, env = "WILLDEEP_MODEL", global = true)]
     model: Option<String>,
 
     /// Provider identity controls authentication and some.im context headers.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     provider: Option<ProviderArg>,
 
     /// Wire API dialect. Auto selects Anthropic Messages only for api.anthropic.com; otherwise Chat Completions.
-    #[arg(long = "api", value_enum)]
+    #[arg(long = "api", value_enum, global = true)]
     api: Option<ApiArg>,
 
     /// Workspace root available to tools.
-    #[arg(long)]
+    #[arg(long, global = true)]
     workspace: Option<PathBuf>,
 
     /// Additional workspace allowed in Web mode. May be repeated.
@@ -76,15 +77,15 @@ struct Cli {
     web_workspaces: Vec<PathBuf>,
 
     /// Allow create/edit inside the workspace without approval. Shell and MCP still ask.
-    #[arg(long)]
+    #[arg(long, global = true)]
     full_auto: bool,
 
     /// Maximum model/tool rounds.
-    #[arg(long)]
+    #[arg(long, global = true)]
     max_turns: Option<usize>,
 
     /// Maximum output tokens for Anthropic Messages.
-    #[arg(long)]
+    #[arg(long, global = true)]
     max_output_tokens: Option<u32>,
 
     /// Emit newline-delimited JSON events on stdout.
@@ -132,7 +133,7 @@ struct Cli {
     listen: std::net::SocketAddr,
 
     /// UI language: zh-CN, en, or ja. Overrides agent.language.
-    #[arg(long, env = "WILLDEEP_LANGUAGE")]
+    #[arg(long, env = "WILLDEEP_LANGUAGE", global = true)]
     language: Option<String>,
 
     /// Read a trusted Web bridge prompt and attachments as JSON from stdin.
@@ -142,6 +143,8 @@ struct Cli {
 
 #[derive(Clone, Debug, Subcommand)]
 enum CliCommand {
+    /// Run one non-interactive coding-agent turn.
+    Run(RunArgs),
     /// Create, validate, or inspect the TOML configuration.
     Config {
         #[command(subcommand)]
@@ -181,6 +184,40 @@ enum CliCommand {
     },
 }
 
+#[derive(Clone, Debug, Args)]
+struct RunArgs {
+    /// Task for the agent. Reads stdin when omitted.
+    #[arg(value_name = "PROMPT", num_args = 0.., trailing_var_arg = true)]
+    prompt: Vec<String>,
+
+    /// Read the task from a UTF-8 file, or - for stdin.
+    #[arg(long, value_name = "PATH|-", conflicts_with = "prompt")]
+    input: Option<PathBuf>,
+
+    /// Attach a text or PNG/JPEG/WebP/GIF file. May be repeated.
+    #[arg(long, value_name = "PATH")]
+    attachment: Vec<PathBuf>,
+
+    /// Resume a saved Session by UUID or `latest`.
+    #[arg(long, value_name = "ID|latest")]
+    session: Option<String>,
+
+    /// Output the final result as text, one JSON object, or NDJSON events.
+    #[arg(long, value_enum, default_value = "text")]
+    output: RunOutput,
+
+    /// Suppress successful output. Errors still use stderr and a non-zero exit code.
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RunOutput {
+    Text,
+    Json,
+    Ndjson,
+}
+
 #[derive(Deserialize)]
 struct WebInput {
     prompt: String,
@@ -214,14 +251,79 @@ enum ApiArg {
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("error: {error:#}");
-        std::process::exit(1);
+        std::process::exit(stable_exit_code(&error));
     }
 }
 
+#[derive(Debug)]
+struct RunInputError(String);
+
+impl std::fmt::Display for RunInputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RunInputError {}
+
+fn invalid_run_input(message: impl Into<String>) -> anyhow::Error {
+    RunInputError(message.into()).into()
+}
+
+fn stable_exit_code(error: &anyhow::Error) -> i32 {
+    if error.downcast_ref::<RunInputError>().is_some() {
+        return 2;
+    }
+    if error
+        .downcast_ref::<willdeep_core::provider::ProviderError>()
+        .is_some()
+    {
+        return 3;
+    }
+    if let Some(error) = error.downcast_ref::<willdeep_core::AgentError>() {
+        return match error {
+            willdeep_core::AgentError::Provider(_) => 3,
+            willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::ApprovalDenied(_))
+            | willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::ReadOnlyPolicy(_))
+            | willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::OutsideWorkspace(
+                _,
+            )) => 4,
+            _ => 5,
+        };
+    }
+    if let Some(error) = error.downcast_ref::<willdeep_core::tools::ToolError>() {
+        return match error {
+            willdeep_core::tools::ToolError::ApprovalDenied(_)
+            | willdeep_core::tools::ToolError::ReadOnlyPolicy(_)
+            | willdeep_core::tools::ToolError::OutsideWorkspace(_) => 4,
+            _ => 5,
+        };
+    }
+    1
+}
+
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let run_args = match cli.command.take() {
+        Some(CliCommand::Run(args)) => {
+            if args.quiet && args.output != RunOutput::Text {
+                return Err(invalid_run_input(
+                    "--quiet cannot be combined with --output json or ndjson",
+                ));
+            }
+            cli.no_tui = true;
+            cli.resume = args.session.clone().or(cli.resume);
+            cli.json = args.output == RunOutput::Ndjson;
+            Some(args)
+        }
+        command => {
+            cli.command = command;
+            None
+        }
+    };
     if let Some(command) = cli.command.clone() {
         return match command {
+            CliCommand::Run(_) => unreachable!("run command is normalized above"),
             CliCommand::Config { action } => config::handle(action, cli.config.as_deref()),
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Api {
@@ -323,7 +425,13 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let resumed = load_session(&store, cli.resume.as_deref())?;
+    let resumed = load_session(&store, cli.resume.as_deref()).map_err(|error| {
+        if run_args.is_some() {
+            invalid_run_input(format!("load run Session: {error:#}"))
+        } else {
+            error
+        }
+    })?;
     let web_input = if cli.web_input_json {
         let mut value = String::new();
         std::io::stdin().read_to_string(&mut value)?;
@@ -333,9 +441,16 @@ async fn run() -> Result<()> {
     };
     let prompt = if let Some(input) = &web_input {
         Some(input.prompt.clone())
+    } else if let Some(args) = &run_args {
+        Some(read_run_prompt(args)?)
     } else {
         read_prompt(&cli.prompt, cli.no_tui)?
     };
+    let run_attachments = run_args
+        .as_ref()
+        .map(|args| load_run_attachments(&args.attachment))
+        .transpose()?
+        .unwrap_or_default();
 
     let interactive_tui = prompt.is_none() && std::io::stdin().is_terminal() && !cli.no_tui;
     let (tui_tx, tui_rx) = tui::channel();
@@ -344,7 +459,12 @@ async fn run() -> Result<()> {
         if let Some(connection) = web_input.as_ref().and_then(|input| input.runtime.clone()) {
             harness::HarnessFrontend::Runtime {
                 connection,
-                sink: Arc::new(TerminalSink { json: cli.json }),
+                sink: Arc::new(TerminalSink {
+                    json: cli.json,
+                    quiet: run_args
+                        .as_ref()
+                        .is_some_and(|args| args.quiet || args.output == RunOutput::Json),
+                }),
                 workspace_access: Some(daemon::WorkspaceAccess::ReadOnly),
                 allowed_skills: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
@@ -355,7 +475,12 @@ async fn run() -> Result<()> {
                 relay: relay_bridge.clone(),
             }
         } else {
-            harness::HarnessFrontend::Terminal { json: cli.json }
+            harness::HarnessFrontend::Terminal {
+                json: cli.json,
+                quiet: run_args
+                    .as_ref()
+                    .is_some_and(|args| args.quiet || args.output == RunOutput::Json),
+            }
         };
     let built = harness::build(&cli, &loaded, &home, language, resumed.as_ref(), frontend).await?;
     let agent = built.agent.clone();
@@ -402,30 +527,45 @@ async fn run() -> Result<()> {
     }
     let prompt = prompt.context("provide a prompt argument or pipe one on stdin")?;
     let allow_compress_command = web_input.is_some();
+    let attachments = if let Some(input) = web_input {
+        input.attachments
+    } else {
+        run_attachments
+    };
     let outcome = harness::execute_noninteractive(
         &built,
         &store,
         &mut session,
         prompt,
-        web_input.map(|input| input.attachments).unwrap_or_default(),
+        attachments,
         language,
         allow_compress_command,
     )
     .await?;
-    if cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "completed",
-                "turns": outcome.turns,
-                "text": outcome.final_text,
-                "session_id": session.id
-            })
-        );
+    if let Some(args) = run_args {
+        match args.output {
+            RunOutput::Text if !args.quiet && !outcome.compressed => {
+                println!("{}", outcome.final_text);
+            }
+            RunOutput::Json => println!("{}", completion_json(&outcome, session.id)),
+            RunOutput::Ndjson => println!("{}", completion_json(&outcome, session.id)),
+            RunOutput::Text => {}
+        }
+    } else if cli.json {
+        println!("{}", completion_json(&outcome, session.id));
     } else if !outcome.compressed {
         println!("{}", outcome.final_text);
     }
     Ok(())
+}
+
+fn completion_json(outcome: &harness::HarnessOutcome, session_id: uuid::Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "type": "completed",
+        "turns": outcome.turns,
+        "text": outcome.final_text,
+        "session_id": session_id
+    })
 }
 
 fn model_accepts_images(model: &str) -> bool {
@@ -601,6 +741,118 @@ fn read_prompt(arguments: &[String], no_tui: bool) -> Result<Option<String>> {
     Ok(Some(prompt))
 }
 
+fn read_run_prompt(args: &RunArgs) -> Result<String> {
+    if !args.prompt.is_empty() {
+        return Ok(args.prompt.join(" "));
+    }
+    let mut prompt = String::new();
+    match args.input.as_deref() {
+        Some(path) if path == std::path::Path::new("-") => {
+            std::io::stdin().read_to_string(&mut prompt)?;
+        }
+        Some(path) => {
+            prompt = std::fs::read_to_string(path).map_err(|error| {
+                invalid_run_input(format!("read run input {}: {error}", path.display()))
+            })?;
+        }
+        None if std::io::stdin().is_terminal() => {
+            return Err(invalid_run_input(
+                "provide a prompt, --input PATH, or pipe a prompt on stdin",
+            ));
+        }
+        None => {
+            std::io::stdin().read_to_string(&mut prompt)?;
+        }
+    }
+    if prompt.trim().is_empty() {
+        return Err(invalid_run_input("prompt is empty"));
+    }
+    Ok(prompt)
+}
+
+fn load_run_attachments(paths: &[PathBuf]) -> Result<Vec<willdeep_core::MessageAttachment>> {
+    const MAX_ATTACHMENTS: usize = 12;
+    const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+    const MAX_TEXT_CHARS: usize = 200_000;
+    const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+    if paths.len() > MAX_ATTACHMENTS {
+        return Err(invalid_run_input(format!(
+            "at most {MAX_ATTACHMENTS} attachments are allowed"
+        )));
+    }
+    let mut attachments = Vec::with_capacity(paths.len());
+    let mut total_bytes = 0usize;
+    for path in paths {
+        let bytes = std::fs::read(path).map_err(|error| {
+            invalid_run_input(format!("read attachment {}: {error}", path.display()))
+        })?;
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if bytes.is_empty() || total_bytes > MAX_ATTACHMENT_BYTES {
+            return Err(invalid_run_input(
+                "attachments must be non-empty and total at most 10 MiB",
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| invalid_run_input("attachment file name must be valid UTF-8"))?
+            .to_owned();
+        if let Ok(format) = image::guess_format(&bytes) {
+            let media_type = match format {
+                image::ImageFormat::Png => "image/png",
+                image::ImageFormat::Jpeg => "image/jpeg",
+                image::ImageFormat::WebP => "image/webp",
+                image::ImageFormat::Gif => "image/gif",
+                _ => {
+                    return Err(invalid_run_input(format!(
+                        "unsupported image attachment format: {}",
+                        path.display()
+                    )));
+                }
+            };
+            let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|error| {
+                    invalid_run_input(format!("detect attachment image format: {error}"))
+                })?
+                .into_dimensions()
+                .map_err(|error| {
+                    invalid_run_input(format!("read image dimensions {}: {error}", path.display()))
+                })?;
+            if width == 0
+                || height == 0
+                || u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_PIXELS
+            {
+                return Err(invalid_run_input(
+                    "image attachment dimensions are invalid or too large",
+                ));
+            }
+            attachments.push(willdeep_core::MessageAttachment::Image {
+                name,
+                media_type: media_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                width,
+                height,
+            });
+        } else {
+            let content = String::from_utf8(bytes).map_err(|_| {
+                invalid_run_input(format!(
+                    "attachment is neither supported image nor UTF-8 text: {}",
+                    path.display()
+                ))
+            })?;
+            if content.chars().count() > MAX_TEXT_CHARS {
+                return Err(invalid_run_input(format!(
+                    "text attachment exceeds {MAX_TEXT_CHARS} characters"
+                )));
+            }
+            attachments.push(willdeep_core::MessageAttachment::Text { name, content });
+        }
+    }
+    Ok(attachments)
+}
+
 fn load_session(
     store: &willdeep_core::SessionStore,
     resume: Option<&str>,
@@ -733,11 +985,15 @@ impl Approver for TerminalApprover {
 
 struct TerminalSink {
     json: bool,
+    quiet: bool,
 }
 
 #[async_trait]
 impl EventSink for TerminalSink {
     async fn emit(&self, event: AgentEvent) {
+        if self.quiet {
+            return;
+        }
         if self.json {
             let value = agent_event_json(event);
             println!("{value}");
@@ -907,6 +1163,107 @@ fn compact_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_subcommand_accepts_global_options_and_explicit_output() {
+        let cli = Cli::try_parse_from([
+            "willdeep",
+            "run",
+            "--profile",
+            "coding",
+            "--workspace",
+            ".",
+            "--output",
+            "json",
+            "inspect",
+            "this",
+        ])
+        .unwrap();
+        assert_eq!(cli.profile.as_deref(), Some("coding"));
+        assert_eq!(cli.workspace.as_deref(), Some(std::path::Path::new(".")));
+        let Some(CliCommand::Run(args)) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.prompt, ["inspect", "this"]);
+        assert_eq!(args.output, RunOutput::Json);
+    }
+
+    #[test]
+    fn run_subcommand_rejects_prompt_and_input_together() {
+        assert!(
+            Cli::try_parse_from(["willdeep", "run", "--input", "prompt.txt", "inline"]).is_err()
+        );
+    }
+
+    #[test]
+    fn run_attachments_load_text_and_supported_image_metadata() {
+        let root = std::env::temp_dir().join(format!("willdeep-run-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let text_path = root.join("notes.txt");
+        std::fs::write(&text_path, "evidence").unwrap();
+        let image_path = root.join("pixel.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 3)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&image_path, png.into_inner()).unwrap();
+
+        let attachments = load_run_attachments(&[text_path, image_path]).unwrap();
+        assert!(matches!(
+            &attachments[0],
+            willdeep_core::MessageAttachment::Text { content, .. } if content == "evidence"
+        ));
+        assert!(matches!(
+            &attachments[1],
+            willdeep_core::MessageAttachment::Image {
+                media_type,
+                width: 2,
+                height: 3,
+                ..
+            } if media_type == "image/png"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_exit_codes_are_stable_by_failure_domain() {
+        assert_eq!(stable_exit_code(&invalid_run_input("bad input")), 2);
+        assert_eq!(
+            stable_exit_code(&anyhow::Error::new(
+                willdeep_core::provider::ProviderError::MissingApiKey
+            )),
+            3
+        );
+        assert_eq!(
+            stable_exit_code(&anyhow::Error::new(willdeep_core::AgentError::Tool(
+                willdeep_core::tools::ToolError::ApprovalDenied("test".to_owned())
+            ))),
+            4
+        );
+        assert_eq!(
+            stable_exit_code(&anyhow::Error::new(willdeep_core::AgentError::MaxTurns(3))),
+            5
+        );
+        assert_eq!(stable_exit_code(&anyhow::anyhow!("unknown")), 1);
+    }
+
+    #[test]
+    fn run_completion_json_has_one_stable_machine_readable_envelope() {
+        let session_id = uuid::Uuid::new_v4();
+        let value = completion_json(
+            &harness::HarnessOutcome {
+                final_text: "done".to_owned(),
+                turns: 4,
+                compressed: false,
+            },
+            session_id,
+        );
+        assert_eq!(value["type"], "completed");
+        assert_eq!(value["turns"], 4);
+        assert_eq!(value["text"], "done");
+        assert_eq!(value["session_id"], session_id.to_string());
+        assert!(value.as_object().is_some_and(|object| object.len() == 4));
+    }
 
     #[test]
     fn automatic_api_selection_matches_provider() {

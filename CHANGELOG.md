@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc24] - 2026-08-11
+
+### Added
+
+- 新增 `willdeep run`，支持 Prompt/stdin、显式输入文件、文本/图片附件、Session 续接、text/JSON/NDJSON 与静默输出。
+- 新增稳定退出码契约，区分调用输入、Provider、策略拒绝和 Harness/Tool 执行失败。
+
+### Security
+
+- CLI 图片附件只接受 PNG/JPEG/WebP/GIF，验证真实格式、尺寸、像素数和总载荷；机器事件不输出 Tool 参数、结果或子 Agent 报告。
+
 ## [0.21.0-rc23] - 2026-08-11
 
 ### Changed

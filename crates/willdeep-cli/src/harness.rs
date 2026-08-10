@@ -20,6 +20,7 @@ use crate::{
 pub(crate) enum HarnessFrontend {
     Terminal {
         json: bool,
+        quiet: bool,
     },
     Tui {
         tx: crate::tui::TuiSender,
@@ -338,9 +339,9 @@ pub(crate) async fn build(
         Arc<dyn EventSink>,
         Option<RuntimeConnection>,
     ) = match frontend {
-        HarnessFrontend::Terminal { json } => (
+        HarnessFrontend::Terminal { json, quiet } => (
             Arc::new(TerminalApprover(language)),
-            Arc::new(TerminalSink { json }),
+            Arc::new(TerminalSink { json, quiet }),
             None,
         ),
         HarnessFrontend::Tui { tx, relay } => (
