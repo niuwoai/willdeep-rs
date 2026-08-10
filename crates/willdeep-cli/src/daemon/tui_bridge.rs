@@ -41,6 +41,9 @@ pub(crate) struct RemoteAgent {
     pub current_turn: u64,
     pub current_tool: Option<String>,
     pub total_tokens: Option<u64>,
+    pub max_turns: Option<u64>,
+    pub token_budget: Option<u64>,
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -618,6 +621,9 @@ fn remote_agent(agent: super::agent_store::RuntimeAgent) -> RemoteAgent {
         current_turn: agent.current_turn,
         current_tool: agent.current_tool,
         total_tokens: agent.total_tokens,
+        max_turns: agent.max_turns,
+        token_budget: agent.token_budget,
+        timeout_seconds: agent.timeout_seconds,
     }
 }
 

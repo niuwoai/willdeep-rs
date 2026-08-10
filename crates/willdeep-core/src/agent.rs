@@ -12,6 +12,7 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub system_prompt: String,
     pub context_window: u64,
+    pub token_budget: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +39,9 @@ pub enum AgentEvent {
         profile: String,
         label: String,
         background: bool,
+        max_turns: usize,
+        token_budget: Option<u64>,
+        timeout_seconds: Option<u64>,
     },
     SubagentCompleted {
         id: uuid::Uuid,
@@ -99,6 +103,8 @@ pub enum AgentError {
     EmptyResponse,
     #[error("agent reached the maximum of {0} turns before producing a final answer")]
     MaxTurns(usize),
+    #[error("agent exhausted its token budget of {budget} tokens (used {used})")]
+    TokenBudgetExceeded { budget: u64, used: u64 },
     #[error("subagent failed: {0}")]
     Subagent(String),
 }
@@ -184,6 +190,7 @@ impl Agent {
         messages.push(user_message);
         let definitions = self.tools.definitions();
         let mut compressed: Option<(usize, String)> = None;
+        let mut used_tokens = 0_u64;
         for turn in 1..=self.config.max_turns {
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
@@ -192,7 +199,21 @@ impl Agent {
                 .complete(&request_messages, &definitions)
                 .await?;
             if let Some(usage) = completion.usage {
+                used_tokens = used_tokens.saturating_add(usage.total_tokens.unwrap_or_else(|| {
+                    usage
+                        .input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(usage.output_tokens.unwrap_or(0))
+                }));
                 self.sink.emit(AgentEvent::Usage(usage)).await;
+                if let Some(budget) = self.config.token_budget
+                    && used_tokens >= budget
+                {
+                    return Err(AgentError::TokenBudgetExceeded {
+                        budget,
+                        used: used_tokens,
+                    });
+                }
             }
             let content = completion.content.trim().to_owned();
             if !content.is_empty() {
@@ -392,6 +413,28 @@ mod tests {
         requests: Mutex<Vec<Vec<Message>>>,
     }
 
+    struct UsageProvider;
+
+    #[async_trait]
+    impl Provider for UsageProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            Ok(Completion {
+                content: "would otherwise finish".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: Some(crate::types::Usage {
+                    input_tokens: Some(800),
+                    output_tokens: Some(300),
+                    total_tokens: Some(1_100),
+                }),
+            })
+        }
+    }
+
     impl RecordingProvider {
         fn new(replies: &[&str]) -> Arc<Self> {
             Arc::new(Self {
@@ -434,6 +477,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stops_before_returning_when_token_budget_is_exhausted() {
+        let agent = Agent::new(
+            Arc::new(UsageProvider),
+            registry("token-budget"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: Some(1_000),
+            },
+        );
+
+        let error = agent.run("work").await.expect_err("budget must stop run");
+        assert!(matches!(
+            error,
+            AgentError::TokenBudgetExceeded {
+                budget: 1_000,
+                used: 1_100
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn vision_fallback_sends_image_only_to_vision_provider() {
         let main = RecordingProvider::new(&["done"]);
         let vision = RecordingProvider::new(&["a terminal showing an error"]);
@@ -444,6 +510,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 128_000,
+                token_budget: None,
             },
         )
         .with_image_fallback(vision.clone(), "some.im / qwen3-vl-plus");
@@ -489,6 +556,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 200,
+                token_budget: None,
             },
         );
         let history = (0..18)
@@ -528,6 +596,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 128_000,
+                token_budget: None,
             },
         );
         let history = (0..12)

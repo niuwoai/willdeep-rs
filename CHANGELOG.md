@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.18.0-rc2] - 2026-08-10
+
+### Added
+
+- 子 Agent Profile 新增 `token_budget`、`timeout_seconds` 和 `max_consecutive_failures` TOML 策略；示例配置给出保守默认值和环境变量凭据用法。
+- 核心 Agent Loop 累计 Provider 用量，在达到 Token 总预算时以结构化错误终止；子 Agent 执行支持硬超时。
+- Runtime Agent 持久化启动时的最大轮次、Token 预算和执行时限，TUI 右栏同时展示实时用量与策略上限。
+
+### Changed
+
+- 同一子 Agent Profile 连续失败达到阈值后开启进程内熔断，拒绝继续启动；任一成功执行会自动复位该 Profile 的失败计数。
+
+### Security
+
+- 预算、时限与熔断均在 Core/Runtime 执行，不依赖客户端自觉；策略事件不包含 Prompt、工具参数、Provider 凭据或文件内容。
+
 ## [0.18.0-rc1] - 2026-08-10
 
 ### Added

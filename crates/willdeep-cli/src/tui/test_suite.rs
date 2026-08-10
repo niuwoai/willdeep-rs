@@ -334,6 +334,9 @@ mod tests {
                 current_turn: 3,
                 current_tool: None,
                 total_tokens: Some(42),
+                max_turns: None,
+                token_budget: None,
+                timeout_seconds: None,
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -346,8 +349,11 @@ mod tests {
                 current_turn: 1,
                 current_tool: Some("read_file".to_owned()),
                 total_tokens: Some(9),
+                max_turns: Some(8),
+                token_budget: Some(32_000),
+                timeout_seconds: Some(300),
             });
-        let backend = ratatui::backend::TestBackend::new(48, 32);
+        let backend = ratatui::backend::TestBackend::new(80, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -364,9 +370,9 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Runtime agents · 2"));
         assert!(rendered.contains("abe596 · editor · done"));
-        assert!(rendered.contains("root · T3 · - · 42t"));
+        assert!(rendered.contains("root · T3/- · - · 42t/- · -s"));
+        assert!(rendered.contains("inspect · T1/8 · read_file · 9t/32000t · 300s"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
-        assert!(rendered.contains("inspect · T1 · read_file · 9t"));
         assert_eq!(
             app.selected_runtime_agent().unwrap().label.as_deref(),
             Some("root")

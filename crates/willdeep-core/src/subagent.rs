@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -22,6 +24,9 @@ pub struct SubagentProfile {
     pub capability_prompt: String,
     pub max_turns: usize,
     pub context_window: u64,
+    pub token_budget: Option<u64>,
+    pub timeout_seconds: Option<u64>,
+    pub max_consecutive_failures: usize,
     pub requires_write_target: bool,
 }
 
@@ -31,6 +36,7 @@ pub struct SubagentCatalog {
     profiles: BTreeMap<String, SubagentProfile>,
     background: Arc<BackgroundTaskRegistry>,
     sink: Arc<dyn EventSink>,
+    failures: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 struct SubagentNoopSink;
@@ -95,6 +101,7 @@ impl SubagentCatalog {
                 .collect(),
             background,
             sink: Arc::new(SubagentNoopSink),
+            failures: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -130,6 +137,21 @@ impl SubagentCatalog {
             .profile(args.profile.as_deref())
             .ok_or_else(|| AgentError::Subagent("no subagent profiles configured".to_owned()))?
             .clone();
+        let failure_count = self
+            .failures
+            .lock()
+            .map_err(|_| {
+                AgentError::Subagent("subagent failure tracker is unavailable".to_owned())
+            })?
+            .get(&profile.id)
+            .copied()
+            .unwrap_or(0);
+        if failure_count >= profile.max_consecutive_failures {
+            return Err(AgentError::Subagent(format!(
+                "profile {} circuit is open after {} consecutive failures",
+                profile.id, failure_count
+            )));
+        }
         if profile.requires_write_target && approved_target.is_none() {
             return Err(AgentError::Subagent(
                 "editor profile requires an approved target_file".to_owned(),
@@ -160,9 +182,13 @@ impl SubagentCatalog {
                 ));
             }
             let runner_sink = self.sink.clone();
+            let failures = self.failures.clone();
             let lifecycle_sink = self.sink.clone();
             let lifecycle_profile = profile_id.clone();
             let lifecycle_label = label.clone();
+            let lifecycle_max_turns = profile.max_turns;
+            let lifecycle_token_budget = profile.token_budget;
+            let lifecycle_timeout_seconds = profile.timeout_seconds;
             let id = self.background.start_retriable_with_lifecycle(
                 agent_id,
                 BackgroundTaskKind::Subagent,
@@ -170,9 +196,11 @@ impl SubagentCatalog {
                 move || {
                     let workspace = workspace.clone();
                     let profile = profile.clone();
+                    let profile_id = profile.id.clone();
                     let prompt = prompt.clone();
                     let approved_target = approved_target.clone();
                     let sink = runner_sink.clone();
+                    let failures = failures.clone();
                     async move {
                         let result = run_profile(
                             workspace,
@@ -183,6 +211,7 @@ impl SubagentCatalog {
                             agent_id,
                         )
                         .await;
+                        record_profile_result(&failures, &profile_id, &result);
                         subagent_task_result(result)
                     }
                 },
@@ -197,6 +226,9 @@ impl SubagentCatalog {
                                 profile,
                                 label,
                                 background: true,
+                                max_turns: lifecycle_max_turns,
+                                token_budget: lifecycle_token_budget,
+                                timeout_seconds: lifecycle_timeout_seconds,
                             })
                             .await;
                         } else {
@@ -216,9 +248,12 @@ impl SubagentCatalog {
             self.sink
                 .emit(AgentEvent::SubagentStarted {
                     id: agent_id,
-                    profile: profile_id,
+                    profile: profile_id.clone(),
                     label,
                     background: false,
+                    max_turns: profile.max_turns,
+                    token_budget: profile.token_budget,
+                    timeout_seconds: profile.timeout_seconds,
                 })
                 .await;
             let result = run_profile(
@@ -230,6 +265,7 @@ impl SubagentCatalog {
                 agent_id,
             )
             .await;
+            record_profile_result(&self.failures, &profile_id, &result);
             self.sink
                 .emit(AgentEvent::SubagentCompleted {
                     id: agent_id,
@@ -302,6 +338,7 @@ async fn run_profile(
         workspace.display(),
         profile.capability_prompt
     );
+    let timeout_seconds = profile.timeout_seconds;
     let agent = Agent::new(
         profile.provider,
         tools,
@@ -309,13 +346,40 @@ async fn run_profile(
             max_turns: profile.max_turns,
             system_prompt,
             context_window: profile.context_window,
+            token_budget: profile.token_budget,
         },
     )
     .with_event_sink(Arc::new(ChildEventSink {
         id: agent_id,
         parent: lifecycle_sink,
     }));
-    Ok(Box::pin(agent.run(prompt)).await?.final_text)
+    let run = Box::pin(agent.run(prompt));
+    let outcome = if let Some(seconds) = timeout_seconds {
+        tokio::time::timeout(Duration::from_secs(seconds), run)
+            .await
+            .map_err(|_| {
+                AgentError::Subagent(format!("subagent timed out after {seconds} seconds"))
+            })??
+    } else {
+        run.await?
+    };
+    Ok(outcome.final_text)
+}
+
+fn record_profile_result(
+    failures: &Mutex<BTreeMap<String, usize>>,
+    profile: &str,
+    result: &Result<String, AgentError>,
+) {
+    let Ok(mut failures) = failures.lock() else {
+        return;
+    };
+    if result.is_ok() {
+        failures.remove(profile);
+    } else {
+        let count = failures.entry(profile.to_owned()).or_default();
+        *count = count.saturating_add(1);
+    }
 }
 
 pub fn builtin_profiles(
@@ -403,6 +467,9 @@ fn profile(
         capability_prompt: spec.prompt.to_owned(),
         max_turns: spec.max_turns,
         context_window,
+        token_budget: None,
+        timeout_seconds: Some(300),
+        max_consecutive_failures: 3,
         requires_write_target: spec.requires_write_target,
     }
 }

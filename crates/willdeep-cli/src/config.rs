@@ -60,6 +60,9 @@ pub struct SubagentProfileSettings {
     pub model: Option<String>,
     pub max_turns: Option<usize>,
     pub context_window: Option<u64>,
+    pub token_budget: Option<u64>,
+    pub timeout_seconds: Option<u64>,
+    pub max_consecutive_failures: Option<usize>,
 }
 
 pub struct LoadedConfig {
@@ -161,6 +164,24 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             .is_some_and(|value| !(1..=24).contains(&value))
         {
             bail!("subagents.{name}.max_turns must be between 1 and 24");
+        }
+        if subagent
+            .token_budget
+            .is_some_and(|value| !(1_000..=10_000_000).contains(&value))
+        {
+            bail!("subagents.{name}.token_budget must be between 1000 and 10000000");
+        }
+        if subagent
+            .timeout_seconds
+            .is_some_and(|value| !(10..=86_400).contains(&value))
+        {
+            bail!("subagents.{name}.timeout_seconds must be between 10 and 86400");
+        }
+        if subagent
+            .max_consecutive_failures
+            .is_some_and(|value| !(1..=20).contains(&value))
+        {
+            bail!("subagents.{name}.max_consecutive_failures must be between 1 and 20");
         }
         if let Some(provider) = &subagent.provider_profile
             && !file.providers.contains_key(provider)

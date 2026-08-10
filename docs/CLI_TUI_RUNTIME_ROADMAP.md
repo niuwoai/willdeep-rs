@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.18.0-rc1
+> 当前实施版本：v0.18.0-rc2
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -222,6 +222,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.18.0-rc2（进行中）：Agent Mission Control 首批加入 Profile Token 总预算、执行超时、连续失败熔断，以及 Runtime/TUI 策略快照展示。下一步继续补齐独立 Agent 详情、补充指令和父 Harness 结果回流审计。
 
 v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架构边界文档、`integrations herdr status` 诊断命令，以及 Runtime Task → Herdr Pane 的去重、非阻塞聚合状态上报。Herdr 未安装或上报失败不影响 Harness。
 

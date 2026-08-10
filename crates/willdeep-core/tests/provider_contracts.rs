@@ -87,6 +87,7 @@ async fn run_agent(base: &str, kind: ProviderKind, dialect: ApiDialect) {
             max_turns: 4,
             system_prompt: build_system_prompt(&workspace),
             context_window: 128_000,
+            token_budget: None,
         },
     );
     let outcome = agent

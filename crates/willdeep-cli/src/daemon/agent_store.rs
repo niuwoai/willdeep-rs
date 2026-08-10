@@ -31,6 +31,12 @@ pub(crate) struct RuntimeAgent {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_turns: Option<u64>,
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,
@@ -96,6 +102,9 @@ impl AgentStore {
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -125,6 +134,9 @@ impl AgentStore {
             agent.input_tokens = None;
             agent.output_tokens = None;
             agent.total_tokens = None;
+            agent.max_turns = None;
+            agent.token_budget = None;
+            agent.timeout_seconds = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -147,6 +159,9 @@ impl AgentStore {
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -282,6 +297,11 @@ impl AgentStore {
             agent.input_tokens = None;
             agent.output_tokens = None;
             agent.total_tokens = None;
+            agent.max_turns = value.get("max_turns").and_then(|value| value.as_u64());
+            agent.token_budget = value.get("token_budget").and_then(|value| value.as_u64());
+            agent.timeout_seconds = value
+                .get("timeout_seconds")
+                .and_then(|value| value.as_u64());
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -318,6 +338,11 @@ impl AgentStore {
                 input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                max_turns: value.get("max_turns").and_then(|value| value.as_u64()),
+                token_budget: value.get("token_budget").and_then(|value| value.as_u64()),
+                timeout_seconds: value
+                    .get("timeout_seconds")
+                    .and_then(|value| value.as_u64()),
                 created_at: timestamp,
                 updated_at: timestamp,
                 completed_at: None,

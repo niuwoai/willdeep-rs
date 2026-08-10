@@ -263,12 +263,21 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ));
                         lines.push(Line::styled(
                             format!(
-                                "        {label} · T{} · {} · {}",
+                                "        {label} · T{}/{} · {} · {}/{} · {}s",
                                 agent.current_turn,
+                                agent
+                                    .max_turns
+                                    .map_or_else(|| "-".to_owned(), |turns| turns.to_string()),
                                 agent.current_tool.as_deref().unwrap_or("-"),
                                 agent
                                     .total_tokens
-                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t"))
+                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t")),
+                                agent
+                                    .token_budget
+                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t")),
+                                agent
+                                    .timeout_seconds
+                                    .map_or_else(|| "-".to_owned(), |seconds| seconds.to_string())
                             ),
                             Style::default().fg(Color::DarkGray),
                         ));

@@ -367,6 +367,15 @@ pub(crate) async fn build(
             if let Some(window) = settings.context_window {
                 subagent.context_window = window;
             }
+            if let Some(token_budget) = settings.token_budget {
+                subagent.token_budget = Some(token_budget);
+            }
+            if let Some(timeout_seconds) = settings.timeout_seconds {
+                subagent.timeout_seconds = Some(timeout_seconds);
+            }
+            if let Some(max_failures) = settings.max_consecutive_failures {
+                subagent.max_consecutive_failures = max_failures;
+            }
         }
     }
     let subagents = Arc::new(
@@ -380,6 +389,7 @@ pub(crate) async fn build(
             max_turns,
             system_prompt,
             context_window,
+            token_budget: None,
         },
     )
     .with_event_sink(sink)

@@ -803,12 +803,18 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             profile,
             label,
             background,
+            max_turns,
+            token_budget,
+            timeout_seconds,
         } => serde_json::json!({
             "type": "subagent_started",
             "id": id,
             "profile": profile,
             "label": label,
-            "background": background
+            "background": background,
+            "max_turns": max_turns,
+            "token_budget": token_budget,
+            "timeout_seconds": timeout_seconds
         }),
         AgentEvent::SubagentCompleted { id, status } => serde_json::json!({
             "type": "subagent_completed",
