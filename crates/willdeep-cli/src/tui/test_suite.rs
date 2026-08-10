@@ -454,6 +454,47 @@ mod tests {
         });
         assert_eq!(app.selected_runtime_task_id(), Some(task_id));
     }
+
+    #[test]
+    fn runtime_events_resume_by_cursor_without_duplicate_chat_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-events-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "runtime test");
+        let mut app = App::new(Vec::new(), Language::En);
+        let event = crate::daemon::RemoteRuntimeEvent {
+            sequence: 7,
+            kind: "task.output".to_owned(),
+            message: concat!(
+                "task_id=12345678-0000-0000-0000-000000000000 ",
+                "{\"type\":\"completed\",\"text\":\"restored answer\"}"
+            )
+            .to_owned(),
+            visible: true,
+        };
+        runtime_ui::apply_runtime_events(&mut app, vec![event.clone()], &mut session, &store)
+            .unwrap();
+        runtime_ui::apply_runtime_events(&mut app, vec![event], &mut session, &store).unwrap();
+        assert_eq!(app.runtime_event_cursor, 7);
+        assert_eq!(
+            app.transcript
+                .iter()
+                .filter(|line| line.contains("restored answer"))
+                .count(),
+            1
+        );
+        assert_eq!(store.load(session.id).unwrap().runtime_event_cursor, 7);
+        let restored = store.load(session.id).unwrap();
+        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(
+            transcript(&restored.messages),
+            vec!["WillDeep: [Runtime 12345678] restored answer"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn mouse_can_toggle_and_submit_multi_choice_question() {
         let registry = BackgroundTaskRegistry::default();

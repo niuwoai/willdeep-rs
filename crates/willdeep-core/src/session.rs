@@ -22,6 +22,8 @@ pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub attention_read: BTreeSet<String>,
+    #[serde(default)]
+    pub runtime_event_cursor: u64,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
@@ -39,6 +41,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             attention_read: BTreeSet::new(),
+            runtime_event_cursor: 0,
             swift_source: None,
         }
     }
@@ -201,6 +204,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         updated_at: updated,
         messages,
         attention_read: BTreeSet::new(),
+        runtime_event_cursor: 0,
         swift_source: Some(path.to_path_buf()),
     })
 }

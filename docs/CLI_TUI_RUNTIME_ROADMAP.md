@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.16.0-rc4
+> 当前实施版本：v0.16.0-rc5
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -58,7 +58,7 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 - [ ] 交互 Harness、子 Agent、后台任务、审批、MCP、Web 和移动网关迁入 Runtime 原生生命周期。
 - [x] 持久 Runtime 事件序列号、NDJSON 日志、游标补读以及 `willdeep attach/detach` 基础控制。
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
-- [ ] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线。
+- [x] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线，并按 Workspace 过滤和去重。
 - [ ] Unix Socket 与 Windows Named Pipe；实时事件推送、断线续传和请求去重。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
 - [ ] 无损优雅升级与版本交接。
@@ -166,6 +166,43 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 验收：长期运行资源有界、问题可诊断、状态可恢复，完成 1.0 发布审计。
 
+### 横向能力 A：CLI 与 TUI 深化
+
+以下能力不单独阻塞某个大版本，可随 Runtime 阶段逐批交付，但必须复用统一事件和状态模型：
+
+- [ ] Headless/CI 模式、稳定退出码、`--json`、`--ndjson` 和安静输出模式。
+- [ ] Bash、Zsh、Fish 与 PowerShell 命令补全。
+- [ ] 跨会话 Prompt 历史、全文搜索和安全清理。
+- [ ] 长会话虚拟滚动，工具输出按活动组聚合并默认显示摘要。
+- [ ] 可展开查看工具原始参数、输出、错误和审批依据。
+- [ ] 补齐标题、列表、引用、代码块、表格、链接和行内代码等 Markdown 渲染。
+- [ ] 文件路径、URL 与诊断位置可点击，并提供不支持鼠标终端的键盘替代操作。
+- [ ] 在 Kitty、iTerm2、Sixel 等支持的终端预览图片，否则显示可管理的附件卡片。
+- [ ] 主题、紧凑模式、高对比度、可配置键位以及可选 Vim/Emacs 输入模式。
+
+验收：CLI 可稳定用于脚本和 CI；TUI 在超长会话、大输出和不同终端能力下仍保持流畅、可发现和可访问。
+
+### 横向能力 B：Computer Use
+
+- [ ] macOS 先接入 Accessibility、ScreenCaptureKit 与受控输入事件。
+- [ ] 截图、窗口识别、点击、键盘输入和滚动均产生结构化、可审计事件。
+- [ ] 权限状态明确可见，高风险操作进入统一审批队列。
+- [ ] Computer Use 不能绕过 Workspace、工具权限、智能审核或敏感信息规则。
+- [ ] 作为 Runtime Tool 提供给主 Agent、子 Agent 和 Workflow，而非成为独立状态机。
+- [ ] 后续评估 Windows UI Automation 与 Linux Wayland/X11，并按能力协商降级。
+
+验收：在 macOS 上能够安全完成可复现的桌面操作，用户可查看、停止和审计每一步；其他平台缺少能力时明确降级。
+
+### 1.0 迁移门槛：替换 Swift App Harness 内核
+
+- [ ] 第一阶段：Swift App 使用 Rust Client 观察 Runtime，会话和审批保持双读校验。
+- [ ] 第二阶段：Rust Runtime 接管会话、后台任务、子 Agent 和事件持久化。
+- [ ] 第三阶段：Rust Runtime 接管完整 Harness、Tools、Skills、MCP 与 Provider 生命周期。
+- [ ] 第四阶段：完成数据迁移、故障回退和一致性验证后移除 Swift 旧 Harness。
+- [ ] macOS、Windows 和 Linux 完成协议兼容、崩溃恢复、长时间运行和端到端测试。
+
+验收：Swift、TUI、Web、移动端对同一任务观察到一致状态；迁移与回退不丢会话、事件、附件、审批或用户修改。
+
 ## 4. 实施原则
 
 1. 每个阶段先定义结构化状态和协议，再实现具体 UI。
@@ -177,4 +214,21 @@ Runtime 负责会话、主 Agent、子 Agent、后台任务、审批、问题、
 
 ## 5. 当前执行批次
 
-v0.16.0-rc4：阶段 2 第四批完成；TUI 右栏接入 Runtime 任务、审批和提问，支持 Enter 解阻塞、K 停止，并可从 Composer 用 `/runtime` 提交含附件的可分离任务。下一批将 Runtime 逐轮事件按游标恢复到 TUI 聊天区，并推进原生 Agent 生命周期。
+v0.16.0-rc5：Runtime 的模型轮次、工具调用、用量和完成事件已按持久游标恢复到 TUI；游标按 Session 保存，事件按 Workspace 过滤，用户消息与正式回复可在重连后恢复且不重复。下一批推进交互 Harness、子 Agent 与后台任务的 Runtime 原生生命周期。
+
+## 6. 建议执行顺序
+
+1. 完成并发布 `v0.16.0-rc5`：Runtime 事件恢复、Workspace 过滤、持久游标与重连去重。
+2. 将交互式主 Harness 迁入 Runtime 原生生命周期。
+3. 将子 Agent、后台任务、审批、MCP 和附件迁入统一生命周期。
+4. 实现实时事件推送、断线续传、请求幂等以及跨平台本地传输。
+5. 完成异常退出、守护进程重启和客户端重连的端到端测试。
+6. 实现完整会话恢复、Fork、归档、导出与搜索。
+7. 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
+8. 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
+9. 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
+10. 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
+11. 补齐 Workflow、插件、Herdr 互操作和 Computer Use。
+12. 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
+
+关键路径固定为：`Runtime 持久化 → 会话恢复 → Agent 生命周期 → Diff/Workspace → 统一 API → Web/移动端/Swift 共用内核`。Herdr、Computer Use 和客户端视觉增强可以穿插推进，但不能形成独立于 Runtime 的第二套任务状态机。

@@ -1,5 +1,145 @@
 use super::*;
 
+pub(super) fn apply_runtime_events(
+    app: &mut App,
+    mut events: Vec<crate::daemon::RemoteRuntimeEvent>,
+    session: &mut Session,
+    store: &SessionStore,
+) -> Result<()> {
+    events.sort_by_key(|event| event.sequence);
+    let mut advanced = false;
+    for event in events {
+        if event.sequence <= app.runtime_event_cursor {
+            continue;
+        }
+        if event.visible
+            && let Some(message) = apply_runtime_event(app, &event)
+        {
+            session.messages.push(message);
+        }
+        app.runtime_event_cursor = event.sequence;
+        advanced = true;
+    }
+    if advanced {
+        session.runtime_event_cursor = app.runtime_event_cursor;
+        store.save(session)?;
+    }
+    Ok(())
+}
+
+fn apply_runtime_event(
+    app: &mut App,
+    event: &crate::daemon::RemoteRuntimeEvent,
+) -> Option<Message> {
+    match event.kind.as_str() {
+        "task.output" => return apply_runtime_output(app, &event.message),
+        "task.waiting_approval" => {
+            app.notice = Some(
+                app.language
+                    .text(
+                        "Runtime 任务正在等待审批",
+                        "Runtime task is waiting for approval",
+                        "Runtime タスクが承認待ちです",
+                    )
+                    .to_owned(),
+            );
+        }
+        "task.waiting_answer" => {
+            app.notice = Some(
+                app.language
+                    .text(
+                        "Runtime 任务正在等待回答",
+                        "Runtime task is waiting for an answer",
+                        "Runtime タスクが回答待ちです",
+                    )
+                    .to_owned(),
+            );
+        }
+        "task.failed" => app.append_transcript(format!(
+            "Error: {}",
+            app.language.text(
+                "Runtime 任务失败",
+                "Runtime task failed",
+                "Runtime タスクが失敗しました"
+            )
+        )),
+        "task.cancelled" => app.append_transcript(format!(
+            "System: {}",
+            app.language.text(
+                "Runtime 任务已取消",
+                "Runtime task cancelled",
+                "Runtime タスクをキャンセルしました"
+            )
+        )),
+        _ => {}
+    }
+    None
+}
+
+fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
+    let (task, payload) = message.split_once(' ')?;
+    let task = task.strip_prefix("task_id=").unwrap_or(task);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return None;
+    };
+    match value.get("type").and_then(|value| value.as_str()) {
+        Some("turn_started") => {
+            if let Some(turn) = value.get("turn").and_then(|value| value.as_u64()) {
+                app.record_progress(format!(
+                    "Runtime · {} {turn}",
+                    app.language.text("轮次", "turn", "ターン")
+                ));
+            }
+        }
+        Some("tool_requested") => {
+            if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
+                app.tools.requested(name);
+                app.record_progress(format!(
+                    "Runtime · {} {name}",
+                    app.language.text("正在使用", "using", "使用中")
+                ));
+            }
+        }
+        Some("tool_completed") => {
+            if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
+                let is_error = value
+                    .get("is_error")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                app.tools.completed(name, is_error);
+                app.record_progress(format!(
+                    "Runtime · {} {name}",
+                    if is_error {
+                        app.language.text("失败", "failed", "失敗")
+                    } else {
+                        app.language.text("已完成", "finished", "完了")
+                    }
+                ));
+            }
+        }
+        Some("usage") => {
+            app.latest_usage = Usage {
+                input_tokens: value.get("input_tokens").and_then(|value| value.as_u64()),
+                output_tokens: value.get("output_tokens").and_then(|value| value.as_u64()),
+                total_tokens: value.get("total_tokens").and_then(|value| value.as_u64()),
+            };
+            app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
+        }
+        Some("completed") => {
+            if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
+                let short = task.get(..8).unwrap_or(task);
+                app.append_transcript(format!("WillDeep [Runtime {short}]: {text}"));
+                return Some(Message::assistant(
+                    format!("[Runtime {short}] {text}"),
+                    Vec::new(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 pub(super) fn open_remote_gate(
     app: &mut App,
     gate: crate::daemon::RemoteGate,

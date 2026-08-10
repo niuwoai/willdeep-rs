@@ -26,8 +26,8 @@ const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 
 mod tui_bridge;
 pub(crate) use tui_bridge::{
-    RemoteGate, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    resolve_remote_approval, runtime_snapshot,
+    RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
+    resolve_remote_approval, runtime_event_head, runtime_events, runtime_snapshot,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -144,6 +144,8 @@ enum RuntimeTaskStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RuntimeTask {
     pub(crate) id: uuid::Uuid,
+    #[serde(default)]
+    pub(crate) event_start_sequence: u64,
     status: RuntimeTaskStatus,
     workspace: PathBuf,
     profile: Option<String>,
@@ -844,6 +846,7 @@ async fn health(
         version: willdeep_core::VERSION.to_owned(),
         pid: std::process::id(),
         uptime_seconds: now().saturating_sub(state.started_at),
+        event_sequence: state.events.latest_sequence(),
     })
     .into_response();
     response.headers_mut().insert(
@@ -1020,6 +1023,8 @@ struct Health {
     version: String,
     pid: u32,
     uptime_seconds: u64,
+    #[serde(default)]
+    event_sequence: u64,
 }
 
 async fn probe(state: &DaemonState) -> Result<Health> {
@@ -1117,6 +1122,13 @@ impl EventLog {
 
     fn read_after(&self, after: u64, limit: usize) -> Result<Vec<RuntimeEvent>> {
         read_events(&self.path, after, limit)
+    }
+
+    fn latest_sequence(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|state| state.next_sequence.saturating_sub(1))
+            .unwrap_or_default()
     }
 }
 
@@ -1313,8 +1325,8 @@ impl TaskManager {
     }
 
     async fn submit(self: &Arc<Self>, mut request: SubmitTask) -> Result<RuntimeTask> {
-        if request.prompt.trim().is_empty() {
-            bail!("task prompt must not be empty");
+        if request.prompt.trim().is_empty() && request.attachments.is_empty() {
+            bail!("task prompt and attachments must not both be empty");
         }
         request.workspace = request
             .workspace
@@ -1329,6 +1341,7 @@ impl TaskManager {
         let id = uuid::Uuid::new_v4();
         let mut task = RuntimeTask {
             id,
+            event_start_sequence: 0,
             status: RuntimeTaskStatus::Queued,
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
@@ -1340,7 +1353,11 @@ impl TaskManager {
             error: None,
         };
         self.insert_and_persist(task.clone()).await?;
-        self.events.append("task.queued", format!("task_id={id}"))?;
+        task.event_start_sequence = self
+            .events
+            .append("task.queued", format!("task_id={id}"))?
+            .sequence;
+        self.insert_and_persist(task.clone()).await?;
 
         let mut command = tokio::process::Command::new(&self.executable);
         command

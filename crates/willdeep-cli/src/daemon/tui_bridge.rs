@@ -28,7 +28,64 @@ pub(crate) struct RuntimeSnapshot {
     pub gates: Vec<RemoteGate>,
 }
 
-pub(crate) async fn runtime_snapshot(home: &Path) -> Result<RuntimeSnapshot> {
+#[derive(Clone)]
+pub(crate) struct RemoteRuntimeEvent {
+    pub sequence: u64,
+    pub kind: String,
+    pub message: String,
+    pub visible: bool,
+}
+
+pub(crate) async fn runtime_event_head(home: &Path) -> Result<u64> {
+    let state = match load_state(&DaemonPaths::new(home).state) {
+        Ok(state) => state,
+        Err(_) => return Ok(0),
+    };
+    Ok(probe(&state).await?.event_sequence)
+}
+
+pub(crate) async fn runtime_events(
+    home: &Path,
+    after: u64,
+    workspace: &Path,
+) -> Result<Vec<RemoteRuntimeEvent>> {
+    let state = match load_state(&DaemonPaths::new(home).state) {
+        Ok(state) => state,
+        Err(_) => return Ok(Vec::new()),
+    };
+    probe(&state).await?;
+    let workspace = workspace.canonicalize()?;
+    let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
+    let visible_tasks = tasks
+        .into_iter()
+        .filter(|task| task.workspace == workspace)
+        .map(|task| task.id)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(fetch_events(&state, after)
+        .await?
+        .into_iter()
+        .map(|event| {
+            let visible = event_task_id(&event.message)
+                .is_some_and(|task_id| visible_tasks.contains(&task_id));
+            RemoteRuntimeEvent {
+                sequence: event.sequence,
+                kind: event.kind,
+                message: event.message,
+                visible,
+            }
+        })
+        .collect())
+}
+
+fn event_task_id(message: &str) -> Option<uuid::Uuid> {
+    message
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("task_id="))?
+        .parse()
+        .ok()
+}
+
+pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<RuntimeSnapshot> {
     let paths = DaemonPaths::new(home);
     let state = match load_state(&paths.state) {
         Ok(state) if probe(&state).await.is_ok() => state,
@@ -39,10 +96,22 @@ pub(crate) async fn runtime_snapshot(home: &Path) -> Result<RuntimeSnapshot> {
             });
         }
     };
+    let workspace = workspace.canonicalize()?;
     let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
-    let interactions: Vec<RuntimeInteraction> = authorized_get(&state, "/v1/interactions").await?;
+    let visible_tasks = tasks
+        .iter()
+        .filter(|task| task.workspace == workspace)
+        .map(|task| task.id)
+        .collect::<std::collections::HashSet<_>>();
+    let interactions: Vec<RuntimeInteraction> =
+        authorized_get::<Vec<RuntimeInteraction>>(&state, "/v1/interactions")
+            .await?
+            .into_iter()
+            .filter(|interaction| visible_tasks.contains(&interaction.task_id))
+            .collect();
     let mut attention = tasks
         .into_iter()
+        .filter(|task| visible_tasks.contains(&task.id))
         .filter(|task| task.status != RuntimeTaskStatus::Queued)
         .map(runtime_task_attention)
         .collect::<Vec<_>>();

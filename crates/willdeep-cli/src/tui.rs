@@ -124,6 +124,7 @@ struct App {
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
+    runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
@@ -352,6 +353,13 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    if session.runtime_event_cursor == 0 {
+        session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
+            .await
+            .unwrap_or_default();
+        store.save(session)?;
+    }
+    app.runtime_event_cursor = session.runtime_event_cursor;
     app.workspace = Some(session.workspace.clone());
     app.workspace_status = workspace_status(&session.workspace, language);
     app.workspace_attention = workspace_attention(&session.workspace);
@@ -363,6 +371,8 @@ async fn event_loop(
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
     let (runtime_snapshot_tx, mut runtime_snapshot_rx) =
         mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
+    let (runtime_event_tx, mut runtime_event_rx) =
+        mpsc::unbounded_channel::<Vec<crate::daemon::RemoteRuntimeEvent>>();
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         draw(term, &mut app, &runtime.skills)?;
@@ -371,12 +381,19 @@ async fn event_loop(
                 app.background_tasks=runtime.background_tasks.snapshots();
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
-                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home).await{let _=tx.send(snapshot);}});
+                let workspace=runtime.runtime_submit.workspace.clone();
+                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace).await{let _=tx.send(snapshot);}});
+                let home=runtime.home.clone();
+                let tx=runtime_event_tx.clone();
+                let after=app.runtime_event_cursor;
+                let workspace=runtime.runtime_submit.workspace.clone();
+                tokio::spawn(async move {if let Ok(events)=crate::daemon::runtime_events(&home,after,&workspace).await{let _=tx.send(events);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
             },
+            Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>match mouse.kind {
@@ -501,10 +518,19 @@ async fn event_loop(
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
                             if prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ") {
                                 let remote_prompt=prompt.trim().strip_prefix("/runtime").unwrap_or_default().trim().to_owned();
-                                let attachments=std::mem::take(&mut app.attachments).into_iter().map(|value|value.message).collect();
+                                let attachments:Vec<MessageAttachment>=std::mem::take(&mut app.attachments).into_iter().map(|value|value.message).collect();
                                 let remote_prompt=app.enrich_prompt(&remote_prompt,&runtime.skills);
+                                let user_message=Message::user_with_attachments(prompt.clone(),attachments.clone());
                                 match crate::daemon::submit_runtime_prompt(&runtime.home,&runtime.runtime_submit,remote_prompt,attachments).await {
-                                    Ok(task)=>app.append_transcript(format!("System: {} {}",language.text("已提交 Runtime 任务","Runtime task submitted","Runtime タスクを送信しました"),task.id)),
+                                    Ok(task)=>{
+                                        session.messages.push(user_message);
+                                        if app.runtime_event_cursor==0 {
+                                            app.runtime_event_cursor=task.event_start_sequence.saturating_sub(1);
+                                            session.runtime_event_cursor=app.runtime_event_cursor;
+                                        }
+                                        store.save(session)?;
+                                        app.append_transcript(format!("System: {} {}",language.text("已提交 Runtime 任务","Runtime task submitted","Runtime タスクを送信しました"),task.id));
+                                    },
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 任务失败","Submit Runtime task failed","Runtime タスクの送信に失敗"))),
                                 }
                                 continue;
@@ -589,6 +615,7 @@ impl App {
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
+            runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),

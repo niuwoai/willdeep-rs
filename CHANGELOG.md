@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.0-rc5] - 2026-08-10
+
+### Added
+
+- TUI 按持久事件游标补读 Runtime 的模型轮次、工具请求、工具结果、Token 用量和完成事件，并实时映射到聊天区与活动栏。
+- Runtime 健康响应暴露最新事件序号；任务保存首个事件序号，使首次从 TUI 提交时既不回放旧日志，也不会遗漏快速完成的任务。
+- Session 保存 Runtime 事件游标、`/runtime` 用户消息和正式回复；退出并恢复同一会话后聊天记录保持完整且不重复。
+
+### Changed
+
+- Runtime Inbox、Interaction 与事件补读按当前 Workspace 过滤；不可见事件仍推进全局游标，避免跨工作区泄漏或反复扫描。
+- `/runtime` 允许仅附件任务，文本和附件不能同时为空。
+- 扩展 CLI、TUI、Computer Use、Herdr 互操作和 Swift Harness 替换的完整产品路线图与执行顺序。
+
 ## [0.16.0-rc4] - 2026-08-10
 
 ### Added

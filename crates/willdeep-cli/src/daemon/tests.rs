@@ -75,6 +75,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     let id = uuid::Uuid::new_v4();
     let task = RuntimeTask {
         id,
+        event_start_sequence: 0,
         status: RuntimeTaskStatus::Running,
         workspace: root.clone(),
         profile: None,
@@ -163,6 +164,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
             manager
                 .insert_and_persist(RuntimeTask {
                     id,
+                    event_start_sequence: 0,
                     status: RuntimeTaskStatus::Completed,
                     workspace,
                     profile: None,
@@ -202,6 +204,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     manager
         .insert_and_persist(RuntimeTask {
             id: task_id,
+            event_start_sequence: 0,
             status: RuntimeTaskStatus::Running,
             workspace: root.clone(),
             profile: None,
