@@ -425,26 +425,26 @@ pub(super) async fn activate_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
 
 pub(crate) async fn remote_workspaces(home: &Path) -> Result<Vec<RuntimeWorkspace>> {
     let state = ensure_running(home).await?;
-    authorized_get(&state, "/v1/workspaces").await
+    let response = runtime_client(&state)?
+        .call::<_, Vec<willdeep_runtime_protocol::RuntimeWorkspace>>(
+            "workspace.list",
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+    workspace_data(response).map(|items| items.into_iter().map(local_workspace).collect())
 }
 
 pub(crate) async fn ensure_remote_workspace(home: &Path, root: &Path) -> Result<RuntimeWorkspace> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/workspaces/ensure", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&EnsureWorkspace {
-            root: root.to_path_buf(),
-        })
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::RuntimeWorkspace>(
+            "workspace.ensure",
+            &serde_json::json!({"root": root.to_string_lossy()}),
+            None,
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Workspace registration: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    workspace_data(response).map(local_workspace)
 }
 
 pub(crate) async fn activate_remote_workspace(
@@ -452,21 +452,45 @@ pub(crate) async fn activate_remote_workspace(
     id: uuid::Uuid,
 ) -> Result<RuntimeWorkspace> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/workspaces/{id}/activate",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
+    let response = runtime_client(&state)?
+        .call::<_, willdeep_runtime_protocol::RuntimeWorkspace>(
+            "workspace.activate",
+            &serde_json::json!({"id": id}),
+            None,
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Workspace activation: {}",
-            response.text().await?
-        );
+    workspace_data(response).map(local_workspace)
+}
+
+fn workspace_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
+    match response {
+        willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+            bail!("Runtime Workspace API error: {}", error.message)
+        }
     }
-    Ok(response.json().await?)
+}
+
+fn local_workspace(workspace: willdeep_runtime_protocol::RuntimeWorkspace) -> RuntimeWorkspace {
+    RuntimeWorkspace {
+        schema: WORKSPACE_SCHEMA,
+        id: workspace.id,
+        name: workspace.name,
+        root: workspace.root.map(PathBuf::from).unwrap_or_default(),
+        access: match workspace.access {
+            willdeep_runtime_protocol::WorkspaceAccess::ReadOnly => WorkspaceAccess::ReadOnly,
+            willdeep_runtime_protocol::WorkspaceAccess::Smart => WorkspaceAccess::Smart,
+            willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite => {
+                WorkspaceAccess::WorkspaceWrite
+            }
+        },
+        provider_profile: workspace.provider_profile,
+        skills: workspace.skills,
+        mcp_servers: workspace.mcp_servers,
+        created_at: workspace.created_at,
+        updated_at: workspace.updated_at,
+        active: workspace.active,
+    }
 }
 
 pub(super) async fn remove_cli(home: &Path, id: uuid::Uuid, yes: bool) -> Result<()> {

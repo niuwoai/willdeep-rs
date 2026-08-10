@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc5] - 2026-08-11
+
+### Added
+
+- 协议 crate 新增稳定 Runtime Workspace、Workspace Access 和注册参数 DTO；统一 API 补齐 `workspace.register/ensure/activate/remove`。
+
+### Changed
+
+- `workspace.list` 返回公开 DTO；配置注册、自动确保、激活和移除均进入统一响应信封与 Request ID 持久幂等。
+- TUI `/workspace` 与 Web 启动/Workspace 列表使用的 bridge 改走共享 Runtime Client，不再直接调用旧 Workspace HTTP 端点。
+
+### Security
+
+- Workspace 根目录继续由 Runtime 规范化并验证为真实目录；访问模式、Provider、Skills 与 MCP 允许列表只由服务端注册表持久化，任务提交时客户端字段不能扩大权限。
+- 公共 Workspace 事件只记录稳定 Workspace ID，不再把根路径写入新事件；公开 DTO 的路径字段保持可选，为后续远程权限裁剪保留语义。
+
 ## [0.21.0-rc4] - 2026-08-11
 
 ### Added

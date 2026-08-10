@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.21.0-rc4
+> 当前实施版本：v0.21.0-rc5
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -115,7 +115,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 7：统一控制 API（v0.21.0）
 
-- [-] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event；Session、Agent、Turn、Task、Approval、Question、Event 已迁移为公开 DTO，Workspace/Tool/Artifact 继续迁移。
+- [-] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event；Workspace、Session、Agent、Turn、Task、Approval、Question、Event 已迁移为公开 DTO，Tool/Artifact 继续迁移。
 - [x] 本地 JSON 请求响应与 NDJSON/流式事件协议；统一 API 使用版本化请求/响应信封，事件流按全局序号补读并逐行输出完整信封。
 - [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
 - [-] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；修改类统一请求使用 Pending→Completed 私有日志跨重启去重，不确定崩溃窗口拒绝自动重放；剩余修改操作迁移待完成。
@@ -230,6 +230,8 @@ v0.21.0-rc2（已完成）：新增受 Token 保护的 `POST /v1/api`、`willdee
 v0.21.0-rc3（已完成）：协议 crate 新增 Session/Turn/Agent/Event 公开 DTO，排除配置路径、队列 Prompt/附件、内部错误等存储字段；统一 API 与 Agent Wait 返回公开结构。公共事件边界兼容净化新旧 Tool 参数/输出、Agent 报告、Workspace 路径和错误。TUI 的 NDJSON 实时事件、Agent 列表/补充 Prompt/停止/重试、审批和回答迁移到共享 Client。下一步迁移 Approval/Question/Task/Diff DTO、Web Client，并实现持久幂等与 Unix Socket/Windows Named Pipe。
 
 v0.21.0-rc4（已完成）：协议新增 Task、Pending Approval/Question DTO 和统一 list/get/cancel 操作；TUI Inbox、Task 取消及 Web/TUI 事件补读迁移到共享 Client。修改类请求以只保存指纹和脱敏响应的 Pending→Completed 日志跨重启去重，Pending 落盘失败时不执行，不确定崩溃窗口不自动重放。下一步迁移 Workspace/Diff/Web 管理操作，并实现 Unix Socket 与 Windows Named Pipe。
+
+v0.21.0-rc5（已完成）：协议新增 Workspace/Access/注册参数公开 DTO，统一 API 补齐 register/ensure/activate/remove 并纳入持久幂等；TUI `/workspace` 与 Web 启动/列表 bridge 迁移到共享 Client。新 Workspace 事件只记录稳定 ID，路径继续由 Runtime 规范化，公开路径保持可选以支持未来远程裁剪。下一步迁移 Diff/Web Session 管理并实现 Unix Socket 与 Windows Named Pipe。
 
 v0.20.0-rc6（已完成）：新增受 Runtime Token 保护的 `worktrees-audit` 与 `quarantine-agent-worktree --snapshot <ID> --yes` API/CLI。审计区分 Active、Reviewable、Merged、Clean、Quarantined、Missing、Unknown；活动、未合并、冲突、未跟踪、快照变化、路径越界或无 Agent 记录全部拒绝隔离。安全对象通过 `git worktree move` 整体迁入 Recovery，文件、脏状态、Git 关联和分支完整保留，持久化失败时尝试原路回滚。验收测试证明两个专属 Worktree 可同时修改同一文件而互不影响，根工作区保持原内容；阶段 6 完成。
 

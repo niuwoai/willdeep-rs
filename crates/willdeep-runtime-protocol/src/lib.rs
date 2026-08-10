@@ -233,6 +233,43 @@ pub struct PendingQuestion {
     pub created_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAccess {
+    ReadOnly,
+    Smart,
+    #[default]
+    WorkspaceWrite,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeWorkspace {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub root: Option<String>,
+    pub access: WorkspaceAccess,
+    pub provider_profile: Option<String>,
+    pub skills: Vec<String>,
+    pub mcp_servers: Vec<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterWorkspaceParams {
+    pub root: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub access: WorkspaceAccess,
+    pub provider_profile: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolLimits {
     pub max_event_page: u32,
@@ -315,6 +352,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "runtime.status",
     "workspace.list",
     "workspace.register",
+    "workspace.ensure",
     "workspace.activate",
     "workspace.remove",
     "session.create",
@@ -533,5 +571,33 @@ mod tests {
         let json = serde_json::to_value(&approval).unwrap();
         assert!(json.get("resolution").is_none());
         assert!(json.get("resolved_at").is_none());
+
+        let workspace = RuntimeWorkspace {
+            id: uuid::Uuid::new_v4(),
+            name: "Project".to_owned(),
+            root: None,
+            access: WorkspaceAccess::WorkspaceWrite,
+            provider_profile: None,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            created_at: 1,
+            updated_at: 2,
+            active: true,
+        };
+        let json = serde_json::to_value(&workspace).unwrap();
+        assert!(json.get("schema").is_none());
+        assert_eq!(json["root"], serde_json::Value::Null);
+        assert!(
+            serde_json::from_value::<RegisterWorkspaceParams>(serde_json::json!({
+                "root": "/workspace",
+                "name": null,
+                "access": "smart",
+                "provider_profile": null,
+                "skills": [],
+                "mcp_servers": [],
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 }

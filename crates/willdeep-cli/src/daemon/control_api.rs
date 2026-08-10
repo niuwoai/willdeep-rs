@@ -118,6 +118,12 @@ struct AnswerQuestionParams {
     answer: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceEnsureParams {
+    root: String,
+}
+
 pub(super) async fn handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -232,7 +238,16 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             "uptime_seconds": now().saturating_sub(state.started_at),
             "event_sequence": state.events.latest_sequence()
         })),
-        "workspace.list" => json_result(state.workspaces.list()),
+        "workspace.list" => json_result(state.workspaces.list().map(|workspaces| {
+            workspaces
+                .into_iter()
+                .map(public_workspace)
+                .collect::<Vec<_>>()
+        })),
+        "workspace.register" => workspace_register(state, &request),
+        "workspace.ensure" => workspace_ensure(state, &request),
+        "workspace.activate" => workspace_activate(state, &request),
+        "workspace.remove" => workspace_remove(state, &request),
         "session.list" => json_result(
             state
                 .sessions
@@ -383,6 +398,10 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "agent.stop"
             | "agent.retry"
             | "task.cancel"
+            | "workspace.register"
+            | "workspace.ensure"
+            | "workspace.activate"
+            | "workspace.remove"
             | "approval.resolve"
             | "question.answer"
     )
@@ -571,6 +590,107 @@ fn public_question(
         multi_select,
         created_at: interaction.created_at,
     })
+}
+
+fn public_workspace(
+    workspace: workspace_store::RuntimeWorkspace,
+) -> willdeep_runtime_protocol::RuntimeWorkspace {
+    willdeep_runtime_protocol::RuntimeWorkspace {
+        id: workspace.id,
+        name: workspace.name,
+        root: Some(workspace.root.to_string_lossy().into_owned()),
+        access: match workspace.access {
+            WorkspaceAccess::ReadOnly => willdeep_runtime_protocol::WorkspaceAccess::ReadOnly,
+            WorkspaceAccess::Smart => willdeep_runtime_protocol::WorkspaceAccess::Smart,
+            WorkspaceAccess::WorkspaceWrite => {
+                willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite
+            }
+        },
+        provider_profile: workspace.provider_profile,
+        skills: workspace.skills,
+        mcp_servers: workspace.mcp_servers,
+        created_at: workspace.created_at,
+        updated_at: workspace.updated_at,
+        active: workspace.active,
+    }
+}
+
+fn workspace_register(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::RegisterWorkspaceParams>(request)?;
+    let access = match params.access {
+        willdeep_runtime_protocol::WorkspaceAccess::ReadOnly => WorkspaceAccess::ReadOnly,
+        willdeep_runtime_protocol::WorkspaceAccess::Smart => WorkspaceAccess::Smart,
+        willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite => {
+            WorkspaceAccess::WorkspaceWrite
+        }
+    };
+    let (workspace, created) = state
+        .workspaces
+        .register(workspace_store::RegisterWorkspace {
+            root: PathBuf::from(params.root),
+            name: params.name,
+            access,
+            provider_profile: params.provider_profile,
+            skills: params.skills,
+            mcp_servers: params.mcp_servers,
+        })
+        .map_err(ApiFailure::internal)?;
+    state
+        .events
+        .append(
+            if created {
+                "workspace.registered"
+            } else {
+                "workspace.updated"
+            },
+            format!("workspace_id={}", workspace.id),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(public_workspace(workspace))
+}
+
+fn workspace_ensure(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<WorkspaceEnsureParams>(request)?;
+    state
+        .workspaces
+        .ensure_registered(Path::new(&params.root))
+        .map(public_workspace)
+        .map_err(ApiFailure::internal)
+        .and_then(json)
+}
+
+fn workspace_activate(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<IdParams>(request)?;
+    let workspace = state
+        .workspaces
+        .activate(params.id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Workspace not found"))?;
+    state
+        .events
+        .append(
+            "workspace.activated",
+            format!("workspace_id={}", workspace.id),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(public_workspace(workspace))
+}
+
+fn workspace_remove(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<IdParams>(request)?;
+    let workspace = state
+        .workspaces
+        .remove(params.id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Workspace not found"))?;
+    state
+        .events
+        .append(
+            "workspace.removed",
+            format!("workspace_id={}", workspace.id),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(serde_json::json!({"id": workspace.id, "status": "removed"}))
 }
 
 async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
