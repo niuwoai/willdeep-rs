@@ -37,14 +37,18 @@ use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
 mod agent_commands;
 mod command_catalog;
+mod diff_review_ui;
 mod dispatch;
+mod rendering;
 mod runtime_ui;
 mod session_commands;
 mod sidebar;
 mod workspace_attention;
 use agent_commands::handle_agent_command;
 use command_catalog::command_candidates;
+use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use rendering::*;
 use runtime_ui::open_remote_gate;
 use session_commands::handle_session_command;
 use sidebar::render_sidebar;
@@ -222,13 +226,6 @@ enum SidebarHit {
 struct TaskDetail {
     snapshot: BackgroundTaskSnapshot,
     output: String,
-}
-
-struct DiffReviewState {
-    snapshot: crate::daemon::diff_review::DiffSnapshot,
-    selected: usize,
-    content: Option<(String, String)>,
-    scroll: usize,
 }
 
 #[derive(Default)]
@@ -478,12 +475,54 @@ async fn event_loop(
                         let mut close=false;
                         let mut open_file=None;
                         if let Some(review)=app.diff_review.as_mut(){
+                            if review.search.is_some() {
+                                match key.code {
+                                    KeyCode::Esc => review.search = None,
+                                    KeyCode::Enter if !review.search_matches.is_empty() => {
+                                        review.search_selected = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                            review.search_selected.checked_sub(1).unwrap_or(review.search_matches.len() - 1)
+                                        } else {
+                                            (review.search_selected + 1) % review.search_matches.len()
+                                        };
+                                        review.scroll = review.search_matches[review.search_selected];
+                                    }
+                                    KeyCode::Left => review.search.as_mut().unwrap().left(),
+                                    KeyCode::Right => review.search.as_mut().unwrap().right(),
+                                    KeyCode::Home => review.search.as_mut().unwrap().home(),
+                                    KeyCode::End => review.search.as_mut().unwrap().end(),
+                                    KeyCode::Backspace => { review.search.as_mut().unwrap().backspace(); refresh_diff_search(review); }
+                                    KeyCode::Delete => { review.search.as_mut().unwrap().delete(); refresh_diff_search(review); }
+                                    KeyCode::Char(value) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER) => {
+                                        review.search.as_mut().unwrap().insert(&value.to_string());
+                                        refresh_diff_search(review);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
                             match key.code {
                                 KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;},
                                 KeyCode::Esc=>close=true,
                                 KeyCode::Up if review.content.is_none()=>review.selected=review.selected.checked_sub(1).unwrap_or(review.snapshot.files.len().saturating_sub(1)),
                                 KeyCode::Down if review.content.is_none()&&!review.snapshot.files.is_empty()=>review.selected=(review.selected+1)%review.snapshot.files.len(),
-                                KeyCode::Enter if review.content.is_none()=>open_file=review.snapshot.files.get(review.selected).map(|file|(review.snapshot.id.clone(),file.path.clone())),
+                                KeyCode::Enter if review.content.is_none()=>open_file=review.snapshot.files.get(review.selected).map(|file|(review.snapshot.id.clone(),file.path.clone(),review.area)),
+                                KeyCode::Char('v')|KeyCode::Char('V') if review.content.is_some()=>{
+                                    review.view=match review.view {DiffViewMode::Unified=>DiffViewMode::SideBySide,DiffViewMode::SideBySide=>DiffViewMode::Unified};
+                                    refresh_diff_search(review);
+                                },
+                                KeyCode::Char('s')|KeyCode::Char('S') if review.content.is_some()=>{
+                                    review.area=next_diff_area(review.area);
+                                    open_file=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),review.area));
+                                },
+                                KeyCode::Char('/') if review.content.is_some()=>review.search=Some(PromptEditor::default()),
+                                KeyCode::Char('n') if !review.search_matches.is_empty()=>{
+                                    review.search_selected=(review.search_selected+1)%review.search_matches.len();
+                                    review.scroll=review.search_matches[review.search_selected];
+                                },
+                                KeyCode::Char('N') if !review.search_matches.is_empty()=>{
+                                    review.search_selected=review.search_selected.checked_sub(1).unwrap_or(review.search_matches.len()-1);
+                                    review.scroll=review.search_matches[review.search_selected];
+                                },
                                 KeyCode::Up=>review.scroll=review.scroll.saturating_sub(1),
                                 KeyCode::Down=>review.scroll=review.scroll.saturating_add(1),
                                 KeyCode::PageUp=>review.scroll=review.scroll.saturating_sub(10),
@@ -493,9 +532,9 @@ async fn event_loop(
                             }
                         }
                         if close{app.diff_review=None;continue;}
-                        if let Some((snapshot_id,path))=open_file{
-                            match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,crate::daemon::diff_review::DiffArea::Combined).await{
-                                Ok(content)=>if let Some(review)=app.diff_review.as_mut(){review.content=Some((path,content));review.scroll=0;},
+                        if let Some((snapshot_id,path,area))=open_file{
+                            match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,area).await{
+                                Ok(content)=>if let Some(review)=app.diff_review.as_mut(){review.content=Some((path,content));review.scroll=0;review.search_matches.clear();review.search_selected=0;},
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("打开 Diff 失败","Open Diff failed","Diff を開けませんでした"))),
                             }
                         }
@@ -626,7 +665,17 @@ async fn event_loop(
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if prompt.trim()=="/diff" {
                                 match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
-                                    Ok(snapshot)=>app.diff_review=Some(DiffReviewState{snapshot,selected:0,content:None,scroll:0}),
+                                    Ok(snapshot)=>app.diff_review=Some(DiffReviewState{
+                                        snapshot,
+                                        selected:0,
+                                        content:None,
+                                        scroll:0,
+                                        area:crate::daemon::diff_review::DiffArea::Combined,
+                                        view:DiffViewMode::Unified,
+                                        search:None,
+                                        search_matches:Vec::new(),
+                                        search_selected:0,
+                                    }),
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
                                 }
                                 continue;
@@ -2406,7 +2455,24 @@ fn draw(
                 f.area(),
             );
             let title = if let Some((path, _)) = &review.content {
-                format!("Diff · {path} · ↑/↓/PgUp/PgDn · Esc")
+                let area = match review.area {
+                    crate::daemon::diff_review::DiffArea::Combined => "Combined",
+                    crate::daemon::diff_review::DiffArea::Staged => "Staged",
+                    crate::daemon::diff_review::DiffArea::Unstaged => "Unstaged",
+                };
+                let view = match review.view {
+                    DiffViewMode::Unified => "Unified",
+                    DiffViewMode::SideBySide => "Side-by-side",
+                };
+                let search = review.search.as_ref().map_or_else(String::new, |editor| {
+                    format!(
+                        " · /{} · {}/{}",
+                        editor.text(),
+                        review.search_selected.saturating_add(1).min(review.search_matches.len()),
+                        review.search_matches.len()
+                    )
+                });
+                format!("Diff · {path} · {area} · {view}{search} · V view · S scope · / search · Esc")
             } else {
                 format!(
                     "Diff Review · {} files · +{} -{} · ↑/↓ Enter · Esc",
@@ -2416,7 +2482,17 @@ fn draw(
                 )
             };
             let lines = if let Some((_, content)) = &review.content {
-                let lines = diff_review_lines(content);
+                let query = review
+                    .search
+                    .as_ref()
+                    .map(|editor| editor.text().trim())
+                    .filter(|query| !query.is_empty());
+                let lines = match review.view {
+                    DiffViewMode::Unified => diff_review_lines(content, query),
+                    DiffViewMode::SideBySide => {
+                        diff_side_by_side_lines(content, popup.width.saturating_sub(2), query)
+                    }
+                };
                 let viewport = popup.height.saturating_sub(2) as usize;
                 review.scroll = review
                     .scroll
@@ -2877,320 +2953,11 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-fn diff_review_lines(content: &str) -> Vec<Line<'static>> {
-    content
-        .lines()
-        .map(|line| {
-            let color = if line.starts_with("+++") || line.starts_with("---") {
-                Color::Cyan
-            } else if line.starts_with('+') {
-                Color::Green
-            } else if line.starts_with('-') {
-                Color::Red
-            } else if line.starts_with("@@") {
-                Color::Yellow
-            } else {
-                Color::Gray
-            };
-            Line::styled(line.to_owned(), Style::default().fg(color))
-        })
-        .collect()
-}
-
 pub fn channel() -> (
     mpsc::UnboundedSender<UiMessage>,
     mpsc::UnboundedReceiver<UiMessage>,
 ) {
     mpsc::unbounded_channel()
 }
-fn colored_transcript(entries: &[String], search_query: Option<&str>) -> Text<'static> {
-    let mut lines = Vec::new();
-    for value in entries {
-        if let Some(content) = value.strip_prefix("WillDeep: ") {
-            lines.extend(render_assistant_markdown(content));
-            continue;
-        }
-        let style = if value.starts_with("You:") {
-            Style::default().fg(Color::Cyan)
-        } else if value.starts_with("Error:") {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Yellow)
-        };
-        lines.extend(
-            value
-                .lines()
-                .map(|line| Line::styled(line.to_owned(), style)),
-        );
-    }
-    let mut text = Text::from(lines);
-    if let Some(query) = search_query {
-        highlight_matches(&mut text, query);
-    }
-    text
-}
-
-fn highlight_matches(text: &mut Text<'static>, query: &str) {
-    let Ok(pattern) = RegexBuilder::new(&regex::escape(query))
-        .case_insensitive(true)
-        .build()
-    else {
-        return;
-    };
-    let highlight = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    for line in &mut text.lines {
-        let spans = std::mem::take(&mut line.spans);
-        line.spans = spans
-            .into_iter()
-            .flat_map(|span| {
-                let value = span.content.into_owned();
-                let mut output = Vec::new();
-                let mut offset = 0;
-                for found in pattern.find_iter(&value) {
-                    if found.start() > offset {
-                        output.push(Span::styled(
-                            value[offset..found.start()].to_owned(),
-                            span.style,
-                        ));
-                    }
-                    output.push(Span::styled(
-                        value[found.start()..found.end()].to_owned(),
-                        span.style.patch(highlight),
-                    ));
-                    offset = found.end();
-                }
-                if offset < value.len() {
-                    output.push(Span::styled(value[offset..].to_owned(), span.style));
-                }
-                if output.is_empty() {
-                    output.push(Span::styled(value, span.style));
-                }
-                output
-            })
-            .collect();
-    }
-}
-
-fn rendered_transcript_height(entries: &[String], width: usize) -> usize {
-    Paragraph::new(colored_transcript(entries, None))
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1).min(u16::MAX as usize) as u16)
-}
-
-fn render_assistant_markdown(content: &str) -> Vec<Line<'static>> {
-    let mut output = Vec::new();
-    let mut code_block = false;
-    for (index, raw) in content.lines().enumerate() {
-        if raw.trim_start().starts_with("```") {
-            code_block = !code_block;
-            continue;
-        }
-        let prefix = (index == 0).then(|| {
-            Span::styled(
-                "WillDeep: ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
-        let mut spans = Vec::new();
-        if let Some(prefix) = prefix {
-            spans.push(prefix);
-        }
-        if code_block {
-            spans.push(Span::styled(
-                raw.to_owned(),
-                Style::default().fg(Color::White).bg(Color::DarkGray),
-            ));
-        } else {
-            let trimmed = raw.trim_start();
-            let (marker, body, base) = if let Some(body) = trimmed.strip_prefix("### ") {
-                (
-                    "▸ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("## ") {
-                (
-                    "◆ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("# ") {
-                (
-                    "■ ",
-                    body,
-                    Style::default()
-                        .fg(Color::LightYellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("> ") {
-                (
-                    "│ ",
-                    body,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )
-            } else if let Some(body) = trimmed
-                .strip_prefix("- ")
-                .or_else(|| trimmed.strip_prefix("* "))
-            {
-                ("• ", body, Style::default().fg(Color::Green))
-            } else {
-                ("", raw, Style::default().fg(Color::Green))
-            };
-            if !marker.is_empty() {
-                spans.push(Span::styled(marker, base));
-            }
-            spans.extend(render_inline_markdown(body, base));
-        }
-        output.push(Line::from(spans));
-    }
-    if output.is_empty() {
-        output.push(Line::styled("WillDeep:", Style::default().fg(Color::Green)));
-    }
-    output
-}
-
-fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut rest = value;
-    while !rest.is_empty() {
-        let bold = rest.find("**").map(|index| (index, "bold"));
-        let code = rest.find('`').map(|index| (index, "code"));
-        let link = rest.find('[').map(|index| (index, "link"));
-        let Some((index, kind)) = [bold, code, link]
-            .into_iter()
-            .flatten()
-            .min_by_key(|item| item.0)
-        else {
-            spans.push(Span::styled(rest.to_owned(), base));
-            break;
-        };
-        if index > 0 {
-            spans.push(Span::styled(rest[..index].to_owned(), base));
-            rest = &rest[index..];
-        }
-        match kind {
-            "bold" if rest[2..].find("**").is_some() => {
-                let end = rest[2..].find("**").unwrap() + 2;
-                spans.push(Span::styled(
-                    rest[2..end].to_owned(),
-                    base.add_modifier(Modifier::BOLD),
-                ));
-                rest = &rest[end + 2..];
-            }
-            "code" if rest[1..].find('`').is_some() => {
-                let end = rest[1..].find('`').unwrap() + 1;
-                spans.push(Span::styled(
-                    rest[1..end].to_owned(),
-                    Style::default().fg(Color::LightCyan).bg(Color::DarkGray),
-                ));
-                rest = &rest[end + 1..];
-            }
-            "link" if rest.find("](").is_some() => {
-                let label_end = rest.find("](").unwrap();
-                if let Some(url_end) = rest[label_end + 2..].find(')') {
-                    let url_end = label_end + 2 + url_end;
-                    spans.push(Span::styled(
-                        rest[1..label_end].to_owned(),
-                        Style::default()
-                            .fg(Color::LightBlue)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ));
-                    spans.push(Span::styled(
-                        format!(" ({})", &rest[label_end + 2..url_end]),
-                        base,
-                    ));
-                    rest = &rest[url_end + 1..];
-                } else {
-                    spans.push(Span::styled(rest[..1].to_owned(), base));
-                    rest = &rest[1..];
-                }
-            }
-            _ => {
-                spans.push(Span::styled(rest[..1].to_owned(), base));
-                rest = &rest[1..];
-            }
-        }
-    }
-    spans
-}
-fn compact_thought(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut compact = normalized.chars().take(180).collect::<String>();
-    if normalized.chars().count() > 180 {
-        compact.push('…');
-    }
-    compact
-}
-fn visual_lines(text: &str, width: usize) -> usize {
-    let width = width.max(1);
-    text.split('\n')
-        .map(|line| {
-            line.chars()
-                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-                .sum::<usize>()
-                .max(1)
-                .div_ceil(width)
-        })
-        .sum()
-}
-
-fn question_option_row(popup_y: u16, question: &str, width: usize, index: usize) -> u16 {
-    popup_y
-        .saturating_add(2)
-        .saturating_add(visual_lines(question, width).min(u16::MAX as usize) as u16)
-        .saturating_add(index.min(u16::MAX as usize) as u16)
-}
-
-fn transcript(messages: &[Message]) -> Vec<String> {
-    messages
-        .iter()
-        .filter_map(|message| match message.role {
-            willdeep_core::Role::User => Some(format!(
-                "You: {}{}",
-                message.content,
-                if message.attachments.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{} attachment(s)]", message.attachments.len())
-                }
-            )),
-            willdeep_core::Role::Assistant if !message.content.trim().is_empty() => {
-                Some(format!("WillDeep: {}", message.content))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn welcome_message(workspace: &std::path::Path, language: Language) -> String {
-    let project = workspace
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(language.text("当前工作区", "current workspace", "現在のワークスペース"));
-    match language {
-        Language::ZhCn => format!(
-            "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
-        ),
-        Language::En => format!(
-            "WillDeep: Hello, I’m in {project}. Tell me what you want to build, fix, or investigate; I’ll inspect the project before making changes."
-        ),
-        Language::Ja => format!(
-            "WillDeep: こんにちは。{project} を開きました。実装、修正、調査したいことを教えてください。まずプロジェクトを確認してから作業します。"
-        ),
-    }
-}
-
 #[cfg(test)]
 mod test_suite;

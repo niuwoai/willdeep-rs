@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-10
-> 当前实施版本：v0.19.0-rc1
+> 当前实施版本：v0.19.0-rc2
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -97,7 +97,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 ### 阶段 5：Diff 与 Review Center（v0.19.0）
 
 - [-] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；当前已完成 Workspace 内容指纹快照和文件级状态，待绑定 Turn/Agent。
-- [-] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；当前已完成 Unified Diff、着色、滚动和文件导航。
+- [x] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；支持 Combined/Staged/Unstaged 范围切换和 Unicode 宽度安全双栏。
 - [ ] 接受、打回、请求重改、标记已审和安全撤销单文件。
 - [ ] 测试命令、退出码、失败摘要与变更集绑定。
 - [ ] Commit Preview、敏感文件检查、Tag 和推送目标确认。
@@ -223,7 +223,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.19.0-rc1（已完成）：Diff Review Center 首批加入带内容指纹的 Workspace 快照、受 Token 保护的 Runtime/CLI 文件 Diff API，以及 TUI `/diff` 文件导航、滚动和 Unified Diff 着色；路径穿越、符号链接逃逸、陈旧快照和超大输出均保守拒绝或限制。下一步补齐 Turn/Agent 绑定、Side-by-side、搜索和审查决策。
+v0.19.0-rc2（已完成）：TUI Diff Review 加入 Unified/Side-by-side 双视图、Combined/Staged/Unstaged 范围切换、当前文件搜索、高亮和前后跳转；Diff 与通用渲染逻辑拆分后主 TUI 文件降至 3000 行以内。下一步实现审查决策与不覆盖用户修改的单文件安全撤销。
+
+v0.19.0-rc1（已完成）：Diff Review Center 首批加入带内容指纹的 Workspace 快照、受 Token 保护的 Runtime/CLI 文件 Diff API，以及 TUI `/diff` 文件导航、滚动和 Unified Diff 着色；路径穿越、符号链接逃逸、陈旧快照和超大输出均保守拒绝或限制。
 
 v0.18.0-rc3（已完成）：Agent Mission Control 第二批加入有界结果报告持久化、CLI/TUI 独立 Agent 详情、运行中追加指令，以及补充指令正文投递后清除的脱敏审计。
 

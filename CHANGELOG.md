@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.19.0-rc2] - 2026-08-10
+
+### Added
+
+- TUI Diff Review 新增 Unified/Side-by-side 双视图；并排模式将相邻删除与新增行配对，按 Unicode 显示宽度截断和补齐双栏。
+- 新增 Combined/Staged/Unstaged 范围循环切换，以及当前文件增量搜索、匹配高亮和前后跳转。
+
+### Changed
+
+- 将 Diff Review 状态/渲染与聊天 Markdown 渲染拆分为独立 TUI 模块，主文件降至 3000 行以内。
+
 ## [0.19.0-rc1] - 2026-08-10
 
 ### Added

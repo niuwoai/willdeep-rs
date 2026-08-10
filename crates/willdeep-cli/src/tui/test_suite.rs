@@ -217,6 +217,40 @@ mod tests {
         assert!(app.transcript.is_empty());
     }
     #[test]
+    fn command_menu_discovers_diff_review() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/dif");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/diff");
+    }
+    #[test]
+    fn side_by_side_diff_pairs_replacements_and_preserves_cjk_width() {
+        let rows = diff_side_by_side_rows("@@ -1 +1 @@\n-old 中文\n+new 中文\n context", 43);
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1].contains("-old 中文"));
+        assert!(rows[1].contains("+new 中文"));
+        assert_eq!(UnicodeWidthStr::width(rows[1].as_str()), 43);
+    }
+    #[test]
+    fn diff_area_cycles_without_skipping_a_scope() {
+        use crate::daemon::diff_review::DiffArea;
+
+        assert!(matches!(
+            next_diff_area(DiffArea::Combined),
+            DiffArea::Staged
+        ));
+        assert!(matches!(
+            next_diff_area(DiffArea::Staged),
+            DiffArea::Unstaged
+        ));
+        assert!(matches!(
+            next_diff_area(DiffArea::Unstaged),
+            DiffArea::Combined
+        ));
+    }
+    #[test]
     fn session_fork_options_select_turn_provider_model_and_title() {
         let turn_id = uuid::Uuid::new_v4();
         let options = session_commands::parse_fork_options(&format!(
