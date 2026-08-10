@@ -51,6 +51,82 @@ pub(crate) struct RemoteRuntimeEvent {
     pub visible: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct RemoteRuntimeSession {
+    pub id: uuid::Uuid,
+    pub root_agent_id: uuid::Uuid,
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteRuntimeTurn {
+    pub id: uuid::Uuid,
+}
+
+pub(crate) async fn ensure_runtime_session(
+    home: &Path,
+    id: uuid::Uuid,
+    workspace: &Path,
+    profile: Option<String>,
+    config: Option<PathBuf>,
+    title: String,
+) -> Result<RemoteRuntimeSession> {
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!("http://{}/v1/sessions", state.address))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&session_store::CreateRuntimeSession {
+            id: Some(id),
+            workspace: workspace.canonicalize()?,
+            profile,
+            config,
+            title: Some(title),
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime rejected Session adoption: {}",
+            response.text().await?
+        );
+    }
+    let session: session_store::RuntimeSession = response.json().await?;
+    Ok(RemoteRuntimeSession {
+        id: session.id,
+        root_agent_id: session.root_agent_id,
+    })
+}
+
+pub(crate) async fn submit_runtime_turn(
+    home: &Path,
+    session_id: uuid::Uuid,
+    prompt: String,
+    attachments: Vec<willdeep_core::MessageAttachment>,
+) -> Result<RemoteRuntimeTurn> {
+    if prompt.trim().is_empty() && attachments.is_empty() {
+        bail!("Runtime Turn prompt and attachments must not both be empty");
+    }
+    let request_id = uuid::Uuid::new_v4();
+    let state = ensure_running(home).await?;
+    let response = client()
+        .post(format!(
+            "http://{}/v1/sessions/{session_id}/turns",
+            state.address
+        ))
+        .header(TOKEN_HEADER, &state.token)
+        .json(&session_store::CreateRuntimeTurn {
+            request_id,
+            prompt,
+            attachments,
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!("Runtime rejected Turn: {}", response.text().await?);
+    }
+    let turn: session_store::RuntimeTurn = response.json().await?;
+    Ok(RemoteRuntimeTurn { id: turn.id })
+}
+
 pub(crate) async fn runtime_event_head(home: &Path) -> Result<u64> {
     let state = match load_state(&DaemonPaths::new(home).state) {
         Ok(state) => state,

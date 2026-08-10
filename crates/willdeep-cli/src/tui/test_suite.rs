@@ -555,6 +555,62 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn runtime_managed_session_reloads_core_history_at_turn_terminal() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-managed-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut persisted = Session::new(root.clone(), None, "runtime managed");
+        persisted.runtime_managed = true;
+        store.save(&mut persisted).unwrap();
+        let mut visible = persisted.clone();
+        persisted.messages = vec![
+            Message::user("question"),
+            Message::assistant("answer", Vec::new()),
+        ];
+        store.save(&mut persisted).unwrap();
+        let mut app = App::new(Vec::new(), Language::En);
+        let task_id = uuid::Uuid::new_v4();
+        let output = crate::daemon::RemoteRuntimeEvent {
+            sequence: 1,
+            kind: "task.output".to_owned(),
+            message: format!(
+                "task_id={task_id} {}",
+                serde_json::json!({"type":"completed","text":"answer"})
+            ),
+            visible: true,
+        };
+        let terminal = crate::daemon::RemoteRuntimeEvent {
+            sequence: 2,
+            kind: "turn.completed".to_owned(),
+            message: format!(
+                "session_id={} turn_id={} task_id={task_id}",
+                visible.id,
+                uuid::Uuid::new_v4()
+            ),
+            visible: true,
+        };
+
+        runtime_ui::apply_runtime_events(&mut app, vec![output, terminal], &mut visible, &store)
+            .unwrap();
+        assert_eq!(
+            transcript(&visible.messages),
+            vec!["You: question", "WillDeep: answer"]
+        );
+        assert_eq!(visible.runtime_event_cursor, 2);
+        assert_eq!(
+            app.transcript
+                .iter()
+                .filter(|line| line.contains("answer"))
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn runtime_events_render_child_agent_activity() {
         let root = std::env::temp_dir().join(format!(

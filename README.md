@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.16.0-rc10`，支持：
+当前版本为 `0.17.0-rc1`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -76,6 +76,8 @@ Runtime 事件按递增序号写入私有 NDJSON 日志。`GET /v1/events/stream
 `daemon submit` 会在必要时自动启动 Runtime，并立即返回任务 ID。Prompt 通过 stdin 传给 Harness，不会出现在进程参数中。任务执行、模型输出、最终 session_id 和终态都可以在 `attach` 事件流中恢复；`daemon cancel` 可停止仍在运行的任务。
 
 `daemon create-session` 创建长期 Runtime Session，并同时建立同 ID 的 Core Session 和生命周期稳定的 Root Agent。`submit-turn` 使用客户端 `request_id` 幂等入队；同一 Session 的 Turn 严格串行，不同 Session 可并发。成功 Turn 写入 Core Session 后会清除队列中的私密 Prompt/附件副本；`stop-turn` 可取消排队中或运行中的 Turn。Daemon 重启后排队项继续调度，遗留活动项明确标记为 Interrupted。
+
+TUI 的 `/runtime <任务>` 会幂等收养当前 Core Session，并把输入作为该长期 Session 的新 Turn；重新进入同一 TUI 会话后继续复用原 Root Agent 和历史上下文。用户输入立即显示，消息文件只由后台 Harness 写入，Turn 结束时 TUI 从唯一 Core Session 历史同步，避免前后台双写产生重复或丢消息。
 
 后台 Harness 需要审批或调用 `ask_user` 时会进入 WaitingApproval/WaitingAnswer。`daemon pending` 查看待处理项，使用 `resolve` 或 `answer` 后，原任务从等待点继续。Runtime 控制 Token 只通过启动时私有 stdin 进入 Harness 内存，不会作为环境变量传给 Shell 或 MCP。
 

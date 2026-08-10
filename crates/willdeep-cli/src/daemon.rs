@@ -35,8 +35,8 @@ use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    resolve_remote_approval, retry_remote_agent, runtime_event_head, runtime_snapshot,
-    start_runtime_event_follower, stop_remote_agent,
+    ensure_runtime_session, resolve_remote_approval, retry_remote_agent, runtime_event_head,
+    runtime_snapshot, start_runtime_event_follower, stop_remote_agent, submit_runtime_turn,
 };
 
 #[derive(Clone, Debug, Subcommand)]

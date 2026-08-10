@@ -542,18 +542,23 @@ async fn event_loop(
                                 let remote_prompt=prompt.trim().strip_prefix("/runtime").unwrap_or_default().trim().to_owned();
                                 let attachments:Vec<MessageAttachment>=std::mem::take(&mut app.attachments).into_iter().map(|value|value.message).collect();
                                 let remote_prompt=app.enrich_prompt(&remote_prompt,&runtime.skills);
-                                let user_message=Message::user_with_attachments(prompt.clone(),attachments.clone());
-                                match crate::daemon::submit_runtime_prompt(&runtime.home,&runtime.runtime_submit,remote_prompt,attachments).await {
-                                    Ok(task)=>{
-                                        session.messages.push(user_message);
+                                let event_head=crate::daemon::runtime_event_head(&runtime.home).await.unwrap_or(app.runtime_event_cursor);
+                                match crate::daemon::ensure_runtime_session(&runtime.home,session.id,&session.workspace,session.profile.clone(),Some(runtime.runtime_submit.config.clone().unwrap_or_else(||runtime.home.join("config.toml"))),session.title.clone()).await {
+                                    Ok(remote_session)=>{
+                                        session.runtime_managed=true;
                                         if app.runtime_event_cursor==0 {
-                                            app.runtime_event_cursor=task.event_start_sequence.saturating_sub(1);
-                                            session.runtime_event_cursor=app.runtime_event_cursor;
+                                            app.runtime_event_cursor=event_head;
+                                            session.runtime_event_cursor=event_head;
                                         }
+                                        // Persist ownership before scheduling the Turn. A very fast
+                                        // Harness must never be overwritten by this client's stale history.
                                         store.save(session)?;
-                                        app.append_transcript(format!("System: {} {}",language.text("已提交 Runtime 任务","Runtime task submitted","Runtime タスクを送信しました"),task.id));
+                                        match crate::daemon::submit_runtime_turn(&runtime.home,remote_session.id,remote_prompt,attachments).await {
+                                            Ok(turn)=>app.append_transcript(format!("System: {} {} · Agent {}",language.text("已提交 Runtime 轮次","Runtime turn submitted","Runtime ターンを送信しました"),turn.id,remote_session.root_agent_id)),
+                                            Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
+                                        }
                                     },
-                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 任务失败","Submit Runtime task failed","Runtime タスクの送信に失敗"))),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("绑定 Runtime 会话失败","Bind Runtime session failed","Runtime セッションの接続に失敗"))),
                                 }
                                 continue;
                             }

@@ -285,6 +285,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     let sessions = test_runtime_session_store(&root);
     let session = sessions
         .create(session_store::CreateRuntimeSession {
+            id: None,
             workspace: workspace.clone(),
             profile: None,
             config: None,

@@ -8,23 +8,52 @@ pub(super) fn apply_runtime_events(
 ) -> Result<()> {
     events.sort_by_key(|event| event.sequence);
     let mut advanced = false;
+    let mut reload_runtime_session = false;
     for event in events {
         if event.sequence <= app.runtime_event_cursor {
             continue;
         }
         if event.visible
             && let Some(message) = apply_runtime_event(app, &event)
+            && !session.runtime_managed
         {
             session.messages.push(message);
+        }
+        if event.visible
+            && session.runtime_managed
+            && matches!(
+                event.kind.as_str(),
+                "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.interrupted"
+            )
+            && runtime_event_session_id(&event.message) == Some(session.id)
+        {
+            reload_runtime_session = true;
         }
         app.runtime_event_cursor = event.sequence;
         advanced = true;
     }
     if advanced {
-        session.runtime_event_cursor = app.runtime_event_cursor;
+        if reload_runtime_session {
+            let attention_read = session.attention_read.clone();
+            let mut latest = store.load(session.id)?;
+            latest.attention_read.extend(attention_read);
+            latest.runtime_managed = true;
+            latest.runtime_event_cursor = app.runtime_event_cursor;
+            *session = latest;
+        } else {
+            session.runtime_event_cursor = app.runtime_event_cursor;
+        }
         store.save(session)?;
     }
     Ok(())
+}
+
+fn runtime_event_session_id(message: &str) -> Option<uuid::Uuid> {
+    message.split_whitespace().find_map(|field| {
+        field
+            .strip_prefix("session_id=")
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+    })
 }
 
 fn apply_runtime_event(

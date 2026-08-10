@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc1] - 2026-08-10
+
+### Added
+
+- Runtime 可幂等收养现有 Core Session，保持 Session ID、历史消息、Workspace 和稳定 Root Agent 身份不变。
+
+### Changed
+
+- TUI `/runtime` 改为向当前长期 Runtime Session 提交 Turn，不再为每轮创建彼此孤立的一次性 Runtime Task。
+- Runtime 托管会话由 Harness 独占写入消息历史；TUI 立即显示用户输入，并在 Turn 终态从 Core Session 同步完整历史，避免重复消息或覆盖后台上下文。
+- TUI 在调度 Turn 前持久化 Runtime 托管标记和事件游标，避免极快 Provider 完成后被客户端旧会话快照覆盖。
+
 ## [0.16.0-rc10] - 2026-08-10
 
 ### Added

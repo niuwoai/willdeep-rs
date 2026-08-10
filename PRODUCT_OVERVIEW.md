@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-10 | 当前版本：v0.16.0-rc10
+> 最后更新：2026-08-10 | 当前版本：v0.17.0-rc1
 
 ## 项目简介
 
@@ -38,6 +38,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 非交互 Harness 可通过 Runtime 提交、查询和取消；Daemon 持有进程生命周期并把模型输出、session_id 和终态写入可续传事件流；
 - Runtime 使用单实例租约锁协调并发启动，重启时将遗留运行任务标记为 Interrupted，停止时取消仍在运行的任务；
 - Runtime Session/Turn API 与 CLI 提供稳定 Root Agent、幂等请求 ID、持久严格串行队列、排队/运行取消、终态事件和重启恢复；成功后 Core Session 保留唯一消息历史并清除队列私密正文；
+- TUI `/runtime` 幂等收养当前 Core Session 并提交长期 Session Turn；即时展示输入，终态从 Harness 独占写入的 Core 历史同步，恢复 TUI 后继续同一 Root Agent 且不会双写消息；
 - Runtime 托管任务支持持久审批和 ask_user 待处理项，可由其他 CLI 客户端允许、拒绝或自由回答后继续原 Harness；
 - TUI 右栏统一展示 Runtime 任务与待处理项，支持远端审批、回答和停止；Composer 可用 `/runtime` 提交含文本或图片附件的可分离任务；
 - TUI 按 Session 事件游标补读当前 Workspace 的 Runtime 模型、工具、用量与完成事件；用户请求和正式回复写入会话，退出重连后完整恢复且不重复；

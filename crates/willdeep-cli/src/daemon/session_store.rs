@@ -32,6 +32,8 @@ pub(crate) struct RuntimeSession {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CreateRuntimeSession {
+    #[serde(default)]
+    pub id: Option<uuid::Uuid>,
     pub workspace: PathBuf,
     #[serde(default)]
     pub profile: Option<String>,
@@ -154,18 +156,43 @@ impl RuntimeSessionStore {
         })
     }
 
+    #[cfg(test)]
     pub fn create(&self, request: CreateRuntimeSession) -> Result<RuntimeSession> {
+        Ok(self.ensure(request)?.0)
+    }
+
+    pub fn ensure(&self, request: CreateRuntimeSession) -> Result<(RuntimeSession, bool)> {
         let workspace = request
             .workspace
             .canonicalize()
             .with_context(|| format!("invalid workspace: {}", request.workspace.display()))?;
-        let title = request
-            .title
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "New Runtime session".to_owned());
-        let mut core =
-            willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
-        self.core.save(&mut core)?;
+        if let Some(id) = request.id
+            && let Some(existing) = self.get(id)?
+        {
+            if existing.workspace != workspace {
+                bail!("Runtime Session workspace does not match existing metadata");
+            }
+            return Ok((existing, false));
+        }
+        let core = if let Some(id) = request.id {
+            let core = self
+                .core
+                .load(id)
+                .with_context(|| format!("adopt Core Session {id}"))?;
+            if core.workspace.canonicalize()? != workspace {
+                bail!("Core Session workspace does not match Runtime Session request");
+            }
+            core
+        } else {
+            let title = request
+                .title
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "New Runtime session".to_owned());
+            let mut core =
+                willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
+            self.core.save(&mut core)?;
+            core
+        };
         let timestamp = now();
         let session = RuntimeSession {
             schema: RUNTIME_SESSION_SCHEMA,
@@ -186,7 +213,7 @@ impl RuntimeSessionStore {
             sessions.remove(&session.id);
             return Err(error);
         }
-        Ok(session)
+        Ok((session, true))
     }
 
     pub fn list(&self) -> Result<Vec<RuntimeSession>> {
@@ -526,21 +553,31 @@ pub(super) async fn create_session_handler(
     Json(request): Json<CreateRuntimeSession>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
-    let session = state.sessions.create(request).map_err(|error| {
+    let (session, created) = state.sessions.ensure(request).map_err(|error| {
         eprintln!("create Runtime Session: {error:#}");
         StatusCode::BAD_REQUEST
     })?;
-    state
-        .events
-        .append(
-            "session.created",
-            format!(
-                "session_id={} agent_id={}",
-                session.id, session.root_agent_id
-            ),
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::CREATED, Json(session)).into_response())
+    if created {
+        state
+            .events
+            .append(
+                "session.created",
+                format!(
+                    "session_id={} agent_id={}",
+                    session.id, session.root_agent_id
+                ),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    Ok((
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(session),
+    )
+        .into_response())
 }
 
 pub(super) async fn session_handler(
@@ -699,6 +736,7 @@ pub(super) async fn create_session_cli(
         .post(format!("http://{}/v1/sessions", state.address))
         .header(TOKEN_HEADER, &state.token)
         .json(&CreateRuntimeSession {
+            id: None,
             workspace: workspace
                 .unwrap_or(std::env::current_dir()?)
                 .canonicalize()?,
@@ -888,6 +926,7 @@ mod tests {
         let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
         let session = store
             .create(CreateRuntimeSession {
+                id: None,
                 workspace: workspace.clone(),
                 profile: Some("some-im".to_owned()),
                 config: Some(root.join("config.toml")),
@@ -918,6 +957,38 @@ mod tests {
     }
 
     #[test]
+    fn adopts_an_existing_core_session_idempotently() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-runtime-adopt-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let core_store = willdeep_core::SessionStore::new(&root);
+        let mut core = willdeep_core::Session::new(
+            workspace.canonicalize().unwrap(),
+            Some("mock".to_owned()),
+            "existing",
+        );
+        core_store.save(&mut core).unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let request = || CreateRuntimeSession {
+            id: Some(core.id),
+            workspace: workspace.clone(),
+            profile: Some("mock".to_owned()),
+            config: Some(root.join("config.toml")),
+            title: Some("ignored for adoption".to_owned()),
+        };
+
+        let (adopted, created) = store.ensure(request()).unwrap();
+        assert!(created);
+        assert_eq!(adopted.id, core.id);
+        let (same, created) = store.ensure(request()).unwrap();
+        assert!(!created);
+        assert_eq!(same, adopted);
+        assert_eq!(store.list().unwrap(), vec![adopted]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn turn_queue_is_idempotent_strictly_serial_and_persistent() {
         let root =
             std::env::temp_dir().join(format!("willdeep-runtime-turns-{}", uuid::Uuid::new_v4()));
@@ -927,6 +998,7 @@ mod tests {
         let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
         let session = store
             .create(CreateRuntimeSession {
+                id: None,
                 workspace,
                 profile: None,
                 config: None,
@@ -1016,6 +1088,7 @@ mod tests {
         let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
         let session = store
             .create(CreateRuntimeSession {
+                id: None,
                 workspace,
                 profile: None,
                 config: None,
