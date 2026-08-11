@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc35] - 2026-08-11
+
+### Added
+
+- Core Session 新增向后兼容的模型字段，与 Provider Profile、配置引用一起成为客户端恢复当前会话执行设置的来源。
+- 重启后领取排队 Turn 的测试验证 Runtime Session 会恢复原 Provider Profile、模型和配置，而不是使用新客户端的启动默认值。
+
+### Fixed
+
+- TUI 切换 Session 后同步目标会话的 Provider、模型和配置；提交下一轮时使用目标 Session 模型，避免沿用 TUI 启动参数。
+- Workspace 切换不再覆盖已有目标 Session 的配置或模型；新会话才继承当前启动默认值。
+
+### Security
+
+- Skills 与 MCP 权限不从历史 Session 快照恢复，而是在每个 Runtime Task 开始前从当前持久 Workspace 策略重新绑定，防止旧会话恢复已经撤销的能力。
+
 ## [0.21.0-rc34] - 2026-08-11
 
 ### Changed

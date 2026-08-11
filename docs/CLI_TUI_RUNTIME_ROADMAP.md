@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc34
+> 当前实施版本：v0.21.0-rc35
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -77,7 +77,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
 - [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
 - [x] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 支持同 Workspace 原地切换并按 Session 隔离聊天事件。
-- [-] Goal 已按 Core Session 持久恢复；Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点继续补齐。
+- [-] Goal、Provider Profile、模型和配置已按 Session 恢复；Skills/MCP 按当前持久 Workspace 策略重新绑定。Agent 树、任务、审批、Worktree、Token 和压缩点继续补齐。
 - [x] 已按持久消息边界支持从指定已完成 Turn 精确 Fork，并可为新 Session 覆盖 Provider Profile 和模型。
 - [x] 受 Token CLI/TUI 支持标题、消息内容、Workspace、状态、Provider Profile、模型和更新时间组合搜索；Web 保持当前 Workspace 标题筛选，不向未认证浏览器下发消息摘要。
 - [x] 安全的自动标题与会话数据迁移版本；schema 1 先私有备份再原子迁移到 schema 2，未来版本拒绝降级；首次 Turn 本地生成有界标题并对疑似凭据回退，人工/旧版/Fork 标题不被覆盖。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc35（已完成）：Core Session 增加向后兼容的 `model`，与 `profile`、私有配置引用一起成为客户端恢复执行设置的来源。TUI 启动、同 Workspace Session 切换和跨 Workspace 切换都改用目标 Session 的 Provider、模型与配置，已有目标配置不再被启动参数覆盖；Fork 同步更新 Core 与 Runtime 两份模型元数据。Runtime 重启后从持久 Session 领取 Turn 的测试验证实际 `SubmitTask` 仍携带原设置。Skills/MCP 不保存可能过期的 Session 权限快照，而由 TaskManager 在每轮执行前从当前持久 Workspace 注册表重新绑定，撤销能力后旧会话也不能恢复它。
 
 v0.21.0-rc34（已完成）：TUI `/goal` 从进程内临时状态迁移为 Core Session 的向后兼容字段。设置和关闭 Goal 都立即原子保存；TUI 启动、Session 原地切换与 Workspace 切换统一从目标 Session 恢复，避免把上一个会话的目标串入新会话。旧 JSON 缺少字段时默认未设置；专门测试覆盖存储往返与会话切换清除临时状态并恢复目标 Goal。
 

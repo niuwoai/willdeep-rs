@@ -101,7 +101,11 @@ mod tests {
         let mut app = App::new(vec!["old transcript".to_owned()], Language::En);
         app.runtime_event_cursor = 17;
         let (tx, rx) = mpsc::unbounded_channel();
-        let runtime = TuiRuntime {
+        target.profile = Some("target-provider".to_owned());
+        target.model = Some("target-model".to_owned());
+        target.config = Some(root.join("target-config.toml"));
+        store.save(&mut target).unwrap();
+        let mut runtime = TuiRuntime {
             home: root.clone(),
             skills: Arc::new(SkillCatalog::default()),
             relay_bridge: RelayBridge::new(),
@@ -124,7 +128,7 @@ mod tests {
                 &mut app,
                 &mut current,
                 &store,
-                &runtime,
+                &mut runtime,
             )
             .await
             .unwrap()
@@ -135,6 +139,15 @@ mod tests {
             ["You: restored question", "WillDeep: restored answer"]
         );
         assert_eq!(store.load(target.id).unwrap().runtime_event_cursor, 17);
+        assert_eq!(
+            runtime.runtime_submit.profile.as_deref(),
+            Some("target-provider")
+        );
+        assert_eq!(
+            runtime.runtime_submit.model.as_deref(),
+            Some("target-model")
+        );
+        assert_eq!(runtime.runtime_submit.config, target.config);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

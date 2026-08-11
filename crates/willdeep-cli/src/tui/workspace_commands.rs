@@ -107,7 +107,12 @@ async fn switch(
             &workspace.name,
         )
     });
-    target.config = runtime.runtime_submit.config.clone();
+    if target.config.is_none() {
+        target.config = runtime.runtime_submit.config.clone();
+    }
+    if target.model.is_none() {
+        target.model = runtime.runtime_submit.model.clone();
+    }
     target.runtime_managed = true;
     if target.runtime_event_cursor == 0 {
         target.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
@@ -120,7 +125,7 @@ async fn switch(
         target.id,
         &workspace.root,
         workspace.provider_profile.clone(),
-        runtime.runtime_submit.model.clone(),
+        target.model.clone(),
         target.title.clone(),
     )
     .await?;
@@ -128,6 +133,8 @@ async fn switch(
 
     runtime.runtime_submit.workspace = workspace.root.clone();
     runtime.runtime_submit.profile = workspace.provider_profile.clone();
+    runtime.runtime_submit.model = target.model.clone();
+    runtime.runtime_submit.config = target.config.clone();
     runtime.skills =
         Arc::new(SkillCatalog::discover(&workspace.root, &[]).allow_only(&workspace.skills));
     app.load_session(&target);

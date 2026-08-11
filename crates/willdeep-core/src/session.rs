@@ -18,6 +18,8 @@ pub struct Session {
     pub workspace: PathBuf,
     pub profile: Option<String>,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub config: Option<PathBuf>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -43,6 +45,7 @@ impl Session {
             title: title(prompt),
             workspace,
             profile,
+            model: None,
             config: None,
             created_at: now,
             updated_at: now,
@@ -217,6 +220,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .to_owned(),
         workspace: PathBuf::from(workspace),
         profile: None,
+        model: None,
         config: None,
         created_at: updated,
         updated_at: updated,
@@ -263,6 +267,7 @@ mod tests {
         let store = SessionStore::new(&root);
         let mut session = Session::new(root.clone(), None, "hello session");
         session.config = Some(root.join("config.toml"));
+        session.model = Some("test-model".to_owned());
         session.goal = Some("finish the migration".to_owned());
         session.messages.push(Message::user_with_attachments(
             "hello",
@@ -277,6 +282,7 @@ mod tests {
         store.save(&mut session).unwrap();
         let loaded = store.load(session.id).unwrap();
         assert_eq!(loaded.config, session.config);
+        assert_eq!(loaded.model, session.model);
         assert_eq!(loaded.goal, session.goal);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);

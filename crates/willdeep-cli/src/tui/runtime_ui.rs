@@ -49,7 +49,7 @@ pub(super) async fn submit_turn(
         session.id,
         &session.workspace,
         session.profile.clone(),
-        runtime.runtime_submit.model.clone(),
+        session.model.clone(),
         session.title.clone(),
     )
     .await?;

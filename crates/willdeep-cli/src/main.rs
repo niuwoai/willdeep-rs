@@ -624,11 +624,13 @@ async fn run() -> Result<()> {
     let context_window = built.context_window;
 
     let mut session = resumed.unwrap_or_else(|| {
-        willdeep_core::Session::new(
+        let mut session = willdeep_core::Session::new(
             workspace.clone(),
             cli.profile.clone(),
             prompt.as_deref().unwrap_or("New session"),
-        )
+        );
+        session.model = cli.model.clone();
+        session
     });
     if session.config.is_none() {
         session.config = Some(cli.config.clone().unwrap_or(config::default_config_path()?));

@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc34`，支持：
+当前版本为 `0.21.0-rc35`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -16,7 +16,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - 面向自动化的 NDJSON 事件输出；
 - `~/.willdeep/config.toml` 多 Provider 配置；
 - Ratatui 交互界面与同一套审批机制；
-- 版本化 JSON 会话持久化、列表和恢复；
+- 版本化 JSON 会话持久化、列表和恢复，并按会话恢复 Goal、Provider Profile、模型与配置；
 - Codex/WillDeep 兼容的 `SKILL.md` 发现、列表和安全资源读取；
 - MCP stdio server 初始化、工具发现、命名空间注册与调用。
 - 按 Session 持久恢复的 `/goal`，以及 `/compress`、`/webapp`、`/skills`、`/clear`、`/help` 命令和 `$skill-name` 显式技能引用；TUI 与 Web 均提供 `/` 命令及 `$` 技能候选；

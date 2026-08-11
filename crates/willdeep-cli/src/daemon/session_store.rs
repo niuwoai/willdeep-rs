@@ -281,13 +281,23 @@ impl RuntimeSessionStore {
             return Ok((existing, false));
         }
         let (core, title_source) = if let Some(id) = request.id {
-            let core = self
+            let mut core = self
                 .core
                 .load(id)
                 .with_context(|| format!("adopt Core Session {id}"))?;
             if core.workspace.canonicalize()? != workspace {
                 bail!("Core Session workspace does not match Runtime Session request");
             }
+            if let Some(profile) = request.profile.clone() {
+                core.profile = Some(profile);
+            }
+            if let Some(model) = request.model.clone() {
+                core.model = Some(model);
+            }
+            if core.config.is_none() {
+                core.config = request.config.clone();
+            }
+            self.core.save(&mut core)?;
             (core, SessionTitleSource::Legacy)
         } else {
             let explicit_title = request.title.filter(|value| !value.trim().is_empty());
@@ -300,20 +310,20 @@ impl RuntimeSessionStore {
             };
             let mut core =
                 willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
+            core.model = request.model.clone();
             core.config = request.config.clone();
             self.core.save(&mut core)?;
             (core, title_source)
         };
-        let config = core.config.clone().or(request.config);
         let timestamp = now();
         let session = RuntimeSession {
             schema: RUNTIME_SESSION_SCHEMA,
             id: core.id,
             root_agent_id: uuid::Uuid::new_v4(),
             workspace,
-            profile: request.profile,
-            model: request.model,
-            config,
+            profile: core.profile.clone(),
+            model: core.model.clone(),
+            config: core.config.clone(),
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
             created_at: timestamp,
@@ -405,6 +415,7 @@ impl RuntimeSessionStore {
         core.runtime_managed = true;
         core.swift_source = None;
         core.profile = target_profile.clone();
+        core.model = model.clone().or_else(|| source.model.clone());
         self.core.save(&mut core)?;
         let fork = RuntimeSession {
             schema: RUNTIME_SESSION_SCHEMA,
@@ -412,7 +423,7 @@ impl RuntimeSessionStore {
             root_agent_id: uuid::Uuid::new_v4(),
             workspace: source.workspace,
             profile: target_profile,
-            model: model.or(source.model),
+            model: core.model.clone(),
             config: source.config,
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
@@ -2343,6 +2354,7 @@ mod tests {
             Some("mock".to_owned()),
             "existing",
         );
+        core.model = Some("stored-model".to_owned());
         let stored_config = root.join("private-config.toml");
         core.config = Some(stored_config.clone());
         core_store.save(&mut core).unwrap();
@@ -2359,6 +2371,8 @@ mod tests {
         let (adopted, created) = store.ensure(request()).unwrap();
         assert!(created);
         assert_eq!(adopted.id, core.id);
+        assert_eq!(adopted.profile.as_deref(), Some("mock"));
+        assert_eq!(adopted.model.as_deref(), Some("stored-model"));
         assert_eq!(adopted.config.as_ref(), Some(&stored_config));
         let (same, created) = store.ensure(request()).unwrap();
         assert!(!created);
@@ -2439,10 +2453,59 @@ mod tests {
         assert_eq!(fork.profile.as_deref(), Some("research"));
         assert_eq!(fork.model.as_deref(), Some("deep-model"));
         let fork_core = core_store.load(fork.id).unwrap();
+        assert_eq!(fork_core.profile.as_deref(), Some("research"));
+        assert_eq!(fork_core.model.as_deref(), Some("deep-model"));
         assert_eq!(fork_core.messages.len(), 2);
         assert_eq!(fork_core.messages[0].content, "first");
         assert_eq!(fork_core.messages[1].content, "first answer");
         assert!(store.list_turns(fork.id).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restores_provider_model_and_config_before_claiming_the_next_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-session-execution-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = root.join("runtime-sessions.json");
+        let config = root.join("session-config.toml");
+        let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace: workspace.clone(),
+                profile: Some("session-provider".to_owned()),
+                model: Some("session-model".to_owned()),
+                config: Some(config.clone()),
+                title: Some("Execution settings".to_owned()),
+            })
+            .unwrap();
+        store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "continue with the restored settings".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        drop(store);
+
+        let restored = RuntimeSessionStore::open(path, &root).unwrap();
+        let claimed = restored.claim_next(session.id).unwrap().unwrap();
+        assert_eq!(claimed.request.profile.as_deref(), Some("session-provider"));
+        assert_eq!(claimed.request.model.as_deref(), Some("session-model"));
+        assert_eq!(claimed.request.config.as_ref(), Some(&config));
+        let core = willdeep_core::SessionStore::new(&root)
+            .load(session.id)
+            .unwrap();
+        assert_eq!(core.profile.as_deref(), Some("session-provider"));
+        assert_eq!(core.model.as_deref(), Some("session-model"));
+        assert_eq!(core.config.as_ref(), Some(&config));
         std::fs::remove_dir_all(root).unwrap();
     }
 

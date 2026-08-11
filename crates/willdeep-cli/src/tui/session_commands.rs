@@ -5,7 +5,7 @@ pub(super) async fn handle_session_command(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,
-    runtime: &TuiRuntime,
+    runtime: &mut TuiRuntime,
 ) -> Result<bool> {
     let value = prompt.trim();
     if value != "/session" && !value.starts_with("/session ") {
@@ -156,7 +156,7 @@ async fn switch(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,
-    runtime: &TuiRuntime,
+    runtime: &mut TuiRuntime,
     id: &str,
 ) -> Result<String> {
     if app.running {
@@ -183,6 +183,9 @@ async fn switch(
     target.runtime_event_cursor = app.runtime_event_cursor;
     target.runtime_managed = true;
     store.save(&mut target)?;
+    runtime.runtime_submit.profile = target.profile.clone();
+    runtime.runtime_submit.model = target.model.clone();
+    runtime.runtime_submit.config = target.config.clone();
     app.load_session(&target);
     runtime.relay_bridge.set_session(target.id.to_string());
     *session = target;

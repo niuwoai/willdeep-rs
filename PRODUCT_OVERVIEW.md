@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc34
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc35
 
 ## 项目简介
 
@@ -22,6 +22,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
 - TOML 多 Provider Profile 与安全凭据引用；
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；
+- Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
 - Ratatui 多轮 TUI、可滚动聊天记录、聚合工具活动和界面内审批；
 - 空白新会话的即时工作区欢迎引导；
