@@ -160,8 +160,7 @@ pub(crate) async fn execute_noninteractive(
             .agent
             .compress_history(session.messages.clone())
             .await?;
-        let changed = messages.len() < session.messages.len();
-        session.messages = messages;
+        let changed = session.replace_with_compressed_messages(messages);
         store.save(session)?;
         return Ok(HarnessOutcome {
             final_text: language

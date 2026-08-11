@@ -96,6 +96,8 @@ pub(crate) struct RuntimeTurn {
     pub message_start: Option<usize>,
     #[serde(default)]
     pub message_end: Option<usize>,
+    #[serde(default)]
+    pub message_generation: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +158,8 @@ struct ExportedCoreSession {
     created_at: u64,
     updated_at: u64,
     messages: Vec<willdeep_core::Message>,
+    compression_generation: u64,
+    compression_checkpoint: Option<willdeep_core::session::CompressionCheckpoint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -439,6 +443,11 @@ impl RuntimeSessionStore {
             if turn.metadata.status != RuntimeTurnStatus::Completed {
                 bail!("only a completed Runtime Turn can be used as a Fork boundary");
             }
+            if turn.metadata.message_generation != core.compression_generation {
+                bail!(
+                    "Runtime Turn boundary predates the current compression checkpoint and cannot be forked exactly"
+                );
+            }
             let end = turn.metadata.message_end.context(
                 "Runtime Turn predates durable message boundaries and cannot be forked exactly",
             )?;
@@ -546,6 +555,8 @@ impl RuntimeSessionStore {
                 created_at: core.created_at,
                 updated_at: core.updated_at,
                 messages: core.messages,
+                compression_generation: core.compression_generation,
+                compression_checkpoint: core.compression_checkpoint,
             },
             turns,
         })
@@ -739,6 +750,7 @@ impl RuntimeSessionStore {
             error: None,
             message_start: None,
             message_end: None,
+            message_generation: 0,
         };
         turns.insert(
             metadata.id,
@@ -842,12 +854,12 @@ impl RuntimeSessionStore {
             return Ok(None);
         };
         turn.metadata.attempts = turn.metadata.attempts.saturating_add(1);
-        let core_message_count = self
+        let core = self
             .core
             .load(session_id)
-            .with_context(|| format!("load Core Session {session_id}"))?
-            .messages
-            .len();
+            .with_context(|| format!("load Core Session {session_id}"))?;
+        let core_message_count = core.messages.len();
+        turn.metadata.message_generation = core.compression_generation;
         turn.metadata.message_start = Some(if turn.replay_existing_user_message {
             core_message_count
                 .checked_sub(1)
@@ -939,13 +951,12 @@ impl RuntimeSessionStore {
             // Harness process exit. Do not retain a second private copy indefinitely.
             turn.prompt.clear();
             turn.attachments.clear();
-            turn.metadata.message_end = Some(
-                self.core
-                    .load(session_id)
-                    .with_context(|| format!("load completed Core Session {session_id}"))?
-                    .messages
-                    .len(),
-            );
+            let core = self
+                .core
+                .load(session_id)
+                .with_context(|| format!("load completed Core Session {session_id}"))?;
+            turn.metadata.message_end = Some(core.messages.len());
+            turn.metadata.message_generation = core.compression_generation;
         }
         persist_turns(&self.turns_path, &turns)?;
         drop(turns);
@@ -1928,6 +1939,9 @@ fn prepare_core_for_turn_replay(
     let Ok(core) = core_store.load(turn.metadata.session_id) else {
         return Ok(false);
     };
+    if turn.metadata.message_generation != core.compression_generation {
+        return Ok(false);
+    }
     if core.messages.len() == message_start {
         return Ok(true);
     }
@@ -2535,6 +2549,8 @@ mod tests {
             (second_turn.message_start, second_turn.message_end),
             (Some(2), Some(4))
         );
+        assert_eq!(first_turn.message_generation, 0);
+        assert_eq!(second_turn.message_generation, 0);
 
         let fork = store
             .fork_through(
@@ -2554,6 +2570,45 @@ mod tests {
         assert_eq!(fork_core.messages[0].content, "first");
         assert_eq!(fork_core.messages[1].content, "first answer");
         assert!(store.list_turns(fork.id).unwrap().is_empty());
+
+        let mut compressed_core = core_store.load(session.id).unwrap();
+        assert!(compressed_core.replace_with_compressed_messages(vec![
+            willdeep_core::Message::user("<context-summary>summary</context-summary>")
+        ]));
+        core_store.save(&mut compressed_core).unwrap();
+        assert!(
+            store
+                .fork_through(
+                    session.id,
+                    Some("Stale boundary".to_owned()),
+                    Some(first),
+                    None,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("compression checkpoint")
+        );
+
+        let after_compression = complete_turn("third", "third answer");
+        assert_eq!(
+            store
+                .get_turn(after_compression)
+                .unwrap()
+                .unwrap()
+                .message_generation,
+            1
+        );
+        let current_fork = store
+            .fork_through(
+                session.id,
+                Some("Current boundary".to_owned()),
+                Some(after_compression),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(core_store.load(current_fork.id).unwrap().messages.len(), 3);
         std::fs::remove_dir_all(root).unwrap();
     }
 

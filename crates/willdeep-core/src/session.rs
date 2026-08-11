@@ -10,6 +10,14 @@ use crate::types::Role;
 
 pub const SESSION_VERSION: u32 = 1;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompressionCheckpoint {
+    pub generation: u64,
+    pub previous_message_count: usize,
+    pub compressed_message_count: usize,
+    pub created_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
@@ -32,6 +40,10 @@ pub struct Session {
     pub runtime_managed: bool,
     #[serde(default)]
     pub goal: Option<String>,
+    #[serde(default)]
+    pub compression_generation: u64,
+    #[serde(default)]
+    pub compression_checkpoint: Option<CompressionCheckpoint>,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
@@ -54,8 +66,27 @@ impl Session {
             runtime_event_cursor: 0,
             runtime_managed: false,
             goal: None,
+            compression_generation: 0,
+            compression_checkpoint: None,
             swift_source: None,
         }
+    }
+
+    pub fn replace_with_compressed_messages(&mut self, messages: Vec<Message>) -> bool {
+        let previous_message_count = self.messages.len();
+        let compressed_message_count = messages.len();
+        self.messages = messages;
+        if compressed_message_count >= previous_message_count {
+            return false;
+        }
+        self.compression_generation = self.compression_generation.saturating_add(1);
+        self.compression_checkpoint = Some(CompressionCheckpoint {
+            generation: self.compression_generation,
+            previous_message_count,
+            compressed_message_count,
+            created_at: now(),
+        });
+        true
     }
 }
 
@@ -229,6 +260,8 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         runtime_event_cursor: 0,
         runtime_managed: false,
         goal: None,
+        compression_generation: 0,
+        compression_checkpoint: None,
         swift_source: Some(path.to_path_buf()),
     })
 }
@@ -284,6 +317,7 @@ mod tests {
         assert_eq!(loaded.config, session.config);
         assert_eq!(loaded.model, session.model);
         assert_eq!(loaded.goal, session.goal);
+        assert_eq!(loaded.compression_generation, 0);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);
         assert!(loaded.attention_read.is_empty());
@@ -307,7 +341,39 @@ mod tests {
         let session = Session::new(PathBuf::from("/workspace"), None, "legacy");
         let mut value = serde_json::to_value(session).unwrap();
         value.as_object_mut().unwrap().remove("config");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_generation");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_checkpoint");
         let loaded: Session = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.config, None);
+        assert_eq!(loaded.compression_generation, 0);
+        assert_eq!(loaded.compression_checkpoint, None);
+    }
+
+    #[test]
+    fn records_only_effective_manual_compression() {
+        let mut session = Session::new(PathBuf::from("/workspace"), None, "compression");
+        session.messages = (0..10)
+            .map(|index| Message::user(format!("message {index}")))
+            .collect();
+        assert!(session.replace_with_compressed_messages(vec![Message::user("summary")]));
+        assert_eq!(session.compression_generation, 1);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.compression_checkpoint,
+            Some(CompressionCheckpoint {
+                generation: 1,
+                previous_message_count: 10,
+                compressed_message_count: 1,
+                created_at: session.compression_checkpoint.as_ref().unwrap().created_at,
+            })
+        );
+        assert!(!session.replace_with_compressed_messages(session.messages.clone()));
+        assert_eq!(session.compression_generation, 1);
     }
 }
