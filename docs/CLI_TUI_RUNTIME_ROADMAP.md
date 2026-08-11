@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc40
+> 当前实施版本：v0.21.0-rc41
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -87,7 +87,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 ### 阶段 4：Agent Mission Control（v0.18.0）
 
 - [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
-- [ ] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误。
+- [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、工具时间线、结果报告和 Diff Artifact 摘要，Prompt/错误原文的脱敏与授权边界待设计。
 - [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc41（已完成）：TUI 从 Agent 侧边栏按 Enter 时调用受 Token 保护的 `agent.get`，只在显式详情视图读取已有结果报告；弹窗按 Agent ID 过滤最近 8 条 Tool Activity 与 Workspace Change Artifact，展示工具状态、耗时和 Diff 变更数量。列表仍使用 `agent.list` 最小摘要，未新增 Prompt 原文持久化或事件下发；Prompt/内部错误只有在完成脱敏、权限与保留策略设计后才继续开放。回归测试覆盖跨 Agent 工具和 Artifact 隔离。
 
 v0.21.0-rc40（已完成）：Runtime Task 与 Agent Store 新增向后兼容的模型字段，Root Agent 创建、Session 下一 Turn 和 Daemon 重启恢复都保留实际模型；Subagent Profile 记录父模型、some.im 默认轻量模型或配置覆盖模型，并随生命周期事件进入 Child Agent。统一协议、TUI 和 Web Agent 树显示父子层级、Profile、模型、状态、当前工具、运行耗时、累计 Token 与专属 Worktree/分支；Web 文案全部通过 i18n。测试覆盖 Root/Child 模型持久化、重启恢复、事件协议和 TUI/Web 安全摘要。
 

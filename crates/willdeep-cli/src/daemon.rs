@@ -50,10 +50,10 @@ use local_transport::LocalTransportState;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
-    instruct_remote_agent, remote_session_states, rename_remote_session, resolve_remote_approval,
-    retry_remote_agent, runtime_event_head, runtime_events, runtime_snapshot,
-    search_remote_sessions, set_remote_session_archived, start_runtime_event_follower,
-    stop_remote_agent, stop_remote_turn, submit_runtime_turn,
+    instruct_remote_agent, remote_agent_detail, remote_session_states, rename_remote_session,
+    resolve_remote_approval, retry_remote_agent, runtime_event_head, runtime_events,
+    runtime_snapshot, search_remote_sessions, set_remote_session_archived,
+    start_runtime_event_follower, stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
 pub(crate) use workspace_store::{

@@ -622,7 +622,12 @@ async fn event_loop(
                                 if let Some(gate)=app.selected_remote_gate(){
                                     open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
                                 }else if app.sidebar_selected==2 {
-                                    app.agent_detail=app.selected_runtime_agent();
+                                    if let Some(agent)=app.selected_runtime_agent(){
+                                        match crate::daemon::remote_agent_detail(&runtime.home,agent.id).await {
+                                            Ok(detail)=>app.agent_detail=Some(detail),
+                                            Err(error)=>app.notice=Some(format!("{}: {error}",language.text("加载 Agent 详情失败","Failed to load Agent details","Agent 詳細の読み込みに失敗"))),
+                                        }
+                                    }
                                 }else{app.sidebar_activate(&runtime.background_tasks);}
                             },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),

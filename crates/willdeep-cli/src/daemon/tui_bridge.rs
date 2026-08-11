@@ -577,6 +577,11 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
     })
 }
 
+pub(crate) async fn remote_agent_detail(home: &Path, id: uuid::Uuid) -> Result<RemoteAgent> {
+    let state = ensure_running(home).await?;
+    api_data(runtime_client(&state)?.agent(id).await?).map(remote_agent)
+}
+
 pub(crate) async fn stop_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
     api_data(

@@ -505,6 +505,71 @@ mod tests {
         assert_eq!(app.runtime_agent_selected, 0);
     }
     #[test]
+    fn agent_detail_filters_tool_timeline_and_diff_by_agent() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let agent_id = uuid::Uuid::new_v4();
+        let other_id = uuid::Uuid::new_v4();
+        let agent = crate::daemon::tui_bridge::RemoteAgent {
+            id: agent_id,
+            parent_id: None,
+            label: Some("reader".to_owned()),
+            background: false,
+            profile: Some("reader".to_owned()),
+            model: Some("detail-model".to_owned()),
+            status: RuntimeStatus::Done,
+            current_turn: 2,
+            current_tool: None,
+            total_tokens: Some(55),
+            max_turns: Some(8),
+            token_budget: Some(10_000),
+            timeout_seconds: Some(120),
+            report: Some("detail report".to_owned()),
+            workspace: PathBuf::from("/workspace"),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            created_at: 1,
+            completed_at: Some(2),
+        };
+        for (owner, name) in [(agent_id, "read_file"), (other_id, "git_status")] {
+            app.runtime_tools
+                .push(willdeep_runtime_protocol::RuntimeTool {
+                    id: uuid::Uuid::new_v4(),
+                    session_id: None,
+                    turn_id: None,
+                    task_id: uuid::Uuid::new_v4(),
+                    agent_id: owner,
+                    name: name.to_owned(),
+                    status: willdeep_runtime_protocol::ToolStatus::Completed,
+                    started_at_ms: 10,
+                    completed_at_ms: Some(25),
+                });
+        }
+        for (owner, title) in [(agent_id, "reader changes"), (other_id, "other changes")] {
+            app.runtime_artifacts
+                .push(willdeep_runtime_protocol::RuntimeArtifact {
+                    id: uuid::Uuid::new_v4(),
+                    kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+                    session_id: None,
+                    turn_id: None,
+                    task_id: uuid::Uuid::new_v4(),
+                    agent_id: owner,
+                    title: title.to_owned(),
+                    source_id: uuid::Uuid::new_v4().to_string(),
+                    item_count: 2,
+                    created_at: 1,
+                });
+        }
+
+        let content = agent_worktree_ui::agent_detail_content(&app, &agent);
+        assert!(content.contains("Tool timeline (1)"));
+        assert!(content.contains("read_file · 15ms"));
+        assert!(!content.contains("git_status"));
+        assert!(content.contains("Diff summary (1)"));
+        assert!(content.contains("reader changes"));
+        assert!(!content.contains("other changes"));
+        assert!(content.contains("detail report"));
+    }
+    #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
