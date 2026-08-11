@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Button, Container, Flex, Heading, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
+import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Portal, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, languageLabels, languages, messages, type Language } from "./i18n";
 import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity } from "./RuntimeSidebar";
+import { Markdown } from "./Markdown";
 
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
-type Session = { id: string; title: string; workspace: string; updated_at: number; archived: boolean; active: boolean; active_turn_id: string | null };
+type Session = { id: string; title: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
 type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
@@ -143,7 +144,12 @@ export function App() {
   }, [workspace]);
   useEffect(() => { if (followBottomRef.current) endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat, activity]);
 
-  const visibleSessions = useMemo(() => { const query = sessionSearch.trim().toLowerCase(); return sessions.filter((item) => item.workspace === workspace && (!query || item.title.toLowerCase().includes(query))); }, [sessions, workspace, sessionSearch]);
+  const visibleSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLowerCase();
+    return sessions
+      .filter((item) => item.workspace === workspace && (!query || item.title.toLowerCase().includes(query)))
+      .sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0) || b.updated_at - a.updated_at);
+  }, [sessions, workspace, sessionSearch]);
   const selectedSession = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId]);
   const commandMatches = useMemo(() => prompt.startsWith("/") ? composer.commands.filter((item) => item.startsWith(prompt.split(/\s/)[0])).slice(0, 6) : [], [prompt, composer.commands]);
   const skillQuery = prompt.match(/(?:^|\s)\$([\w-]*)$/)?.[1]?.toLowerCase();
@@ -371,10 +377,17 @@ export function App() {
     }
   }
 
-  async function renameSelectedSession() {
-    if (!selectedSession) return;
-    const title = window.prompt(t.renamePrompt, selectedSession.title)?.trim(); if (!title) return;
-    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}/rename`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); }
+  const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+
+  async function renameSession(target: Session) {
+    const title = window.prompt(t.renamePrompt, target.title)?.trim(); if (!title) return;
+    try { await mutate(`/api/sessions/${encodeURIComponent(target.id)}/rename`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); }
+    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function togglePinSession(target: Session) {
+    const action = target.pinned_at ? "unpin" : "pin";
+    try { await mutate(`/api/sessions/${encodeURIComponent(target.id)}/${action}`, { method: "POST" }); await refreshSessions(); }
     catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }
 
@@ -385,17 +398,21 @@ export function App() {
     catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }
 
-  async function toggleArchiveSelectedSession() {
-    if (!selectedSession) return;
-    const action = selectedSession.archived ? "unarchive" : "archive";
-    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}/${action}`, { method: "POST" }); await refreshSessions(); }
+  async function toggleArchiveSession(target: Session) {
+    const action = target.archived ? "unarchive" : "archive";
+    try { await mutate(`/api/sessions/${encodeURIComponent(target.id)}/${action}`, { method: "POST" }); await refreshSessions(); }
     catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }
 
-  async function deleteSelectedSession() {
-    if (!selectedSession || !window.confirm(t.deleteConfirm)) return;
-    try { await mutate(`/api/sessions/${encodeURIComponent(selectedSession.id)}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: selectedSession.id }) }); setSessionId(""); setChat([]); await refreshSessions(); }
-    catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  async function confirmDeleteSession() {
+    const target = deleteTarget;
+    if (!target) return;
+    try {
+      await mutate(`/api/sessions/${encodeURIComponent(target.id)}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: target.id }) });
+      if (sessionId === target.id) { setSessionId(""); setChat([]); }
+      await refreshSessions();
+    } catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+    finally { setDeleteTarget(null); }
   }
 
   async function exportSelectedSession() {
@@ -482,15 +499,44 @@ export function App() {
       <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568" />
       <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => {
         const selected = sessionId === item.id;
-        return <Button key={item.id} size="sm" opacity={item.archived ? 0.68 : 1} variant="ghost" bg={selected ? "#223247" : "transparent"} color={selected ? "#f2f6fa" : "#b9c5d2"} _hover={{ bg: selected ? "#2a3d55" : "#17222e", color: "#f2f6fa" }} justifyContent="start" overflow="hidden" disabled={busy} onClick={() => void loadSession(item.id, item.active_turn_id)}>{item.title}{item.archived ? ` · ${t.archived}` : ""}</Button>;
+        return <Flex key={item.id} className={`session-row${selected ? " selected" : ""}`} opacity={item.archived ? 0.68 : 1}>
+          <button type="button" className="session-title" disabled={busy} onClick={() => void loadSession(item.id, item.active_turn_id)}>
+            {item.pinned_at != null && <span className="session-pin" title={t.pinned} aria-label={t.pinned}>📌</span>}
+            {item.title}{item.archived ? ` · ${t.archived}` : ""}
+          </button>
+          <Flex className="session-actions">
+            <button type="button" title={t.renameSession} aria-label={t.renameSession} disabled={busy || item.active} onClick={() => void renameSession(item)}>✎</button>
+            <button type="button" title={item.pinned_at != null ? t.unpinSession : t.pinSession} aria-label={item.pinned_at != null ? t.unpinSession : t.pinSession} disabled={busy} onClick={() => void togglePinSession(item)}>{item.pinned_at != null ? "↧" : "📌"}</button>
+            <button type="button" title={item.archived ? t.unarchiveSession : t.archiveSession} aria-label={item.archived ? t.unarchiveSession : t.archiveSession} disabled={busy || item.active} onClick={() => void toggleArchiveSession(item)}>{item.archived ? "↥" : "▣"}</button>
+            <button type="button" className="danger" title={t.deleteSession} aria-label={t.deleteSession} disabled={busy || item.active} onClick={() => setDeleteTarget(item)}>×</button>
+          </Flex>
+        </Flex>;
       })}{!visibleSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
-      {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.renameSession} aria-label={t.renameSession} disabled={busy || selectedSession.active} onClick={() => void renameSelectedSession()}>R</Button><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={selectedSession.archived ? t.unarchiveSession : t.archiveSession} aria-label={selectedSession.archived ? t.unarchiveSession : t.archiveSession} disabled={busy || selectedSession.active} onClick={() => void toggleArchiveSelectedSession()}>{selectedSession.archived ? "↥" : "▣"}</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button><Button size="xs" variant="ghost" colorPalette="red" title={t.deleteSession} aria-label={t.deleteSession} disabled={busy || selectedSession.active} onClick={() => void deleteSelectedSession()}>×</Button></Flex>}
+      {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
       </Box>
       <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="#202a35" color="#627184" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
+      <Dialog.Root role="alertdialog" open={deleteTarget !== null} onOpenChange={(details) => { if (!details.open) setDeleteTarget(null); }}>
+        <Portal>
+          <Dialog.Backdrop bg="#000a" />
+          <Dialog.Positioner>
+            <Dialog.Content bg="#101820" color="#e7edf4" border="1px solid" borderColor="#2b3948" borderRadius="12px" maxW="360px">
+              <Dialog.Header><Dialog.Title fontSize="md">{t.deleteDialogTitle}</Dialog.Title></Dialog.Header>
+              <Dialog.Body>
+                <Text fontWeight="600" mb="2" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{deleteTarget?.title}</Text>
+                <Text fontSize="sm" color="#8b99aa">{t.deleteConfirm}</Text>
+              </Dialog.Body>
+              <Dialog.Footer gap="2">
+                <Button size="sm" variant="outline" borderColor="#3a4859" color="#d8e2ec" onClick={() => setDeleteTarget(null)}>{t.cancel}</Button>
+                <Button size="sm" colorPalette="red" onClick={() => void confirmDeleteSession()}>{t.confirmDelete}</Button>
+              </Dialog.Footer>
+            </Dialog.Content>
+          </Dialog.Positioner>
+        </Portal>
+      </Dialog.Root>
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="6" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id} className="run-card">{message.steps?.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.content}</Box>)}</VStack>
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id} className="run-card">{message.steps?.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="#ff8f8f" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
       <Box className="composer-shell">

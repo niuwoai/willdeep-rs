@@ -31,6 +31,8 @@ pub struct Session {
     pub config: Option<PathBuf>,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub pinned_at: Option<u64>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub attention_read: BTreeSet<String>,
@@ -61,6 +63,7 @@ impl Session {
             config: None,
             created_at: now,
             updated_at: now,
+            pinned_at: None,
             messages: Vec::new(),
             attention_read: BTreeSet::new(),
             runtime_event_cursor: 0,
@@ -155,8 +158,41 @@ impl SessionStore {
         Ok(values)
     }
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
-        std::fs::create_dir_all(&self.directory)?;
         session.updated_at = now();
+        self.write(session)
+    }
+    /// 置顶/取消置顶。不改动 `updated_at`，避免打乱最近使用排序；
+    /// 对 Xedit 桥接会话就地补丁其 JSON 的 `pinnedAt`（ISO8601），
+    /// 不在本地生成会覆盖 Xedit 实时内容的影子副本。
+    pub fn set_pinned(&self, id: Uuid, pinned: bool) -> Result<Session, SessionError> {
+        let mut session = self.load(id)?;
+        session.pinned_at = if pinned { Some(now()) } else { None };
+        if let Some(source) = session.swift_source.clone() {
+            let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&source)?)?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other("invalid Swift session object"))
+            })?;
+            match session.pinned_at {
+                Some(at) => {
+                    object.insert(
+                        "pinnedAt".to_owned(),
+                        serde_json::Value::String(format_iso8601(at)),
+                    );
+                }
+                None => {
+                    object.remove("pinnedAt");
+                }
+            }
+            let temporary = source.with_extension(format!("{}.tmp", Uuid::new_v4()));
+            std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+            std::fs::rename(&temporary, &source)?;
+        } else {
+            self.write(&session)?;
+        }
+        Ok(session)
+    }
+    fn write(&self, session: &Session) -> Result<(), SessionError> {
+        std::fs::create_dir_all(&self.directory)?;
         let data = serde_json::to_vec_pretty(session)?;
         let temporary = self
             .directory
@@ -255,6 +291,10 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         config: None,
         created_at: updated,
         updated_at: updated,
+        pinned_at: value
+            .get("pinnedAt")
+            .and_then(|value| value.as_str())
+            .and_then(parse_iso8601),
         messages,
         attention_read: BTreeSet::new(),
         runtime_event_cursor: 0,
@@ -280,6 +320,73 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// 解析 Xedit（Swift `JSONEncoder.dateEncodingStrategy = .iso8601`）写出的
+/// UTC 时间戳，如 `2026-08-11T12:34:56Z`；容忍小数秒与 `+00:00` 形式。
+fn parse_iso8601(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (date, time) = text.split_once('T')?;
+    let mut parts = date.splitn(3, '-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let time = time
+        .trim_end_matches('Z')
+        .trim_end_matches("+00:00")
+        .trim_end_matches("+0000");
+    let time = time.split_once('.').map(|(v, _)| v).unwrap_or(time);
+    let mut parts = time.splitn(3, ':');
+    let hour: u64 = parts.next()?.parse().ok()?;
+    let minute: u64 = parts.next()?.parse().ok()?;
+    let second: u64 = parts.next().unwrap_or("0").parse().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn format_iso8601(timestamp: u64) -> String {
+    let days = (timestamp / 86_400) as i64;
+    let seconds = timestamp % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60
+    )
+}
+
+// Howard Hinnant 的 days_from_civil / civil_from_days 算法（公历、以 1970-01-01 为第 0 天）。
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = (year - era * 400) as u64;
+    let doy =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let doe = (days - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 fn title(prompt: &str) -> String {
     prompt
@@ -334,6 +441,43 @@ mod tests {
         assert!(!store.delete(session.id).unwrap());
         assert!(store.load(session.id).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pins_session_without_touching_updated_at() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-pin-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "pin me");
+        store.save(&mut session).unwrap();
+        let saved_updated_at = store.load(session.id).unwrap().updated_at;
+        let pinned = store.set_pinned(session.id, true).unwrap();
+        assert!(pinned.pinned_at.is_some());
+        let loaded = store.load(session.id).unwrap();
+        assert_eq!(loaded.pinned_at, pinned.pinned_at);
+        assert_eq!(loaded.updated_at, saved_updated_at);
+        let unpinned = store.set_pinned(session.id, false).unwrap();
+        assert_eq!(unpinned.pinned_at, None);
+        assert_eq!(store.load(session.id).unwrap().pinned_at, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_and_formats_iso8601_round_trip() {
+        assert_eq!(parse_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso8601("2026-08-11T00:00:00Z"), Some(1_786_406_400));
+        assert_eq!(
+            parse_iso8601("2026-08-11T12:34:56.789Z"),
+            Some(1_786_451_696)
+        );
+        assert_eq!(
+            parse_iso8601("2026-08-11T12:34:56+00:00"),
+            parse_iso8601("2026-08-11T12:34:56Z")
+        );
+        assert_eq!(parse_iso8601("not a date"), None);
+        for timestamp in [0, 951_827_696, 1_786_451_696, 4_102_444_799] {
+            assert_eq!(parse_iso8601(&format_iso8601(timestamp)), Some(timestamp));
+        }
+        assert_eq!(format_iso8601(1_786_451_696), "2026-08-11T12:34:56Z");
     }
 
     #[test]

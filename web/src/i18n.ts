@@ -21,6 +21,8 @@ const zhCN = {
   helpText: "可用命令：/help、/goal <目标>、/goal off、/compress、/skills、/clear。输入 $ 可选择技能。", cleared: "聊天显示已清空", goalSet: "目标模式已开启", goalOff: "目标模式已关闭",
   skills: "技能", noSkills: "当前工作区没有发现技能",
   searchSessions: "搜索会话", renameSession: "重命名", forkSession: "分叉", archiveSession: "归档", unarchiveSession: "取消归档", deleteSession: "删除", exportSession: "导出",
+  pinSession: "置顶", unpinSession: "取消置顶", pinned: "已置顶",
+  deleteDialogTitle: "删除会话", cancel: "取消", confirmDelete: "删除",
   renamePrompt: "输入新的会话名称", forkPrompt: "输入分叉会话名称", deleteConfirm: "永久删除这个会话及其本地历史？此操作无法撤销。", archived: "已归档", sessionActionFailed: "会话操作失败",
 };
 
@@ -46,6 +48,8 @@ const en: Messages = {
   helpText: "Commands: /help, /goal <text>, /goal off, /compress, /skills, /clear. Type $ to choose a skill.", cleared: "Chat display cleared", goalSet: "Goal mode enabled", goalOff: "Goal mode disabled",
   skills: "Skills", noSkills: "No skills found in this workspace",
   searchSessions: "Search sessions", renameSession: "Rename", forkSession: "Fork", archiveSession: "Archive", unarchiveSession: "Unarchive", deleteSession: "Delete", exportSession: "Export",
+  pinSession: "Pin", unpinSession: "Unpin", pinned: "Pinned",
+  deleteDialogTitle: "Delete session", cancel: "Cancel", confirmDelete: "Delete",
   renamePrompt: "Enter a new session title", forkPrompt: "Enter a title for the fork", deleteConfirm: "Permanently delete this session and its local history? This cannot be undone.", archived: "Archived", sessionActionFailed: "Session action failed",
 };
 
@@ -69,6 +73,8 @@ const ja: Messages = {
   helpText: "コマンド：/help、/goal <目標>、/goal off、/compress、/skills、/clear。$ でスキルを選択できます。", cleared: "チャット表示を消去しました", goalSet: "ゴールモードを有効にしました", goalOff: "ゴールモードを無効にしました",
   skills: "スキル", noSkills: "このワークスペースにはスキルがありません",
   searchSessions: "セッションを検索", renameSession: "名前を変更", forkSession: "フォーク", archiveSession: "アーカイブ", unarchiveSession: "アーカイブ解除", deleteSession: "削除", exportSession: "エクスポート",
+  pinSession: "ピン留め", unpinSession: "ピン留め解除", pinned: "ピン留め済み",
+  deleteDialogTitle: "セッションを削除", cancel: "キャンセル", confirmDelete: "削除",
   renamePrompt: "新しいセッション名を入力", forkPrompt: "フォークのセッション名を入力", deleteConfirm: "このセッションとローカル履歴を完全に削除しますか？元に戻せません。", archived: "アーカイブ済み", sessionActionFailed: "セッション操作に失敗しました",
 };
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Box, Button, Flex, Input, NativeSelect, Text, VStack } from "@chakra-ui/react";
+import { Box, Button, Flex, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
 import { RuntimeDetailPanel, type RuntimeDetailTarget } from "./RuntimeDetailPanel";
 
@@ -142,17 +142,17 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
     </Flex>
     <Box mt="3" p="2" borderRadius="sm" bg="#171d24">
       <Text fontSize="xs" color="#8290a3" mb="1">{t.newReadOnlyAgent}</Text>
-      <Flex gap="1">
-        <NativeSelect.Root flex="0 0 106px">
-          <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
-            <option value="scout">{t.agentProfileScout}</option>
-            <option value="reader">{t.agentProfileReader}</option>
-            <option value="deep">{t.agentProfileDeep}</option>
-          </NativeSelect.Field>
-          <NativeSelect.Indicator />
-        </NativeSelect.Root>
-        <Input size="xs" value={spawnPrompt} aria-label={t.agentTask} placeholder={t.agentTaskPlaceholder} onChange={(event) => setSpawnPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void spawnAgent(); } }} />
-        <Button size="2xs" flexShrink="0" disabled={!canSpawnAgent || !spawnPrompt.trim() || controlBusy} onClick={() => void spawnAgent()}>{t.spawnAgent}</Button>
+      <NativeSelect.Root mb="1">
+        <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
+          <option value="scout">{t.agentProfileScout}</option>
+          <option value="reader">{t.agentProfileReader}</option>
+          <option value="deep">{t.agentProfileDeep}</option>
+        </NativeSelect.Field>
+        <NativeSelect.Indicator />
+      </NativeSelect.Root>
+      <Textarea size="xs" rows={2} resize="none" value={spawnPrompt} aria-label={t.agentTask} placeholder={t.agentTaskPlaceholder} onChange={(event) => setSpawnPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void spawnAgent(); } }} />
+      <Flex mt="1" justify="flex-end">
+        <Button size="2xs" disabled={!canSpawnAgent || !spawnPrompt.trim() || controlBusy} onClick={() => void spawnAgent()}>{t.spawnAgent}</Button>
       </Flex>
       {!canSpawnAgent && <Text mt="1" fontSize="2xs" color="#718096">{t.activeSessionRequired}</Text>}
     </Box>

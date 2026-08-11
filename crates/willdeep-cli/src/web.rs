@@ -65,6 +65,7 @@ struct SessionSummary {
     title: String,
     workspace: String,
     updated_at: u64,
+    pinned_at: Option<u64>,
     archived: bool,
     active: bool,
     active_turn_id: Option<uuid::Uuid>,
@@ -286,6 +287,8 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/unarchive", post(unarchive_session))
+        .route("/api/sessions/{id}/pin", post(pin_session))
+        .route("/api/sessions/{id}/unpin", post(unpin_session))
         .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces))
@@ -756,6 +759,7 @@ async fn sessions(
                 title: session.title,
                 workspace: session.workspace.display().to_string(),
                 updated_at: session.updated_at,
+                pinned_at: session.pinned_at,
                 archived,
                 active,
                 active_turn_id,
@@ -861,6 +865,41 @@ async fn unarchive_session(
     crate::daemon::set_remote_session_archived(&state.home, id, false)
         .await
         .map_err(WebError::from_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pin_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, WebError> {
+    set_session_pinned(&state, id, true).await
+}
+
+async fn unpin_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, WebError> {
+    set_session_pinned(&state, id, false).await
+}
+
+// 置顶是本地会话元数据（与 Xedit 的 pinnedAt 同语义），不需要把会话拉入 Runtime。
+async fn set_session_pinned(
+    state: &WebState,
+    id: uuid::Uuid,
+    pinned: bool,
+) -> Result<StatusCode, WebError> {
+    let store = SessionStore::new(&state.home);
+    let session = store
+        .load(id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !workspace_allowed(state, &session.workspace).await? {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    store
+        .set_pinned(id, pinned)
+        .map_err(|error| WebError::internal(error.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

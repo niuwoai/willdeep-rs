@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc60] - 2026-08-12
+
+### Added
+- Web 聊天中 AI 回复使用 `react-markdown` + `remark-gfm` 渲染基础 Markdown（标题、列表、粗斜体、行内代码、代码块、表格、引用、链接），链接在新标签页打开且不使用 `dangerouslySetInnerHTML`；用户消息保持纯文本展示。
+- 会话新增 `pinned_at` 置顶元数据（可选 Unix 秒时间戳，与 Xedit 的 `pinnedAt: Date?` 同语义）：本地会话写入会话 JSON；Xedit 桥接会话读取其 ISO8601 `pinnedAt`，置顶/取消置顶时就地补丁 Xedit 会话文件而不产生本地影子副本。置顶不改动 `updated_at`，不打乱最近使用排序。
+- Web 新增 `POST /api/sessions/{id}/pin` 与 `POST /api/sessions/{id}/unpin`；会话列表按"置顶（最近置顶在前）→ 最近更新"排序，置顶会话带 📌 标记。
+- Web 会话列表行悬停显示重命名、置顶/取消置顶、归档/取消归档、删除操作图标；删除改用 Chakra Dialog 确认弹窗（展示会话标题与不可撤销提示），不再使用原生 `window.confirm`。
+
+### Changed
+- Web 侧栏"新建只读子 Agent"改为纵向布局：Profile 下拉与任务描述各占整行，任务输入升级为两行 Textarea（Enter 提交、Shift+Enter 换行），创建按钮单独一行，不再与输入框挤在一行导致无法看清任务内容。
+- 会话底部操作条精简为分叉与导出；重命名、归档、删除移入列表行悬停图标。
+
+### Tests
+- 新增置顶往返、置顶不触碰 `updated_at`、ISO8601 解析/格式化往返的单元测试。
+- Web ESLint、TypeScript/Vite 构建、Rust 全工作区测试、Clippy 与 rustfmt 作为本版本验收项。
+
 ## [0.21.0-rc59] - 2026-08-11
 
 ### Fixed

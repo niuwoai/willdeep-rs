@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc59
+> 当前实施版本：v0.21.0-rc60
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -225,7 +225,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.21.0-rc59（进行中）：补齐 TUI 活动窗口的交互一致性。活动区保存独立布局矩形并进入鼠标命中判断，点击后显示焦点边框；`Ctrl+W` 在输入、聊天、活动和状态栏四区循环，活动区聚焦后可用 Enter/Space 展开或收起工具详情、Esc 返回输入区。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+v0.21.0-rc60（进行中）：Web 聊天 AI 回复接入 `react-markdown` + `remark-gfm` 基础 Markdown 渲染（标题、列表、代码块、表格、引用、链接），仅作用于 assistant 消息且不引入 `dangerouslySetInnerHTML`；侧栏"新建只读子 Agent"改为纵向布局，任务描述升级为整行两行 Textarea，解决 282px 侧栏内下拉、输入、按钮挤在一行的问题。会话新增 `pinned_at` 置顶元数据（与 Xedit `pinnedAt` 语义兼容，桥接会话就地补丁 Xedit JSON），Web 提供 pin/unpin 接口；会话列表行悬停显示重命名、置顶、归档、删除图标，删除改用 Chakra Dialog 确认。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc59（已完成）：补齐 TUI 活动窗口的交互一致性。活动区保存独立布局矩形并进入鼠标命中判断，点击后显示焦点边框；`Ctrl+W` 在输入、聊天、活动和状态栏四区循环，活动区聚焦后可用 Enter/Space 展开或收起工具详情、Esc 返回输入区。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
 
 v0.21.0-rc58（已完成）：修复 TUI Diff 查看后聊天区出现残影。Diff 渲染边界按四列 Tab Stop 展开真实 Tab，并把 ESC、响铃等其余控制字符转换成可见转义，Unified 与 Side-by-side 共用同一安全文本；从文件内容返回列表或关闭 Diff 模态时强制清空终端并重建 Ratatui 双缓冲，避免物理光标与虚拟单元格失步。回归测试覆盖 Tab、ESC、响铃、并排替换与 CJK 宽度。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
 
