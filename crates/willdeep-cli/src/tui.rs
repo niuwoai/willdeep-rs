@@ -9,17 +9,17 @@ use async_trait::async_trait;
 use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -177,6 +177,9 @@ struct App {
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
     attention_detail: Option<AttentionItem>,
+    attention_diff_rect: Rect,
+    attention_allow_rect: Rect,
+    attention_deny_rect: Rect,
     search: Option<SearchState>,
     workspace: Option<PathBuf>,
     palette: Option<PaletteState>,
@@ -307,6 +310,137 @@ struct TuiRuntime {
     rx: mpsc::UnboundedReceiver<UiMessage>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffAttentionAction {
+    Open,
+    Accept,
+    Reject,
+}
+
+async fn load_diff_review_state(
+    home: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<DiffReviewState> {
+    let snapshot = crate::daemon::diff_review::remote_snapshot(home, workspace).await?;
+    let reviews = crate::daemon::diff_review::remote_reviews(home, workspace, &snapshot.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| (record.path, record.decision))
+        .collect();
+    let verifications =
+        crate::daemon::diff_review::remote_verifications(home, workspace, &snapshot.id)
+            .await
+            .unwrap_or_default();
+    let attributions =
+        crate::daemon::diff_review::remote_attributions(home, workspace, &snapshot.id)
+            .await
+            .unwrap_or_default();
+    Ok(DiffReviewState {
+        snapshot,
+        selected: 0,
+        content: None,
+        scroll: 0,
+        area: crate::daemon::diff_review::DiffArea::Combined,
+        view: DiffViewMode::Unified,
+        search: None,
+        search_matches: Vec::new(),
+        search_selected: 0,
+        reviews,
+        confirm_revert: false,
+        verifications,
+        attributions,
+        commit_preview: None,
+        preview_draft: None,
+    })
+}
+
+async fn handle_diff_attention_action(
+    action: DiffAttentionAction,
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &TuiRuntime,
+    language: Language,
+) -> Result<()> {
+    if matches!(action, DiffAttentionAction::Open) {
+        match load_diff_review_state(&runtime.home, &session.workspace).await {
+            Ok(review) => {
+                app.diff_review = Some(review);
+                app.attention_detail = None;
+            }
+            Err(error) => {
+                app.notice = Some(format!(
+                    "{}: {error}",
+                    language.text(
+                        "打开 Diff Review 失败",
+                        "Open Diff Review failed",
+                        "Diff Review を開けませんでした"
+                    )
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let decision = if matches!(action, DiffAttentionAction::Accept) {
+        crate::daemon::diff_review::ReviewDecision::Accepted
+    } else {
+        crate::daemon::diff_review::ReviewDecision::Rejected
+    };
+    let snapshot =
+        crate::daemon::diff_review::remote_snapshot(&runtime.home, &session.workspace).await?;
+    if snapshot.has_conflicts && matches!(action, DiffAttentionAction::Accept) {
+        app.notice = Some(
+            language
+                .text(
+                    "存在未解决冲突，不能整批通过；请先查看 Diff",
+                    "Unresolved conflicts prevent bulk acceptance; inspect the Diff first",
+                    "未解決の競合があるため一括承認できません。Diff を確認してください",
+                )
+                .to_owned(),
+        );
+        return Ok(());
+    }
+    for file in &snapshot.files {
+        crate::daemon::diff_review::remote_review(
+            &runtime.home,
+            &snapshot.id,
+            &crate::daemon::diff_review::ReviewRequest {
+                workspace: session.workspace.clone(),
+                path: file.path.clone(),
+                decision,
+                note: None,
+            },
+        )
+        .await?;
+    }
+    if let Some(detail) = app.attention_detail.take() {
+        app.attention_read.insert(detail.id);
+        session.attention_read = app.attention_read.clone();
+        store.save(session)?;
+    }
+    app.workspace_attention = workspace_attention(&session.workspace);
+    app.notice = Some(format!(
+        "{}: {}",
+        if matches!(action, DiffAttentionAction::Accept) {
+            language.text(
+                "已通过当前 Diff",
+                "Current Diff accepted",
+                "現在の Diff を承認しました",
+            )
+        } else {
+            language.text(
+                "已拒绝当前 Diff",
+                "Current Diff rejected",
+                "現在の Diff を拒否しました",
+            )
+        },
+        snapshot.files.len()
+    ));
+    Ok(())
+}
+
 async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -368,7 +502,14 @@ async fn event_loop(
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
-                Event::Mouse(mouse)=>match mouse.kind {
+                Event::Mouse(mouse)=>{
+                    if mouse.kind==MouseEventKind::Down(MouseButton::Left)
+                        && let Some(action)=app.diff_attention_action_at(mouse.column,mouse.row)
+                    {
+                        handle_diff_attention_action(action,&mut app,session,store,runtime,language).await?;
+                        continue;
+                    }
+                    match mouse.kind {
                     MouseEventKind::Down(_)=>{
                         app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
                         if app.attention_detail.is_some()
@@ -389,7 +530,7 @@ async fn event_loop(
                     MouseEventKind::ScrollUp=>app.scroll_up(3),
                     MouseEventKind::ScrollDown=>app.scroll_down(3),
                     _=>{}
-                },
+                }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
@@ -567,8 +708,20 @@ async fn event_loop(
                         }
                         continue;
                     }
-                    if app.attention_detail.is_some(){
-                        if key.code==KeyCode::Esc{app.attention_detail=None;}
+                    if let Some(detail)=app.attention_detail.clone(){
+                        if detail.source==AttentionSource::DiffReview {
+                            let action=match key.code {
+                                KeyCode::Enter|KeyCode::Char('d')|KeyCode::Char('D')=>Some(DiffAttentionAction::Open),
+                                KeyCode::Char('y')|KeyCode::Char('Y')=>Some(DiffAttentionAction::Accept),
+                                KeyCode::Char('n')|KeyCode::Char('N')=>Some(DiffAttentionAction::Reject),
+                                _=>None,
+                            };
+                            if let Some(action)=action {
+                                handle_diff_attention_action(action,&mut app,session,store,runtime,language).await?;
+                            } else if key.code==KeyCode::Esc {
+                                app.attention_detail=None;
+                            }
+                        } else if key.code==KeyCode::Esc{app.attention_detail=None;}
                         else if key.code==KeyCode::Enter
                             && let Some(gate)=app.selected_remote_gate()
                         {
@@ -728,29 +881,8 @@ async fn event_loop(
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("启动 Web App 失败","Start Web App failed","Web App の起動に失敗しました")));continue;},
                             }
                             if prompt.trim()=="/diff" {
-                                match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await {
-                                    Ok(snapshot)=>{
-                                        let reviews=crate::daemon::diff_review::remote_reviews(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default().into_iter().map(|record|(record.path,record.decision)).collect();
-                                        let verifications=crate::daemon::diff_review::remote_verifications(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default();
-                                        let attributions=crate::daemon::diff_review::remote_attributions(&runtime.home,&session.workspace,&snapshot.id).await.unwrap_or_default();
-                                        app.diff_review=Some(DiffReviewState{
-                                            snapshot,
-                                            selected:0,
-                                            content:None,
-                                            scroll:0,
-                                            area:crate::daemon::diff_review::DiffArea::Combined,
-                                            view:DiffViewMode::Unified,
-                                            search:None,
-                                            search_matches:Vec::new(),
-                                            search_selected:0,
-                                            reviews,
-                                            confirm_revert:false,
-                                            verifications,
-                                            attributions,
-                                            commit_preview:None,
-                                            preview_draft:None,
-                                        });
-                                    },
+                                match load_diff_review_state(&runtime.home,&session.workspace).await {
+                                    Ok(review)=>app.diff_review=Some(review),
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
                                 }
                                 continue;
@@ -891,6 +1023,9 @@ impl App {
             task_detail: None,
             task_detail_scroll: 0,
             attention_detail: None,
+            attention_diff_rect: Rect::default(),
+            attention_allow_rect: Rect::default(),
+            attention_deny_rect: Rect::default(),
             search: None,
             workspace: None,
             palette: None,

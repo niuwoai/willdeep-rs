@@ -1,17 +1,23 @@
 use super::*;
 
-pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &App) {
+pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App) {
+    app.attention_diff_rect = Rect::default();
+    app.attention_allow_rect = Rect::default();
+    app.attention_deny_rect = Rect::default();
     let Some(detail) = &app.attention_detail else {
         return;
     };
     let actionable = app.selected_remote_gate().is_some();
+    let diff_review = detail.source == AttentionSource::DiffReview;
     let content = format!(
         "{} · {}\n\n{}\n\n{}{}",
         attention_source_label(detail.source, app.language),
         runtime_status_label(detail.status, app.language),
         detail.title,
         detail.detail,
-        if actionable {
+        if diff_review {
+            "\n\n "
+        } else if actionable {
             app.language.text(
                 "\n\nEnter 打开审批",
                 "\n\nEnter opens approval",
@@ -29,7 +35,13 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &App) {
         f.area(),
     );
     f.render_widget(Clear, popup);
-    let title = if actionable {
+    let title = if diff_review {
+        app.language.text(
+            "Diff 审批 · D/Enter 查看 · Y 通过 · N 拒绝 · Esc 关闭",
+            "Diff review · D/Enter view · Y accept · N reject · Esc closes",
+            "Diff レビュー · D/Enter 表示 · Y 承認 · N 拒否 · Esc 閉じる",
+        )
+    } else if actionable {
         app.language.text(
             "Inbox 详情 · Enter 审批 · Esc 关闭",
             "Inbox detail · Enter approve · Esc closes",
@@ -53,9 +65,59 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &App) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+    if diff_review && popup.height >= 3 {
+        let labels = [
+            app.language
+                .text("[D 查看 Diff]", "[D View Diff]", "[D Diff 表示]"),
+            app.language.text("[Y 通过]", "[Y Accept]", "[Y 承認]"),
+            app.language.text("[N 拒绝]", "[N Reject]", "[N 拒否]"),
+        ];
+        let widths = labels.map(|label| label.chars().count() as u16 + 1);
+        let total = widths
+            .iter()
+            .sum::<u16>()
+            .min(popup.width.saturating_sub(2));
+        let mut x = popup.x + popup.width.saturating_sub(total + 1);
+        let y = popup.y + popup.height.saturating_sub(2);
+        for (index, (label, width)) in labels.into_iter().zip(widths).enumerate() {
+            let rect = Rect::new(x, y, width.min(popup.right().saturating_sub(x)), 1);
+            match index {
+                0 => app.attention_diff_rect = rect,
+                1 => app.attention_allow_rect = rect,
+                _ => app.attention_deny_rect = rect,
+            }
+            let color = match index {
+                0 => Color::LightCyan,
+                1 => Color::Green,
+                _ => Color::Red,
+            };
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(color)),
+                rect,
+            );
+            x = x.saturating_add(width);
+        }
+    }
 }
 
 impl App {
+    pub(super) fn diff_attention_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<DiffAttentionAction> {
+        let point = (column, row).into();
+        if self.attention_diff_rect.contains(point) {
+            Some(DiffAttentionAction::Open)
+        } else if self.attention_allow_rect.contains(point) {
+            Some(DiffAttentionAction::Accept)
+        } else if self.attention_deny_rect.contains(point) {
+            Some(DiffAttentionAction::Reject)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn attention_items(&self) -> Vec<AttentionItem> {
         let mut items = Vec::new();
         if let Some((description, _, _)) = &self.approval {
@@ -158,15 +220,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
         app.language
             .text("移动中继", "Mobile relay", "モバイルリレー"),
     ];
-    let mut lines = vec![
-        Line::styled(
-            format!("WillDeep v{}", willdeep_core::VERSION),
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(""),
-    ];
+    let mut lines = Vec::new();
     let mut headers = [0usize; 4];
     let mut logical_hits = Vec::new();
     let mut selected_attention_row = None;
@@ -399,7 +453,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
         }
         lines.push(Line::raw(""));
     }
-    let viewport = area.height.saturating_sub(2).max(1) as usize;
+    let viewport = area.height.saturating_sub(3).max(1) as usize;
     let selected_row = if app.sidebar_selected == 1 {
         selected_attention_row.unwrap_or(headers[1])
     } else {
@@ -436,11 +490,20 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         "状態 · Ctrl+W フォーカス · Ctrl+B 非表示",
                     ))
                     .borders(Borders::ALL)
+                    .padding(Padding::new(0, 0, 0, 1))
                     .border_style(Style::default().fg(border)),
             )
             .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0)),
         area,
     );
+    if area.width > 4 && area.height > 2 {
+        f.render_widget(
+            Paragraph::new(format!("WillDeep v{}", willdeep_core::VERSION))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1),
+        );
+    }
 }
 
 fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> f64 {

@@ -44,6 +44,7 @@ pub struct SubagentCatalog {
     background: Arc<BackgroundTaskRegistry>,
     sink: Arc<dyn EventSink>,
     failures: Arc<Mutex<BTreeMap<String, usize>>>,
+    model_overrides: Arc<Mutex<BTreeMap<uuid::Uuid, String>>>,
     worktrees: Option<SubagentWorktreeManager>,
 }
 
@@ -110,6 +111,7 @@ impl SubagentCatalog {
             background,
             sink: Arc::new(SubagentNoopSink),
             failures: Arc::new(Mutex::new(BTreeMap::new())),
+            model_overrides: Arc::new(Mutex::new(BTreeMap::new())),
             worktrees: None,
         }
     }
@@ -130,6 +132,40 @@ impl SubagentCatalog {
             .map(|profile| format!("`{}` — {}", profile.id, profile.purpose))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    pub fn retry_background_agent(
+        &self,
+        agent_id: uuid::Uuid,
+        model: Option<&str>,
+    ) -> Result<Option<String>, AgentError> {
+        let model = model.map(str::trim).filter(|model| !model.is_empty());
+        if model.is_some_and(|model| model.len() > 256) {
+            return Err(AgentError::Subagent(
+                "model override must contain 1 to 256 bytes".to_owned(),
+            ));
+        }
+        let previous = if let Some(model) = model {
+            self.model_overrides
+                .lock()
+                .expect("subagent model overrides")
+                .insert(agent_id, model.to_owned())
+        } else {
+            None
+        };
+        let retried = self.background.retry_agent(agent_id);
+        if retried.is_none() && model.is_some() {
+            let mut overrides = self
+                .model_overrides
+                .lock()
+                .expect("subagent model overrides");
+            if let Some(previous) = previous {
+                overrides.insert(agent_id, previous);
+            } else {
+                overrides.remove(&agent_id);
+            }
+        }
+        Ok(retried)
     }
 
     pub(crate) fn needs_write_approval(&self, id: Option<&str>) -> bool {
@@ -272,6 +308,8 @@ impl SubagentCatalog {
             let lifecycle_root_workspace = prepared.root_workspace.clone();
             let lifecycle_worktree_branch = prepared.branch.clone();
             let lifecycle_dedicated_worktree = prepared.dedicated;
+            let runner_model_overrides = self.model_overrides.clone();
+            let lifecycle_model_overrides = self.model_overrides.clone();
             let instruction_inbox = Arc::new(AgentInstructionInbox::default());
             let runner_instruction_inbox = instruction_inbox.clone();
             let runner_prepared = prepared.clone();
@@ -282,7 +320,7 @@ impl SubagentCatalog {
                 instruction_inbox,
                 move || {
                     let workspace = workspace.clone();
-                    let profile = profile.clone();
+                    let mut profile = profile.clone();
                     let profile_id = profile.id.clone();
                     let prompt = prompt.clone();
                     let approved_target = approved_target.clone();
@@ -290,7 +328,20 @@ impl SubagentCatalog {
                     let failures = failures.clone();
                     let instruction_inbox = runner_instruction_inbox.clone();
                     let prepared = runner_prepared.clone();
+                    let model_overrides = runner_model_overrides.clone();
                     async move {
+                        if let Some(model) = model_overrides
+                            .lock()
+                            .expect("subagent model overrides")
+                            .get(&agent_id)
+                            .cloned()
+                        {
+                            profile.provider = match profile.provider.with_model(&model) {
+                                Ok(provider) => provider,
+                                Err(error) => return subagent_task_result(Err(error.into())),
+                            };
+                            profile.model = Some(model);
+                        }
                         let result = run_profile(
                             workspace,
                             profile,
@@ -310,7 +361,12 @@ impl SubagentCatalog {
                     let sink = lifecycle_sink.clone();
                     let background = lifecycle_background.clone();
                     let profile = lifecycle_profile.clone();
-                    let model = lifecycle_model.clone();
+                    let model = lifecycle_model_overrides
+                        .lock()
+                        .expect("subagent model overrides")
+                        .get(&agent_id)
+                        .cloned()
+                        .or_else(|| lifecycle_model.clone());
                     let label = lifecycle_label.clone();
                     let workspace = lifecycle_workspace.clone();
                     let root_workspace = lifecycle_root_workspace.clone();
@@ -672,6 +728,12 @@ mod tests {
 
     struct ReportProvider;
 
+    #[derive(Clone)]
+    struct ModelProvider {
+        model: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
     #[derive(Default)]
     struct CaptureSink(std::sync::Mutex<Vec<AgentEvent>>);
 
@@ -692,6 +754,30 @@ mod tests {
             assert!(tools.iter().all(|tool| tool.name != "spawn_agent"));
             Ok(Completion {
                 content: "subagent report".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ModelProvider {
+        fn with_model(&self, model: &str) -> Result<Arc<dyn Provider>, ProviderError> {
+            Ok(Arc::new(Self {
+                model: model.to_owned(),
+                seen: self.seen.clone(),
+            }))
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            self.seen.lock().unwrap().push(self.model.clone());
+            Ok(Completion {
+                content: format!("report from {}", self.model),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
                 usage: None,
@@ -854,6 +940,66 @@ mod tests {
             AgentEvent::SubagentCompleted { id: event_id, .. } if *event_id == id
         )));
         drop(events);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn terminal_background_agent_retries_with_a_reconfigured_provider_model() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-subagent-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(ModelProvider {
+            model: "old-model".to_owned(),
+            seen: seen.clone(),
+        });
+        let background = Arc::new(BackgroundTaskRegistry::default());
+        let sink = Arc::new(CaptureSink::default());
+        let mut profiles = builtin_profiles(provider.clone(), provider, 128_000);
+        for profile in &mut profiles {
+            profile.model = Some("old-model".to_owned());
+        }
+        let catalog =
+            SubagentCatalog::new(&root, profiles, background).with_event_sink(sink.clone());
+        let id = uuid::Uuid::new_v4();
+        catalog
+            .spawn_external_read_only(
+                id,
+                "inspect".to_owned(),
+                Some("model retry".to_owned()),
+                Some("scout".to_owned()),
+            )
+            .await
+            .expect("spawn");
+        for _ in 0..50 {
+            if seen.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), ["old-model"]);
+
+        assert!(
+            catalog
+                .retry_background_agent(id, Some("new-model"))
+                .expect("retry with model")
+                .is_some()
+        );
+        for _ in 0..50 {
+            if seen.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), ["old-model", "new-model"]);
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
+            event,
+            AgentEvent::SubagentStarted {
+                id: event_id,
+                model: Some(model),
+                ..
+            } if *event_id == id && model == "new-model"
+        )));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

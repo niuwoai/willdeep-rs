@@ -265,19 +265,40 @@ pub(crate) async fn submit_runtime_turn(
     }
     let request_id = uuid::Uuid::new_v4();
     let state = ensure_running(home).await?;
-    let turn = api_data(
-        runtime_client(&state)?
-            .submit_turn(
-                &willdeep_runtime_protocol::SubmitTurnParams {
-                    session_id,
-                    turn_request_id: request_id,
-                    prompt,
-                    attachments: attachments.into_iter().map(public_attachment).collect(),
-                },
-                request_id,
-            )
-            .await?,
-    )?;
+    let client = runtime_client(&state)?;
+    let public_attachments = attachments
+        .into_iter()
+        .map(public_attachment)
+        .collect::<Vec<_>>();
+    let params = willdeep_runtime_protocol::SubmitTurnParams {
+        session_id,
+        turn_request_id: request_id,
+        prompt: prompt.clone(),
+        attachments: public_attachments.clone(),
+    };
+    let turn = match client.submit_turn(&params, request_id).await {
+        Ok(response) => api_data(response)?,
+        Err(error) if error.status_code() == Some(404) => {
+            #[derive(Serialize)]
+            struct LegacyTurnRequest<'a> {
+                request_id: uuid::Uuid,
+                prompt: &'a str,
+                attachments: &'a [willdeep_runtime_protocol::MessageAttachment],
+            }
+            client
+                .post_json::<_, willdeep_runtime_protocol::RuntimeTurn>(
+                    &format!("/v1/sessions/{session_id}/turns"),
+                    &LegacyTurnRequest {
+                        request_id,
+                        prompt: &prompt,
+                        attachments: &public_attachments,
+                    },
+                )
+                .await
+                .context("submit Turn through the legacy Runtime Session endpoint")?
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(RemoteRuntimeTurn { id: turn.id })
 }
 

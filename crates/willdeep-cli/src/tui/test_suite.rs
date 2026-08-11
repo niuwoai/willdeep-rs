@@ -492,6 +492,16 @@ mod tests {
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
         assert!(rendered.contains("Tools: 1 · Running: 1 · Artifacts: 1"));
         assert!(rendered.contains("read_file · Running"));
+        let footer = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 30)].symbol())
+            .collect::<String>();
+        let version = format!("WillDeep v{}", willdeep_core::VERSION);
+        assert!(footer.contains(&version));
+        let version_x = 1 + (80 - 2 - version.chars().count() as u16);
+        assert_eq!(
+            terminal.backend().buffer()[(version_x, 30)].fg,
+            Color::DarkGray
+        );
         assert_eq!(
             app.selected_runtime_agent().unwrap().label.as_deref(),
             Some("root")
@@ -1233,6 +1243,26 @@ mod tests {
         let detail = app.attention_detail.as_ref().expect("detail");
         assert_eq!(detail.id, "diff-review:abc");
         assert!(detail.detail.contains("src/a.rs"));
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar::render_attention_detail(frame, &mut app))
+            .unwrap();
+        assert_ne!(app.attention_diff_rect, Rect::default());
+        assert_ne!(app.attention_allow_rect, Rect::default());
+        assert_ne!(app.attention_deny_rect, Rect::default());
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_diff_rect.x, app.attention_diff_rect.y),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_allow_rect.x, app.attention_allow_rect.y),
+            Some(DiffAttentionAction::Accept)
+        );
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_deny_rect.x, app.attention_deny_rect.y),
+            Some(DiffAttentionAction::Reject)
+        );
         app.attention_detail = None;
         assert!(app.attention_mark_read());
         assert!(app.attention_items().is_empty());

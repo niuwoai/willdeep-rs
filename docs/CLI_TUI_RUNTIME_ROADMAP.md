@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc42
+> 当前实施版本：v0.21.0-rc43
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -48,6 +48,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 右栏增加“需要你处理”“正在工作”“最近完成”。
 - [x] 审批、ask_user、失败任务、阻塞子 Agent、Worktree 冲突和待审 Diff 统一进入 Inbox。
 - [x] 支持允许、拒绝、回答、重试、停止、标记已读和精确跳转。
+- [x] Workspace Diff Inbox 支持键盘与鼠标查看 Diff、整批通过或拒绝；决定绑定精确快照，冲突禁止整批通过。
 - [x] Agent → 会话 → Workspace 的状态优先级聚合。
 
 验收：用户无需轮询输出即可处理所有阻塞项，每个条目能跳回准确上下文。
@@ -88,7 +89,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
 - [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、可滚动工具时间线、结果报告和 Diff Artifact 摘要，Prompt/错误原文的脱敏与授权边界待设计。
-- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
+- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止、重试，以及统一 API/Rust Client 在终态重试边界真实换模型，TUI/Web 交互入口待完成。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
 
@@ -224,13 +225,15 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc43（已完成）：统一 `agent.retry` 从仅 ID 参数扩展为向后兼容的 `RetryAgentParams { id, model? }`，Rust Client 保留旧方法并新增 `retry_agent_with_model`。模型覆盖只允许终态后台 Child Agent 的重试路径；Harness 为 Chat Completions、Responses 和 Anthropic Provider 克隆原连接、鉴权与协议配置，只替换模型并创建真实 Provider 实例，随后 `SubagentStarted` 生命周期和 Agent Store 更新实际模型。运行中的 Agent 仍拒绝重试/换模，不做半轮热切。TUI 版本号移至侧栏右下角并降低对比度；Workspace Diff Inbox 详情增加键盘和鼠标可点击的查看/通过/拒绝，精确快照记录决定且冲突禁止整批通过。统一 API 404 时 Turn 提交以相同 request ID 回退旧 Session 路由，兼容旧 Daemon 且不自动重启。测试覆盖真实模型切换、协议夹具、按钮命中、版本位置和 404 状态识别。
+
 v0.21.0-rc42（已完成）：TUI Agent 详情增加独立滚动状态，方向键逐行、Page Up/Down 分页、Home/End 首尾跳转，鼠标滚轮在弹窗打开时优先滚动详情而不是底层聊天区。渲染端按终端宽度计算实际换行行数并夹紧偏移，长报告可完整浏览且不会滚入空白区；打开或关闭另一个 Agent 时重置偏移。回归测试覆盖长内容末尾定位和短内容零滚动。
 
 v0.21.0-rc41（已完成）：TUI 从 Agent 侧边栏按 Enter 时调用受 Token 保护的 `agent.get`，只在显式详情视图读取已有结果报告；弹窗按 Agent ID 过滤最近 8 条 Tool Activity 与 Workspace Change Artifact，展示工具状态、耗时和 Diff 变更数量。列表仍使用 `agent.list` 最小摘要，未新增 Prompt 原文持久化或事件下发；Prompt/内部错误只有在完成脱敏、权限与保留策略设计后才继续开放。回归测试覆盖跨 Agent 工具和 Artifact 隔离。
 
 v0.21.0-rc40（已完成）：Runtime Task 与 Agent Store 新增向后兼容的模型字段，Root Agent 创建、Session 下一 Turn 和 Daemon 重启恢复都保留实际模型；Subagent Profile 记录父模型、some.im 默认轻量模型或配置覆盖模型，并随生命周期事件进入 Child Agent。统一协议、TUI 和 Web Agent 树显示父子层级、Profile、模型、状态、当前工具、运行耗时、累计 Token 与专属 Worktree/分支；Web 文案全部通过 i18n。测试覆盖 Root/Child 模型持久化、重启恢复、事件协议和 TUI/Web 安全摘要。
 
-v0.21.0-rc39（已完成）：TUI 侧边栏顶部常驻显示编译期 `willdeep_core::VERSION`，用户可直接核对正在运行的二进制是否为当前发版。`/webapp` 保持在 `/` 命令候选中，并加入通用斜杠命令兜底的委派白名单，避免未来分发顺序调整时被误报为未知命令。测试覆盖 `/web` 候选发现和 `/webapp` 不被兜底拦截。
+v0.21.0-rc39（已完成）：TUI 侧边栏开始常驻显示编译期 `willdeep_core::VERSION`，用户可直接核对正在运行的二进制是否为当前发版；rc43 后位置调整为低对比度右下角。`/webapp` 保持在 `/` 命令候选中，并加入通用斜杠命令兜底的委派白名单，避免未来分发顺序调整时被误报为未知命令。测试覆盖 `/web` 候选发现和 `/webapp` 不被兜底拦截。
 
 v0.21.0-rc38（已完成）：Core Session 新增向后兼容的压缩代次和最近一次手动压缩检查点，记录压缩前后消息数与时间；TUI 与 Runtime `/compress` 只有在消息确实缩短时才递增代次并原子保存。Runtime Turn 在领取与完成时绑定 Core 压缩代次，精确 Fork 只接受当前代次边界，旧代次不再用失效数组下标截断；Daemon 重启的安全重放也要求代次一致。测试覆盖检查点持久化、旧 Session 兼容、压缩前边界拒绝和压缩后新 Turn 正常 Fork。
 

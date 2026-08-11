@@ -215,6 +215,15 @@
         "timeout_ms": 10000
       }
     },
+    "agent_retry": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000017",
+      "operation": "agent.retry",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "model": "qwen3-coder-plus"
+      }
+    },
     "approval_resolve": {
       "protocol_version": "1.0",
       "request_id": "00000000-0000-4000-8000-000000000013",

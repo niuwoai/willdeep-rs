@@ -151,6 +151,13 @@ pub struct AgentPromptParams {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct RetryAgentParams {
+    pub id: uuid::Uuid,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnAgentParams {
     pub session_id: uuid::Uuid,
     pub prompt: String,
@@ -475,6 +482,8 @@ pub struct RuntimeAgentCommand {
     pub kind: AgentCommandKind,
     pub status: AgentCommandStatus,
     pub created_at: u64,
+    #[serde(default)]
+    pub requested_model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1169,6 +1178,10 @@ mod tests {
         let _: AgentPromptParams = serde_json::from_value(prompt.params).unwrap();
         let wait: ApiRequest = serde_json::from_value(requests["agent_wait"].clone()).unwrap();
         let _: AgentWaitParams = serde_json::from_value(wait.params).unwrap();
+        let retry: ApiRequest = serde_json::from_value(requests["agent_retry"].clone()).unwrap();
+        assert_eq!(retry.operation, "agent.retry");
+        let retry: RetryAgentParams = serde_json::from_value(retry.params).unwrap();
+        assert_eq!(retry.model.as_deref(), Some("qwen3-coder-plus"));
         let approval: ApiRequest =
             serde_json::from_value(requests["approval_resolve"].clone()).unwrap();
         let _: ResolveApprovalParams = serde_json::from_value(approval.params).unwrap();
@@ -1223,6 +1236,12 @@ mod tests {
         let wait: AgentWaitParams =
             serde_json::from_value(serde_json::json!({"id": agent_id})).unwrap();
         assert_eq!(wait.timeout_ms, 10_000);
+        let retry: RetryAgentParams = serde_json::from_value(serde_json::json!({
+            "id": agent_id,
+            "model": "qwen3-coder-plus"
+        }))
+        .unwrap();
+        assert_eq!(retry.model.as_deref(), Some("qwen3-coder-plus"));
         let events: EventListParams = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(events, EventListParams::default());
         assert_eq!(events.limit, 200);
@@ -1255,6 +1274,7 @@ mod tests {
             kind: AgentCommandKind::Instruct,
             status: AgentCommandStatus::Pending,
             created_at: 10,
+            requested_model: None,
         };
         let json = serde_json::to_string(&command).unwrap();
         assert!(!json.contains("message"));

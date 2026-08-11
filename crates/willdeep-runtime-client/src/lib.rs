@@ -121,6 +121,22 @@ impl RuntimeClient {
         }
     }
 
+    pub async fn post_json<P, T>(&self, path: &str, payload: &P) -> Result<T, ClientError>
+    where
+        P: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        decode_raw_response(
+            self.http
+                .post(format!("{}{}", self.base_url, normalized_path(path)))
+                .header(TOKEN_HEADER, &self.token)
+                .json(payload)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn call<P, T>(
         &self,
         operation: impl Into<String>,
@@ -215,8 +231,21 @@ impl RuntimeClient {
         id: uuid::Uuid,
         request_id: uuid::Uuid,
     ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
-        self.call("agent.retry", &IdParams { id }, Some(request_id))
-            .await
+        self.retry_agent_with_model(id, None, request_id).await
+    }
+
+    pub async fn retry_agent_with_model(
+        &self,
+        id: uuid::Uuid,
+        model: Option<String>,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
+        self.call(
+            "agent.retry",
+            &willdeep_runtime_protocol::RetryAgentParams { id, model },
+            Some(request_id),
+        )
+        .await
     }
 
     pub async fn tasks(&self) -> Result<ApiResponse<Vec<RuntimeTask>>, ClientError> {
@@ -537,9 +566,30 @@ pub enum ClientError {
     NdjsonLineTooLarge(usize),
 }
 
+impl ClientError {
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            Self::HttpStatus(status) | Self::InvalidResponse { status, .. } => Some(*status),
+            Self::Http(error) => error.status().map(|status| status.as_u16()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposes_http_status_for_legacy_route_fallbacks() {
+        let invalid = ClientError::InvalidResponse {
+            status: 404,
+            source: serde_json::from_slice::<serde_json::Value>(b"").unwrap_err(),
+        };
+        assert_eq!(invalid.status_code(), Some(404));
+        assert_eq!(ClientError::HttpStatus(503).status_code(), Some(503));
+        assert_eq!(ClientError::UnsafeEndpoint.status_code(), None);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

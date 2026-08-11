@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc42
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc43
 
 ## 项目简介
 
@@ -27,10 +27,11 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
 - Root/Child Agent 持久记录实际模型，统一 API、TUI 与 Web Agent 树展示父子层级、模型、状态、工具、耗时、Token 和 Worktree；
 - TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；Prompt 原文不额外持久化或下发；
+- 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
 - Ratatui 多轮 TUI、可滚动聊天记录、聚合工具活动和界面内审批；
-- TUI 侧边栏常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
+- TUI 侧边栏右下角以低对比度常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
 - 空白新会话的即时工作区欢迎引导；
 - 多行 Prompt 编辑、鼠标光标定位、文本粘贴附件和可删除图片附件；
 - TUI 与 Web 的简体中文、英语、日语界面及持久语言偏好；
@@ -52,6 +53,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；
 - TUI 右栏 Attention Inbox 按人工介入优先级聚合待处理、工作中和最近完成事项；
 - Attention Inbox 支持键盘/鼠标选择、后台任务与子 Agent 详情跳转、停止运行项和标记已读；
+- Diff Inbox 详情支持键盘和鼠标点击查看完整 Diff、整批通过或拒绝；决定绑定提交时的精确快照，冲突状态禁止整批通过；
 - Inbox 已读状态随会话持久化，后台 Shell 与子 Agent 支持真实重试，任务结束时触发终端提示；
 - Git 冲突和待审 Diff 使用内容指纹进入 Inbox，子 Agent 审批阻塞结构化上报，状态按 Agent→会话→Workspace 上卷；
 - 跨平台 Runtime Daemon 提供 `start/status/stop/logs/upgrade`；Upgrade 以 draining 闸门拒绝新工作、保留活跃任务和持久排队 Turn，任务归零后由当前二进制接管。Headless 观察者识别 Runtime 身份更替后沿事件游标自动重附着；本机客户端优先通过权限为 `0600` 的 Unix Socket 或拒绝远程客户端的 Windows Named Pipe 通信，并兼容旧状态的受 Token 回环 TCP；
@@ -67,6 +69,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 非交互 Harness 可通过 Runtime 提交、查询和取消；Daemon 直接持有进程内 Harness Future，并把模型输出、session_id 和终态写入可续传事件流，不再为每个 Turn 启动 CLI 子进程；
 - Headless CLI 默认创建或续接同一 Runtime Session/Turn，按游标分页追平脱敏持久事件并按失败域维持自动化退出码；进程级敏感覆盖保守留在 `--local` 路径；
 - CLI 与 Runtime 共用 Provider、视觉降级、审批、Skills、MCP、Tools、子 Agent Profile、会话写入和后台结果回流的 Harness Factory；Agent 事件直接写入 Runtime EventLog，不经过 stdout 文本中转；
+- TUI Turn 提交优先使用统一控制 API；旧 Runtime 明确返回 404 时，以同一 request ID 回退到旧 Session Turn 路由，避免重复提交且不自动重启 Daemon；
 - Runtime 使用带心跳的单实例租约锁协调并发启动；异常退出后一次启动请求可在旧租约过期后安全接管，重启时将遗留 Running/Waiting Task、Turn、Agent 标记为 Interrupted、取消 Pending Interaction，并补写可续传恢复事件；
 - Runtime 优雅停止会先取消并收敛进程内 Harness Future，再关闭 HTTP Server，等待审批或回答的请求不会阻塞 Daemon 退出；
 - Runtime Session/Turn API 与 CLI 提供稳定 Root Agent、幂等请求 ID、持久严格串行队列、排队/运行取消、终态事件和重启恢复；成功后 Core Session 保留唯一消息历史并清除队列私密正文；

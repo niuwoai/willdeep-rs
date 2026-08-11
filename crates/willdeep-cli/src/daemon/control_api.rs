@@ -261,9 +261,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         "agent.prompt" => agent_prompt(state, &request).await,
         "agent.wait" => agent_wait(state, &request).await,
         "agent.stop" => agent_command(state, &request, agent_control::AgentCommandKind::Stop).await,
-        "agent.retry" => {
-            agent_command(state, &request, agent_control::AgentCommandKind::Retry).await
-        }
+        "agent.retry" => agent_retry(state, &request).await,
         "task.list" => json(
             state
                 .tasks
@@ -1227,6 +1225,7 @@ async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
         params.id,
         agent_control::AgentCommandKind::Instruct,
         Some(message.to_owned()),
+        None,
     )
     .await
     .map_err(ApiFailure::from_status)?;
@@ -1317,9 +1316,32 @@ async fn agent_command(
     kind: agent_control::AgentCommandKind,
 ) -> ApiResult {
     let params = params::<IdParams>(request)?;
-    let command = agent_control::enqueue_agent_command_internal(state, params.id, kind, None)
+    let command = agent_control::enqueue_agent_command_internal(state, params.id, kind, None, None)
         .await
         .map_err(ApiFailure::from_status)?;
+    command_response(command)
+}
+
+async fn agent_retry(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::RetryAgentParams>(request)?;
+    let model = params.model.map(|model| model.trim().to_owned());
+    if model
+        .as_deref()
+        .is_some_and(|model| model.is_empty() || model.len() > 256)
+    {
+        return Err(ApiFailure::invalid(
+            "model must contain 1 to 256 bytes when provided",
+        ));
+    }
+    let command = agent_control::enqueue_agent_command_internal(
+        state,
+        params.id,
+        agent_control::AgentCommandKind::Retry,
+        None,
+        model,
+    )
+    .await
+    .map_err(ApiFailure::from_status)?;
     command_response(command)
 }
 
@@ -1357,6 +1379,7 @@ fn command_response(command: agent_control::AgentCommand) -> ApiResult {
             }
         },
         created_at: command.created_at,
+        requested_model: command.model,
     })
 }
 

@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc42
+> 当前实现版本：v0.21.0-rc43
 
 ## 1. 目标
 
@@ -64,6 +64,7 @@ session.search
 agent.spawn
 agent.prompt
 agent.wait
+agent.retry
 approval.resolve
 event.list
 event.stream
@@ -91,6 +92,15 @@ diff.revert
 }
 ```
 
+`agent.retry` 只接受已经进入终态且可重试的后台 Child Agent。可选 `model` 表示在重试边界重建同一 Provider 的模型实例；运行中的 Agent 不热切模型：
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000003",
+  "model": "qwen3-coder-plus"
+}
+```
+
 成功响应是状态为 `queued` 的 `RuntimeAgent`，其中 `id` 可直接传给 `agent.get` 或 `agent.wait`。当前公开 Spawn 固定后台执行，Profile 仅允许 `scout`、`reader`、`deep`；它不接受 Parent ID、Task ID、Workspace、工具权限、`target_file` 或前台执行开关。
 
 操作名一旦发布不得在同一协议主版本中改变语义。新增操作向后兼容；删除或改变字段含义需要提升协议主版本。
@@ -105,7 +115,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc42",
+    "server_version": "0.21.0-rc43",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -123,7 +133,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc42"
+    "server_version": "0.21.0-rc43"
   }
 }
 ```

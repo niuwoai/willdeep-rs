@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0-rc43] - 2026-08-11
+
+### Added
+
+- 统一 `agent.retry` 参数新增可选 `model`，Rust Client 提供 `retry_agent_with_model`；旧的仅 ID 调用保持兼容。
+- 终态后台 Child Agent 可在重试边界基于原 Provider 配置重建新模型实例，生命周期与 Agent Store 随后记录实际模型。
+- Diff Inbox 详情提供键盘与鼠标可点击的“查看 Diff / Y 通过 / N 拒绝”；整批决定记录到精确当前快照并将本次指纹标记已处理。
+
+### Changed
+
+- 运行中的 Agent 不支持中途热切模型；模型覆盖只在可重试终态生效，避免同一轮请求混用模型。
+- TUI 发版版本号改为低对比度并固定在状态侧栏右下角，不再占用顶部主信息位置。
+
+### Fixed
+
+- 统一 Runtime API 返回 HTTP 404 时，Turn 提交使用相同 request ID 安全回退到旧 Session Turn 路由，兼容仍在运行的旧版 Daemon，不自动重启或打断任务。
+
 ## [0.21.0-rc42] - 2026-08-11
 
 ### Added
