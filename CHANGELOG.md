@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0-rc61] - 2026-08-12
+
+### Docs
+- `README.md` 重新定位为面向读者的项目介绍：价值主张、30 秒上手、能力一览、安全须知与文档索引，不再承载完整参考内容，篇幅从 546 行降到约 130 行。
+- 新增 `docs/README.md` 作为文档总索引，按「上手 → 三种使用方式 → 能力专题 → 排查 → 协议与架构」组织全部文档。
+- 按主题拆分出 13 篇文档：`INSTALL.md`、`CONFIGURATION.md`、`AUTHENTICATION.md`、`CLI_REFERENCE.md`、`TUI_GUIDE.md`、`WEB_GUIDE.md`、`SOMEIM_INTEGRATION.md`、`RUNTIME_DAEMON.md`、`SUBAGENTS.md`、`APPROVALS.md`、`SKILLS_AND_MCP.md`、`MOBILE.md`、`TROUBLESHOOTING.md`。
+- `docs/TUI_GUIDE.md` 新增鼠标章节，说明 SSH 下鼠标事件由本地终端模拟器上报、SSH 仅作透明字节管道，因此远程可用；tmux 需 `set -g mouse on`，GNU screen 支持残缺；`Ctrl+S` 文本选择模式、`?1003h` 全移动上报在高延迟链路上的上行开销，以及终端不支持鼠标时的纯键盘等价路径。
+- `docs/AUTHENTICATION.md` 首次完整记录四类凭据的边界：Provider API Key 四层解析链（含子 Agent 不继承 `--api-key` / `WILLDEEP_API_KEY`）、some.im 浏览器登录为「打开 URL + 轮询」而非 OAuth 授权码交换、Runtime 控制 Token 覆盖全部端点且 `/v1/internal` 缺标记时返回 404 而非 401、手机中继二维码明文携带 relay token。
+- `docs/CLI_REFERENCE.md` 按真实 Clap 命令树重写，补上此前 README 未记录的 `--listen`（默认 `127.0.0.1:9847`）、`daemon capabilities` 与 `instruct-agent`。
+- `docs/WEB_GUIDE.md` 记录完整 JSON API 清单、工作区 allowlist 的「启动白名单 ∩ Runtime 注册表」双层模型、事件游标与退避重连，并明确 1 MiB 请求体上限对图片附件的实际约束，以及 Vite 代理端口硬编码为 9847。
+- `docs/SOMEIM_INTEGRATION.md` 说明 host 精确匹配（`some.im` / `api.some.im` / `api.niuwoai.com`）、视觉回退的模型判定规则与默认 `qwen3-vl-plus`、`web_search` 端点为替换整条路径的 `/api/v1/customer/web-search`，并澄清 `x-willdeep-session-id` / `x-willdeep-workspace-id` 是 Provider 实例级随机 UUID，与会话 UUID 和工作区路径无关。
+
 ## [0.21.0-rc60] - 2026-08-12
 
 ### Added
