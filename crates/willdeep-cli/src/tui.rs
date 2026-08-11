@@ -148,6 +148,7 @@ struct App {
     runtime_artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
     runtime_agent_selected: usize,
     agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
+    agent_detail_scroll: usize,
     worktree_review: Option<crate::daemon::WorktreeReview>,
     diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
@@ -377,6 +378,8 @@ async fn event_loop(
                             open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
                         }
                     },
+                    MouseEventKind::ScrollUp if app.agent_detail.is_some()=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown if app.agent_detail.is_some()=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_sub(3),
                     MouseEventKind::ScrollDown if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(-3),
@@ -418,7 +421,13 @@ async fn event_loop(
                     }
                     if let Some(agent)=app.agent_detail.clone(){
                         match key.code {
-                            KeyCode::Esc=>app.agent_detail=None,
+                            KeyCode::Esc=>{app.agent_detail=None;app.agent_detail_scroll=0;},
+                            KeyCode::Up=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(1),
+                            KeyCode::Down=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(1),
+                            KeyCode::PageUp=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(8),
+                            KeyCode::PageDown=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(8),
+                            KeyCode::Home=>app.agent_detail_scroll=0,
+                            KeyCode::End=>app.agent_detail_scroll=usize::MAX,
                             KeyCode::Char('w')|KeyCode::Char('W') if agent.dedicated_worktree=>match crate::daemon::remote_review(&runtime.home,agent.id).await {
                                 Ok(review)=>app.worktree_review=Some(review),
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("Worktree 审查失败","Worktree review failed","Worktree レビュー失敗"))),
@@ -627,6 +636,7 @@ async fn event_loop(
                                             Ok(detail)=>app.agent_detail=Some(detail),
                                             Err(error)=>app.notice=Some(format!("{}: {error}",language.text("加载 Agent 详情失败","Failed to load Agent details","Agent 詳細の読み込みに失敗"))),
                                         }
+                                        app.agent_detail_scroll=0;
                                     }
                                 }else{app.sidebar_activate(&runtime.background_tasks);}
                             },
@@ -852,6 +862,7 @@ impl App {
             runtime_artifacts: Vec::new(),
             runtime_agent_selected: 0,
             agent_detail: None,
+            agent_detail_scroll: 0,
             worktree_review: None,
             diff_review: None,
             runtime_event_cursor: 0,

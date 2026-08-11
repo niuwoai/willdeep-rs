@@ -570,6 +570,21 @@ mod tests {
         assert!(content.contains("detail report"));
     }
     #[test]
+    fn agent_detail_scroll_is_bounded_to_the_wrapped_content() {
+        let content = (0..20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            agent_worktree_ui::agent_detail_scroll_offset(&content, 20, 5, usize::MAX),
+            15
+        );
+        assert_eq!(
+            agent_worktree_ui::agent_detail_scroll_offset(&content, 20, 30, usize::MAX),
+            0
+        );
+    }
+    #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));

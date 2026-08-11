@@ -22,18 +22,22 @@ fn render_agent_detail(
             .max(1),
         frame.area(),
     );
+    let inner_width = popup.width.saturating_sub(2).max(1) as usize;
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let scroll =
+        agent_detail_scroll_offset(&content, inner_width, inner_height, app.agent_detail_scroll);
     frame.render_widget(Clear, popup);
     let title = if agent.dedicated_worktree {
         app.language.text(
-            "Agent 详情 · W 审查 Worktree · Esc 关闭",
-            "Agent details · W review Worktree · Esc close",
-            "Agent 詳細 · W Worktree レビュー · Esc 閉じる",
+            "Agent 详情 · ↑↓/PgUp/PgDn 滚动 · W 审查 Worktree · Esc 关闭",
+            "Agent details · ↑↓/PgUp/PgDn scroll · W review Worktree · Esc close",
+            "Agent 詳細 · ↑↓/PgUp/PgDn スクロール · W Worktree レビュー · Esc 閉じる",
         )
     } else {
         app.language.text(
-            "Agent 详情 · Esc 关闭",
-            "Agent details · Esc close",
-            "Agent 詳細 · Esc で閉じる",
+            "Agent 详情 · ↑↓/PgUp/PgDn 滚动 · Esc 关闭",
+            "Agent details · ↑↓/PgUp/PgDn scroll · Esc close",
+            "Agent 詳細 · ↑↓/PgUp/PgDn スクロール · Esc 閉じる",
         )
     };
     frame.render_widget(
@@ -44,9 +48,20 @@ fn render_agent_detail(
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::LightCyan)),
             )
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+pub(super) fn agent_detail_scroll_offset(
+    content: &str,
+    width: usize,
+    height: usize,
+    requested: usize,
+) -> u16 {
+    let max_scroll = visual_lines(content, width.max(1)).saturating_sub(height);
+    requested.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
 pub(super) fn agent_detail_content(

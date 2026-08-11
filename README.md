@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc41`，支持：
+当前版本为 `0.21.0-rc42`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；

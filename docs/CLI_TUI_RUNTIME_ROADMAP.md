@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc41
+> 当前实施版本：v0.21.0-rc42
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -87,7 +87,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 ### 阶段 4：Agent Mission Control（v0.18.0）
 
 - [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
-- [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、工具时间线、结果报告和 Diff Artifact 摘要，Prompt/错误原文的脱敏与授权边界待设计。
+- [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、可滚动工具时间线、结果报告和 Diff Artifact 摘要，Prompt/错误原文的脱敏与授权边界待设计。
 - [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc42（已完成）：TUI Agent 详情增加独立滚动状态，方向键逐行、Page Up/Down 分页、Home/End 首尾跳转，鼠标滚轮在弹窗打开时优先滚动详情而不是底层聊天区。渲染端按终端宽度计算实际换行行数并夹紧偏移，长报告可完整浏览且不会滚入空白区；打开或关闭另一个 Agent 时重置偏移。回归测试覆盖长内容末尾定位和短内容零滚动。
 
 v0.21.0-rc41（已完成）：TUI 从 Agent 侧边栏按 Enter 时调用受 Token 保护的 `agent.get`，只在显式详情视图读取已有结果报告；弹窗按 Agent ID 过滤最近 8 条 Tool Activity 与 Workspace Change Artifact，展示工具状态、耗时和 Diff 变更数量。列表仍使用 `agent.list` 最小摘要，未新增 Prompt 原文持久化或事件下发；Prompt/内部错误只有在完成脱敏、权限与保留策略设计后才继续开放。回归测试覆盖跨 Agent 工具和 Artifact 隔离。
 
