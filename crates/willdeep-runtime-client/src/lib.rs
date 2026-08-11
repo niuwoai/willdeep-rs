@@ -107,6 +107,22 @@ impl RuntimeClient {
         .await
     }
 
+    pub async fn get_json_with_query<Q, T>(&self, path: &str, query: &Q) -> Result<T, ClientError>
+    where
+        Q: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        decode_raw_response(
+            self.http
+                .get(format!("{}{}", self.base_url, normalized_path(path)))
+                .header(TOKEN_HEADER, &self.token)
+                .query(query)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn post_empty(&self, path: &str) -> Result<(), ClientError> {
         let response = self
             .http

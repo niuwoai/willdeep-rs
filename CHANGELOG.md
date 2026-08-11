@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.21.0-rc44] - 2026-08-11
+
+### Added
+
+- TUI Agent 详情新增键盘与鼠标可点击的补充指令、停止、原模型重试、指定模型重试和 Worktree Diff 控件；已有 Composer 草稿或附件不会被覆盖。
+- TUI `/agent` 支持 `instruct`、`stop`、`retry` 与 `retry --model`，Web Runtime Agent 侧栏同步提供指定模型重试且全部文案覆盖中英日。
+
+### Fixed
+
+- Diff Inbox 弹窗现在先于残留 Task、Agent、Diff 和底层聊天面板捕获 D/Enter、Y、N，打开互斥详情时会清理旧覆盖层，按键不再泄漏到底层输入区。
+- 旧 Runtime 不支持统一 Diff 控制 API 时，快照、内容和审查自动回退既有受 Token 路由；操作失败仅显示状态提示，不再退出整个 TUI。
+- Web Agent 重试请求严格拒绝客户端夹带额外作用域，并对可选模型执行 1–256 字节边界校验。
+
 ## [0.21.0-rc43] - 2026-08-11
 
 ### Added

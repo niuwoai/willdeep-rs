@@ -124,11 +124,14 @@ export function App() {
     } catch (reason) { setError(`${t.runtimeActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }
 
-  async function runAgentAction(id: string, action: "stop" | "retry" | "prompt") {
+  async function runAgentAction(id: string, action: "stop" | "retry" | "retry_model" | "prompt", currentModel?: string | null) {
     const message = action === "prompt" ? window.prompt(t.agentPrompt)?.trim() : undefined;
     if (action === "prompt" && !message) return;
+    const model = action === "retry_model" ? window.prompt(t.agentModelPrompt, currentModel ?? "")?.trim() : undefined;
+    if (action === "retry_model" && !model) return;
+    const endpointAction = action === "retry_model" ? "retry" : action;
     try {
-      await mutate(`/api/runtime/agents/${encodeURIComponent(id)}/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace, ...(message ? { message } : {}) }) });
+      await mutate(`/api/runtime/agents/${encodeURIComponent(id)}/${endpointAction}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace, ...(message ? { message } : {}), ...(model ? { model } : {}) }) });
       await refreshRuntimeActivity();
     } catch (reason) { setError(`${t.runtimeActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }

@@ -149,6 +149,7 @@ struct App {
     runtime_agent_selected: usize,
     agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
     agent_detail_scroll: usize,
+    agent_detail_action_rects: Vec<(Rect, AgentDetailAction)>,
     worktree_review: Option<crate::daemon::WorktreeReview>,
     diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
@@ -315,6 +316,128 @@ enum DiffAttentionAction {
     Open,
     Accept,
     Reject,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentDetailAction {
+    Instruct,
+    Stop,
+    Retry,
+    RetryWithModel,
+    ReviewWorktree,
+}
+
+fn diff_attention_action_for_key(code: KeyCode) -> Option<DiffAttentionAction> {
+    match code {
+        KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => Some(DiffAttentionAction::Open),
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(DiffAttentionAction::Accept),
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(DiffAttentionAction::Reject),
+        _ => None,
+    }
+}
+
+fn prefill_agent_command(
+    app: &mut App,
+    agent_id: uuid::Uuid,
+    action: AgentDetailAction,
+    language: Language,
+) {
+    if !app.input.is_empty() || !app.attachments.is_empty() {
+        app.notice = Some(
+            language
+                .text(
+                    "输入区已有草稿或附件，请先发送或清空后再操作 Agent",
+                    "The composer has a draft or attachments; send or clear it before controlling the Agent",
+                    "入力欄に下書きまたは添付があります。送信または消去してから Agent を操作してください",
+                )
+                .to_owned(),
+        );
+        return;
+    }
+    let command = match action {
+        AgentDetailAction::Instruct => format!("/agent instruct {agent_id} "),
+        AgentDetailAction::RetryWithModel => format!("/agent retry {agent_id} --model "),
+        _ => return,
+    };
+    app.input.insert(&command);
+    app.focus = FocusPane::Prompt;
+    app.agent_detail = None;
+    app.agent_detail_scroll = 0;
+}
+
+async fn handle_agent_detail_action(
+    action: AgentDetailAction,
+    app: &mut App,
+    runtime: &TuiRuntime,
+    language: Language,
+) {
+    let Some(agent) = app.agent_detail.clone() else {
+        return;
+    };
+    match action {
+        AgentDetailAction::Instruct | AgentDetailAction::RetryWithModel => {
+            prefill_agent_command(app, agent.id, action, language);
+        }
+        AgentDetailAction::Stop => {
+            match crate::daemon::stop_remote_agent(&runtime.home, agent.id).await {
+                Ok(()) => {
+                    app.agent_detail = None;
+                    app.notice = Some(
+                        language
+                            .text(
+                                "已请求停止子 Agent",
+                                "Child Agent stop requested",
+                                "子 Agent の停止を要求しました",
+                            )
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text("停止失败", "Stop failed", "停止に失敗")
+                    ))
+                }
+            }
+        }
+        AgentDetailAction::Retry => {
+            match crate::daemon::retry_remote_agent(&runtime.home, agent.id).await {
+                Ok(()) => {
+                    app.agent_detail = None;
+                    app.notice = Some(
+                        language
+                            .text(
+                                "已请求重试子 Agent",
+                                "Child Agent retry requested",
+                                "子 Agent の再試行を要求しました",
+                            )
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text("重试失败", "Retry failed", "再試行に失敗")
+                    ))
+                }
+            }
+        }
+        AgentDetailAction::ReviewWorktree => {
+            match crate::daemon::remote_review(&runtime.home, agent.id).await {
+                Ok(review) => app.worktree_review = Some(review),
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text(
+                            "Worktree 审查失败",
+                            "Worktree review failed",
+                            "Worktree レビュー失敗"
+                        )
+                    ))
+                }
+            }
+        }
+    }
 }
 
 async fn load_diff_review_state(
@@ -506,7 +629,15 @@ async fn event_loop(
                     if mouse.kind==MouseEventKind::Down(MouseButton::Left)
                         && let Some(action)=app.diff_attention_action_at(mouse.column,mouse.row)
                     {
-                        handle_diff_attention_action(action,&mut app,session,store,runtime,language).await?;
+                        if let Err(error)=handle_diff_attention_action(action,&mut app,session,store,runtime,language).await {
+                            app.notice=Some(format!("{}: {error}",language.text("Diff 操作失败","Diff action failed","Diff 操作に失敗")));
+                        }
+                        continue;
+                    }
+                    if mouse.kind==MouseEventKind::Down(MouseButton::Left)
+                        && let Some(action)=app.agent_detail_action_at(mouse.column,mouse.row)
+                    {
+                        handle_agent_detail_action(action,&mut app,runtime,language).await;
                         continue;
                     }
                     match mouse.kind {
@@ -546,6 +677,25 @@ async fn event_loop(
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
+                    if let Some(detail)=app.attention_detail.clone(){
+                        if detail.source==AttentionSource::DiffReview {
+                            let action=diff_attention_action_for_key(key.code);
+                            if let Some(action)=action {
+                                if let Err(error)=handle_diff_attention_action(action,&mut app,session,store,runtime,language).await {
+                                    app.notice=Some(format!("{}: {error}",language.text("Diff 操作失败","Diff action failed","Diff 操作に失敗")));
+                                }
+                            } else if key.code==KeyCode::Esc {
+                                app.attention_detail=None;
+                            }
+                        } else if key.code==KeyCode::Esc{app.attention_detail=None;}
+                        else if key.code==KeyCode::Enter
+                            && let Some(gate)=app.selected_remote_gate()
+                        {
+                            app.attention_detail=None;
+                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                        }
+                        continue;
+                    }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
                     if let Some(review)=app.worktree_review.clone(){
                         match key.code {
@@ -569,10 +719,11 @@ async fn event_loop(
                             KeyCode::PageDown=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(8),
                             KeyCode::Home=>app.agent_detail_scroll=0,
                             KeyCode::End=>app.agent_detail_scroll=usize::MAX,
-                            KeyCode::Char('w')|KeyCode::Char('W') if agent.dedicated_worktree=>match crate::daemon::remote_review(&runtime.home,agent.id).await {
-                                Ok(review)=>app.worktree_review=Some(review),
-                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("Worktree 审查失败","Worktree review failed","Worktree レビュー失敗"))),
-                            },
+                            KeyCode::Char('i')|KeyCode::Char('I') if agent.background&&agent.status==willdeep_core::RuntimeStatus::Working=>handle_agent_detail_action(AgentDetailAction::Instruct,&mut app,runtime,language).await,
+                            KeyCode::Char('k')|KeyCode::Char('K') if agent.background&&agent.status==willdeep_core::RuntimeStatus::Working=>handle_agent_detail_action(AgentDetailAction::Stop,&mut app,runtime,language).await,
+                            KeyCode::Char('r')|KeyCode::Char('R') if agent.background&&matches!(agent.status,willdeep_core::RuntimeStatus::Blocked|willdeep_core::RuntimeStatus::Failed|willdeep_core::RuntimeStatus::Done|willdeep_core::RuntimeStatus::Cancelled)=>handle_agent_detail_action(AgentDetailAction::Retry,&mut app,runtime,language).await,
+                            KeyCode::Char('m')|KeyCode::Char('M') if agent.background&&matches!(agent.status,willdeep_core::RuntimeStatus::Blocked|willdeep_core::RuntimeStatus::Failed|willdeep_core::RuntimeStatus::Done|willdeep_core::RuntimeStatus::Cancelled)=>handle_agent_detail_action(AgentDetailAction::RetryWithModel,&mut app,runtime,language).await,
+                            KeyCode::Char('w')|KeyCode::Char('W') if agent.dedicated_worktree=>handle_agent_detail_action(AgentDetailAction::ReviewWorktree,&mut app,runtime,language).await,
                             _=>{}
                         }
                         continue;
@@ -705,28 +856,6 @@ async fn event_loop(
                                 Ok(preview)=>if let Some(review)=app.diff_review.as_mut(){review.commit_preview=Some(preview);},
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("生成 Commit Preview 失败","Commit Preview failed","Commit Preview に失敗しました"))),
                             }
-                        }
-                        continue;
-                    }
-                    if let Some(detail)=app.attention_detail.clone(){
-                        if detail.source==AttentionSource::DiffReview {
-                            let action=match key.code {
-                                KeyCode::Enter|KeyCode::Char('d')|KeyCode::Char('D')=>Some(DiffAttentionAction::Open),
-                                KeyCode::Char('y')|KeyCode::Char('Y')=>Some(DiffAttentionAction::Accept),
-                                KeyCode::Char('n')|KeyCode::Char('N')=>Some(DiffAttentionAction::Reject),
-                                _=>None,
-                            };
-                            if let Some(action)=action {
-                                handle_diff_attention_action(action,&mut app,session,store,runtime,language).await?;
-                            } else if key.code==KeyCode::Esc {
-                                app.attention_detail=None;
-                            }
-                        } else if key.code==KeyCode::Esc{app.attention_detail=None;}
-                        else if key.code==KeyCode::Enter
-                            && let Some(gate)=app.selected_remote_gate()
-                        {
-                            app.attention_detail=None;
-                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
                         }
                         continue;
                     }
@@ -995,6 +1124,7 @@ impl App {
             runtime_agent_selected: 0,
             agent_detail: None,
             agent_detail_scroll: 0,
+            agent_detail_action_rects: Vec::new(),
             worktree_review: None,
             diff_review: None,
             runtime_event_cursor: 0,
@@ -1131,6 +1261,10 @@ impl App {
         {
             self.open_task_detail(index, registry);
         } else {
+            self.task_detail = None;
+            self.agent_detail = None;
+            self.worktree_review = None;
+            self.diff_review = None;
             self.attention_detail = Some(item);
         }
     }
@@ -1222,6 +1356,10 @@ impl App {
                 .text("暂无输出", "No output", "出力なし")
                 .to_owned()
         });
+        self.attention_detail = None;
+        self.agent_detail = None;
+        self.worktree_review = None;
+        self.diff_review = None;
         self.task_detail = Some(TaskDetail { snapshot, output });
         self.task_detail_scroll = 0;
     }

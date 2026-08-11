@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc43
+> 当前实施版本：v0.21.0-rc44
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -89,7 +89,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
 - [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、可滚动工具时间线、结果报告和 Diff Artifact 摘要，Prompt/错误原文的脱敏与授权边界待设计。
-- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止、重试，以及统一 API/Rust Client 在终态重试边界真实换模型，TUI/Web 交互入口待完成。
+- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的补充 Prompt、停止、重试，以及统一 API/Rust Client 在终态重试边界真实换模型；TUI/Web 已提供指定模型重试入口，独立日志视图和新建入口待完成。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
 
@@ -224,6 +224,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc44（已完成）：修复 Diff Inbox 弹窗虽在最上层渲染、键盘事件却可能先被残留 Task/Agent/Diff 面板截获的问题；打开 Attention 详情时清理互斥覆盖层，D/Enter、Y、N 先于所有底层面板消费。统一 Diff 快照、文件内容、单项审查和审查列表在新控制 API 返回 404 时回退旧 Runtime 路由；弹窗操作错误改为状态提示，不再冒泡退出 TUI。Agent 详情新增可点击的补充指令、停止、重试、指定模型重试和 Worktree Diff 控件，并保护 Composer 既有草稿；`/agent` 扩展 `stop` 与 `retry [--model]`。Web Runtime Agent 侧栏同步增加指定模型重试，模型和 Workspace 请求体严格校验且全部文案覆盖中英日。测试覆盖弹窗按键捕获、按钮命中、草稿保护、命令解析和 Web 请求体。
 
 v0.21.0-rc43（已完成）：统一 `agent.retry` 从仅 ID 参数扩展为向后兼容的 `RetryAgentParams { id, model? }`，Rust Client 保留旧方法并新增 `retry_agent_with_model`。模型覆盖只允许终态后台 Child Agent 的重试路径；Harness 为 Chat Completions、Responses 和 Anthropic Provider 克隆原连接、鉴权与协议配置，只替换模型并创建真实 Provider 实例，随后 `SubagentStarted` 生命周期和 Agent Store 更新实际模型。运行中的 Agent 仍拒绝重试/换模，不做半轮热切。TUI 版本号移至侧栏右下角并降低对比度；Workspace Diff Inbox 详情增加键盘和鼠标可点击的查看/通过/拒绝，精确快照记录决定且冲突禁止整批通过。统一 API 404 时 Turn 提交以相同 request ID 回退旧 Session 路由，兼容旧 Daemon 且不自动重启。测试覆盖真实模型切换、协议夹具、按钮命中、版本位置和 404 状态识别。
 

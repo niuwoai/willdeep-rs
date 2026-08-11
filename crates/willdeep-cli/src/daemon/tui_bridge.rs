@@ -614,10 +614,18 @@ pub(crate) async fn stop_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()>
 }
 
 pub(crate) async fn retry_remote_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
+    retry_remote_agent_with_model(home, id, None).await
+}
+
+pub(crate) async fn retry_remote_agent_with_model(
+    home: &Path,
+    id: uuid::Uuid,
+    model: Option<String>,
+) -> Result<()> {
     let state = ensure_running(home).await?;
     api_data(
         runtime_client(&state)?
-            .retry_agent(id, uuid::Uuid::new_v4())
+            .retry_agent_with_model(id, model, uuid::Uuid::new_v4())
             .await?,
     )?;
     Ok(())

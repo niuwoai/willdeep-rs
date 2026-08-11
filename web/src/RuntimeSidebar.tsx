@@ -52,7 +52,7 @@ type Props = {
   busy: boolean;
   onResolveApproval: (id: string, decision: "allow_once" | "deny" | "always_allow") => Promise<void>;
   onAnswerQuestion: (id: string, answer: string | null) => Promise<void>;
-  onAgentAction: (id: string, action: "stop" | "retry" | "prompt") => Promise<void>;
+  onAgentAction: (id: string, action: "stop" | "retry" | "retry_model" | "prompt", currentModel?: string | null) => Promise<void>;
 };
 
 function agentStatus(status: string, t: Messages) {
@@ -105,7 +105,7 @@ export function RuntimeSidebar({ activity, messages: t, busy, onResolveApproval,
         <Text fontSize="2xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agent.elapsed_seconds}{t.secondsUnit}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
         {agent.background && <Flex gap="1" mt="1">
           {agent.status === "working" && <><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "prompt")}>{t.instruct}</Button><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "stop")}>{t.stop}</Button></>}
-          {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "retry")}>{t.retry}</Button>}
+          {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "retry")}>{t.retry}</Button><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "retry_model", agent.model)}>{t.changeModel}</Button></>}
         </Flex>}
       </Box>)}
     </VStack>}

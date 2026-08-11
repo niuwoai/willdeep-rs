@@ -129,6 +129,14 @@ struct WebWorkspaceAction {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WebAgentRetryAction {
+    workspace: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WebAgentPromptAction {
     workspace: String,
     message: String,
@@ -497,10 +505,19 @@ async fn stop_runtime_agent(
 async fn retry_runtime_agent(
     State(state): State<Arc<WebState>>,
     Path(id): Path<uuid::Uuid>,
-    Json(action): Json<WebWorkspaceAction>,
+    Json(action): Json<WebAgentRetryAction>,
 ) -> Result<StatusCode, WebError> {
     authorize_runtime_agent(&state, &action.workspace, id).await?;
-    crate::daemon::retry_remote_agent(&state.home, id)
+    let model = action.model.map(|model| model.trim().to_owned());
+    if model
+        .as_deref()
+        .is_some_and(|model| model.is_empty() || model.len() > 256)
+    {
+        return Err(WebError::bad_request(
+            "model must contain 1 to 256 bytes when provided",
+        ));
+    }
+    crate::daemon::retry_remote_agent_with_model(&state.home, id, model)
         .await
         .map_err(WebError::from_anyhow)?;
     Ok(StatusCode::NO_CONTENT)
@@ -1361,6 +1378,20 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<WebAgentRetryAction>(serde_json::json!({
+                "workspace": "/allowed",
+                "model": "qwen3-max",
+                "agent_id": uuid::Uuid::new_v4()
+            }))
+            .is_err()
+        );
+        let retry = serde_json::from_value::<WebAgentRetryAction>(serde_json::json!({
+            "workspace": "/allowed",
+            "model": "qwen3-max"
+        }))
+        .expect("valid retry action");
+        assert_eq!(retry.model.as_deref(), Some("qwen3-max"));
         assert!(
             serde_json::from_value::<WebApprovalAction>(serde_json::json!({
                 "workspace": "/allowed",

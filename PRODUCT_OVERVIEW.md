@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc43
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc44
 
 ## 项目简介
 
@@ -26,7 +26,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
 - Root/Child Agent 持久记录实际模型，统一 API、TUI 与 Web Agent 树展示父子层级、模型、状态、工具、耗时、Token 和 Worktree；
-- TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；Prompt 原文不额外持久化或下发；
+- TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；后台 Agent 可在详情中用键盘或鼠标补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 既有草稿；Prompt 原文不额外持久化或下发；
 - 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
@@ -41,7 +41,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Rust Runtime Client 覆盖 Workspace、Session、Agent、Turn、Task、Approval、Question、Event 的高频观察与控制方法，TUI bridge 直接复用；
 - 统一 `agent.spawn` API 与 Rust Client 可在活跃 Session 中创建稳定 ID 的后台只读子 Agent，并通过 `agent.wait` 观察完成；父级、Task 和 Workspace 均由服务端推导，外部调用不能选择写目标；
 - Web Runtime 侧栏按当前 Workspace 展示 Agent、待审批/回答、关注项、Tool 与 Artifact 摘要，Agent 私有路径、报告和内部错误不会下发；
-- Web Runtime 侧栏可解决三类审批、回答单选/多选/自定义问题，并停止、重试或补充后台 Agent；写操作重新验证 Workspace 和目标归属；
+- Web Runtime 侧栏可解决三类审批、回答单选/多选/自定义问题，并停止、重试、指定模型重试或补充后台 Agent；写操作重新验证 Workspace 和目标归属，请求体拒绝客户端夹带额外作用域；
 - Rust Runtime Client 覆盖 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销，TUI Diff Center 直接复用；
 - Worktree Review、Merge、Audit、Quarantine 已进入统一 API 和 Rust Client，精确 Review/Snapshot ID 与确认字段继续约束写操作；
 - 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
@@ -53,7 +53,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；
 - TUI 右栏 Attention Inbox 按人工介入优先级聚合待处理、工作中和最近完成事项；
 - Attention Inbox 支持键盘/鼠标选择、后台任务与子 Agent 详情跳转、停止运行项和标记已读；
-- Diff Inbox 详情支持键盘和鼠标点击查看完整 Diff、整批通过或拒绝；决定绑定提交时的精确快照，冲突状态禁止整批通过；
+- Diff Inbox 详情独占键盘事件，支持 D/Enter、Y、N 与鼠标点击查看完整 Diff、整批通过或拒绝；决定绑定提交时的精确快照，冲突状态禁止整批通过。统一 Diff API 对旧 Runtime 的快照、内容和审查路由安全回退，操作错误只显示提示而不退出 TUI；
 - Inbox 已读状态随会话持久化，后台 Shell 与子 Agent 支持真实重试，任务结束时触发终端提示；
 - Git 冲突和待审 Diff 使用内容指纹进入 Inbox，子 Agent 审批阻塞结构化上报，状态按 Agent→会话→Workspace 上卷；
 - 跨平台 Runtime Daemon 提供 `start/status/stop/logs/upgrade`；Upgrade 以 draining 闸门拒绝新工作、保留活跃任务和持久排队 Turn，任务归零后由当前二进制接管。Headless 观察者识别 Runtime 身份更替后沿事件游标自动重附着；本机客户端优先通过权限为 `0600` 的 Unix Socket 或拒绝远程客户端的 Windows Named Pipe 通信，并兼容旧状态的受 Token 回环 TCP；

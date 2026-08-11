@@ -595,6 +595,83 @@ mod tests {
         );
     }
     #[test]
+    fn terminal_agent_detail_exposes_clickable_retry_model_and_diff_actions() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.agent_detail = Some(crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            label: Some("editor".to_owned()),
+            background: true,
+            profile: Some("editor".to_owned()),
+            model: Some("old-model".to_owned()),
+            status: RuntimeStatus::Failed,
+            current_turn: 2,
+            current_tool: None,
+            total_tokens: Some(55),
+            max_turns: Some(8),
+            token_budget: Some(10_000),
+            timeout_seconds: Some(120),
+            report: Some("failed report".to_owned()),
+            workspace: PathBuf::from("/worktree"),
+            worktree_branch: Some("willdeep/editor".to_owned()),
+            dedicated_worktree: true,
+            created_at: 1,
+            completed_at: Some(2),
+        });
+        let backend = ratatui::backend::TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| agent_worktree_ui::render_agent_overlays(frame, &mut app))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("[R Retry]"));
+        assert!(rendered.contains("[M Change model]"));
+        assert!(rendered.contains("[W View Diff]"));
+        for expected in [
+            AgentDetailAction::Retry,
+            AgentDetailAction::RetryWithModel,
+            AgentDetailAction::ReviewWorktree,
+        ] {
+            let (rect, _) = app
+                .agent_detail_action_rects
+                .iter()
+                .find(|(_, action)| *action == expected)
+                .expect("action rect");
+            assert_eq!(app.agent_detail_action_at(rect.x, rect.y), Some(expected));
+        }
+    }
+
+    #[test]
+    fn agent_command_prefill_never_overwrites_an_existing_draft() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        let id = uuid::Uuid::new_v4();
+        app.input.insert("保留我的草稿");
+        prefill_agent_command(
+            &mut app,
+            id,
+            AgentDetailAction::RetryWithModel,
+            Language::ZhCn,
+        );
+        assert_eq!(app.input.text(), "保留我的草稿");
+        assert!(app.notice.as_deref().unwrap().contains("已有草稿"));
+
+        app.input.take();
+        prefill_agent_command(
+            &mut app,
+            id,
+            AgentDetailAction::RetryWithModel,
+            Language::ZhCn,
+        );
+        assert_eq!(app.input.text(), format!("/agent retry {id} --model "));
+        assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         assert!(app.handle_help_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
@@ -1266,6 +1343,27 @@ mod tests {
         app.attention_detail = None;
         assert!(app.attention_mark_read());
         assert!(app.attention_items().is_empty());
+    }
+
+    #[test]
+    fn diff_attention_keyboard_shortcuts_are_captured_by_the_modal() {
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('d')),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Enter),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('Y')),
+            Some(DiffAttentionAction::Accept)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('n')),
+            Some(DiffAttentionAction::Reject)
+        );
+        assert_eq!(diff_attention_action_for_key(KeyCode::Char('x')), None);
     }
     #[test]
     fn mouse_click_inserts_command_candidate() {

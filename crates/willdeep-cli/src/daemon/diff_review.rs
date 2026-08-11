@@ -691,12 +691,21 @@ fn area_name(area: DiffArea) -> &'static str {
 
 pub(crate) async fn remote_snapshot(home: &Path, workspace: &Path) -> Result<DiffSnapshot> {
     let state = ensure_running(home).await?;
-    let response = runtime_client(&state)?
+    let client = runtime_client(&state)?;
+    let workspace_value = workspace.to_string_lossy().into_owned();
+    let response = client
         .diff_snapshot(&willdeep_runtime_protocol::DiffSnapshotParams {
-            workspace: workspace.to_string_lossy().into_owned(),
+            workspace: workspace_value.clone(),
         })
-        .await?;
-    local_snapshot(runtime_api_data(response)?)
+        .await;
+    match response {
+        Ok(response) => local_snapshot(runtime_api_data(response)?),
+        Err(error) if error.status_code() == Some(404) => client
+            .get_json_with_query("/v1/diffs", &[("workspace", workspace_value)])
+            .await
+            .context("load Diff snapshot through the legacy Runtime endpoint"),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn remote_content(
@@ -707,15 +716,38 @@ pub(crate) async fn remote_content(
     area: DiffArea,
 ) -> Result<String> {
     let state = ensure_running(home).await?;
-    let response = runtime_client(&state)?
+    let client = runtime_client(&state)?;
+    let workspace_value = workspace.to_string_lossy().into_owned();
+    let response = client
         .diff_content(&willdeep_runtime_protocol::DiffContentParams {
-            workspace: workspace.to_string_lossy().into_owned(),
+            workspace: workspace_value.clone(),
             snapshot_id: snapshot_id.to_owned(),
             path: path.to_owned(),
             area: public_area(area),
         })
-        .await?;
-    Ok(runtime_api_data(response)?.content)
+        .await;
+    match response {
+        Ok(response) => Ok(runtime_api_data(response)?.content),
+        Err(error) if error.status_code() == Some(404) => {
+            let value: serde_json::Value = client
+                .get_json_with_query(
+                    &format!("/v1/diffs/{snapshot_id}/content"),
+                    &[
+                        ("workspace", workspace_value),
+                        ("path", path.to_owned()),
+                        ("area", area_name(area).to_owned()),
+                    ],
+                )
+                .await
+                .context("load Diff content through the legacy Runtime endpoint")?;
+            Ok(value
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn remote_review(
@@ -724,7 +756,8 @@ pub(crate) async fn remote_review(
     request: &ReviewRequest,
 ) -> Result<DiffReviewRecord> {
     let state = ensure_running(home).await?;
-    let response = runtime_client(&state)?
+    let client = runtime_client(&state)?;
+    let response = client
         .review_diff(
             &willdeep_runtime_protocol::DiffReviewParams {
                 workspace: request.workspace.to_string_lossy().into_owned(),
@@ -735,8 +768,15 @@ pub(crate) async fn remote_review(
             },
             uuid::Uuid::new_v4(),
         )
-        .await?;
-    local_review(runtime_api_data(response)?)
+        .await;
+    match response {
+        Ok(response) => local_review(runtime_api_data(response)?),
+        Err(error) if error.status_code() == Some(404) => client
+            .post_json(&format!("/v1/diffs/{snapshot_id}/reviews"), request)
+            .await
+            .context("save Diff review through the legacy Runtime endpoint"),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn remote_reviews(
@@ -745,16 +785,28 @@ pub(crate) async fn remote_reviews(
     snapshot_id: &str,
 ) -> Result<Vec<DiffReviewRecord>> {
     let state = ensure_running(home).await?;
-    let response = runtime_client(&state)?
+    let client = runtime_client(&state)?;
+    let workspace_value = workspace.to_string_lossy().into_owned();
+    let response = client
         .diff_reviews(&willdeep_runtime_protocol::DiffSnapshotQueryParams {
-            workspace: workspace.to_string_lossy().into_owned(),
+            workspace: workspace_value.clone(),
             snapshot_id: snapshot_id.to_owned(),
         })
-        .await?;
-    runtime_api_data(response)?
-        .into_iter()
-        .map(local_review)
-        .collect()
+        .await;
+    match response {
+        Ok(response) => runtime_api_data(response)?
+            .into_iter()
+            .map(local_review)
+            .collect(),
+        Err(error) if error.status_code() == Some(404) => client
+            .get_json_with_query(
+                &format!("/v1/diffs/{snapshot_id}/reviews"),
+                &[("workspace", workspace_value)],
+            )
+            .await
+            .context("load Diff reviews through the legacy Runtime endpoint"),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn remote_verifications(

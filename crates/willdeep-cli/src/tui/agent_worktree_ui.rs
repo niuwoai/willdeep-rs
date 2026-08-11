@@ -1,57 +1,135 @@
 use super::*;
 
-pub(super) fn render_agent_overlays(frame: &mut ratatui::Frame<'_>, app: &App) {
-    if let Some(agent) = &app.agent_detail {
-        render_agent_detail(frame, app, agent);
+pub(super) fn render_agent_overlays(frame: &mut ratatui::Frame<'_>, app: &mut App) {
+    app.agent_detail_action_rects.clear();
+    if let Some(agent) = app.agent_detail.clone() {
+        render_agent_detail(frame, app, &agent);
     }
-    if let Some(review) = &app.worktree_review {
-        render_worktree_review(frame, app, review);
+    if let Some(review) = app.worktree_review.clone() {
+        app.agent_detail_action_rects.clear();
+        render_worktree_review(frame, app, &review);
     }
 }
 
 fn render_agent_detail(
     frame: &mut ratatui::Frame<'_>,
-    app: &App,
+    app: &mut App,
     agent: &crate::daemon::tui_bridge::RemoteAgent,
 ) {
     let content = agent_detail_content(app, agent);
     let popup = centered_rect(
         frame.area().width.min(92),
-        (visual_lines(&content, frame.area().width.min(90) as usize) as u16 + 2)
+        (visual_lines(&content, frame.area().width.min(90) as usize) as u16 + 3)
             .min(frame.area().height)
             .max(1),
         frame.area(),
     );
     let inner_width = popup.width.saturating_sub(2).max(1) as usize;
-    let inner_height = popup.height.saturating_sub(2) as usize;
+    let inner_height = popup.height.saturating_sub(3) as usize;
     let scroll =
         agent_detail_scroll_offset(&content, inner_width, inner_height, app.agent_detail_scroll);
     frame.render_widget(Clear, popup);
-    let title = if agent.dedicated_worktree {
-        app.language.text(
-            "Agent 详情 · ↑↓/PgUp/PgDn 滚动 · W 审查 Worktree · Esc 关闭",
-            "Agent details · ↑↓/PgUp/PgDn scroll · W review Worktree · Esc close",
-            "Agent 詳細 · ↑↓/PgUp/PgDn スクロール · W Worktree レビュー · Esc 閉じる",
-        )
-    } else {
-        app.language.text(
-            "Agent 详情 · ↑↓/PgUp/PgDn 滚动 · Esc 关闭",
-            "Agent details · ↑↓/PgUp/PgDn scroll · Esc close",
-            "Agent 詳細 · ↑↓/PgUp/PgDn スクロール · Esc 閉じる",
-        )
-    };
+    let title = app.language.text(
+        "Agent 详情 · ↑↓/PgUp/PgDn 滚动 · Esc 关闭",
+        "Agent details · ↑↓/PgUp/PgDn scroll · Esc close",
+        "Agent 詳細 · ↑↓/PgUp/PgDn スクロール · Esc 閉じる",
+    );
     frame.render_widget(
         Paragraph::new(content)
             .block(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .padding(Padding::new(0, 0, 0, 1))
                     .border_style(Style::default().fg(Color::LightCyan)),
             )
             .scroll((scroll, 0))
             .wrap(Wrap { trim: false }),
         popup,
     );
+    render_agent_actions(frame, app, agent, popup);
+}
+
+fn render_agent_actions(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut App,
+    agent: &crate::daemon::tui_bridge::RemoteAgent,
+    popup: Rect,
+) {
+    let mut actions = Vec::new();
+    if agent.background && agent.status == willdeep_core::RuntimeStatus::Working {
+        actions.push((
+            AgentDetailAction::Instruct,
+            app.language.text("[I 补充]", "[I Instruct]", "[I 指示]"),
+            Color::LightCyan,
+        ));
+        actions.push((
+            AgentDetailAction::Stop,
+            app.language.text("[K 停止]", "[K Stop]", "[K 停止]"),
+            Color::Red,
+        ));
+    }
+    if agent.background
+        && matches!(
+            agent.status,
+            willdeep_core::RuntimeStatus::Blocked
+                | willdeep_core::RuntimeStatus::Failed
+                | willdeep_core::RuntimeStatus::Done
+                | willdeep_core::RuntimeStatus::Cancelled
+        )
+    {
+        actions.push((
+            AgentDetailAction::Retry,
+            app.language.text("[R 重试]", "[R Retry]", "[R 再試行]"),
+            Color::Green,
+        ));
+        actions.push((
+            AgentDetailAction::RetryWithModel,
+            app.language
+                .text("[M 换模型]", "[M Change model]", "[M モデル変更]"),
+            Color::LightMagenta,
+        ));
+    }
+    if agent.dedicated_worktree {
+        actions.push((
+            AgentDetailAction::ReviewWorktree,
+            app.language
+                .text("[W 查看 Diff]", "[W View Diff]", "[W Diff 表示]"),
+            Color::Yellow,
+        ));
+    }
+    let mut x = popup.x.saturating_add(1);
+    let right = popup.right().saturating_sub(1);
+    let y = popup.bottom().saturating_sub(2);
+    for (action, label, color) in actions {
+        let width = UnicodeWidthStr::width(label).saturating_add(1) as u16;
+        if x >= right {
+            break;
+        }
+        let rect = Rect::new(x, y, width.min(right.saturating_sub(x)), 1);
+        if rect.width == 0 {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(color)),
+            rect,
+        );
+        app.agent_detail_action_rects.push((rect, action));
+        x = x.saturating_add(width);
+    }
+}
+
+impl App {
+    pub(super) fn agent_detail_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<AgentDetailAction> {
+        let point = (column, row).into();
+        self.agent_detail_action_rects
+            .iter()
+            .find_map(|(rect, action)| rect.contains(point).then_some(*action))
+    }
 }
 
 pub(super) fn agent_detail_scroll_offset(
