@@ -6,6 +6,7 @@ pub(crate) enum AgentCommandKind {
     Stop,
     Retry,
     Instruct,
+    Spawn,
 }
 
 pub(super) async fn control_agent(
@@ -18,6 +19,7 @@ pub(super) async fn control_agent(
         AgentCommandKind::Stop => "stop",
         AgentCommandKind::Retry => "retry",
         AgentCommandKind::Instruct => "instruct",
+        AgentCommandKind::Spawn => "spawn",
     };
     let response = client()
         .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
@@ -159,6 +161,7 @@ pub(super) async fn enqueue_agent_command_internal(
                 | RuntimeAgentStatus::Interrupted
         ),
         AgentCommandKind::Instruct => agent.status == RuntimeAgentStatus::Running,
+        AgentCommandKind::Spawn => false,
     };
     if !valid_status {
         return Err(StatusCode::CONFLICT);
@@ -208,6 +211,18 @@ pub(super) async fn resolve_agent_command_handler(
         .resolve(task_id, command_id, resolution)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if command.kind == AgentCommandKind::Spawn && command.status == AgentCommandStatus::Rejected {
+        state
+            .agents
+            .reject_external_child(
+                command.agent_id,
+                command
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "external spawn was rejected".to_owned()),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     state
         .events
         .append(
@@ -241,6 +256,10 @@ pub(crate) struct AgentCommand {
     pub error: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -263,6 +282,7 @@ impl Drop for AgentCommandWatcher {
 pub(crate) fn start_agent_command_watcher(
     connection: Option<&RuntimeConnection>,
     background: Arc<willdeep_core::BackgroundTaskRegistry>,
+    subagents: Arc<willdeep_core::SubagentCatalog>,
 ) -> Result<Option<AgentCommandWatcher>> {
     let Some(connection) = connection.cloned() else {
         return Ok(None);
@@ -287,13 +307,15 @@ pub(crate) fn start_agent_command_watcher(
                 && let Ok(commands) = response.json::<Vec<AgentCommand>>().await
             {
                 for command in commands {
-                    let resolution = resolved
-                        .entry(command.id)
-                        .or_insert_with(|| {
-                            let (applied, error) = apply_command(&background, &command);
-                            ResolveAgentCommand { applied, error }
-                        })
-                        .clone();
+                    let resolution = if let Some(resolution) = resolved.get(&command.id) {
+                        resolution.clone()
+                    } else {
+                        let (applied, error) =
+                            apply_command(&background, &subagents, &command).await;
+                        let value = ResolveAgentCommand { applied, error };
+                        resolved.insert(command.id, value.clone());
+                        value
+                    };
                     if let Ok(response) = client
                         .post(format!(
                             "{}/v1/tasks/{}/agent-commands/{}/resolve",
@@ -315,8 +337,9 @@ pub(crate) fn start_agent_command_watcher(
     Ok(Some(AgentCommandWatcher { task }))
 }
 
-fn apply_command(
+async fn apply_command(
     background: &willdeep_core::BackgroundTaskRegistry,
+    subagents: &willdeep_core::SubagentCatalog,
     command: &AgentCommand,
 ) -> (bool, Option<String>) {
     match command.kind {
@@ -344,6 +367,26 @@ fn apply_command(
             false,
             Some("Agent is not running or cannot accept instructions".to_owned()),
         ),
+        AgentCommandKind::Spawn => {
+            let Some(prompt) = command.message.clone() else {
+                return (
+                    false,
+                    Some("Spawn command is missing its prompt".to_owned()),
+                );
+            };
+            match subagents
+                .spawn_external_read_only(
+                    command.agent_id,
+                    prompt,
+                    command.label.clone(),
+                    command.profile.clone(),
+                )
+                .await
+            {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(error.to_string())),
+            }
+        }
     }
 }
 
@@ -362,6 +405,8 @@ impl AgentCommandStore {
                 command.resolved_at = Some(now());
                 command.error = Some("Runtime restarted before command was applied".to_owned());
                 command.message = None;
+                command.profile = None;
+                command.label = None;
                 changed = true;
             }
         }
@@ -401,6 +446,35 @@ impl AgentCommandStore {
             resolved_at: None,
             error: None,
             message,
+            profile: None,
+            label: None,
+        };
+        commands.insert(command.id, command.clone());
+        persist_commands(&self.path, &commands)?;
+        Ok(command)
+    }
+
+    pub fn enqueue_spawn(
+        &self,
+        task_id: uuid::Uuid,
+        agent_id: uuid::Uuid,
+        prompt: String,
+        profile: Option<String>,
+        label: Option<String>,
+    ) -> Result<AgentCommand> {
+        let mut commands = self.lock()?;
+        let command = AgentCommand {
+            id: uuid::Uuid::new_v4(),
+            task_id,
+            agent_id,
+            kind: AgentCommandKind::Spawn,
+            status: AgentCommandStatus::Pending,
+            created_at: now(),
+            resolved_at: None,
+            error: None,
+            message: Some(prompt),
+            profile,
+            label,
         };
         commands.insert(command.id, command.clone());
         persist_commands(&self.path, &commands)?;
@@ -444,6 +518,8 @@ impl AgentCommandStore {
         command.resolved_at = Some(now());
         command.error = resolution.error;
         command.message = None;
+        command.profile = None;
+        command.label = None;
         let command = command.clone();
         persist_commands(&self.path, &commands)?;
         Ok(Some(command))

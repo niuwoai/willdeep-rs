@@ -10,7 +10,7 @@
         "server_version": "0.21.0-rc15",
         "objects": ["runtime", "workspace", "session", "agent", "turn", "tool", "task", "approval", "question", "artifact", "event"],
         "capabilities": ["runtime_observe", "workspace_manage", "session_manage", "agent_observe", "turn_submit", "approval_resolve", "question_answer", "event_replay", "event_stream"],
-        "operations": ["runtime.capabilities", "workspace.list", "session.list", "agent.list", "turn.list", "tool.list", "task.list", "approval.list", "question.list", "artifact.list", "event.list"],
+        "operations": ["runtime.capabilities", "workspace.list", "session.list", "agent.list", "agent.spawn", "turn.list", "tool.list", "task.list", "approval.list", "question.list", "artifact.list", "event.list"],
         "transports": ["http_loopback", "ndjson", "unix_socket", "windows_named_pipe"],
         "limits": {
           "max_event_page": 1000,
@@ -186,6 +186,17 @@
     }
   },
   "requests": {
+    "agent_spawn": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000010",
+      "operation": "agent.spawn",
+      "params": {
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "prompt": "Inspect the repository structure",
+        "profile": "scout",
+        "label": "structure scout"
+      }
+    },
     "agent_prompt": {
       "protocol_version": "1.0",
       "request_id": "00000000-0000-4000-8000-000000000011",

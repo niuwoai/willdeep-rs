@@ -113,6 +113,121 @@ fn runtime_provider_failure_preserves_the_documented_exit_code() {
     assert_eq!(provider.requests(), 1);
 }
 
+#[test]
+fn public_api_spawns_and_waits_for_a_read_only_child_agent() {
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start_waiting_root();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut session = willdeep_core::Session::new(workspace.clone(), None, "external spawn");
+    session.config = Some(config.clone());
+    willdeep_core::SessionStore::new(&home)
+        .save(&mut session)
+        .expect("persist Core Session fixture");
+    let _guard = TestGuard::new(root.clone(), home.clone());
+
+    let root_turn = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            &session.id.to_string(),
+            "wait for user input",
+        ])
+        .output()
+        .expect("start waiting root Agent");
+    assert_eq!(
+        root_turn.status.code(),
+        Some(4),
+        "ask_user must leave the Runtime Turn waiting; stderr:\n{}",
+        String::from_utf8_lossy(&root_turn.stderr)
+    );
+
+    let editor_params = root.join("editor-spawn.json");
+    write_json(
+        &editor_params,
+        serde_json::json!({
+            "session_id": session.id,
+            "prompt": "edit a file",
+            "profile": "editor"
+        }),
+    );
+    let editor = willdeep(&home)
+        .args([
+            "api",
+            "agent.spawn",
+            "--params-file",
+            path_text(&editor_params),
+        ])
+        .output()
+        .expect("reject external editor spawn");
+    assert!(!editor.status.success());
+    let editor_envelope: serde_json::Value =
+        serde_json::from_slice(&editor.stdout).expect("parse editor rejection envelope");
+    assert_eq!(editor_envelope["error"]["code"], "invalid_request");
+
+    let spawn_params = root.join("scout-spawn.json");
+    write_json(
+        &spawn_params,
+        serde_json::json!({
+            "session_id": session.id,
+            "prompt": "inspect the repository structure",
+            "profile": "scout",
+            "label": "external scout"
+        }),
+    );
+    let spawn = willdeep(&home)
+        .args([
+            "api",
+            "agent.spawn",
+            "--params-file",
+            path_text(&spawn_params),
+        ])
+        .output()
+        .expect("spawn external scout");
+    assert_success(&spawn, "spawn external scout");
+    let spawn_envelope: serde_json::Value =
+        serde_json::from_slice(&spawn.stdout).expect("parse spawn envelope");
+    assert_eq!(spawn_envelope["data"]["status"], "queued");
+    assert_eq!(spawn_envelope["data"]["profile"], "scout");
+    let child_id = spawn_envelope["data"]["id"]
+        .as_str()
+        .expect("spawned Agent ID");
+
+    let wait_params = root.join("agent-wait.json");
+    write_json(
+        &wait_params,
+        serde_json::json!({"id": child_id, "timeout_ms": 10_000}),
+    );
+    let wait = willdeep(&home)
+        .args([
+            "api",
+            "agent.wait",
+            "--params-file",
+            path_text(&wait_params),
+        ])
+        .output()
+        .expect("wait for external scout");
+    assert_success(&wait, "wait for external scout");
+    let wait_envelope: serde_json::Value =
+        serde_json::from_slice(&wait.stdout).expect("parse Agent wait envelope");
+    assert_eq!(wait_envelope["data"]["id"], child_id);
+    assert_eq!(wait_envelope["data"]["status"], "completed");
+    assert_eq!(wait_envelope["data"]["label"], "external scout");
+    assert_eq!(
+        provider.requests(),
+        2,
+        "root and child must each reach Provider"
+    );
+}
+
 fn willdeep(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_willdeep"));
     command
@@ -164,6 +279,14 @@ model = "mock-model"
         .expect("create private test config")
         .write_all(contents.as_bytes())
         .expect("write test config");
+}
+
+fn write_json(path: &Path, value: serde_json::Value) {
+    std::fs::write(
+        path,
+        serde_json::to_vec(&value).expect("serialize test JSON"),
+    )
+    .expect("write test JSON");
 }
 
 fn path_text(path: &Path) -> &str {
@@ -224,10 +347,18 @@ struct MockProvider {
 
 impl MockProvider {
     fn start() -> Self {
-        Self::start_with_status(200)
+        Self::start_with_mode(MockMode::Success)
     }
 
     fn start_with_status(status: u16) -> Self {
+        Self::start_with_mode(MockMode::Status(status))
+    }
+
+    fn start_waiting_root() -> Self {
+        Self::start_with_mode(MockMode::WaitThenSuccess)
+    }
+
+    fn start_with_mode(mode: MockMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Provider");
         listener
             .set_nonblocking(true)
@@ -242,8 +373,8 @@ impl MockProvider {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         read_request(&mut stream);
-                        worker_requests.fetch_add(1, Ordering::Relaxed);
-                        write_response(&mut stream, status);
+                        let index = worker_requests.fetch_add(1, Ordering::Relaxed);
+                        write_response(&mut stream, mode, index);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -267,6 +398,13 @@ impl MockProvider {
     fn requests(&self) -> usize {
         self.requests.load(Ordering::Relaxed)
     }
+}
+
+#[derive(Clone, Copy)]
+enum MockMode {
+    Success,
+    Status(u16),
+    WaitThenSuccess,
 }
 
 impl Drop for MockProvider {
@@ -311,8 +449,17 @@ fn read_request(stream: &mut TcpStream) {
     }
 }
 
-fn write_response(stream: &mut TcpStream, status: u16) {
-    let (reason, body) = if status == 200 {
+fn write_response(stream: &mut TcpStream, mode: MockMode, request_index: usize) {
+    let status = match mode {
+        MockMode::Status(status) => status,
+        MockMode::Success | MockMode::WaitThenSuccess => 200,
+    };
+    let (reason, body) = if mode_is_waiting_root(mode, request_index) {
+        (
+            "OK",
+            r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"ask_root","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"keep the root active?\",\"options\":[\"yes\"]}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned(),
+        )
+    } else if status == 200 {
         (
             "OK",
             format!(
@@ -332,6 +479,10 @@ fn write_response(stream: &mut TcpStream, status: u16) {
     stream
         .write_all(response.as_bytes())
         .expect("write Provider response");
+}
+
+fn mode_is_waiting_root(mode: MockMode, request_index: usize) -> bool {
+    matches!(mode, MockMode::WaitThenSuccess) && request_index == 0
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

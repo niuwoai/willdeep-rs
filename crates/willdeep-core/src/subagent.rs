@@ -146,6 +146,66 @@ impl SubagentCatalog {
         args: SpawnAgentArgs,
         approved_target: Option<PathBuf>,
     ) -> Result<String, AgentError> {
+        self.run_with_id(uuid::Uuid::new_v4(), args, approved_target)
+            .await
+    }
+
+    pub async fn spawn_external_read_only(
+        &self,
+        id: uuid::Uuid,
+        prompt: String,
+        label: Option<String>,
+        profile: Option<String>,
+    ) -> Result<(), AgentError> {
+        let profile_id = profile
+            .as_deref()
+            .unwrap_or("deep")
+            .trim()
+            .to_ascii_lowercase();
+        let selected = self.profiles.get(&profile_id).ok_or_else(|| {
+            AgentError::Subagent(format!("subagent profile not found: {profile_id}"))
+        })?;
+        const READ_ONLY_TOOLS: &[&str] = &[
+            "search_files",
+            "grep_files",
+            "list_directory",
+            "read_file",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_blame",
+        ];
+        if selected.requires_write_target
+            || selected
+                .tool_names
+                .iter()
+                .any(|name| !READ_ONLY_TOOLS.contains(&name.as_str()))
+        {
+            return Err(AgentError::Subagent(format!(
+                "profile {profile_id} is not eligible for external read-only spawn"
+            )));
+        }
+        self.run_with_id(
+            id,
+            SpawnAgentArgs {
+                prompt,
+                label,
+                profile: Some(profile_id),
+                run_in_background: Some(true),
+                target_file: None,
+            },
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn run_with_id(
+        &self,
+        agent_id: uuid::Uuid,
+        args: SpawnAgentArgs,
+        approved_target: Option<PathBuf>,
+    ) -> Result<String, AgentError> {
         let profile = self
             .profile(args.profile.as_deref())
             .ok_or_else(|| AgentError::Subagent("no subagent profiles configured".to_owned()))?
@@ -193,7 +253,6 @@ impl SubagentCatalog {
                 ));
             }
         }
-        let agent_id = uuid::Uuid::new_v4();
         let prepared = self.prepare_workspace(agent_id, profile.worktree).await?;
         let approved_target = remap_approved_target(approved_target, &prepared)?;
         let workspace = prepared.workspace.clone();
@@ -725,6 +784,70 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(AgentError::Subagent(_))));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn external_spawn_is_background_only_and_rejects_writing_profiles() {
+        let (catalog, root) = fixture();
+        let sink = Arc::new(CaptureSink::default());
+        let catalog = catalog.with_event_sink(sink.clone());
+        assert!(
+            catalog
+                .spawn_external_read_only(
+                    uuid::Uuid::new_v4(),
+                    "edit".to_owned(),
+                    None,
+                    Some("editor".to_owned()),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            catalog
+                .spawn_external_read_only(
+                    uuid::Uuid::new_v4(),
+                    "inspect".to_owned(),
+                    None,
+                    Some("missing".to_owned()),
+                )
+                .await
+                .is_err()
+        );
+
+        let id = uuid::Uuid::new_v4();
+        catalog
+            .spawn_external_read_only(
+                id,
+                "inspect".to_owned(),
+                Some("external scout".to_owned()),
+                Some("scout".to_owned()),
+            )
+            .await
+            .expect("spawn external read-only agent");
+        for _ in 0..50 {
+            if sink.0.lock().unwrap().iter().any(|event| {
+                matches!(event, AgentEvent::SubagentCompleted { id: event_id, .. } if *event_id == id)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SubagentStarted {
+                id: event_id,
+                profile,
+                background: true,
+                ..
+            } if *event_id == id && profile == "scout"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SubagentCompleted { id: event_id, .. } if *event_id == id
+        )));
+        drop(events);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

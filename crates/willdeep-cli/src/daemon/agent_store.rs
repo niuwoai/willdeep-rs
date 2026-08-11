@@ -218,6 +218,72 @@ impl AgentStore {
         Ok(agents)
     }
 
+    pub fn reserve_external_child(
+        &self,
+        id: uuid::Uuid,
+        parent_id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        profile: String,
+        label: Option<String>,
+    ) -> Result<RuntimeAgent> {
+        let mut agents = self.lock()?;
+        if agents.contains_key(&id) {
+            bail!("Runtime Agent ID already exists");
+        }
+        let parent = agents
+            .get(&parent_id)
+            .filter(|agent| agent.parent_id.is_none() && agent.task_id == task_id)
+            .context("active Runtime root agent not found")?
+            .clone();
+        let timestamp = now();
+        let agent = RuntimeAgent {
+            id,
+            parent_id: Some(parent_id),
+            task_id,
+            label,
+            background: true,
+            workspace: parent.workspace.clone(),
+            root_workspace: Some(parent.workspace),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
+            profile: Some(profile),
+            status: RuntimeAgentStatus::Queued,
+            current_turn: 0,
+            current_tool: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            completed_at: None,
+            error: None,
+        };
+        agents.insert(id, agent.clone());
+        persist_agents(&self.path, &agents)?;
+        Ok(agent)
+    }
+
+    pub fn reject_external_child(&self, id: uuid::Uuid, error: String) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime Agent not found")?;
+        if agent.status != RuntimeAgentStatus::Queued {
+            return Ok(());
+        }
+        agent.status = RuntimeAgentStatus::Failed;
+        agent.updated_at = now();
+        agent.completed_at = Some(now());
+        agent.error = Some(error);
+        persist_agents(&self.path, &agents)
+    }
+
     pub fn get(&self, id: uuid::Uuid) -> Result<Option<RuntimeAgent>> {
         Ok(self.lock()?.get(&id).cloned())
     }

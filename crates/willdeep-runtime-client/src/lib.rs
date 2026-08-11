@@ -178,6 +178,14 @@ impl RuntimeClient {
         self.call("agent.get", &IdParams { id }, None).await
     }
 
+    pub async fn spawn_agent(
+        &self,
+        params: &willdeep_runtime_protocol::SpawnAgentParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeAgent>, ClientError> {
+        self.call("agent.spawn", params, Some(request_id)).await
+    }
+
     pub async fn prompt_agent(
         &self,
         params: &AgentPromptParams,

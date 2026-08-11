@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc30
+> 当前实施版本：v0.21.0-rc31
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -117,7 +117,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 - [x] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event 公共 DTO。
 - [x] 本地 JSON 请求响应与 NDJSON/流式事件协议；统一 API 使用版本化请求/响应信封，事件流按全局序号补读并逐行输出完整信封。
-- [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
+- [x] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`；Spawn 只允许活跃 Session 中服务端绑定 Workspace 的后台只读 Profile。
 - [-] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；修改类统一请求使用 Pending→Completed 私有日志跨重启去重，不确定崩溃窗口拒绝自动重放；剩余修改操作迁移待完成。
 - [-] Rust Client Library，供 TUI、Web、Swift FFI、移动端和自动化复用；已抽出回环连接、Token、能力、统一调用和 NDJSON 解码，TUI 事件、Agent、审批、回答、Workspace 与 Diff Center 已迁移。
 - [-] API Key、工具参数、Prompt 和路径按权限脱敏；公开 DTO 排除配置/队列正文/内部错误，公共事件兼容净化 Tool 参数/输出、报告、路径和错误，细粒度远程路径权限待实现。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc31（已完成）：补齐统一控制协议此前仅写入路线图、没有真实 Dispatch 的 `agent.spawn`。请求只接受活跃 Session、Prompt、标签和 `scout`/`reader`/`deep`；Runtime 从 Session → Turn → Task → Root Agent 推导父级与 Workspace，预分配稳定 Child ID，经原 Harness 的命令桥调用同一 SubagentCatalog，并可由 `agent.wait` 等待终态。Core 再次按实际 Profile 工具集合验证只读性，`editor`、未知 Profile、客户端路径和写目标均拒绝。真实二进制 + 等待中的 Root + Mock Provider 测试覆盖 Spawn/Wait 完整链路。
 
 v0.21.0-rc30（已完成）：Headless `willdeep run` 默认创建或续接同一持久 Runtime Session/Turn，按游标分页追平脱敏事件并等待真实终态；`--local` 保留显式进程内兼容入口，进程级凭据和临时 Provider/Harness 覆盖不会序列化到 Runtime。Runtime Task 公共 DTO 增加向后兼容的失败域，CLI 继续稳定区分 Provider、策略和 Harness/Tool 退出码；Ctrl+C 只停止本次精确 Turn。真实二进制 + 隔离 Daemon + 回环 Mock Provider 的进程级测试覆盖两轮续接、持久 Turn 与 Provider 失败。并行场景发现并修复 EventLog 读取未完成 NDJSON 末行的竞态。
 

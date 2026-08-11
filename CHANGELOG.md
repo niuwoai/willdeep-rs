@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0-rc31] - 2026-08-11
+
+### Added
+
+- 统一控制 API 与 Rust Client 新增真实 `agent.spawn`，可从活跃 Runtime Session 派生后台 `scout`、`reader` 或 `deep` 子 Agent，并以稳定 Child Agent ID 配合 `agent.wait` 观察终态。
+- 跨语言协议夹具新增严格的 Agent Spawn 请求；进程级端到端测试覆盖 Root 等待、公共 Spawn、Child Provider 执行和 Wait 完成链路。
+
+### Security
+
+- Spawn 的父 Agent、Task 与 Workspace 全由 Runtime 根据 Session 推导；请求 DTO 拒绝路径和额外权限字段。
+- 外部 Spawn 只允许工具集合经二次校验的只读 Profile，明确拒绝 `editor`、写目标和未知 Profile；Prompt 在命令应用或恢复拒绝后立即从持久命令记录清除。
+
 ## [0.21.0-rc30] - 2026-08-11
 
 ### Added

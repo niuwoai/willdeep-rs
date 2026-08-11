@@ -151,6 +151,15 @@ pub struct AgentPromptParams {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct SpawnAgentParams {
+    pub session_id: uuid::Uuid,
+    pub prompt: String,
+    pub profile: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentWaitParams {
     pub id: uuid::Uuid,
     #[serde(default = "default_agent_wait_timeout_ms")]
@@ -981,6 +990,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "session.export",
     "agent.list",
     "agent.get",
+    "agent.spawn",
     "agent.prompt",
     "agent.wait",
     "agent.stop",
@@ -1149,6 +1159,9 @@ mod tests {
         assert_eq!(responses.len(), 11);
 
         let requests = fixture["requests"].as_object().unwrap();
+        let spawn: ApiRequest = serde_json::from_value(requests["agent_spawn"].clone()).unwrap();
+        assert_eq!(spawn.operation, "agent.spawn");
+        let _: SpawnAgentParams = serde_json::from_value(spawn.params).unwrap();
         let prompt: ApiRequest = serde_json::from_value(requests["agent_prompt"].clone()).unwrap();
         assert_eq!(prompt.operation, "agent.prompt");
         let _: AgentPromptParams = serde_json::from_value(prompt.params).unwrap();
@@ -1219,6 +1232,16 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<SpawnAgentParams>(serde_json::json!({
+                "session_id": uuid::Uuid::new_v4(),
+                "prompt": "inspect",
+                "profile": "scout",
+                "workspace": "/must/not/be/accepted"
+            }))
+            .is_err()
+        );
+        assert!(SUPPORTED_OPERATIONS.contains(&"agent.spawn"));
     }
 
     #[test]

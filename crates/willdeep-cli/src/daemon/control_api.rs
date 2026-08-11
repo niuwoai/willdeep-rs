@@ -2,7 +2,7 @@ use super::*;
 use willdeep_runtime_protocol::{
     AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse,
     ApprovalDecision, ErrorCode, EventListParams, IdParams, ResolveApprovalParams,
-    WorkspaceEnsureParams,
+    SpawnAgentParams, WorkspaceEnsureParams,
 };
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
@@ -240,6 +240,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             },
             Err(error) => Err(error),
         },
+        "agent.spawn" => agent_spawn(state, &request),
         "agent.prompt" => agent_prompt(state, &request).await,
         "agent.wait" => agent_wait(state, &request).await,
         "agent.stop" => agent_command(state, &request, agent_control::AgentCommandKind::Stop).await,
@@ -516,6 +517,7 @@ fn is_mutating_operation(operation: &str) -> bool {
     matches!(
         operation,
         "agent.prompt"
+            | "agent.spawn"
             | "agent.stop"
             | "agent.retry"
             | "task.cancel"
@@ -1200,6 +1202,84 @@ async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     command_response(command)
 }
 
+fn agent_spawn(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<SpawnAgentParams>(request)?;
+    let prompt = params.prompt.trim();
+    if prompt.is_empty() || prompt.len() > MAX_TURN_PROMPT_BYTES {
+        return Err(ApiFailure::invalid(format!(
+            "prompt must contain 1 to {MAX_TURN_PROMPT_BYTES} bytes"
+        )));
+    }
+    let profile = validate_external_spawn_profile(params.profile.as_deref())?;
+    if params
+        .label
+        .as_deref()
+        .is_some_and(|label| label.trim().is_empty() || label.len() > 128)
+    {
+        return Err(ApiFailure::invalid("label must contain 1 to 128 bytes"));
+    }
+    let session = state
+        .sessions
+        .get(params.session_id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Session not found"))?;
+    let turn_id = session
+        .active_turn_id
+        .ok_or_else(|| ApiFailure::conflict("Runtime Session has no active Turn"))?;
+    let turn = state
+        .sessions
+        .get_turn(turn_id)
+        .map_err(ApiFailure::internal)?
+        .ok_or_else(|| ApiFailure::not_found("Runtime Turn not found"))?;
+    let task_id = turn
+        .active_task_id
+        .ok_or_else(|| ApiFailure::conflict("Runtime Turn has no active Task"))?;
+    let child_id = uuid::Uuid::new_v4();
+    let child = state
+        .agents
+        .reserve_external_child(
+            child_id,
+            session.root_agent_id,
+            task_id,
+            profile.clone(),
+            params.label.map(|label| label.trim().to_owned()),
+        )
+        .map_err(ApiFailure::internal)?;
+    if let Err(error) = state.agent_commands.enqueue_spawn(
+        task_id,
+        child_id,
+        prompt.to_owned(),
+        Some(profile),
+        child.label.clone(),
+    ) {
+        let _ = state
+            .agents
+            .reject_external_child(child_id, "failed to queue external spawn".to_owned());
+        return Err(ApiFailure::internal(error));
+    }
+    if let Err(error) = state.events.append(
+            "agent.spawn_requested",
+            format!(
+                "session_id={} turn_id={turn_id} task_id={task_id} parent_agent_id={} agent_id={child_id}",
+                session.id, session.root_agent_id
+            ),
+        ) {
+        eprintln!("append external Agent spawn event: {error:#}");
+    }
+    json(public_agent(child, false))
+}
+
+fn validate_external_spawn_profile(profile: Option<&str>) -> Result<String, ApiFailure> {
+    let profile = profile.unwrap_or("deep").trim().to_ascii_lowercase();
+    if matches!(profile.as_str(), "scout" | "reader" | "deep") {
+        Ok(profile)
+    } else {
+        Err(ApiFailure::invalid(
+            "external agent.spawn only permits read-only scout, reader, or deep profiles",
+        ))
+    }
+}
+
 async fn agent_command(
     state: &ServerState,
     request: &ApiRequest,
@@ -1213,6 +1293,11 @@ async fn agent_command(
 }
 
 fn command_response(command: agent_control::AgentCommand) -> ApiResult {
+    if command.kind == agent_control::AgentCommandKind::Spawn {
+        return Err(ApiFailure::internal(anyhow::anyhow!(
+            "spawn command cannot be returned as an Agent control command"
+        )));
+    }
     json(willdeep_runtime_protocol::RuntimeAgentCommand {
         id: command.id,
         task_id: command.task_id,
@@ -1227,6 +1312,7 @@ fn command_response(command: agent_control::AgentCommand) -> ApiResult {
             agent_control::AgentCommandKind::Instruct => {
                 willdeep_runtime_protocol::AgentCommandKind::Instruct
             }
+            agent_control::AgentCommandKind::Spawn => unreachable!(),
         },
         status: match command.status {
             agent_control::AgentCommandStatus::Pending => {
@@ -1364,6 +1450,15 @@ impl ApiFailure {
         }
     }
 
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: ErrorCode::Conflict,
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
     fn internal(error: impl std::fmt::Display) -> Self {
         eprintln!("Runtime control API internal error: {error}");
         Self {
@@ -1450,7 +1545,36 @@ mod tests {
         first.params["message"] = serde_json::Value::String("different prompt".to_owned());
         assert_ne!(first_fingerprint, request_fingerprint(&first));
         assert!(is_mutating_operation("agent.prompt"));
+        assert!(is_mutating_operation("agent.spawn"));
         assert!(!is_mutating_operation("session.list"));
+    }
+
+    #[test]
+    fn external_spawn_params_cannot_select_paths_or_writing_profiles() {
+        let request = ApiRequest::new(
+            "agent.spawn",
+            serde_json::json!({
+                "session_id": uuid::Uuid::new_v4(),
+                "prompt": "inspect",
+                "profile": "scout",
+                "workspace": "/tmp/escape"
+            }),
+        );
+        assert_eq!(
+            params::<SpawnAgentParams>(&request).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            validate_external_spawn_profile(None).ok().as_deref(),
+            Some("deep")
+        );
+        assert_eq!(
+            validate_external_spawn_profile(Some(" SCOUT "))
+                .ok()
+                .as_deref(),
+            Some("scout")
+        );
+        assert!(validate_external_spawn_profile(Some("editor")).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc30
+> 当前实现版本：v0.21.0-rc31
 
 ## 1. 目标
 
@@ -78,6 +78,19 @@ diff.review
 diff.revert
 ```
 
+`agent.spawn` 的稳定参数为：
+
+```json
+{
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "prompt": "Inspect the repository structure",
+  "profile": "scout",
+  "label": "structure scout"
+}
+```
+
+成功响应是状态为 `queued` 的 `RuntimeAgent`，其中 `id` 可直接传给 `agent.get` 或 `agent.wait`。当前公开 Spawn 固定后台执行，Profile 仅允许 `scout`、`reader`、`deep`；它不接受 Parent ID、Task ID、Workspace、工具权限、`target_file` 或前台执行开关。
+
 操作名一旦发布不得在同一协议主版本中改变语义。新增操作向后兼容；删除或改变字段含义需要提升协议主版本。
 
 ## 5. 响应信封
@@ -90,7 +103,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc30",
+    "server_version": "0.21.0-rc31",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +121,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc30"
+    "server_version": "0.21.0-rc31"
   }
 }
 ```
@@ -128,6 +141,7 @@ diff.revert
 - 所有控制端点必须显式校验随机 Runtime Token；
 - API Key、Provider Secret、Runtime Token 永不进入 DTO、事件或错误字段；
 - Prompt、附件正文和工具参数默认仅在明确需要的目标操作中返回；
+- `agent.spawn` 只接受活跃 `session_id`、Prompt、标签与只读 Profile；父 Agent、Task、Workspace 和 Child ID 由服务端绑定，客户端路径、写目标、`editor` 与未知 Profile 均拒绝；
 - `RuntimeTool` 只公开稳定 ID、Session/Turn/Task/Agent 归属、工具名、状态和起止时间；Tool 索引不保存参数、输出正文、Workspace 路径或内部错误；
 - `RuntimeTask.failure_domain` 在失败时可取 `provider`、`policy`、`tool`、`harness` 或 `internal`，成功与旧记录为 `null`；未知未来值由旧客户端解码为 `unknown`，字段不包含内部错误正文；
 - Workspace Change `RuntimeArtifact` 由内容指纹确认的 Diff Attribution 生成，只公开归属、来源快照和变更项数量；路径与内容必须另走受授权的精确 Diff API；
@@ -150,7 +164,7 @@ diff.revert
 
 ## 9. 跨语言兼容夹具
 
-[`public-api-v1.json`](../crates/willdeep-runtime-protocol/fixtures/public-api-v1.json) 是协议 `1.0` 的固定 decoder contract fixture。它包含统一响应信封，Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 十一类公开对象，以及 Agent Prompt/Wait、审批、提问、事件查询请求和公共控制结果；不包含认证凭据、用户 Prompt、工具参数、输出正文或本机路径。
+[`public-api-v1.json`](../crates/willdeep-runtime-protocol/fixtures/public-api-v1.json) 是协议 `1.0` 的固定 decoder contract fixture。它包含统一响应信封，Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact、Event 十一类公开对象，以及 Agent Spawn/Prompt/Wait、审批、提问、事件查询请求和公共控制结果；不包含认证凭据、工具参数、输出正文或本机路径。
 
 Swift、Android 和第三方客户端应在 CI 中逐项解码 `responses`，并至少断言：
 

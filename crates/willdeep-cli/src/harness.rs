@@ -349,8 +349,6 @@ pub(crate) async fn build(
         ),
     };
     let background_tasks = Arc::new(BackgroundTaskRegistry::default());
-    let command_watcher =
-        daemon::start_agent_command_watcher(runtime_connection.as_ref(), background_tasks.clone())?;
     let verification_home = home.to_path_buf();
     let verification_workspace = workspace.clone();
     let tools = ToolRegistry::new(&workspace, approval_mode)?
@@ -437,6 +435,11 @@ pub(crate) async fn build(
             .with_worktree_root(home.join("worktrees").join("subagents"))
             .with_event_sink(sink.clone()),
     );
+    let command_watcher = daemon::start_agent_command_watcher(
+        runtime_connection.as_ref(),
+        background_tasks.clone(),
+        subagents.clone(),
+    )?;
     let mut agent = Agent::new(
         provider,
         tools,
