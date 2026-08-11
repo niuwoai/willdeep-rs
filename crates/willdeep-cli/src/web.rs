@@ -209,6 +209,7 @@ struct WebRuntimeAgent {
     current_tool: Option<String>,
     total_tokens: Option<u64>,
     elapsed_seconds: u64,
+    finished_seconds_ago: Option<u64>,
     worktree_branch: Option<String>,
     dedicated_worktree: bool,
 }
@@ -447,6 +448,9 @@ async fn runtime_activity(
 
 fn web_runtime_agent(agent: crate::daemon::tui_bridge::RemoteAgent) -> WebRuntimeAgent {
     let elapsed_seconds = agent_elapsed_seconds(&agent);
+    let finished_seconds_ago = agent
+        .completed_at
+        .map(|completed_at| now_seconds().saturating_sub(completed_at));
     WebRuntimeAgent {
         id: agent.id,
         parent_id: agent.parent_id,
@@ -459,6 +463,7 @@ fn web_runtime_agent(agent: crate::daemon::tui_bridge::RemoteAgent) -> WebRuntim
         current_tool: agent.current_tool,
         total_tokens: agent.total_tokens,
         elapsed_seconds,
+        finished_seconds_ago,
         worktree_branch: agent.worktree_branch,
         dedicated_worktree: agent.dedicated_worktree,
     }
@@ -700,6 +705,26 @@ async fn authorize_runtime_agent(
         Err(WebError::not_found(
             "Runtime Agent not found in this workspace",
         ))
+    }
+}
+
+/// Turn actions carry no Workspace in the request, so the Session that owns the
+/// Turn is resolved first and its Workspace checked against the server
+/// allowlist. Everything unknown or out of scope collapses into the same 404 so
+/// a caller cannot probe for Turn ids in other Workspaces.
+async fn authorize_runtime_turn(state: &WebState, id: uuid::Uuid) -> Result<(), WebError> {
+    let not_found = || WebError::not_found("Runtime Turn not found in this workspace");
+    let session_id = crate::daemon::remote_turn_session(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?
+        .ok_or_else(not_found)?;
+    let session = SessionStore::new(&state.home)
+        .load(session_id)
+        .map_err(|_| not_found())?;
+    if workspace_allowed(state, &session.workspace).await? {
+        Ok(())
+    } else {
+        Err(not_found())
     }
 }
 
@@ -957,6 +982,7 @@ async fn stop_turn(
     State(state): State<Arc<WebState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<StatusCode, WebError> {
+    authorize_runtime_turn(&state, id).await?;
     crate::daemon::stop_remote_turn(&state.home, id)
         .await
         .map_err(WebError::from_anyhow)?;
@@ -1472,10 +1498,17 @@ async fn workspace_allowed(
     state: &WebState,
     requested: &std::path::Path,
 ) -> Result<bool, WebError> {
-    Ok(registered_web_workspaces(state)
-        .await?
-        .iter()
-        .any(|workspace| workspace.root == requested))
+    Ok(workspace_in_allowlist(
+        &registered_web_workspaces(state).await?,
+        requested,
+    ))
+}
+
+fn workspace_in_allowlist(
+    allowed: &[crate::daemon::RuntimeWorkspace],
+    requested: &std::path::Path,
+) -> bool {
+    allowed.iter().any(|workspace| workspace.root == requested)
 }
 
 async fn select_workspace(
@@ -1844,6 +1877,43 @@ mod tests {
         assert!(snapshot_has_question(&snapshot, question_id));
         assert!(!snapshot_has_approval(&snapshot, uuid::Uuid::new_v4()));
         assert!(!snapshot_has_agent(&snapshot, uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn turn_actions_require_the_owning_session_workspace_in_the_allowlist() {
+        let registered = |root: &str| crate::daemon::RuntimeWorkspace {
+            schema: 1,
+            id: uuid::Uuid::new_v4(),
+            name: "workspace".to_owned(),
+            root: std::path::PathBuf::from(root),
+            access: crate::daemon::WorkspaceAccess::WorkspaceWrite,
+            provider_profile: None,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+            active: true,
+        };
+        let allowed = vec![registered("/allowed"), registered("/also-allowed")];
+
+        assert!(workspace_in_allowlist(
+            &allowed,
+            std::path::Path::new("/allowed")
+        ));
+        assert!(workspace_in_allowlist(
+            &allowed,
+            std::path::Path::new("/also-allowed")
+        ));
+        // A Turn whose Session lives outside the allowlist must not be
+        // stoppable, even with a valid Turn id.
+        assert!(!workspace_in_allowlist(
+            &allowed,
+            std::path::Path::new("/other-workspace")
+        ));
+        assert!(!workspace_in_allowlist(
+            &[],
+            std::path::Path::new("/allowed")
+        ));
     }
 
     #[test]

@@ -768,6 +768,54 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
 }
 
 #[test]
+fn task_recovery_survives_dangling_session_reference() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-dangling-session-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("tasks.json");
+    let id = uuid::Uuid::new_v4();
+    let task = RuntimeTask {
+        id,
+        session_id: Some(uuid::Uuid::new_v4()),
+        turn_id: None,
+        agent_id: None,
+        event_start_sequence: 0,
+        status: RuntimeTaskStatus::Running,
+        workspace: root.clone(),
+        profile: None,
+        model: None,
+        pid: Some(10),
+        created_at: 1,
+        started_at: Some(2),
+        completed_at: None,
+        exit_code: None,
+        failure_domain: None,
+        error: None,
+    };
+    persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let manager = TaskManager::open(TaskManagerOptions {
+        path,
+        interactions_path: root.join("interactions.json"),
+        home: root.clone(),
+        events,
+        agents: test_agent_store(&root),
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+    let recovered = manager.tasks.blocking_read();
+    assert_eq!(recovered[&id].status, RuntimeTaskStatus::Interrupted);
+    assert!(recovered[&id].agent_id.is_some());
+    drop(recovered);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
     let root = std::env::temp_dir().join(format!(
         "willdeep-waiting-task-recovery-{}",

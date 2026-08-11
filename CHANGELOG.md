@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0-rc62] - 2026-08-12
+
+### Fixed
+- Web 层 `POST /api/turns/{id}/stop` 补上工作区归属校验：此前该端点拿到任意合法 Turn UUID 就直接转发给 daemon，未做 allowlist 或归属检查，可跨工作区中断他人正在执行的 Turn。现在先经 Runtime 解析出该 Turn 所属 Session，再校验 Session 的工作区在服务器 allowlist 内；Turn 不存在、Session 读取失败、工作区不在 allowlist 三种情况统一返回 404，避免通过错误码差异探测其他工作区的 Turn id。与 Agent/审批/提问操作已有的 `authorize_runtime_agent` / `authorized_runtime_snapshot` 校验级别对齐。
+
+### Changed
+- 新增 `daemon::remote_turn_session()`：按 Turn id 反查所属 Session，Runtime 返回 `NotFound` 时给出 `None`，其余 API 错误照常上抛。
+- Web 会话列表默认只展示未归档会话；已归档会话收进列表底部"已归档 (N)"折叠组，默认收起且不渲染行 DOM，点击才展开全部归档会话，展开后仍支持悬停操作（取消归档、删除等）。切换工作区时折叠组自动收起。
+- Web 历史会话列表限制最大高度（42vh）并使用独立细滚动条，移除原先只显示前 20 条的截断，滚动即可浏览全部会话。
+
+### Fixed
+- Runtime 启动恢复不再因历史任务引用已删除的 Session 而失败：悬空引用的任务降级绑定无会话根 Agent，Daemon 正常完成启动。此前用户删除会话后重启 Daemon 会直接无法启动。
+
+### Tests
+- 新增"任务引用已删除会话时启动恢复存活"的回归测试。
+- Web ESLint 与 TypeScript/Vite 构建作为本版本验收项；实测置顶经归档/取消归档往返后 `pinned_at` 保持不变。
+
 ## [0.21.0-rc61] - 2026-08-12
 
 ### Docs

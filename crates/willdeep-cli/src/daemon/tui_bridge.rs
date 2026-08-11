@@ -307,6 +307,23 @@ pub(crate) async fn stop_remote_turn(home: &Path, id: uuid::Uuid) -> Result<()> 
     Ok(())
 }
 
+/// Resolves the Session that owns `id`, so callers can authorize a Turn action
+/// against their own Workspace allowlist. Returns `None` when the Runtime does
+/// not know the Turn at all.
+pub(crate) async fn remote_turn_session(home: &Path, id: uuid::Uuid) -> Result<Option<uuid::Uuid>> {
+    let state = ensure_running(home).await?;
+    match runtime_client(&state)?.turn(id).await? {
+        willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(Some(data.session_id)),
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
+            if error.code == willdeep_runtime_protocol::ErrorCode::NotFound {
+                Ok(None)
+            } else {
+                bail!("Runtime API error: {}", error.message)
+            }
+        }
+    }
+}
+
 pub(crate) async fn remote_active_turn(
     home: &Path,
     session_id: uuid::Uuid,

@@ -298,12 +298,12 @@
       "status": "ok",
       "data": {
         "status": "draining",
-        "version": "0.21.0-rc60",
+        "version": "0.21.0-rc62",
         "pid": 42,
         "uptime_seconds": 10,
         "event_sequence": 15
       },
-      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc60" }
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc62" }
     },
     "object_mutation": {
       "status": "ok",
@@ -313,7 +313,7 @@
       },
       "meta": {
         "protocol_version": "1.0",
-        "server_version": "0.21.0-rc60",
+        "server_version": "0.21.0-rc62",
         "request_id": "00000000-0000-4000-8000-000000000019"
       }
     }

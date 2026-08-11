@@ -150,6 +150,7 @@ ssh -L 9847:127.0.0.1:9847 user@remote
 ### 其他边界
 
 - 审批、提问、Agent 操作会二次校验目标对象确实属于该工作区，跨工作区操作返回 404；
+- 停止 Turn（`POST /api/turns/{id}/stop`）请求体里没有 `workspace`，服务端先按 Turn id 反查所属 Session，再校验该 Session 的工作区在 allowlist 内；Turn 不存在、会话读不到、工作区不在白名单三种情况统一返回 404；
 - 所有请求体都是 `deny_unknown_fields`，客户端夹带 `workspace_root` / `task_id` / `agent_id` 等额外作用域字段会直接反序列化失败；
 - 子 Agent Spawn 只允许 `scout` / `reader` / `deep` 三种只读 Profile，父级、Task、Workspace 和 Child ID 全部由 Runtime 推导；
 - 静态资源附带 `X-Content-Type-Options: nosniff` 和限制到 `'self'` 的 CSP；

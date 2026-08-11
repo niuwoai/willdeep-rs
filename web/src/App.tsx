@@ -126,6 +126,7 @@ export function App() {
     abortRef.current?.abort();
     setSessionId("");
     setChat([]);
+    setShowArchived(false);
     json<Session[]>("/api/sessions").then((values) => {
       setSessions(values);
       const available = values.filter((item) => item.workspace === workspace && !item.archived);
@@ -144,11 +145,16 @@ export function App() {
   }, [workspace]);
   useEffect(() => { if (followBottomRef.current) endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat, activity]);
 
-  const visibleSessions = useMemo(() => {
+  const [showArchived, setShowArchived] = useState(false);
+  const { liveSessions, archivedSessions } = useMemo(() => {
     const query = sessionSearch.trim().toLowerCase();
-    return sessions
+    const filtered = sessions
       .filter((item) => item.workspace === workspace && (!query || item.title.toLowerCase().includes(query)))
       .sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0) || b.updated_at - a.updated_at);
+    return {
+      liveSessions: filtered.filter((item) => !item.archived),
+      archivedSessions: filtered.filter((item) => item.archived),
+    };
   }, [sessions, workspace, sessionSearch]);
   const selectedSession = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId]);
   const commandMatches = useMemo(() => prompt.startsWith("/") ? composer.commands.filter((item) => item.startsWith(prompt.split(/\s/)[0])).slice(0, 6) : [], [prompt, composer.commands]);
@@ -379,6 +385,22 @@ export function App() {
 
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
 
+  function sessionRow(item: Session) {
+    const selected = sessionId === item.id;
+    return <Flex key={item.id} className={`session-row${selected ? " selected" : ""}`} opacity={item.archived ? 0.68 : 1}>
+      <button type="button" className="session-title" disabled={busy} onClick={() => void loadSession(item.id, item.active_turn_id)}>
+        {item.pinned_at != null && <span className="session-pin" title={t.pinned} aria-label={t.pinned}>📌</span>}
+        {item.title}
+      </button>
+      <Flex className="session-actions">
+        <button type="button" title={t.renameSession} aria-label={t.renameSession} disabled={busy || item.active} onClick={() => void renameSession(item)}>✎</button>
+        <button type="button" title={item.pinned_at != null ? t.unpinSession : t.pinSession} aria-label={item.pinned_at != null ? t.unpinSession : t.pinSession} disabled={busy} onClick={() => void togglePinSession(item)}>{item.pinned_at != null ? "↧" : "📌"}</button>
+        <button type="button" title={item.archived ? t.unarchiveSession : t.archiveSession} aria-label={item.archived ? t.unarchiveSession : t.archiveSession} disabled={busy || item.active} onClick={() => void toggleArchiveSession(item)}>{item.archived ? "↥" : "▣"}</button>
+        <button type="button" className="danger" title={t.deleteSession} aria-label={t.deleteSession} disabled={busy || item.active} onClick={() => setDeleteTarget(item)}>×</button>
+      </Flex>
+    </Flex>;
+  }
+
   async function renameSession(target: Session) {
     const title = window.prompt(t.renamePrompt, target.title)?.trim(); if (!title) return;
     try { await mutate(`/api/sessions/${encodeURIComponent(target.id)}/rename`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); }
@@ -497,21 +519,15 @@ export function App() {
       <RuntimeSidebar activity={runtimeActivity} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
       <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { localStorage.removeItem(`${lastSessionPrefix}${workspace}`); setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
       <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568" />
-      <VStack align="stretch" gap="1">{visibleSessions.slice(0, 20).map((item) => {
-        const selected = sessionId === item.id;
-        return <Flex key={item.id} className={`session-row${selected ? " selected" : ""}`} opacity={item.archived ? 0.68 : 1}>
-          <button type="button" className="session-title" disabled={busy} onClick={() => void loadSession(item.id, item.active_turn_id)}>
-            {item.pinned_at != null && <span className="session-pin" title={t.pinned} aria-label={t.pinned}>📌</span>}
-            {item.title}{item.archived ? ` · ${t.archived}` : ""}
+      <Box className="session-list">
+        <VStack align="stretch" gap="1">{liveSessions.map(sessionRow)}{!liveSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
+        {archivedSessions.length > 0 && <Box mt="2">
+          <button type="button" className="archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((current) => !current)}>
+            <span className={`archived-caret${showArchived ? " open" : ""}`}>▸</span>{t.archived} ({archivedSessions.length})
           </button>
-          <Flex className="session-actions">
-            <button type="button" title={t.renameSession} aria-label={t.renameSession} disabled={busy || item.active} onClick={() => void renameSession(item)}>✎</button>
-            <button type="button" title={item.pinned_at != null ? t.unpinSession : t.pinSession} aria-label={item.pinned_at != null ? t.unpinSession : t.pinSession} disabled={busy} onClick={() => void togglePinSession(item)}>{item.pinned_at != null ? "↧" : "📌"}</button>
-            <button type="button" title={item.archived ? t.unarchiveSession : t.archiveSession} aria-label={item.archived ? t.unarchiveSession : t.archiveSession} disabled={busy || item.active} onClick={() => void toggleArchiveSession(item)}>{item.archived ? "↥" : "▣"}</button>
-            <button type="button" className="danger" title={t.deleteSession} aria-label={t.deleteSession} disabled={busy || item.active} onClick={() => setDeleteTarget(item)}>×</button>
-          </Flex>
-        </Flex>;
-      })}{!visibleSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
+          {showArchived && <VStack align="stretch" gap="1" mt="1">{archivedSessions.map(sessionRow)}</VStack>}
+        </Box>}
+      </Box>
       {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
       </Box>
       <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="#202a35" color="#627184" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
