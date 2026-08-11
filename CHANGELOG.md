@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc40] - 2026-08-11
+
+### Added
+
+- Root 与 Child Agent 持久记录实际模型；Subagent 生命周期事件和统一 Runtime Agent DTO 暴露向后兼容的可选模型字段。
+- TUI 与 Web Agent 树显示模型、累计 Token、运行耗时和专属 Worktree 摘要，Web Child 按父级缩进。
+
+### Fixed
+
+- Runtime Task 持久保存模型，Daemon 重启恢复 Root Agent 时不再丢失本轮模型选择。
+
 ## [0.21.0-rc39] - 2026-08-11
 
 ### Added

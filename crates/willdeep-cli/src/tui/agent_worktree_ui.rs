@@ -15,7 +15,7 @@ fn render_agent_detail(
     agent: &crate::daemon::tui_bridge::RemoteAgent,
 ) {
     let content = format!(
-        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {:?}\n{}: {}/{}\n{}: {}/{}\n{}: {}s\n{}: {}\n{}: {}\n{}: {}\n\n{}",
+        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {:?}\n{}: {}/{}\n{}: {}/{}\n{}: {}s\n{}: {}\n{}: {}\n{}: {}\n\n{}",
         app.language.text("Agent", "Agent", "エージェント"),
         agent.id,
         app.language.text("父级", "Parent", "親"),
@@ -24,6 +24,8 @@ fn render_agent_detail(
             .map_or_else(|| "—".to_owned(), |id| id.to_string()),
         app.language.text("Profile", "Profile", "プロファイル"),
         agent.profile.as_deref().unwrap_or("—"),
+        app.language.text("模型", "Model", "モデル"),
+        agent.model.as_deref().unwrap_or("—"),
         app.language.text("标签", "Label", "ラベル"),
         agent.label.as_deref().unwrap_or("—"),
         app.language.text("状态", "Status", "状態"),

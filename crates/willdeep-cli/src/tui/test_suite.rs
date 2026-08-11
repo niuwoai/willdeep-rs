@@ -406,6 +406,7 @@ mod tests {
                 label: Some("root".to_owned()),
                 background: false,
                 profile: Some("editor".to_owned()),
+                model: Some("root-model".to_owned()),
                 status: RuntimeStatus::Done,
                 current_turn: 3,
                 current_tool: None,
@@ -417,6 +418,8 @@ mod tests {
                 workspace: PathBuf::from("/workspace"),
                 worktree_branch: None,
                 dedicated_worktree: false,
+                created_at: 1,
+                completed_at: Some(2),
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -425,6 +428,7 @@ mod tests {
                 label: Some("inspect".to_owned()),
                 background: true,
                 profile: Some("scout".to_owned()),
+                model: Some("scout-model".to_owned()),
                 status: RuntimeStatus::Working,
                 current_turn: 1,
                 current_tool: Some("read_file".to_owned()),
@@ -436,6 +440,8 @@ mod tests {
                 workspace: PathBuf::from("/worktrees/agent"),
                 worktree_branch: Some("willdeep/agent-test".to_owned()),
                 dedicated_worktree: true,
+                created_at: 1,
+                completed_at: None,
             });
         app.runtime_tools
             .push(willdeep_runtime_protocol::RuntimeTool {
@@ -479,8 +485,10 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Runtime agents · 2"));
         assert!(rendered.contains("abe596 · editor · done"));
-        assert!(rendered.contains("root · T3/- · - · 42t/- · -s"));
-        assert!(rendered.contains("inspect · T1/8 · read_file · 9t/32000t · 300s"));
+        assert!(rendered.contains("root · root-model · 1.0s"));
+        assert!(rendered.contains("T3/- · - · 42t/- · -s"));
+        assert!(rendered.contains("inspect · scout-model ·"));
+        assert!(rendered.contains("T1/8 · read_file · 9t/32000t · 300s"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
         assert!(rendered.contains("Tools: 1 · Running: 1 · Artifacts: 1"));
         assert!(rendered.contains("read_file · Running"));

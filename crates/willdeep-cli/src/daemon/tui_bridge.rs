@@ -46,6 +46,7 @@ pub(crate) struct RemoteAgent {
     pub label: Option<String>,
     pub background: bool,
     pub profile: Option<String>,
+    pub model: Option<String>,
     pub status: willdeep_core::RuntimeStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
@@ -57,6 +58,8 @@ pub(crate) struct RemoteAgent {
     pub workspace: PathBuf,
     pub worktree_branch: Option<String>,
     pub dedicated_worktree: bool,
+    pub created_at: u64,
+    pub completed_at: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -616,6 +619,7 @@ fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
         label: agent.label,
         background: agent.background,
         profile: agent.profile,
+        model: agent.model,
         status: match agent.status {
             willdeep_runtime_protocol::AgentStatus::Queued
             | willdeep_runtime_protocol::AgentStatus::Running => {
@@ -649,6 +653,8 @@ fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
         workspace: agent.workspace.map(PathBuf::from).unwrap_or_default(),
         worktree_branch: agent.worktree_branch,
         dedicated_worktree: agent.dedicated_worktree,
+        created_at: agent.created_at,
+        completed_at: agent.completed_at,
     }
 }
 

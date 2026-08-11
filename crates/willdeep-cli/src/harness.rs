@@ -405,26 +405,38 @@ pub(crate) async fn build(
     let context_window = profile
         .and_then(|value| value.context_window)
         .unwrap_or(128_000);
+    let cheap_model = if kind == ProviderKind::SomeIm {
+        "glm-5".to_owned()
+    } else {
+        model.clone()
+    };
     let cheap_provider = if kind == ProviderKind::SomeIm {
         let mut cheap = parent_provider_config.clone();
-        cheap.model = "glm-5".to_owned();
+        cheap.model = cheap_model.clone();
         build_provider(cheap).context("initialize default subagent provider")?
     } else {
         provider.clone()
     };
     let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
     for subagent in &mut subagent_profiles {
+        subagent.model = Some(if subagent.id == "deep" {
+            model.clone()
+        } else {
+            cheap_model.clone()
+        });
         if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
             if let Some(provider_name) = settings.provider_profile.as_deref() {
                 let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
                 if let Some(model) = &settings.model {
                     configured.model = model.clone();
                 }
+                subagent.model = Some(configured.model.clone());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             } else if let Some(model) = &settings.model {
                 let mut configured = parent_provider_config.clone();
                 configured.model = model.clone();
+                subagent.model = Some(model.clone());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             }

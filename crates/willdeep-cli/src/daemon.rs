@@ -568,6 +568,8 @@ pub(crate) struct RuntimeTask {
     status: RuntimeTaskStatus,
     workspace: PathBuf,
     profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     pid: Option<u32>,
     created_at: u64,
     started_at: Option<u64>,
@@ -2358,6 +2360,7 @@ impl TaskManager {
                     task.id,
                     task.workspace.clone(),
                     task.profile.clone(),
+                    task.model.clone(),
                     agent_status(task.status),
                 )?
             } else {
@@ -2365,6 +2368,7 @@ impl TaskManager {
                     task.id,
                     task.workspace.clone(),
                     task.profile.clone(),
+                    task.model.clone(),
                     agent_status(task.status),
                 )?
             };
@@ -2646,6 +2650,7 @@ impl TaskManager {
             status: RuntimeTaskStatus::Queued,
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
+            model: request.model.clone(),
             pid: None,
             created_at: now(),
             started_at: None,
@@ -2664,6 +2669,7 @@ impl TaskManager {
                 id,
                 request.workspace.clone(),
                 request.profile.clone(),
+                request.model.clone(),
                 RuntimeAgentStatus::Queued,
             )?
         } else {
@@ -2671,6 +2677,7 @@ impl TaskManager {
                 id,
                 request.workspace.clone(),
                 request.profile.clone(),
+                request.model.clone(),
                 RuntimeAgentStatus::Queued,
             )?
         };

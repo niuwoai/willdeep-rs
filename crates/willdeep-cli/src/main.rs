@@ -1378,6 +1378,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         AgentEvent::SubagentStarted {
             id,
             profile,
+            model,
             label,
             background,
             max_turns,
@@ -1391,6 +1392,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "type": "subagent_started",
             "id": id,
             "profile": profile,
+            "model": model,
             "label": label,
             "background": background,
             "max_turns": max_turns,

@@ -24,10 +24,14 @@ export type RuntimeAgent = {
   label: string | null;
   background: boolean;
   profile: string | null;
+  model: string | null;
   status: string;
   current_turn: number;
   current_tool: string | null;
   total_tokens: number | null;
+  elapsed_seconds: number;
+  worktree_branch: string | null;
+  dedicated_worktree: boolean;
 };
 
 export type RuntimeGate =
@@ -96,8 +100,9 @@ export function RuntimeSidebar({ activity, messages: t, busy, onResolveApproval,
       </Box>)}
     </VStack>}
     {activity.agents.length > 0 && <VStack align="stretch" gap="1" mt="3">
-      {activity.agents.slice(0, 4).map((agent) => <Box key={agent.id}>
+      {activity.agents.slice(0, 4).map((agent) => <Box key={agent.id} pl={agent.parent_id ? "3" : "0"}>
         <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Text color="#8290a3" flexShrink="0">{agentStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text></Flex>
+        <Text fontSize="2xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agent.elapsed_seconds}{t.secondsUnit}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
         {agent.background && <Flex gap="1" mt="1">
           {agent.status === "working" && <><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "prompt")}>{t.instruct}</Button><Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "stop")}>{t.stop}</Button></>}
           {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <Button size="2xs" variant="ghost" disabled={busy} onClick={() => void onAgentAction(agent.id, "retry")}>{t.retry}</Button>}

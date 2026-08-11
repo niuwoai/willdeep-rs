@@ -2,7 +2,7 @@
 
 > 状态：实施中
 > 首个目标版本：v0.17.0
-> 最后更新：2026-08-11（v0.21.0-rc39 TUI 版本与 Web App 命令发现）
+> 最后更新：2026-08-11（v0.21.0-rc40 Agent 模型与耗时观测）
 
 ## 1. 目标
 
@@ -13,6 +13,8 @@ Core Session 的可选 `goal` 字段保存用户明确设置的持续目标。�
 Provider Profile、模型和私有配置引用随 Session 持久化；客户端切换后必须以目标 Session 为准，启动参数只用于新会话默认值。Skills 与 MCP 属于可撤销的 Workspace 权限：每个 Task 执行前从当前持久 Workspace 注册表重新解析，不允许历史 Session 快照恢复已撤销能力。
 
 Agent Store 的 input/output/total Token 是 Agent 身份级累计值，而不是最后一次响应快照。Root Agent 在同一 Session 的后续 Task 中延续累计值；Child Agent 同身份重试也延续。累计使用饱和加法并持久化，Daemon 重启不得清零。
+
+Root 与 Child Agent 都持久记录实际执行模型。Root 从 Runtime Task/Session 恢复；Child 从解析后的 Subagent Profile 生命周期事件恢复。公开 Agent DTO 的 `model` 为向后兼容的可选字段，TUI、Web、移动端和 Swift 观察客户端不得从 Profile 名称猜测模型。
 
 本协议区分四种稳定身份：
 

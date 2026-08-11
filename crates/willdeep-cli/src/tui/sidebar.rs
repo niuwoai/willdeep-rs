@@ -304,6 +304,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         let profile = agent.profile.as_deref().unwrap_or("root");
                         let label = agent.label.as_deref().unwrap_or(profile);
                         let mode = if agent.background { " bg" } else { "" };
+                        let elapsed = agent_elapsed_seconds(agent);
                         let prefix = if agent.parent_id.is_some() {
                             "      ↳"
                         } else {
@@ -326,7 +327,15 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ));
                         lines.push(Line::styled(
                             format!(
-                                "        {label} · T{}/{} · {} · {}/{} · {}s",
+                                "        {label} · {} · {:.1}s",
+                                agent.model.as_deref().unwrap_or("-"),
+                                elapsed
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                        lines.push(Line::styled(
+                            format!(
+                                "        T{}/{} · {} · {}/{} · {}s",
                                 agent.current_turn,
                                 agent
                                     .max_turns
@@ -432,4 +441,14 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
             .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0)),
         area,
     );
+}
+
+fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> f64 {
+    let end = agent.completed_at.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
+    end.saturating_sub(agent.created_at) as f64
 }

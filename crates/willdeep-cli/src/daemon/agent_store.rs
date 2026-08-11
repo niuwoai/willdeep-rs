@@ -39,6 +39,8 @@ pub(crate) struct RuntimeAgent {
     #[serde(default)]
     pub worktree_quarantined_at: Option<u64>,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: RuntimeAgentStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
@@ -97,6 +99,7 @@ impl AgentStore {
         task_id: uuid::Uuid,
         workspace: PathBuf,
         profile: Option<String>,
+        model: Option<String>,
         status: RuntimeAgentStatus,
     ) -> Result<RuntimeAgent> {
         let mut agents = self.lock()?;
@@ -119,6 +122,7 @@ impl AgentStore {
             worktree_merged_at: None,
             worktree_quarantined_at: None,
             profile,
+            model,
             status,
             current_turn: 0,
             current_tool: None,
@@ -145,6 +149,7 @@ impl AgentStore {
         task_id: uuid::Uuid,
         workspace: PathBuf,
         profile: Option<String>,
+        model: Option<String>,
         status: RuntimeAgentStatus,
     ) -> Result<RuntimeAgent> {
         let mut agents = self.lock()?;
@@ -159,6 +164,7 @@ impl AgentStore {
             agent.worktree_merged_at = None;
             agent.worktree_quarantined_at = None;
             agent.profile = profile;
+            agent.model = model;
             agent.status = status;
             agent.current_turn = 0;
             agent.current_tool = None;
@@ -189,6 +195,7 @@ impl AgentStore {
             worktree_merged_at: None,
             worktree_quarantined_at: None,
             profile,
+            model,
             status,
             current_turn: 0,
             current_tool: None,
@@ -248,6 +255,7 @@ impl AgentStore {
             worktree_merged_at: None,
             worktree_quarantined_at: None,
             profile: Some(profile),
+            model: None,
             status: RuntimeAgentStatus::Queued,
             current_turn: 0,
             current_tool: None,
@@ -406,6 +414,10 @@ impl AgentStore {
                 .get("profile")
                 .and_then(|value| value.as_str())
                 .map(ToOwned::to_owned);
+            agent.model = value
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
             agent.label = value
                 .get("label")
                 .and_then(|value| value.as_str())
@@ -479,6 +491,10 @@ impl AgentStore {
                 worktree_quarantined_at: None,
                 profile: value
                     .get("profile")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                model: value
+                    .get("model")
                     .and_then(|value| value.as_str())
                     .map(ToOwned::to_owned),
                 status: RuntimeAgentStatus::Running,

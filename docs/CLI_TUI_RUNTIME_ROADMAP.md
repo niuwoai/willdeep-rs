@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc39
+> 当前实施版本：v0.21.0-rc40
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -86,7 +86,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 4：Agent Mission Control（v0.18.0）
 
-- [ ] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
+- [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
 - [ ] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误。
 - [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc40（已完成）：Runtime Task 与 Agent Store 新增向后兼容的模型字段，Root Agent 创建、Session 下一 Turn 和 Daemon 重启恢复都保留实际模型；Subagent Profile 记录父模型、some.im 默认轻量模型或配置覆盖模型，并随生命周期事件进入 Child Agent。统一协议、TUI 和 Web Agent 树显示父子层级、Profile、模型、状态、当前工具、运行耗时、累计 Token 与专属 Worktree/分支；Web 文案全部通过 i18n。测试覆盖 Root/Child 模型持久化、重启恢复、事件协议和 TUI/Web 安全摘要。
 
 v0.21.0-rc39（已完成）：TUI 侧边栏顶部常驻显示编译期 `willdeep_core::VERSION`，用户可直接核对正在运行的二进制是否为当前发版。`/webapp` 保持在 `/` 命令候选中，并加入通用斜杠命令兜底的委派白名单，避免未来分发顺序调整时被误报为未知命令。测试覆盖 `/web` 候选发现和 `/webapp` 不被兜底拦截。
 

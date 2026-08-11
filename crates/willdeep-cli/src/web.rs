@@ -172,10 +172,14 @@ struct WebRuntimeAgent {
     label: Option<String>,
     background: bool,
     profile: Option<String>,
+    model: Option<String>,
     status: &'static str,
     current_turn: u64,
     current_tool: Option<String>,
     total_tokens: Option<u64>,
+    elapsed_seconds: u64,
+    worktree_branch: Option<String>,
+    dedicated_worktree: bool,
 }
 
 #[derive(Serialize)]
@@ -360,16 +364,23 @@ async fn runtime_activity(
         agents: snapshot
             .agents
             .into_iter()
-            .map(|agent| WebRuntimeAgent {
-                id: agent.id,
-                parent_id: agent.parent_id,
-                label: agent.label,
-                background: agent.background,
-                profile: agent.profile,
-                status: runtime_status_name(agent.status),
-                current_turn: agent.current_turn,
-                current_tool: agent.current_tool,
-                total_tokens: agent.total_tokens,
+            .map(|agent| {
+                let elapsed_seconds = agent_elapsed_seconds(&agent);
+                WebRuntimeAgent {
+                    id: agent.id,
+                    parent_id: agent.parent_id,
+                    label: agent.label,
+                    background: agent.background,
+                    profile: agent.profile,
+                    model: agent.model,
+                    status: runtime_status_name(agent.status),
+                    current_turn: agent.current_turn,
+                    current_tool: agent.current_tool,
+                    total_tokens: agent.total_tokens,
+                    elapsed_seconds,
+                    worktree_branch: agent.worktree_branch,
+                    dedicated_worktree: agent.dedicated_worktree,
+                }
             })
             .collect(),
         gates: snapshot
@@ -404,6 +415,16 @@ async fn runtime_activity(
             .collect(),
         attention_count: snapshot.attention.len(),
     }))
+}
+
+fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> u64 {
+    let end = agent.completed_at.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
+    end.saturating_sub(agent.created_at)
 }
 
 fn runtime_status_name(status: willdeep_core::RuntimeStatus) -> &'static str {
@@ -1284,10 +1305,14 @@ mod tests {
             label: Some("reader".to_owned()),
             background: true,
             profile: Some("reader".to_owned()),
+            model: Some("reader-model".to_owned()),
             status: runtime_status_name(willdeep_core::RuntimeStatus::Working),
             current_turn: 2,
             current_tool: Some("read_file".to_owned()),
             total_tokens: Some(100),
+            elapsed_seconds: 12,
+            worktree_branch: None,
+            dedicated_worktree: false,
         })
         .unwrap();
         assert_eq!(value["status"], "working");

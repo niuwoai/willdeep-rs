@@ -538,6 +538,7 @@ mod tests {
                     task_id,
                     repository.clone(),
                     None,
+                    None,
                     RuntimeAgentStatus::Running,
                 )
                 .unwrap();

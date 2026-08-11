@@ -434,6 +434,8 @@ pub struct RuntimeAgent {
     pub worktree_branch: Option<String>,
     pub dedicated_worktree: bool,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: AgentStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,

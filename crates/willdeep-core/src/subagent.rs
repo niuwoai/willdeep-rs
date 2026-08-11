@@ -24,6 +24,7 @@ use crate::tools::{ApprovalMode, ToolError, ToolRegistry};
 pub struct SubagentProfile {
     pub id: String,
     pub purpose: String,
+    pub model: Option<String>,
     pub provider: Arc<dyn Provider>,
     pub tool_names: Vec<String>,
     pub capability_prompt: String,
@@ -262,6 +263,7 @@ impl SubagentCatalog {
             let lifecycle_sink = self.sink.clone();
             let lifecycle_background = self.background.clone();
             let lifecycle_profile = profile_id.clone();
+            let lifecycle_model = profile.model.clone();
             let lifecycle_label = label.clone();
             let lifecycle_max_turns = profile.max_turns;
             let lifecycle_token_budget = profile.token_budget;
@@ -308,6 +310,7 @@ impl SubagentCatalog {
                     let sink = lifecycle_sink.clone();
                     let background = lifecycle_background.clone();
                     let profile = lifecycle_profile.clone();
+                    let model = lifecycle_model.clone();
                     let label = lifecycle_label.clone();
                     let workspace = lifecycle_workspace.clone();
                     let root_workspace = lifecycle_root_workspace.clone();
@@ -317,6 +320,7 @@ impl SubagentCatalog {
                             sink.emit(AgentEvent::SubagentStarted {
                                 id: agent_id,
                                 profile,
+                                model,
                                 label,
                                 background: true,
                                 max_turns: lifecycle_max_turns,
@@ -347,6 +351,7 @@ impl SubagentCatalog {
                 .emit(AgentEvent::SubagentStarted {
                     id: agent_id,
                     profile: profile_id.clone(),
+                    model: profile.model.clone(),
                     label,
                     background: false,
                     max_turns: profile.max_turns,
@@ -643,6 +648,7 @@ fn profile(
     SubagentProfile {
         id: spec.id.to_owned(),
         purpose: spec.purpose.to_owned(),
+        model: None,
         provider,
         tool_names: spec.tools.iter().map(|value| (*value).to_owned()).collect(),
         capability_prompt: spec.prompt.to_owned(),

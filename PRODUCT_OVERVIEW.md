@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc39
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc40
 
 ## 项目简介
 
@@ -25,6 +25,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
+- Root/Child Agent 持久记录实际模型，统一 API、TUI 与 Web Agent 树展示父子层级、模型、状态、工具、耗时、Token 和 Worktree；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
 - Ratatui 多轮 TUI、可滚动聊天记录、聚合工具活动和界面内审批；

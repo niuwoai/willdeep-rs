@@ -585,6 +585,7 @@ mod tests {
                 worktree_merged_at: None,
                 worktree_quarantined_at: None,
                 profile: Some("editor".to_owned()),
+                model: Some("editor-model".to_owned()),
                 status: RuntimeAgentStatus::Completed,
                 current_turn: 1,
                 current_tool: None,

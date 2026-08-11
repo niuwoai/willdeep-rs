@@ -136,6 +136,7 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
     sink.emit(willdeep_core::AgentEvent::SubagentStarted {
         id: child_agent_id,
         profile: "editor".to_owned(),
+        model: Some("editor-model".to_owned()),
         label: "isolated edit".to_owned(),
         background: true,
         max_turns: 6,
@@ -315,6 +316,7 @@ fn agent_store_persists_structured_harness_lifecycle() {
             task_id,
             root.clone(),
             Some("editor".to_owned()),
+            Some("root-model".to_owned()),
             RuntimeAgentStatus::Queued,
         )
         .unwrap();
@@ -352,6 +354,7 @@ fn agent_store_persists_structured_harness_lifecycle() {
                 "subagent_started",
                 serde_json::json!({
                     "profile": "scout",
+                    "model": "scout-model",
                     "label": "inspect files",
                     "background": true,
                     "workspace": root.join("child-worktree"),
@@ -392,6 +395,7 @@ fn agent_store_persists_structured_harness_lifecycle() {
         .unwrap();
     let completed_child = store.get(child_id).unwrap().unwrap();
     assert_eq!(completed_child.status, RuntimeAgentStatus::Completed);
+    assert_eq!(completed_child.model.as_deref(), Some("scout-model"));
     assert_eq!(completed_child.current_turn, 2);
     assert_eq!(completed_child.total_tokens, Some(9));
     assert!(completed_child.dedicated_worktree);
@@ -436,12 +440,14 @@ fn agent_store_persists_structured_harness_lifecycle() {
             next_task_id,
             root.clone(),
             Some("mock".to_owned()),
+            Some("continued-model".to_owned()),
             RuntimeAgentStatus::Queued,
         )
         .unwrap();
     assert_eq!(continued_root.input_tokens, Some(15));
     assert_eq!(continued_root.output_tokens, Some(5));
     assert_eq!(continued_root.total_tokens, Some(20));
+    assert_eq!(continued_root.model.as_deref(), Some("continued-model"));
     store
         .set_status_for_task(next_task_id, RuntimeAgentStatus::Completed, None)
         .unwrap();
@@ -488,6 +494,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
         status: RuntimeTaskStatus::Running,
         workspace: root.clone(),
         profile: None,
+        model: None,
         pid: Some(10),
         created_at: 1,
         started_at: Some(2),
@@ -551,6 +558,7 @@ fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
                 status: RuntimeTaskStatus::WaitingApproval,
                 workspace: root.clone(),
                 profile: None,
+                model: None,
                 pid: None,
                 created_at: 1,
                 started_at: Some(2),
@@ -648,6 +656,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
         status: RuntimeTaskStatus::Running,
         workspace,
         profile: None,
+        model: Some("restored-model".to_owned()),
         pid: Some(10),
         created_at: 1,
         started_at: Some(2),
@@ -678,6 +687,10 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     );
     assert_eq!(agents.list().unwrap().len(), 1);
     assert_eq!(agents.list().unwrap()[0].id, session.root_agent_id);
+    assert_eq!(
+        agents.list().unwrap()[0].model.as_deref(),
+        Some("restored-model")
+    );
     assert_eq!(
         events
             .read_after(0, 10)
@@ -776,6 +789,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
                     status: RuntimeTaskStatus::Completed,
                     workspace,
                     profile: None,
+                    model: None,
                     pid: None,
                     created_at: index,
                     started_at: Some(index),
@@ -824,6 +838,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
             status: RuntimeTaskStatus::Running,
             workspace: root.clone(),
             profile: None,
+            model: None,
             pid: Some(42),
             created_at: 1,
             started_at: Some(1),

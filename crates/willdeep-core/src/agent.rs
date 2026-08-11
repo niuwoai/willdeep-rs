@@ -64,6 +64,7 @@ pub enum AgentEvent {
     SubagentStarted {
         id: uuid::Uuid,
         profile: String,
+        model: Option<String>,
         label: String,
         background: bool,
         max_turns: usize,

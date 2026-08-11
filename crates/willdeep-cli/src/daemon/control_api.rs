@@ -717,6 +717,7 @@ fn public_agent(
         worktree_branch: agent.worktree_branch,
         dedicated_worktree: agent.dedicated_worktree,
         profile: agent.profile,
+        model: agent.model,
         status: match agent.status {
             Source::Queued => Target::Queued,
             Source::Running => Target::Running,
