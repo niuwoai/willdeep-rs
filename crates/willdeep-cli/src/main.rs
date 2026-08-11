@@ -675,7 +675,10 @@ async fn run() -> Result<()> {
         prompt,
         attachments,
         language,
-        allow_compress_command,
+        harness::ExecutionOptions {
+            allow_compress_command,
+            replay_existing_user_message: false,
+        },
     )
     .await?;
     if let Some(args) = run_args {

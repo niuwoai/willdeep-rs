@@ -56,6 +56,12 @@ pub(crate) struct RuntimeHarnessOutcome {
     pub session_id: uuid::Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ExecutionOptions {
+    pub allow_compress_command: bool,
+    pub replay_existing_user_message: bool,
+}
+
 pub(crate) async fn execute_runtime(
     home: &Path,
     request: crate::daemon::SubmitTask,
@@ -127,7 +133,10 @@ pub(crate) async fn execute_runtime(
         request.prompt,
         request.attachments,
         language,
-        true,
+        ExecutionOptions {
+            allow_compress_command: true,
+            replay_existing_user_message: request.replay_existing_user_message,
+        },
     )
     .await?;
     Ok(RuntimeHarnessOutcome {
@@ -144,9 +153,9 @@ pub(crate) async fn execute_noninteractive(
     prompt: String,
     attachments: Vec<willdeep_core::MessageAttachment>,
     language: Language,
-    allow_compress_command: bool,
+    options: ExecutionOptions,
 ) -> Result<HarnessOutcome> {
-    if allow_compress_command && prompt.trim() == "/compress" {
+    if options.allow_compress_command && prompt.trim() == "/compress" {
         let messages = built
             .agent
             .compress_history(session.messages.clone())
@@ -178,10 +187,23 @@ pub(crate) async fn execute_noninteractive(
             compressed: true,
         });
     }
-    let history = session.messages.clone();
-    let user_message = willdeep_core::Message::user_with_attachments(&prompt, attachments);
-    session.messages.push(user_message.clone());
-    store.save(session)?;
+    let (history, user_message) = if options.replay_existing_user_message {
+        let user_message = session
+            .messages
+            .last()
+            .cloned()
+            .context("recovered Turn is missing its persisted user message")?;
+        (
+            session.messages[..session.messages.len() - 1].to_vec(),
+            user_message,
+        )
+    } else {
+        let history = session.messages.clone();
+        let user_message = willdeep_core::Message::user_with_attachments(&prompt, attachments);
+        session.messages.push(user_message.clone());
+        store.save(session)?;
+        (history, user_message)
+    };
     let mut outcome = built
         .agent
         .run_with_history_message(history, user_message)

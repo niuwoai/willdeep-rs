@@ -103,6 +103,8 @@ struct StoredRuntimeTurn {
     metadata: RuntimeTurn,
     prompt: String,
     attachments: Vec<willdeep_core::MessageAttachment>,
+    #[serde(default)]
+    replay_existing_user_message: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,7 +209,21 @@ pub(super) struct RuntimeSessionStore {
 }
 
 impl RuntimeSessionStore {
+    #[cfg(test)]
     pub fn open(path: PathBuf, home: &Path) -> Result<Self> {
+        Self::open_inner(path, home, &std::collections::HashSet::new())
+    }
+
+    pub(super) fn open_guarded(path: PathBuf, home: &Path, tools_path: &Path) -> Result<Self> {
+        let tool_task_ids = load_tool_task_ids(tools_path)?;
+        Self::open_inner(path, home, &tool_task_ids)
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        home: &Path,
+        tool_task_ids: &std::collections::HashSet<uuid::Uuid>,
+    ) -> Result<Self> {
         let (mut sessions, migrated) = load_sessions(&path)?;
         if migrated {
             backup_sessions_before_migration(&path, 1)?;
@@ -215,25 +231,7 @@ impl RuntimeSessionStore {
         }
         let turns_path = path.with_file_name("turns.json");
         let mut turns = load_turns(&turns_path)?;
-        let mut changed = false;
-        for session in sessions.values_mut() {
-            if matches!(
-                session.status,
-                RuntimeSessionStatus::Queued
-                    | RuntimeSessionStatus::Running
-                    | RuntimeSessionStatus::WaitingApproval
-                    | RuntimeSessionStatus::WaitingAnswer
-            ) {
-                session.status = RuntimeSessionStatus::Interrupted;
-                session.active_turn_id = None;
-                session.updated_at = now();
-                session.last_error = Some("Runtime restarted while Session was active".to_owned());
-                changed = true;
-            }
-        }
-        if changed {
-            persist_sessions(&path, &sessions)?;
-        }
+        let core = willdeep_core::SessionStore::new(home);
         let mut turns_changed = false;
         for turn in turns.values_mut() {
             if matches!(
@@ -242,19 +240,66 @@ impl RuntimeSessionStore {
                     | RuntimeTurnStatus::WaitingApproval
                     | RuntimeTurnStatus::WaitingAnswer
             ) {
-                turn.metadata.status = RuntimeTurnStatus::Interrupted;
-                turn.metadata.completed_at = Some(now());
-                turn.metadata.error = Some("Runtime restarted while Turn was active".to_owned());
+                let has_tool_activity = turn
+                    .metadata
+                    .active_task_id
+                    .is_some_and(|task_id| tool_task_ids.contains(&task_id));
+                if !has_tool_activity && prepare_core_for_turn_replay(&core, turn)? {
+                    turn.metadata.status = RuntimeTurnStatus::Queued;
+                    turn.metadata.active_task_id = None;
+                    turn.metadata.started_at = None;
+                    turn.metadata.completed_at = None;
+                    turn.metadata.error = None;
+                    turn.metadata.message_start = None;
+                    turn.metadata.message_end = None;
+                } else {
+                    turn.metadata.status = RuntimeTurnStatus::Interrupted;
+                    turn.metadata.completed_at = Some(now());
+                    turn.metadata.error =
+                        Some("Runtime restarted after Turn history became ambiguous".to_owned());
+                }
                 turns_changed = true;
             }
         }
         if turns_changed {
             persist_turns(&turns_path, &turns)?;
         }
+        let mut sessions_changed = false;
+        for session in sessions.values_mut() {
+            if matches!(
+                session.status,
+                RuntimeSessionStatus::Queued
+                    | RuntimeSessionStatus::Running
+                    | RuntimeSessionStatus::WaitingApproval
+                    | RuntimeSessionStatus::WaitingAnswer
+            ) {
+                let replayable = session
+                    .active_turn_id
+                    .and_then(|turn_id| turns.get(&turn_id))
+                    .is_some_and(|turn| turn.metadata.status == RuntimeTurnStatus::Queued);
+                session.status = if replayable {
+                    RuntimeSessionStatus::Idle
+                } else {
+                    RuntimeSessionStatus::Interrupted
+                };
+                session.active_turn_id = None;
+                session.updated_at = now();
+                session.last_error = Some(if replayable {
+                    "Runtime restarted; active Turn was safely requeued".to_owned()
+                } else {
+                    "Runtime restarted while Session history could not be safely replayed"
+                        .to_owned()
+                });
+                sessions_changed = true;
+            }
+        }
+        if sessions_changed {
+            persist_sessions(&path, &sessions)?;
+        }
         Ok(Self {
             path,
             turns_path,
-            core: willdeep_core::SessionStore::new(home),
+            core,
             sessions: Mutex::new(sessions),
             turns: Mutex::new(turns),
         })
@@ -701,6 +746,7 @@ impl RuntimeSessionStore {
                 metadata: metadata.clone(),
                 prompt: request.prompt,
                 attachments: request.attachments,
+                replay_existing_user_message: false,
             },
         );
         persist_turns(&self.turns_path, &turns)?;
@@ -796,13 +842,19 @@ impl RuntimeSessionStore {
             return Ok(None);
         };
         turn.metadata.attempts = turn.metadata.attempts.saturating_add(1);
-        turn.metadata.message_start = Some(
-            self.core
-                .load(session_id)
-                .with_context(|| format!("load Core Session {session_id}"))?
-                .messages
-                .len(),
-        );
+        let core_message_count = self
+            .core
+            .load(session_id)
+            .with_context(|| format!("load Core Session {session_id}"))?
+            .messages
+            .len();
+        turn.metadata.message_start = Some(if turn.replay_existing_user_message {
+            core_message_count
+                .checked_sub(1)
+                .context("recovered Turn is missing its persisted user message")?
+        } else {
+            core_message_count
+        });
         turn.metadata.message_end = None;
         session.status = RuntimeSessionStatus::Queued;
         session.active_turn_id = Some(turn.metadata.id);
@@ -822,6 +874,7 @@ impl RuntimeSessionStore {
                 config: session.config.clone(),
                 session_id: Some(session.id),
                 turn_id: Some(turn.metadata.id),
+                replay_existing_user_message: turn.replay_existing_user_message,
             },
         };
         persist_turns(&self.turns_path, &turns)?;
@@ -1864,6 +1917,48 @@ fn load_sessions(path: &Path) -> Result<(HashMap<uuid::Uuid, RuntimeSession>, bo
     ))
 }
 
+fn prepare_core_for_turn_replay(
+    core_store: &willdeep_core::SessionStore,
+    turn: &mut StoredRuntimeTurn,
+) -> Result<bool> {
+    turn.replay_existing_user_message = false;
+    let Some(message_start) = turn.metadata.message_start else {
+        return Ok(false);
+    };
+    let Ok(core) = core_store.load(turn.metadata.session_id) else {
+        return Ok(false);
+    };
+    if core.messages.len() == message_start {
+        return Ok(true);
+    }
+    if core.messages.len() != message_start.saturating_add(1) {
+        return Ok(false);
+    }
+    let Some(message) = core.messages.last() else {
+        return Ok(false);
+    };
+    let same_attachments =
+        serde_json::to_vec(&message.attachments)? == serde_json::to_vec(&turn.attachments)?;
+    if message.role != willdeep_core::Role::User
+        || message.content != turn.prompt
+        || !same_attachments
+    {
+        return Ok(false);
+    }
+    turn.replay_existing_user_message = true;
+    Ok(true)
+}
+
+fn load_tool_task_ids(path: &Path) -> Result<std::collections::HashSet<uuid::Uuid>> {
+    if !path.exists() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let records: Vec<willdeep_runtime_protocol::RuntimeTool> =
+        serde_json::from_slice(&std::fs::read(path)?)
+            .with_context(|| format!("read Tool activity replay guard: {}", path.display()))?;
+    Ok(records.into_iter().map(|record| record.task_id).collect())
+}
+
 fn backup_sessions_before_migration(path: &Path, source_schema: u32) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -2495,7 +2590,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let restored = RuntimeSessionStore::open(path, &root).unwrap();
+        let restored = RuntimeSessionStore::open(path.clone(), &root).unwrap();
         let claimed = restored.claim_next(session.id).unwrap().unwrap();
         assert_eq!(claimed.request.profile.as_deref(), Some("session-provider"));
         assert_eq!(claimed.request.model.as_deref(), Some("session-model"));
@@ -2506,6 +2601,194 @@ mod tests {
         assert_eq!(core.profile.as_deref(), Some("session-provider"));
         assert_eq!(core.model.as_deref(), Some("session-model"));
         assert_eq!(core.config.as_ref(), Some(&config));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn safely_requeues_active_turn_without_deleting_a_persisted_user_message() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-safe-turn-replay-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = root.join("runtime-sessions.json");
+        let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: None,
+                model: None,
+                config: None,
+                title: Some("Replay".to_owned()),
+            })
+            .unwrap();
+        let prompt = "resume this exact turn";
+        let (turn, _) = store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: prompt.to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        let claimed = store.claim_next(session.id).unwrap().unwrap();
+        assert!(!claimed.request.replay_existing_user_message);
+        assert!(store.bind_task(turn.id, uuid::Uuid::new_v4()).unwrap());
+        let core_store = willdeep_core::SessionStore::new(&root);
+        let mut core = core_store.load(session.id).unwrap();
+        core.messages.push(willdeep_core::Message::user(prompt));
+        core_store.save(&mut core).unwrap();
+        drop(store);
+
+        let restored = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        assert_eq!(
+            restored.get(session.id).unwrap().unwrap().status,
+            RuntimeSessionStatus::Idle
+        );
+        assert_eq!(
+            restored.get_turn(turn.id).unwrap().unwrap().status,
+            RuntimeTurnStatus::Queued
+        );
+        assert_eq!(core_store.load(session.id).unwrap().messages.len(), 1);
+        assert_eq!(restored.schedulable_sessions().unwrap(), vec![session.id]);
+        let replay = restored.claim_next(session.id).unwrap().unwrap();
+        assert!(replay.request.replay_existing_user_message);
+        assert_eq!(replay.request.prompt, prompt);
+        assert_eq!(core_store.load(session.id).unwrap().messages.len(), 1);
+        drop(restored);
+        let restored_again = RuntimeSessionStore::open(path, &root).unwrap();
+        assert_eq!(
+            restored_again.get(session.id).unwrap().unwrap().status,
+            RuntimeSessionStatus::Idle
+        );
+        let replay_again = restored_again.claim_next(session.id).unwrap().unwrap();
+        assert!(replay_again.request.replay_existing_user_message);
+        assert_eq!(core_store.load(session.id).unwrap().messages.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_partial_turn_history_is_preserved_and_not_requeued() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-ambiguous-turn-replay-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = root.join("runtime-sessions.json");
+        let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: None,
+                model: None,
+                config: None,
+                title: Some("Ambiguous replay".to_owned()),
+            })
+            .unwrap();
+        let (turn, _) = store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "do not discard partial history".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        store.claim_next(session.id).unwrap().unwrap();
+        assert!(store.bind_task(turn.id, uuid::Uuid::new_v4()).unwrap());
+        let core_store = willdeep_core::SessionStore::new(&root);
+        let mut core = core_store.load(session.id).unwrap();
+        core.messages.push(willdeep_core::Message::user(
+            "do not discard partial history",
+        ));
+        core.messages.push(willdeep_core::Message::assistant(
+            "partial but durable output",
+            Vec::new(),
+        ));
+        core_store.save(&mut core).unwrap();
+        drop(store);
+
+        let restored = RuntimeSessionStore::open(path, &root).unwrap();
+        assert_eq!(
+            restored.get(session.id).unwrap().unwrap().status,
+            RuntimeSessionStatus::Interrupted
+        );
+        assert_eq!(
+            restored.get_turn(turn.id).unwrap().unwrap().status,
+            RuntimeTurnStatus::Interrupted
+        );
+        assert!(restored.claim_next(session.id).unwrap().is_none());
+        let messages = core_store.load(session.id).unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "partial but durable output");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_tool_activity_blocks_automatic_turn_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-tool-replay-guard-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = root.join("runtime-sessions.json");
+        let tools_path = root.join("tools.json");
+        let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: None,
+                model: None,
+                config: None,
+                title: Some("Tool replay guard".to_owned()),
+            })
+            .unwrap();
+        let (turn, _) = store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "a tool may already have changed the workspace".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        store.claim_next(session.id).unwrap().unwrap();
+        let task_id = uuid::Uuid::new_v4();
+        assert!(store.bind_task(turn.id, task_id).unwrap());
+        std::fs::write(
+            &tools_path,
+            serde_json::to_vec_pretty(&vec![willdeep_runtime_protocol::RuntimeTool {
+                id: uuid::Uuid::new_v4(),
+                session_id: Some(session.id),
+                turn_id: Some(turn.id),
+                task_id,
+                agent_id: session.root_agent_id,
+                name: "edit_file".to_owned(),
+                status: willdeep_runtime_protocol::ToolStatus::Completed,
+                started_at_ms: 1,
+                completed_at_ms: Some(2),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        drop(store);
+
+        let restored = RuntimeSessionStore::open_guarded(path, &root, &tools_path).unwrap();
+        assert_eq!(
+            restored.get_turn(turn.id).unwrap().unwrap().status,
+            RuntimeTurnStatus::Interrupted
+        );
+        assert!(restored.claim_next(session.id).unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

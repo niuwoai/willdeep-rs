@@ -598,6 +598,8 @@ pub(crate) struct SubmitTask {
     pub(crate) session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub(crate) turn_id: Option<uuid::Uuid>,
+    #[serde(skip)]
+    pub(crate) replay_existing_user_message: bool,
 }
 
 #[derive(Clone)]
@@ -1053,6 +1055,7 @@ pub(crate) async fn submit_runtime_prompt(
             config: options.config.clone(),
             session_id: None,
             turn_id: None,
+            replay_existing_user_message: false,
         })
         .send()
         .await?;
@@ -1651,9 +1654,10 @@ async fn run(home: &Path) -> Result<()> {
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
     let agent_commands = Arc::new(AgentCommandStore::open(paths.agent_commands.clone())?);
-    let sessions = Arc::new(session_store::RuntimeSessionStore::open(
+    let sessions = Arc::new(session_store::RuntimeSessionStore::open_guarded(
         paths.runtime_sessions.clone(),
         home,
+        &paths.tools,
     )?);
     let (turn_scheduler, mut scheduled_sessions) = tokio::sync::mpsc::unbounded_channel();
     let work_gate = Arc::new(RwLock::new(false));
@@ -2269,6 +2273,7 @@ struct DaemonPaths {
     log: PathBuf,
     events: PathBuf,
     tasks: PathBuf,
+    tools: PathBuf,
     agents: PathBuf,
     agent_commands: PathBuf,
     idempotency: PathBuf,
@@ -2286,6 +2291,7 @@ impl DaemonPaths {
             log: directory.join("daemon.log"),
             events: directory.join("events.ndjson"),
             tasks: directory.join("tasks.json"),
+            tools: directory.join("tools.json"),
             agents: directory.join("agents.json"),
             agent_commands: directory.join("agent-commands.json"),
             idempotency: directory.join("idempotency.json"),
@@ -2401,11 +2407,18 @@ impl TaskManager {
                 ),
             )?;
             if let (Some(session_id), Some(turn_id)) = (task.session_id, task.turn_id) {
+                let requeued = sessions
+                    .get_turn(turn_id)?
+                    .is_some_and(|turn| turn.status == session_store::RuntimeTurnStatus::Queued);
                 events.append(
-                    "turn.interrupted",
+                    if requeued {
+                        "turn.requeued"
+                    } else {
+                        "turn.interrupted"
+                    },
                     format!(
-                        "session_id={session_id} turn_id={turn_id} task_id={} exit_code=none error={error}",
-                        task.id
+                        "session_id={session_id} turn_id={turn_id} task_id={} exit_code=none replay={} error={error}",
+                        task.id, requeued
                     ),
                 )?;
             }

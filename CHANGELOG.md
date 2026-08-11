@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc36] - 2026-08-11
+
+### Added
+
+- Runtime 重启会自动重新排队可证明安全的活跃 Session Turn，并由既有启动调度器按原 Session 串行约束续跑。
+- 已持久化的末尾用户消息可被重放 Harness 原样复用，不删除、不重复追加；连续重启仍保持同一消息边界。
+- 恢复事件区分旧 Task 的 `task.interrupted` 与可续跑 Turn 的 `turn.requeued`，便于客户端解释状态变化。
+
+### Changed
+
+- 重启时原 Pending Approval/Ask User 仍保守取消；重放再次到达同一工具或问题时重新创建交互，旧审批结果不会自动沿用。
+
+### Security
+
+- 只有旧 Task 没有任何持久工具活动，且 Core 历史恰好停在 Turn 起点或仅多出与私有队列 Prompt/附件完全一致的一条用户消息时才自动重放。存在工具副作用证据或额外持久内容时保留全部历史并维持 `Interrupted`，不截断、不猜测。
+
 ## [0.21.0-rc35] - 2026-08-11
 
 ### Added
