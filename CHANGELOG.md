@@ -1,5 +1,189 @@
 # Changelog
 
+## [0.21.0-rc59] - 2026-08-11
+
+### Fixed
+- TUI 活动窗口纳入正式焦点模型，支持鼠标点击聚焦，并使用与输入、聊天和状态栏一致的焦点边框与状态提示。
+- `Ctrl+W` 现在按输入、聊天、活动、状态栏的顺序循环；活动区聚焦后可用 Enter/Space 展开或收起工具详情，Esc 返回输入区。
+
+### Tests
+- 扩展焦点循环、鼠标命中和多语言焦点标签测试，覆盖活动窗口交互。
+
+## [0.21.0-rc58] - 2026-08-11
+
+### Fixed
+- TUI Diff Unified/Side-by-side 渲染前统一展开真实 Tab，并把 ESC、响铃等终端控制字符转换为可见转义，避免源码内容移动物理终端光标后污染聊天区。
+- 从 Diff 文件内容返回列表或关闭 Diff 模态时强制完整清屏并重建 Ratatui 缓冲，清除可能存在的终端残影。
+- Web 聊天消息、工具轨迹和单行思考状态采用更紧凑的垂直间距；Composer 聚焦时只保留外层单一边框，不再叠加 Textarea 与额外阴影轮廓。
+- CLI crate 显式跟踪 `web/dist` 变化；前端重新构建后 Debug/Release 二进制会重新嵌入最新资源，不再出现 Cargo 报成功但本地可执行文件仍携带旧 Web UI 的情况。
+
+### Tests
+- 新增包含 Tab、ESC 与响铃字符的 Diff 安全渲染回归测试，并继续验证并排替换与 CJK 显示宽度。
+- 运行全部 Diff 定向测试、Rust 全工作区测试、Clippy、格式检查与 `git diff --check`。
+
+## [0.21.0-rc57] - 2026-08-11
+
+### Added
+- Web 技能候选面板新增独立搜索框，并继续支持 Composer 中 `$` 后随输入即时过滤。
+- Web 侧栏 Footer 从服务端健康接口展示当前版本，避免前端重复硬编码版本号。
+
+### Changed
+- Web Runtime 信息默认收起且可展开/收起，后台状态轮询不受展示状态影响；历史会话保持默认展开。
+- 历史会话按钮、搜索输入和空状态使用明确的暗色主题前景、背景与悬停颜色。
+
+### Fixed
+- 空白 `New session` 不再进入 Web 历史列表；只有存在真实用户文字/附件输入或仍在运行的会话才会显示。
+
+### Tests
+- 新增空白、仅欢迎消息、普通用户输入和仅附件输入的会话可见性回归测试。
+- Web ESLint、TypeScript/Vite 构建以及 Rust 全工作区测试与 Clippy 作为本版本验收项。
+
+## [0.21.0-rc56] - 2026-08-11
+
+### Added
+- 后台 Shell 新增同版本隐藏 Supervisor：命令通过匿名长度帧 stdin 发送，父 Harness 持有同一管道作为存活租约，命令不进入进程参数或 Runtime 资源索引。
+- 后台 Shell 生命周期以 `background_shell:<job_id>` 持久 Tool 资源绑定 Session、Turn、Execution Task 与 Root Agent；事件仅记录稳定 ID、状态、退出码、耗时和输出字节数。
+
+### Changed
+- Unix 后台命令在独立进程组运行；取消、超时或父端断开时，只在仍持有且确认尚未退出的 Child 句柄期间终止该进程组，避免留下命令子进程及 PID 复用误杀。
+- Tool Store 自行创建私有持久目录，不再依赖调用方预先建立目录。
+
+### Fixed
+- 修复 Tokio 阻塞 stdin 监视可能拖住 Supervisor 正常退出的问题；父端 EOF 改由独立标准线程观察并通过 oneshot 回传。
+- Daemon 重启时运行中的后台 Shell 不再丢失归属或静默消失；现在与其他 Tool 一样收敛为 Interrupted，并且恢复事件只写一次。
+
+### Security
+- Supervisor 的命令和输出正文不会持久化到 Tool 索引、恢复事件或公开 DTO；隐藏入口缺少内部环境标记时拒绝执行。
+
+### Tests
+- 新增 Supervisor 正常完成、内部入口拒绝、父端断开与真实子 PID 消失的进程级测试。
+- 扩展持久落盘、精确 Session/Turn/Task/Agent 归属、单元恢复和真实双 Daemon 重启测试；第二次启动不得重复写入后台 Shell 恢复事件。
+
+## [0.21.0-rc55] - 2026-08-11
+
+### Added
+- Runtime 启动恢复为运行中的 Child Agent、Tool、未应用 Agent 命令和外部 Spawn 预留 Child 补写一次性脱敏事件，观察客户端可沿原事件游标获知精确收敛结果。
+
+### Changed
+- 未应用 Agent 命令在重启后明确变为 Rejected；尚未真正执行的外部 Spawn 对应预留 Child 明确变为 Failed，不再与已运行后中断的 Child 混为一类。
+- Child Agent 的专属 Worktree、分支和待审内容在恢复时原地保留，继续交由精确 Diff Review、Merge 或 Quarantine 流程处理。
+
+### Fixed
+- 运行中的 Child Agent 与 Tool 重启后不再静默改状态；现在持久收敛为 Interrupted 并记录稳定 Task/Agent/Tool 归属，且重复恢复报告不会重复写入事件。
+
+### Tests
+- 新增跨资源恢复测试，同时覆盖 Child Agent、专属 Worktree、运行中 Tool、Stop 命令、外部 Spawn 命令、事件脱敏和一次性消费。
+- 新增真实双 Daemon 进程恢复测试：首个进程从中断快照收敛资源，停止并再次启动后只新增 Daemon 生命周期事件，四类资源恢复事件不重复。
+
+## [0.21.0-rc54] - 2026-08-11
+
+### Added
+- 新增 `/v1/internal` 私有传输层，承载进程内 Harness Task、Interaction、Agent 命令、私有 Session 创建及 Daemon 生命周期。
+- 私有请求在 Runtime Token 之外必须携带内部传输标记；缺失或错误时返回 404，避免内部端点被误识别为公开 API。
+
+### Changed
+- 公开 Runtime Client 移除未使用的任意 Query GET 与 JSON POST 方法；内部调用统一由 CLI crate 内不可导出的专用 Client 发出。
+- rc53 的 drain/shutdown 仅保留一次升级兼容桥；rc54 接管后使用新的私有生命周期路径。
+
+### Fixed
+- SSE 与 NDJSON 长连接订阅 Runtime shutdown 状态；排空时主动结束事件流，不再让 graceful shutdown 永久等待活跃观察连接。
+- Web SSE 重连若 Turn 已在断线期间完成，会从持久 Session/Turn 立即返回最终消息，不再因 `active_turn_id` 已清除而响应 409。
+
+### Tests
+- 新增内部传输标记精确校验，扩展认证测试以确保 Runtime Token 与内部标记缺一不可，并验证空闲事件流关闭及 Turn 在断线期间完成后的持久恢复。
+- 扩展真实双 Daemon 接管测试：活动 Turn 运行期间保持已排空历史的 NDJSON 长连接，旧 Runtime 必须主动结束观察流、完成任务并交棒，替换 Runtime 随后继续接单。
+- Headless 真实进程测试改用 Axum Mock Provider，完整消费 HTTP 请求并优雅关闭，消除手写 TCP 响应提前断连造成的偶发假失败。
+
+## [0.21.0-rc53] - 2026-08-11
+
+### Changed
+- CLI 的 Task、Agent、审批、问答和 Diff 管理统一改用类型化 Runtime Client 与显式 Request ID，不再直接拼接旧资源 URL。
+- TUI 的 Turn 提交、事件 Task 归属与 Diff Center 移除 404 旧 Daemon 回退；当前客户端只通过统一控制 API 使用公开 Runtime 能力。
+- 进程内 Harness 的任务、Interaction、Agent 命令队列和 Daemon 生命周期路由继续作为私有传输边界保留，不与公开协议混用。
+
+### Tests
+- 全工作区类型检查约束公开 Client 返回 DTO；后续完整测试继续覆盖 CLI/TUI 交互、Diff、安全审批和真实 Runtime 进程接管。
+
+## [0.21.0-rc52] - 2026-08-11
+
+### Fixed
+- Runtime 优雅排空只等待仍处于活动状态的 Task；终态 Task 遗留的 cancellation 句柄不再导致进程永久停留在 `draining`。
+- Runtime 的 TCP 与本地 Socket 监听器改用有状态广播关闭信号；即使监听器稍晚进入等待，也不会漏掉排空通知并留下半退出进程。
+- TUI 侧栏滚动继续使用可见范围过滤和饱和坐标计算，避免越界下溢 panic 后退出 TUI、露出原终端内容。
+
+### Tests
+- 新增终态 Task 遗留 cancellation 句柄的排空回归测试，固定全部活动与终态 Task 状态分类，并验证并行及晚订阅监听器都能收到关闭信号。
+
+## [0.21.0-rc51] - 2026-08-11
+
+### Added
+- 共享 Rust Runtime Client 补齐 Runtime 状态、Workspace 注册/确保/激活/移除，以及 Session 创建/重命名/Fork/归档/删除/导出的类型化方法。
+- 协议新增可前向兼容的 Runtime 健康状态和对象删除/移除结果 DTO；`runtime.status` 能明确报告 `draining`。
+
+### Changed
+- CLI、TUI 的 Workspace/Session/Turn 管理统一改用类型化 Client 和显式幂等 Request ID，不再手写统一操作名、参数 JSON 或 Workspace 旧 HTTP 路由。
+- 所有统一 API 修改操作由单一清单进入 Pending→Completed 持久幂等路径；测试确保清单无重复且全部属于公开协议操作。
+
+### Tests
+- 新增真实 Unix Socket 契约测试，验证 Workspace、Session 与 Runtime 状态操作的 Token、操作名、Request ID、严格参数和响应 DTO。
+
+## [0.21.0-rc50] - 2026-08-11
+
+### Added
+- Web 新增按 Session 恢复活动 Turn 的 SSE 端点；服务端从 Session 推导 Turn、Task、Workspace 和事件起点，浏览器只能提供最后已应用游标与语言。
+- 会话列表公开安全的 `active_turn_id`，前端记住当前工作区最后会话与每个 Turn 的事件游标；刷新会自动重载历史并重新附着，网络中断按指数退避续接。
+
+### Changed
+- Web SSE 事件携带单调 `cursor` 与 SSE `id`；重连按游标去重，终态后从持久 Session 重载正式消息，不重复提交 Prompt 或追加 Assistant 答案。
+
+### Tests
+- 新增隔离 Web Server、延迟 Mock Provider 和真实 Runtime 的进程级断线恢复测试：首条 SSE 主动断开后接回同一 Turn，Provider 只请求一次且会话只保存一条 Assistant 回复。
+
+## [0.21.0-rc49] - 2026-08-11
+
+### Added
+- Web Runtime 侧栏新增当前工作区后台 Task 列表；进行中与最近五分钟完成的任务可打开结构化详情。
+- Task 详情展示状态、Profile、耗时、退出码、失败域，以及按 Task 归属过滤的 Tool 时间线和 Workspace Change Artifact 摘要。
+
+### Security
+- Web Task 摘要不下发 Workspace、Prompt、命令、参数、输出、内部错误、报告、路径、模型、配置或 PID；序列化回归测试固定该边界。
+
+## [0.21.0-rc48] - 2026-08-11
+
+### Fixed
+- 修复 TUI 侧栏滚动到不可见逻辑行时，命中坐标提前执行无符号减法并触发 panic、导致 TUI 退出的问题。
+- 侧栏可见范围、滚动偏移和终端坐标改为饱和计算；极小视口和极端手动滚动会安全夹紧。
+
+## [0.21.0-rc47] - 2026-08-11
+
+### Added
+- Web Runtime 侧栏新增 Agent 与待处理 Task 详情，可查看按归属过滤的工具时间线、状态、耗时及 Diff Artifact 摘要。
+
+### Security
+- Web 结构化日志只使用公开 Runtime DTO；回归测试确保工具参数、输出、报告、Workspace、路径和内部错误不会下发浏览器。
+
+## [0.21.0-rc46] - 2026-08-11
+
+### Changed
+- TUI Diff Review 支持鼠标滚轮浏览当前 Diff、文件列表和 Commit Preview，内容标题同步提示滚轮与方向键操作。
+
+### Fixed
+- Diff Review 打开时会优先消费所有鼠标事件；滚轮、点击和移动不再穿透到聊天区、Composer 或侧栏。
+
+## [0.21.0-rc45] - 2026-08-11
+
+### Added
+- TUI Runtime Agent 状态分组新增只读子 Agent 创建入口，并支持 `/agent spawn scout|reader|deep <task>`。
+- Web Runtime 侧栏新增 Scout、Reader、Deep 只读子 Agent 创建器；请求只接受当前 Workspace 中的活动父会话、任务正文与只读 Profile。
+
+### Changed
+- TUI 状态行常驻显示 `Ctrl+S 选择`；进入后释放终端鼠标捕获，可在完整输出区原生拖选并通过 `Cmd+C` / `Ctrl+Shift+C` 复制，按 `Esc` 或再次按 `Ctrl+S` 返回交互模式。
+- Web 将聊天流式输出状态与 Runtime 控件提交状态解耦；父 Harness 运行时仍可审批、回答、控制或创建子 Agent，会话活动状态每两秒与 Runtime 对齐。
+
+### Fixed
+- 文本选择模式不再把复制快捷键当作退出事件，避免复制时意外结束 TUI。
+- 修复 Web 在父 Harness 运行期间禁用全部 Runtime 控件、导致审批和 Agent 控制入口实际不可用的问题。
+
 ## [0.21.0-rc44] - 2026-08-11
 
 ### Added

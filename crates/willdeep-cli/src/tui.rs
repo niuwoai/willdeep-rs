@@ -124,6 +124,7 @@ struct App {
     viewport_height: usize,
     tools: ToolActivity,
     tools_expanded: bool,
+    activity_rect: Rect,
     attachments: Vec<DraftAttachment>,
     selected_attachment: usize,
     prompt_rect: Rect,
@@ -201,6 +202,7 @@ struct App {
 enum FocusPane {
     Prompt,
     Chat,
+    Activity,
     Sidebar,
 }
 
@@ -208,6 +210,7 @@ enum FocusPane {
 enum SidebarHit {
     Section(usize),
     Attention(usize),
+    NewAgent,
 }
 
 struct TaskDetail {
@@ -334,6 +337,32 @@ fn diff_attention_action_for_key(code: KeyCode) -> Option<DiffAttentionAction> {
         KeyCode::Char('n') | KeyCode::Char('N') => Some(DiffAttentionAction::Reject),
         _ => None,
     }
+}
+
+fn selection_mode_exit_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffReviewMouseAction {
+    ScrollUp,
+    ScrollDown,
+    Consume,
+}
+
+fn diff_review_mouse_action(
+    diff_review_open: bool,
+    kind: MouseEventKind,
+) -> Option<DiffReviewMouseAction> {
+    if !diff_review_open {
+        return None;
+    }
+    Some(match kind {
+        MouseEventKind::ScrollUp => DiffReviewMouseAction::ScrollUp,
+        MouseEventKind::ScrollDown => DiffReviewMouseAction::ScrollDown,
+        _ => DiffReviewMouseAction::Consume,
+    })
 }
 
 fn prefill_agent_command(
@@ -626,6 +655,24 @@ async fn event_loop(
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
                 Event::Mouse(mouse)=>{
+                    if app.question.is_some()||app.approval.is_some() {
+                        if matches!(mouse.kind,MouseEventKind::Down(_)) {
+                            app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        }
+                        continue;
+                    }
+                    if let Some(action)=diff_review_mouse_action(app.diff_review.is_some(),mouse.kind) {
+                        if let Some(review)=app.diff_review.as_mut()
+                            && review.preview_draft.is_none()
+                        {
+                            match action {
+                                DiffReviewMouseAction::ScrollUp=>review.scroll=review.scroll.saturating_sub(3),
+                                DiffReviewMouseAction::ScrollDown=>review.scroll=review.scroll.saturating_add(3),
+                                DiffReviewMouseAction::Consume=>{},
+                            }
+                        }
+                        continue;
+                    }
                     if mouse.kind==MouseEventKind::Down(MouseButton::Left)
                         && let Some(action)=app.diff_attention_action_at(mouse.column,mouse.row)
                     {
@@ -663,14 +710,20 @@ async fn event_loop(
                     _=>{}
                 }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
-                        app.selection_mode = !app.selection_mode;
-                        if app.selection_mode {execute!(term.backend_mut(),DisableMouseCapture)?;} else {execute!(term.backend_mut(),EnableMouseCapture)?;}
-                        let notice=if app.selection_mode {language.text("文本选择模式 · 拖动选择，Ctrl+S 恢复交互","Text selection · drag to select, Ctrl+S restores interaction","テキスト選択 · ドラッグで選択、Ctrl+S で戻る")} else {language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました")};
-                        app.notice=Some(notice.to_owned());
+                    if app.selection_mode {
+                        if selection_mode_exit_key(key) {
+                            app.selection_mode=false;
+                            execute!(term.backend_mut(),EnableMouseCapture)?;
+                            app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
+                        }
                         continue;
                     }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
+                        app.selection_mode = true;
+                        execute!(term.backend_mut(),DisableMouseCapture)?;
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if let Some((_,always,sender))=app.approval.take(){
@@ -730,6 +783,7 @@ async fn event_loop(
                     }
                     if app.diff_review.is_some(){
                         let mut close=false;
+                        let mut force_full_redraw=false;
                         let mut open_file=None;
                         let mut review_action=None;
                         let mut revert_action=None;
@@ -789,8 +843,8 @@ async fn event_loop(
                                 }
                                 continue;
                             } else {match key.code {
-                                KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;},
-                                KeyCode::Esc=>close=true,
+                                KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;force_full_redraw=true;},
+                                KeyCode::Esc=>{close=true;force_full_redraw=true;},
                                 KeyCode::Up if review.content.is_none()=>review.selected=review.selected.checked_sub(1).unwrap_or(review.snapshot.files.len().saturating_sub(1)),
                                 KeyCode::Down if review.content.is_none()&&!review.snapshot.files.is_empty()=>review.selected=(review.selected+1)%review.snapshot.files.len(),
                                 KeyCode::Enter if review.content.is_none()=>open_file=review.snapshot.files.get(review.selected).map(|file|(review.snapshot.id.clone(),file.path.clone(),review.area)),
@@ -826,6 +880,7 @@ async fn event_loop(
                             }}
                         }
                         if preview_draft_handled&&commit_preview_action.is_none(){continue;}
+                        if force_full_redraw{term.clear()?;}
                         if close{app.diff_review=None;continue;}
                         if let Some((snapshot_id,path,area))=open_file{
                             match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,area).await{
@@ -898,6 +953,15 @@ async fn event_loop(
                         }
                         continue;
                     }
+                    if app.focus==FocusPane::Activity {
+                        match key.code {
+                            KeyCode::Esc=>app.focus=FocusPane::Prompt,
+                            KeyCode::Enter|KeyCode::Char(' ')=>app.tools_expanded = !app.tools_expanded,
+                            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.tools_expanded = !app.tools_expanded,
+                            _=>{}
+                        }
+                        continue;
+                    }
                     if app.focus==FocusPane::Sidebar {
                         match key.code {
                             KeyCode::Esc=>app.focus=FocusPane::Prompt,
@@ -923,6 +987,7 @@ async fn event_loop(
                                 }else{app.sidebar_activate(&runtime.background_tasks);}
                             },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
+                            KeyCode::Char('n')|KeyCode::Char('N') if app.sidebar_selected==2=>app.prefill_new_agent(),
                             KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>{
                                 if let Some(id)=app.selected_runtime_task_id(){
                                     match crate::daemon::cancel_remote_task(&runtime.home,id).await {
@@ -976,7 +1041,7 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
-                            match handle_agent_command(&prompt,&mut app,runtime).await {
+                            match handle_agent_command(&prompt,&mut app,runtime,session.id).await {
                                 Ok(true)=>continue,
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("Agent 操作失败","Agent action failed","Agent 操作に失敗しました")));continue;},
@@ -1053,6 +1118,8 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
+                UiMessage::Agent(AgentEvent::BackgroundShellStarted{id})=>app.record_progress(format!("{} {id}",language.text("后台命令已启动","Background command started","バックグラウンドコマンド開始"))),
+                UiMessage::Agent(AgentEvent::BackgroundShellCompleted{id,status,..})=>app.record_progress(format!("{} {id} · {status:?}",language.text("后台命令已结束","Background command finished","バックグラウンドコマンド完了"))),
                 UiMessage::Agent(AgentEvent::SubagentStarted{id,profile,background,..})=>app.record_progress(format!("{} {} · {profile} · {}",language.text("子 Agent 已启动","Subagent started","サブエージェント開始"),id.to_string().get(..8).unwrap_or("agent"),if background{language.text("后台","background","バックグラウンド")}else{language.text("前台","foreground","フォアグラウンド")})),
                 UiMessage::Agent(AgentEvent::SubagentCompleted{id,status,..})=>app.record_progress(format!("{} {} · {status:?}",language.text("子 Agent 已结束","Subagent finished","サブエージェント完了"),id.to_string().get(..8).unwrap_or("agent"))),
                 UiMessage::Agent(AgentEvent::SubagentTurnStarted{id,turn})=>app.record_progress(format!("{} {} · {} {turn}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("轮次","turn","ターン"))),
@@ -1099,6 +1166,7 @@ impl App {
             viewport_height: 10,
             tools: ToolActivity::default(),
             tools_expanded: false,
+            activity_rect: Rect::default(),
             attachments: Vec::new(),
             selected_attachment: 0,
             prompt_rect: Rect::default(),
@@ -1212,7 +1280,8 @@ impl App {
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             FocusPane::Prompt => FocusPane::Chat,
-            FocusPane::Chat => FocusPane::Sidebar,
+            FocusPane::Chat => FocusPane::Activity,
+            FocusPane::Activity => FocusPane::Sidebar,
             FocusPane::Sidebar => FocusPane::Prompt,
         };
     }
@@ -1346,6 +1415,22 @@ impl App {
         } else {
             self.sidebar_toggle();
         }
+    }
+    fn prefill_new_agent(&mut self) {
+        if !self.input.is_empty() || !self.attachments.is_empty() {
+            self.notice = Some(
+                self.language
+                    .text(
+                        "输入区已有草稿或附件，请先发送或清空后再新建 Agent",
+                        "The composer has a draft or attachments; send or clear it before creating an Agent",
+                        "入力欄に下書きまたは添付があります。送信または消去してから Agent を作成してください",
+                    )
+                    .to_owned(),
+            );
+            return;
+        }
+        self.input.insert("/agent spawn scout ");
+        self.focus = FocusPane::Prompt;
     }
     fn open_task_detail(&mut self, index: usize, registry: &BackgroundTaskRegistry) {
         let Some(snapshot) = self.background_tasks.get(index).cloned() else {
@@ -2061,10 +2146,13 @@ impl App {
                         self.attention_selected = index;
                         self.attention_activate(registry);
                     }
+                    SidebarHit::NewAgent => self.prefill_new_agent(),
                 }
             }
         } else if self.transcript_rect.contains((x, y).into()) {
             self.focus = FocusPane::Chat;
+        } else if self.activity_rect.contains((x, y).into()) {
+            self.focus = FocusPane::Activity;
         } else if self.prompt_rect.contains((x, y).into()) {
             self.focus = FocusPane::Prompt;
             let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
@@ -2321,9 +2409,9 @@ fn draw(
         let title = if app.selection_mode {
             app.language
                 .text(
-                    "WillDeep · 文本选择模式 · Ctrl+S 退出",
-                    "WillDeep · text selection · Ctrl+S exits",
-                    "WillDeep · テキスト選択 · Ctrl+S で終了",
+                    "WillDeep · 拖动选择文字 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
+                    "WillDeep · drag to select · Cmd+C / Ctrl+Shift+C copy · Esc exits",
+                    "WillDeep · ドラッグ選択 · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
                 )
                 .to_owned()
         } else if app.follow_bottom {
@@ -2368,6 +2456,7 @@ fn draw(
             areas[0],
         );
         if activity > 0 {
+            app.activity_rect = areas[1];
             let text = if app.tools_expanded {
                 format!(
                     "{} · {}\n{}",
@@ -2405,11 +2494,30 @@ fn draw(
                 Paragraph::new(text).block(
                     Block::default()
                         .title(app.language.text(
-                            "活动 · Ctrl+O 查看详情",
-                            "Activity · Ctrl+O details",
-                            "アクティビティ · Ctrl+O で詳細",
+                            if app.focus == FocusPane::Activity {
+                                "活动 [焦点] · Enter 展开/收起"
+                            } else {
+                                "活动 · Ctrl+O 查看详情"
+                            },
+                            if app.focus == FocusPane::Activity {
+                                "Activity [focused] · Enter expand/collapse"
+                            } else {
+                                "Activity · Ctrl+O details"
+                            },
+                            if app.focus == FocusPane::Activity {
+                                "アクティビティ [フォーカス] · Enter で開閉"
+                            } else {
+                                "アクティビティ · Ctrl+O で詳細"
+                            },
                         ))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(
+                            if app.focus == FocusPane::Activity {
+                                Color::Cyan
+                            } else {
+                                Color::DarkGray
+                            },
+                        )),
                 ),
                 areas[1],
             );
@@ -2479,7 +2587,16 @@ fn draw(
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
-        let status = app.notice.take().unwrap_or_else(|| {
+        let status = if app.selection_mode {
+            app.language
+                .text(
+                    "文本选择模式 · 鼠标拖选 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
+                    "Text selection · drag · Cmd+C / Ctrl+Shift+C copy · Esc exits",
+                    "テキスト選択 · ドラッグ · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
+                )
+                .to_owned()
+        } else {
+            app.notice.take().unwrap_or_else(|| {
             let input = app.latest_usage.input_tokens.unwrap_or(0);
             let output = app.latest_usage.output_tokens.unwrap_or(0);
             let context_tokens = app.context_tokens.max(input);
@@ -2492,26 +2609,28 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+S {} · F1",
                     app.language.text("运行中", "Running", "実行中"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
-                    app.language.text("最近", "latest", "直近")
+                    app.language.text("最近", "latest", "直近"),
+                    app.language.text("选择", "select", "選択")
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
                     app.language.text("最近", "latest", "直近"),
                     app.language
-                        .text("Enter 发送", "Enter send", "Enter で送信")
+                        .text("Enter 发送", "Enter send", "Enter で送信"),
+                    app.language.text("选择", "select", "選択")
                 )
             }
-        });
+        })};
         f.render_widget(Paragraph::new(status), areas[4]);
         app.sidebar_rect = Rect::default();
         if app.sidebar_visible && (wide_sidebar || app.focus == FocusPane::Sidebar) {
@@ -2864,6 +2983,7 @@ fn draw(
                     "Commit Preview 入力 · Tab 切替 · Enter 生成 · Esc 取消",
                 ).to_owned()
             } else if let Some((path, _)) = &review.content {
+                let path = terminal_safe_diff_text(path);
                 if review.confirm_revert {
                     format!("⚠ Revert {path} ({:?})? Y confirm · any key cancel",review.area)
                 } else {
@@ -2884,7 +3004,7 @@ fn draw(
                         review.search_matches.len()
                     )
                 });
-                format!("Diff · {path} · {area} · {view}{search} · A accept · D reject · C changes · M reviewed · R revert · V/S/ search · Esc")
+                format!("Diff · {path} · {area} · {view}{search} · Wheel/↑↓ scroll · A accept · D reject · C changes · M reviewed · R revert · V/S/ search · Esc")
                 }
             } else {
                 format!(
@@ -3197,6 +3317,7 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
     match focus {
         FocusPane::Prompt => language.text("输入", "Prompt", "入力"),
         FocusPane::Chat => language.text("聊天", "Chat", "チャット"),
+        FocusPane::Activity => language.text("活动", "Activity", "アクティビティ"),
         FocusPane::Sidebar => language.text("状态栏", "Status", "ステータス"),
     }
 }
@@ -3243,13 +3364,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }

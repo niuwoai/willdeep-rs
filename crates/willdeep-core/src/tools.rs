@@ -10,9 +10,9 @@ use futures_util::StreamExt;
 use globset::Glob;
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::background::{
@@ -28,6 +28,8 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_SUPERVISOR_REQUEST_BYTES: usize = 256 * 1024;
+const BACKGROUND_SUPERVISOR_ENV: &str = "WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR";
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
 
@@ -1031,43 +1033,8 @@ impl ToolRegistry {
                     let workspace = workspace.clone();
                     let verification_reporter = verification_reporter.clone();
                     async move {
-                        let mut process = platform_shell(&command);
-                        process
-                            .current_dir(workspace)
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped())
-                            .kill_on_drop(true);
-                        let result = match tokio::time::timeout(
-                            std::time::Duration::from_secs(timeout),
-                            async { process.spawn()?.wait_with_output().await },
-                        )
-                        .await
-                        {
-                            Ok(Ok(output)) => {
-                                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                                text.push_str(&String::from_utf8_lossy(&output.stderr));
-                                TaskResult {
-                                    status: if output.status.success() {
-                                        BackgroundTaskStatus::Completed
-                                    } else {
-                                        BackgroundTaskStatus::Failed
-                                    },
-                                    exit_code: output.status.code(),
-                                    output: text,
-                                }
-                            }
-                            Ok(Err(error)) => TaskResult {
-                                status: BackgroundTaskStatus::LaunchFailed,
-                                exit_code: Some(-1),
-                                output: error.to_string(),
-                            },
-                            Err(_) => TaskResult {
-                                status: BackgroundTaskStatus::TimedOut,
-                                exit_code: None,
-                                output: format!("command timed out after {timeout} seconds"),
-                            },
-                        };
+                        let result =
+                            run_background_shell(command.clone(), workspace, timeout).await;
                         report_verification(
                             verification_reporter.as_ref(),
                             &command,
@@ -1351,6 +1318,298 @@ impl ToolRegistry {
         } else {
             Err(ToolError::OutsideWorkspace(requested.to_owned()))
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackgroundSupervisorRequest {
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackgroundSupervisorResult {
+    status: BackgroundTaskStatus,
+    exit_code: Option<i32>,
+    output: String,
+}
+
+#[cfg(not(test))]
+async fn run_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> TaskResult {
+    match run_supervised_background_shell(command, workspace, timeout_seconds).await {
+        Ok(result) => TaskResult {
+            status: result.status,
+            exit_code: result.exit_code,
+            output: result.output,
+        },
+        Err(error) => TaskResult {
+            status: BackgroundTaskStatus::LaunchFailed,
+            exit_code: Some(-1),
+            output: format!("background supervisor failed: {error}"),
+        },
+    }
+}
+
+#[cfg(test)]
+async fn run_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> TaskResult {
+    let mut process = platform_shell(&command);
+    process
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), async {
+        process.spawn()?.wait_with_output().await
+    })
+    .await
+    {
+        Ok(Ok(output)) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            TaskResult {
+                status: if output.status.success() {
+                    BackgroundTaskStatus::Completed
+                } else {
+                    BackgroundTaskStatus::Failed
+                },
+                exit_code: output.status.code(),
+                output: text,
+            }
+        }
+        Ok(Err(error)) => TaskResult {
+            status: BackgroundTaskStatus::LaunchFailed,
+            exit_code: Some(-1),
+            output: error.to_string(),
+        },
+        Err(_) => TaskResult {
+            status: BackgroundTaskStatus::TimedOut,
+            exit_code: None,
+            output: format!("command timed out after {timeout_seconds} seconds"),
+        },
+    }
+}
+
+#[cfg(not(test))]
+async fn run_supervised_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> anyhow::Result<BackgroundSupervisorResult> {
+    let request = BackgroundSupervisorRequest {
+        command,
+        workspace,
+        timeout_seconds,
+    };
+    let payload = serde_json::to_vec(&request)?;
+    anyhow::ensure!(
+        payload.len() <= MAX_SUPERVISOR_REQUEST_BYTES,
+        "background supervisor request is too large"
+    );
+    let executable = std::env::current_exe()?;
+    let mut process = Command::new(executable);
+    process
+        .args(["daemon", "background-supervisor"])
+        .env(BACKGROUND_SUPERVISOR_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    let mut child = process.spawn()?;
+    let mut liveness = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stdin is unavailable"))?;
+    let length = u32::try_from(payload.len())?.to_be_bytes();
+    liveness.write_all(&length).await?;
+    liveness.write_all(&payload).await?;
+    liveness.flush().await?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stderr is unavailable"))?;
+    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES));
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_seconds.saturating_add(10)),
+        child.wait(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("background supervisor did not stop after its deadline"))??;
+    drop(liveness);
+    let stdout = stdout_task.await??;
+    let stderr = stderr_task.await??;
+    anyhow::ensure!(
+        status.success(),
+        "background supervisor exited with {:?}: {}",
+        status.code(),
+        String::from_utf8_lossy(&stderr).trim()
+    );
+    serde_json::from_slice(&stdout)
+        .map_err(|error| anyhow::anyhow!("decode background supervisor result: {error}"))
+}
+
+pub async fn run_background_supervisor() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::env::var(BACKGROUND_SUPERVISOR_ENV).as_deref() == Ok("1"),
+        "background supervisor is an internal command"
+    );
+    let mut input = tokio::io::stdin();
+    let mut length = [0_u8; 4];
+    input.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    anyhow::ensure!(
+        length <= MAX_SUPERVISOR_REQUEST_BYTES,
+        "background supervisor request is too large"
+    );
+    let mut payload = vec![0_u8; length];
+    input.read_exact(&mut payload).await?;
+    let request: BackgroundSupervisorRequest = serde_json::from_slice(&payload)?;
+    anyhow::ensure!(
+        !request.command.trim().is_empty(),
+        "background command is empty"
+    );
+    anyhow::ensure!(
+        request.timeout_seconds > 0 && request.timeout_seconds <= MAX_COMMAND_TIMEOUT_SECS,
+        "background command timeout is invalid"
+    );
+    let workspace = request.workspace.canonicalize()?;
+    anyhow::ensure!(
+        workspace.is_dir(),
+        "background Workspace is not a directory"
+    );
+
+    let mut shell = platform_shell(&request.command);
+    configure_background_process(&mut shell);
+    shell
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut shell = shell.spawn()?;
+    let shell_stdout = shell
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background shell stdout is unavailable"))?;
+    let shell_stderr = shell
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background shell stderr is unavailable"))?;
+    let stdout_task = tokio::spawn(read_bounded(shell_stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr_task = tokio::spawn(read_bounded(shell_stderr, MAX_COMMAND_OUTPUT_BYTES));
+    drop(input);
+    let mut parent_disconnect = watch_parent_disconnect()?;
+    let (status, exit_code) = tokio::select! {
+        status = shell.wait() => {
+            let status = status?;
+            let kind = if status.success() {
+                BackgroundTaskStatus::Completed
+            } else {
+                BackgroundTaskStatus::Failed
+            };
+            (kind, status.code())
+        }
+        parent = &mut parent_disconnect => {
+            parent.map_err(|_| anyhow::anyhow!("background parent watcher stopped"))??;
+            terminate_background_process(&mut shell).await;
+            (BackgroundTaskStatus::Killed, None)
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout_seconds)) => {
+            terminate_background_process(&mut shell).await;
+            (BackgroundTaskStatus::TimedOut, None)
+        }
+    };
+    let mut output = String::from_utf8_lossy(&stdout_task.await??).into_owned();
+    output.push_str(&String::from_utf8_lossy(&stderr_task.await??));
+    let output = truncate_bytes(output);
+    let result = BackgroundSupervisorResult {
+        status,
+        exit_code,
+        output,
+    };
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(&serde_json::to_vec(&result)?).await?;
+    stdout.flush().await?;
+    Ok(())
+}
+
+fn watch_parent_disconnect() -> anyhow::Result<tokio::sync::oneshot::Receiver<std::io::Result<()>>>
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("willdeep-parent-watch".to_owned())
+        .spawn(move || {
+            let mut input = std::io::stdin();
+            let mut buffer = [0_u8; 64];
+            let result = loop {
+                match std::io::Read::read(&mut input, &mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(_) => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = sender.send(result);
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(unix)]
+fn configure_background_process(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_background_process(_command: &mut Command) {}
+
+async fn terminate_background_process(process: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        // `try_wait == None` means the group leader is still an unreaped live
+        // child, so its PID cannot be reused between this check and killpg.
+        if process.try_wait().ok().flatten().is_none()
+            && let Some(pid) = process.id()
+            && let Ok(group) = i32::try_from(pid)
+        {
+            // SAFETY: the child was placed in a fresh process group before
+            // spawn and remains unreaped above; a negative PID targets only
+            // that owned group rather than an unrelated process.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = process.kill().await;
+    let _ = process.wait().await;
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(limit.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&chunk[..read.min(remaining)]);
     }
 }
 

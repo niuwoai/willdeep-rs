@@ -2691,7 +2691,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "willdeep"
-version = "0.21.0-rc44"
+version = "0.21.0-rc59"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2713,6 +2713,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
@@ -2726,12 +2727,14 @@ dependencies = [
 
 [[package]]
 name = "willdeep-core"
-version = "0.21.0-rc44"
+version = "0.21.0-rc59"
 dependencies = [
+ "anyhow",
  "async-trait",
  "futures-util",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",
@@ -2743,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "willdeep-runtime-client"
-version = "0.21.0-rc44"
+version = "0.21.0-rc59"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2758,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "willdeep-runtime-protocol"
-version = "0.21.0-rc44"
+version = "0.21.0-rc59"
 dependencies = [
  "serde",
  "serde_json",

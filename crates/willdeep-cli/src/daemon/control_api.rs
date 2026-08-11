@@ -198,13 +198,17 @@ async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Respon
 async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
     let result = match request.operation.as_str() {
         "runtime.capabilities" => json(runtime_capabilities(state)),
-        "runtime.status" => json(serde_json::json!({
-            "status": "ok",
-            "version": willdeep_core::VERSION,
-            "pid": std::process::id(),
-            "uptime_seconds": now().saturating_sub(state.started_at),
-            "event_sequence": state.events.latest_sequence()
-        })),
+        "runtime.status" => json(willdeep_runtime_protocol::RuntimeStatus {
+            status: if *state.work_gate.read().await {
+                willdeep_runtime_protocol::RuntimeHealth::Draining
+            } else {
+                willdeep_runtime_protocol::RuntimeHealth::Ok
+            },
+            version: willdeep_core::VERSION.to_owned(),
+            pid: std::process::id(),
+            uptime_seconds: now().saturating_sub(state.started_at),
+            event_sequence: state.events.latest_sequence(),
+        }),
         "workspace.list" => json_result(state.workspaces.list().map(|workspaces| {
             workspaces
                 .into_iter()
@@ -528,33 +532,34 @@ impl UnifiedResponse {
     }
 }
 
+const MUTATING_OPERATIONS: &[&str] = &[
+    "agent.prompt",
+    "agent.spawn",
+    "agent.stop",
+    "agent.retry",
+    "task.cancel",
+    "workspace.register",
+    "workspace.ensure",
+    "workspace.activate",
+    "workspace.remove",
+    "approval.resolve",
+    "question.answer",
+    "session.create",
+    "session.rename",
+    "session.fork",
+    "session.archive",
+    "session.delete",
+    "turn.submit",
+    "turn.stop",
+    "diff.review",
+    "diff.verification.record",
+    "diff.revert",
+    "worktree.merge",
+    "worktree.quarantine",
+];
+
 fn is_mutating_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "agent.prompt"
-            | "agent.spawn"
-            | "agent.stop"
-            | "agent.retry"
-            | "task.cancel"
-            | "workspace.register"
-            | "workspace.ensure"
-            | "workspace.activate"
-            | "workspace.remove"
-            | "approval.resolve"
-            | "question.answer"
-            | "session.create"
-            | "session.rename"
-            | "session.fork"
-            | "session.archive"
-            | "session.delete"
-            | "turn.submit"
-            | "turn.stop"
-            | "diff.review"
-            | "diff.verification.record"
-            | "diff.revert"
-            | "worktree.merge"
-            | "worktree.quarantine"
-    )
+    MUTATING_OPERATIONS.contains(&operation)
 }
 
 fn is_work_producing_operation(operation: &str) -> bool {
@@ -910,7 +915,10 @@ fn workspace_remove(state: &ServerState, request: &ApiRequest) -> ApiResult {
             format!("workspace_id={}", workspace.id),
         )
         .map_err(ApiFailure::internal)?;
-    json(serde_json::json!({"id": workspace.id, "status": "removed"}))
+    json(willdeep_runtime_protocol::ObjectMutationResult {
+        id: workspace.id,
+        status: willdeep_runtime_protocol::ObjectMutationStatus::Removed,
+    })
 }
 
 fn session_create(state: &ServerState, request: &ApiRequest) -> ApiResult {
@@ -1021,7 +1029,10 @@ fn session_delete(state: &ServerState, request: &ApiRequest) -> ApiResult {
         .events
         .append("session.deleted", format!("session_id={}", params.id))
         .map_err(ApiFailure::internal)?;
-    json(serde_json::json!({"id": params.id, "status": "deleted"}))
+    json(willdeep_runtime_protocol::ObjectMutationResult {
+        id: params.id,
+        status: willdeep_runtime_protocol::ObjectMutationStatus::Deleted,
+    })
 }
 
 fn public_session_export(export: session_store::RuntimeSessionExport) -> ApiResult {
@@ -1607,6 +1618,22 @@ mod tests {
         assert!(is_work_producing_operation("agent.retry"));
         assert!(!is_work_producing_operation("agent.stop"));
         assert!(!is_work_producing_operation("approval.resolve"));
+    }
+
+    #[test]
+    fn every_mutating_operation_is_public_and_uses_the_idempotency_path() {
+        assert!(MUTATING_OPERATIONS.iter().all(|operation| {
+            willdeep_runtime_protocol::SUPPORTED_OPERATIONS.contains(operation)
+                && is_mutating_operation(operation)
+        }));
+        assert_eq!(
+            MUTATING_OPERATIONS
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            MUTATING_OPERATIONS.len()
+        );
     }
 
     #[test]

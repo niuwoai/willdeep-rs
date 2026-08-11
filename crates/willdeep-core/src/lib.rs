@@ -31,7 +31,7 @@ pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
 pub use subagent_worktree::SubagentWorktreePolicy;
 pub use tools::{
     ApprovalDecision, ApprovalMode, Approver, CommandVerification, ToolRegistry, UserQuestion,
-    VerificationStatus, WebToolConfig,
+    VerificationStatus, WebToolConfig, run_background_supervisor,
 };
 pub use types::{Message, MessageAttachment, Role, ToolCall};
 

@@ -247,6 +247,28 @@
       "request_id": "00000000-0000-4000-8000-000000000015",
       "operation": "event.list",
       "params": { "after": 15, "limit": 200 }
+    },
+    "workspace_register": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000018",
+      "operation": "workspace.register",
+      "params": {
+        "root": "/workspace",
+        "name": "example",
+        "access": "workspace_write",
+        "provider_profile": null,
+        "skills": [],
+        "mcp_servers": []
+      }
+    },
+    "session_delete": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000019",
+      "operation": "session.delete",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "confirmation": "00000000-0000-4000-8000-000000000002"
+      }
     }
   },
   "control_results": {
@@ -271,6 +293,29 @@
         "resolved_at": 146
       },
       "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc17" }
+    },
+    "runtime_status": {
+      "status": "ok",
+      "data": {
+        "status": "draining",
+        "version": "0.21.0-rc59",
+        "pid": 42,
+        "uptime_seconds": 10,
+        "event_sequence": 15
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc59" }
+    },
+    "object_mutation": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "status": "deleted"
+      },
+      "meta": {
+        "protocol_version": "1.0",
+        "server_version": "0.21.0-rc59",
+        "request_id": "00000000-0000-4000-8000-000000000019"
+      }
     }
   }
 }

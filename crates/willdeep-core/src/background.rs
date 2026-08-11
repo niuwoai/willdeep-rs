@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 
 use crate::agent::AgentInstructionInbox;
@@ -23,7 +23,7 @@ pub enum BackgroundTaskKind {
     Subagent,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
@@ -83,6 +83,7 @@ struct LaunchSpec {
 pub struct BackgroundTaskRegistry {
     inner: Arc<Mutex<RegistryState>>,
     events: broadcast::Sender<BackgroundTaskEvent>,
+    lifecycle: Option<TaskLifecycleHook>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -94,11 +95,21 @@ impl Default for BackgroundTaskRegistry {
                 pending: VecDeque::new(),
             })),
             events,
+            lifecycle: None,
         }
     }
 }
 
 impl BackgroundTaskRegistry {
+    pub fn with_lifecycle_observer<H, HFut>(mut self, lifecycle: H) -> Self
+    where
+        H: Fn(BackgroundTaskSnapshot) -> HFut + Send + Sync + 'static,
+        HFut: Future<Output = ()> + Send + 'static,
+    {
+        self.lifecycle = Some(Arc::new(move |snapshot| Box::pin(lifecycle(snapshot))));
+        self
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<BackgroundTaskEvent> {
         self.events.subscribe()
     }
@@ -322,7 +333,11 @@ impl BackgroundTaskRegistry {
             });
         let registry = self.clone();
         let task_id = id.clone();
+        let observer = self.lifecycle.clone();
         tokio::spawn(async move {
+            if let Some(observer) = &observer {
+                observer(snapshot.clone()).await;
+            }
             if let Some(lifecycle) = &lifecycle {
                 lifecycle(snapshot).await;
             }
@@ -330,10 +345,13 @@ impl BackgroundTaskRegistry {
                 result = future => result,
                 _ = cancelled.changed() => TaskResult { status: BackgroundTaskStatus::Killed, exit_code: None, output: "task cancelled".to_owned() },
             };
-            if let Some(event) = registry.finish(&task_id, result)
-                && let Some(lifecycle) = &lifecycle
-            {
-                lifecycle(event.snapshot).await;
+            if let Some(event) = registry.finish(&task_id, result) {
+                if let Some(observer) = &observer {
+                    observer(event.snapshot.clone()).await;
+                }
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event.snapshot).await;
+                }
             }
         });
         id
@@ -574,5 +592,37 @@ mod tests {
             lifecycle_rx.recv().await.unwrap().status,
             BackgroundTaskStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn registry_lifecycle_observer_sees_shell_start_and_terminal_snapshot() {
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = BackgroundTaskRegistry::default().with_lifecycle_observer(move |snapshot| {
+            let tx = lifecycle_tx.clone();
+            async move {
+                let _ = tx.send(snapshot);
+            }
+        });
+        let id = registry.start_retriable(
+            BackgroundTaskKind::Shell,
+            "private command label".to_owned(),
+            || async {
+                TaskResult {
+                    status: BackgroundTaskStatus::Completed,
+                    exit_code: Some(0),
+                    output: "private output".to_owned(),
+                }
+            },
+        );
+
+        let started = lifecycle_rx.recv().await.unwrap();
+        assert_eq!(started.id, id);
+        assert_eq!(started.status, BackgroundTaskStatus::Running);
+        assert_eq!(started.output_bytes, 0);
+        let completed = lifecycle_rx.recv().await.unwrap();
+        assert_eq!(completed.id, id);
+        assert_eq!(completed.status, BackgroundTaskStatus::Completed);
+        assert_eq!(completed.exit_code, Some(0));
+        assert_eq!(completed.output_bytes, "private output".len());
     }
 }

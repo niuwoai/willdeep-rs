@@ -357,33 +357,27 @@ pub(super) async fn register_cli(
     mcp_servers: Vec<String>,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/workspaces", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&RegisterWorkspace {
-            root,
-            name,
-            access,
-            provider_profile,
-            skills,
-            mcp_servers,
-        })
-        .send()
+    let response = runtime_client(&state)?
+        .register_workspace(
+            &willdeep_runtime_protocol::RegisterWorkspaceParams {
+                root: root.to_string_lossy().into_owned(),
+                name,
+                access: public_access(access),
+                provider_profile,
+                skills,
+                mcp_servers,
+            },
+            uuid::Uuid::new_v4(),
+        )
         .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Workspace registration: {}",
-            response.text().await?
-        );
-    }
-    print_workspace(&response.json().await?);
+    print_workspace(&local_workspace(workspace_data(response)?));
     Ok(())
 }
 
 pub(super) async fn list_cli(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let workspaces: Vec<RuntimeWorkspace> = authorized_get(&state, "/v1/workspaces").await?;
-    for workspace in workspaces {
+    let workspaces = workspace_data(runtime_client(&state)?.workspaces().await?)?;
+    for workspace in workspaces.into_iter().map(local_workspace) {
         print_workspace(&workspace);
     }
     Ok(())
@@ -396,8 +390,12 @@ pub(super) async fn resolve_cli_root(home: &Path, root: Option<PathBuf>) -> Resu
             .with_context(|| format!("invalid Workspace root: {}", root.display()));
     }
     let state = ensure_running(home).await?;
-    let workspaces: Vec<RuntimeWorkspace> = authorized_get(&state, "/v1/workspaces").await?;
-    if let Some(active) = workspaces.into_iter().find(|workspace| workspace.active) {
+    let workspaces = workspace_data(runtime_client(&state)?.workspaces().await?)?;
+    if let Some(active) = workspaces
+        .into_iter()
+        .map(local_workspace)
+        .find(|workspace| workspace.active)
+    {
         return Ok(active.root);
     }
     std::env::current_dir()?.canonicalize().map_err(Into::into)
@@ -405,43 +403,27 @@ pub(super) async fn resolve_cli_root(home: &Path, root: Option<PathBuf>) -> Resu
 
 pub(super) async fn activate_cli(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/workspaces/{id}/activate",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
+    let response = runtime_client(&state)?
+        .activate_workspace(id, uuid::Uuid::new_v4())
         .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Workspace activation: {}",
-            response.text().await?
-        );
-    }
-    print_workspace(&response.json().await?);
+    print_workspace(&local_workspace(workspace_data(response)?));
     Ok(())
 }
 
 pub(crate) async fn remote_workspaces(home: &Path) -> Result<Vec<RuntimeWorkspace>> {
     let state = ensure_running(home).await?;
-    let response = runtime_client(&state)?
-        .call::<_, Vec<willdeep_runtime_protocol::RuntimeWorkspace>>(
-            "workspace.list",
-            &serde_json::json!({}),
-            None,
-        )
-        .await?;
+    let response = runtime_client(&state)?.workspaces().await?;
     workspace_data(response).map(|items| items.into_iter().map(local_workspace).collect())
 }
 
 pub(crate) async fn ensure_remote_workspace(home: &Path, root: &Path) -> Result<RuntimeWorkspace> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::RuntimeWorkspace>(
-            "workspace.ensure",
-            &serde_json::json!({"root": root.to_string_lossy()}),
-            None,
+        .ensure_workspace(
+            &willdeep_runtime_protocol::WorkspaceEnsureParams {
+                root: root.to_string_lossy().into_owned(),
+            },
+            uuid::Uuid::new_v4(),
         )
         .await?;
     workspace_data(response).map(local_workspace)
@@ -453,13 +435,19 @@ pub(crate) async fn activate_remote_workspace(
 ) -> Result<RuntimeWorkspace> {
     let state = ensure_running(home).await?;
     let response = runtime_client(&state)?
-        .call::<_, willdeep_runtime_protocol::RuntimeWorkspace>(
-            "workspace.activate",
-            &serde_json::json!({"id": id}),
-            None,
-        )
+        .activate_workspace(id, uuid::Uuid::new_v4())
         .await?;
     workspace_data(response).map(local_workspace)
+}
+
+fn public_access(access: WorkspaceAccess) -> willdeep_runtime_protocol::WorkspaceAccess {
+    match access {
+        WorkspaceAccess::ReadOnly => willdeep_runtime_protocol::WorkspaceAccess::ReadOnly,
+        WorkspaceAccess::Smart => willdeep_runtime_protocol::WorkspaceAccess::Smart,
+        WorkspaceAccess::WorkspaceWrite => {
+            willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite
+        }
+    }
 }
 
 fn workspace_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
@@ -498,16 +486,14 @@ pub(super) async fn remove_cli(home: &Path, id: uuid::Uuid, yes: bool) -> Result
         bail!("Workspace removal requires --yes; files and Sessions are not deleted");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .delete(format!("http://{}/v1/workspaces/{id}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Workspace removal: {}",
-            response.text().await?
-        );
+    let result = workspace_data(
+        runtime_client(&state)?
+            .remove_workspace(id, uuid::Uuid::new_v4())
+            .await?,
+    )?;
+    if result.id != id || result.status != willdeep_runtime_protocol::ObjectMutationStatus::Removed
+    {
+        bail!("Runtime returned an invalid Workspace removal result");
     }
     println!("removed\tworkspace={id}\tfiles=preserved\tsessions=preserved");
     Ok(())

@@ -4,8 +4,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskRegistry, EventSink, SubagentCatalog,
-    ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
+    Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
+    BackgroundTaskStatus, EventSink, SubagentCatalog, ToolRegistry, WebToolConfig, build_provider,
+    builtin_profiles,
 };
 
 use crate::config::LoadedConfig;
@@ -369,7 +370,32 @@ pub(crate) async fn build(
             Some(connection),
         ),
     };
-    let background_tasks = Arc::new(BackgroundTaskRegistry::default());
+    let background_lifecycle_sink = sink.clone();
+    let background_tasks = Arc::new(BackgroundTaskRegistry::default().with_lifecycle_observer(
+        move |snapshot| {
+            let sink = background_lifecycle_sink.clone();
+            async move {
+                if snapshot.kind != BackgroundTaskKind::Shell {
+                    return;
+                }
+                if snapshot.status == BackgroundTaskStatus::Running {
+                    sink.emit(willdeep_core::AgentEvent::BackgroundShellStarted {
+                        id: snapshot.id,
+                    })
+                    .await;
+                } else {
+                    sink.emit(willdeep_core::AgentEvent::BackgroundShellCompleted {
+                        id: snapshot.id,
+                        status: snapshot.status,
+                        exit_code: snapshot.exit_code,
+                        elapsed_millis: snapshot.elapsed_millis,
+                        output_bytes: snapshot.output_bytes,
+                    })
+                    .await;
+                }
+            }
+        },
+    ));
     let verification_home = home.to_path_buf();
     let verification_workspace = workspace.clone();
     let tools = ToolRegistry::new(&workspace, approval_mode)?

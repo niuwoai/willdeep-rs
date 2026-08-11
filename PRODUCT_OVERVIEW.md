@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc44
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc59
 
 ## 项目简介
 
@@ -24,39 +24,49 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
+- 后台 Shell 由同版本内部 Supervisor 通过匿名帧管道接收命令并监视父 Harness 存活；命令不进入进程参数或 Runtime 资源索引，Unix 在取消、超时或父端断开时终止独立进程组；
+- Daemon 重启将运行中的 Child Agent、Tool 与后台 Shell 明确收敛为 Interrupted，未应用 Agent 命令收敛为 Rejected，未真正启动的外部 Spawn Child 收敛为 Failed；后台 Shell 以 `background_shell:<job_id>` 精确绑定 Session、Turn、Task 与 Root Agent，恢复事件仅写一次且只含稳定归属 ID，专属 Worktree 原地保留供后续 Diff/合并/隔离；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
 - Root/Child Agent 持久记录实际模型，统一 API、TUI 与 Web Agent 树展示父子层级、模型、状态、工具、耗时、Token 和 Worktree；
 - TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；后台 Agent 可在详情中用键盘或鼠标补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 既有草稿；Prompt 原文不额外持久化或下发；
 - 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
-- Ratatui 多轮 TUI、可滚动聊天记录、聚合工具活动和界面内审批；
+- Ratatui 多轮 TUI、可滚动聊天记录、可点击聚焦并展开/收起的聚合工具活动和界面内审批；
 - TUI 侧边栏右下角以低对比度常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
 - 空白新会话的即时工作区欢迎引导；
 - 多行 Prompt 编辑、鼠标光标定位、文本粘贴附件和可删除图片附件；
 - TUI 与 Web 的简体中文、英语、日语界面及持久语言偏好；
 - TUI 临时单行思考摘要，以及 Web 单行工作状态、逐轮工具轨迹与停止生成；
+- Web 聊天消息、工具轨迹和思考状态使用紧凑垂直节奏；Composer 聚焦只显示单一外框，内部 Textarea 不重复绘制 focus-visible 轮廓；
+- Rust CLI 构建显式跟踪 `web/dist`，前端产物变化会触发二进制重新嵌入，Debug 与 Release 不会静默沿用旧 Web UI；
 - Web/TUI 独立聊天历史滚动与 TUI 常用 Markdown 终端渲染；
-- Rust Runtime Client 为 Tool 与 Artifact 观察提供类型化方法，并通过本地 Socket 往返测试约束协议操作与 DTO；
-- Rust Runtime Client 覆盖 Workspace、Session、Agent、Turn、Task、Approval、Question、Event 的高频观察与控制方法，TUI bridge 直接复用；
+- Rust Runtime Client 为全部公开 Runtime 操作提供类型化方法；Runtime 状态、Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff 与 Worktree 控制复用同一协议 DTO，并通过本地 Socket 往返测试约束操作名、Token、幂等 Request ID 与响应解码；
 - 统一 `agent.spawn` API 与 Rust Client 可在活跃 Session 中创建稳定 ID 的后台只读子 Agent，并通过 `agent.wait` 观察完成；父级、Task 和 Workspace 均由服务端推导，外部调用不能选择写目标；
-- Web Runtime 侧栏按当前 Workspace 展示 Agent、待审批/回答、关注项、Tool 与 Artifact 摘要，Agent 私有路径、报告和内部错误不会下发；
+- Web Runtime 侧栏按当前 Workspace 展示 Agent、后台 Task、待审批/回答、关注项、Tool 与 Artifact 摘要；进行中与最近五分钟完成的 Task 可查看状态、Profile、耗时、退出码、失败域和归属时间线，Workspace、Prompt、命令、参数、输出、报告、路径、模型、配置、PID 和内部错误不会下发；
 - Web Runtime 侧栏可解决三类审批、回答单选/多选/自定义问题，并停止、重试、指定模型重试或补充后台 Agent；写操作重新验证 Workspace 和目标归属，请求体拒绝客户端夹带额外作用域；
+- Web Runtime 侧栏可在活动父会话中创建 Scout、Reader、Deep 只读子 Agent；父级、Task、Workspace 和 Child ID 均由 Runtime 推导，聊天 SSE 输出不会锁死审批、回答和 Agent 控件；
+- Web Runtime 摘要默认收起但持续刷新，历史会话默认可见并使用明确的暗色对比度；空白会话不进入历史列表，技能候选提供独立搜索框，侧栏 Footer 展示服务端当前版本；
+- Web Agent 与待处理 Task 详情按公开 `agent_id` / `task_id` 展示最近工具时间线、状态、耗时和 Diff Artifact；仅使用已脱敏 Runtime DTO，不下发 Prompt、工具载荷、报告、路径或内部错误；
 - Rust Runtime Client 覆盖 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销，TUI Diff Center 直接复用；
 - Worktree Review、Merge、Audit、Quarantine 已进入统一 API 和 Rust Client，精确 Review/Snapshot ID 与确认字段继续约束写操作；
 - 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
-- TUI 可切换终端原生文本选择与复制模式；
-- TUI 全局快捷键帮助、Prompt/状态栏焦点高亮与状态行焦点提示；
+- TUI 状态行常驻 `Ctrl+S 选择` 入口，可在完整输出区使用终端原生拖选与复制，并以 `Esc` 恢复鼠标交互；
+- TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建只读 Scout、Reader、Deep 子 Agent；
+- TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
-- TUI Prompt、聊天区和状态栏三态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
+- TUI Prompt、聊天区、活动区和状态栏四态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；
 - TUI 右栏 Attention Inbox 按人工介入优先级聚合待处理、工作中和最近完成事项；
+- TUI 侧栏手动滚动使用饱和范围和延迟命中计算，极小视口、超大滚动偏移及不可见命中行不会触发整数下溢或退出 TUI；
 - Attention Inbox 支持键盘/鼠标选择、后台任务与子 Agent 详情跳转、停止运行项和标记已读；
 - Diff Inbox 详情独占键盘事件，支持 D/Enter、Y、N 与鼠标点击查看完整 Diff、整批通过或拒绝；决定绑定提交时的精确快照，冲突状态禁止整批通过。统一 Diff API 对旧 Runtime 的快照、内容和审查路由安全回退，操作错误只显示提示而不退出 TUI；
+- Diff Review 模态独占全部鼠标事件，滚轮仅浏览当前 Diff、文件列表或 Commit Preview，不会穿透并滚动底层聊天区；
+- Diff 文本进入 TUI 前展开 Tab 并转义 ESC、响铃等终端控制字符，返回列表或关闭模态时强制完整重绘，避免终端光标与 Ratatui 缓冲失步后在聊天区留下残影；
 - Inbox 已读状态随会话持久化，后台 Shell 与子 Agent 支持真实重试，任务结束时触发终端提示；
 - Git 冲突和待审 Diff 使用内容指纹进入 Inbox，子 Agent 审批阻塞结构化上报，状态按 Agent→会话→Workspace 上卷；
-- 跨平台 Runtime Daemon 提供 `start/status/stop/logs/upgrade`；Upgrade 以 draining 闸门拒绝新工作、保留活跃任务和持久排队 Turn，任务归零后由当前二进制接管。Headless 观察者识别 Runtime 身份更替后沿事件游标自动重附着；本机客户端优先通过权限为 `0600` 的 Unix Socket 或拒绝远程客户端的 Windows Named Pipe 通信，并兼容旧状态的受 Token 回环 TCP；
+- 跨平台 Runtime Daemon 提供 `start/status/stop/logs/upgrade`；Upgrade 以 draining 闸门拒绝新工作、保留活跃任务和持久排队 Turn，并只按活动 Task 状态等待排空，终态 Task 遗留的 cancellation 句柄不会阻塞接管。TCP 与本地 Socket 共用有状态广播关闭信号，晚订阅监听器也不会漏掉通知。Headless 观察者识别 Runtime 身份更替后沿事件游标自动重附着；本机客户端优先通过权限为 `0600` 的 Unix Socket 或拒绝远程客户端的 Windows Named Pipe 通信，并兼容旧状态的受 Token 回环 TCP；
 - Session/Turn CLI、TUI 与 Web 共用统一 Runtime Client；收养既有 Session 时由 Runtime 从 Core 存储恢复私有配置引用，公共协议不传输配置路径；
 - Runtime Session 元数据使用可迁移 schema；schema 1 首次由 rc33 打开时先写私有原始备份，再原子升级为 schema 2。新建未命名会话以首次 Turn 生成本地有界标题，疑似凭据 Prompt 不复制到标题；显式 Rename、收养旧会话和 Fork 标题保持人工所有权；
 - Runtime 持久记录主 Agent 与子 Agent 的 Tool Activity，支持按 Session、Turn、Task、Agent 和状态查询；公开记录只含工具名与生命周期，不含参数、输出或 Workspace 路径；
@@ -66,6 +76,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 事件以 NDJSON 和单调序号持久化，`attach --after` 支持按游标补读并安全分离客户端；
 - Runtime 事件日志读写使用同一互斥边界，活跃追加期间的控制 API 不会读取到未完成的 NDJSON 末行；
 - Runtime 提供受 Token 保护的 SSE 事件流，按游标分页补历史后切换实时广播；慢客户端从持久日志恢复，TUI 长连接消费并对旧 Daemon 保留轮询降级；
+- Runtime drain/shutdown 会广播关闭状态给 SSE 与 NDJSON 事件流；观察连接主动结束并由客户端沿持久游标重附着，不阻塞 Daemon graceful shutdown；
 - 非交互 Harness 可通过 Runtime 提交、查询和取消；Daemon 直接持有进程内 Harness Future，并把模型输出、session_id 和终态写入可续传事件流，不再为每个 Turn 启动 CLI 子进程；
 - Headless CLI 默认创建或续接同一 Runtime Session/Turn，按游标分页追平脱敏持久事件并按失败域维持自动化退出码；进程级敏感覆盖保守留在 `--local` 路径；
 - CLI 与 Runtime 共用 Provider、视觉降级、审批、Skills、MCP、Tools、子 Agent Profile、会话写入和后台结果回流的 Harness Factory；Agent 事件直接写入 Runtime EventLog，不经过 stdout 文本中转；
@@ -109,14 +120,18 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 提供统一 `POST /v1/api` 与可续传 NDJSON 事件流；修改类请求按 Request ID 有界去重，共享 `willdeep-runtime-client` 负责回环校验、鉴权、信封解析和流式解码；
 - Session、Turn、Agent 与 Event 使用协议 crate 的公开 DTO；TUI 实时事件、Agent 观察/控制、审批和回答均通过共享 Runtime Client，公共事件边界兼容净化旧日志中的工具参数、输出、报告、路径和内部错误；
 - Task、Pending Approval 与 Pending Question 也使用公开 DTO；TUI Inbox 和 Web/TUI 事件补读通过共享 Client，修改请求以 Pending→Completed 私有日志跨 Runtime 重启去重，不确定崩溃窗口拒绝自动重放；
-- Workspace 与访问模式使用公开 DTO；注册、自动确保、激活、移除和 TUI/Web Workspace bridge 均通过共享 Client，服务端继续规范化路径并覆盖任务权限；
+- CLI 的 Task/Agent 列表、详情、停止、重试、补充指令、审批、问答与 Diff 命令均通过共享 Client；TUI Turn 提交、事件 Task 归属与 Diff Center 不再回退旧资源路由，旧 Runtime 必须先通过受控升级接管；
+- 进程内 Harness 的完整 Task 提交、长等待 Interaction、Agent 命令轮询/回执和 Daemon drain/shutdown 迁入 `/v1/internal` 私有传输；除 Runtime Token 外必须携带内部标记，缺失时以 404 隐藏端点，公开 Client 不提供这些方法；
+- Workspace 与访问模式使用公开 DTO；注册、自动确保、激活、移除和 CLI/TUI/Web Workspace bridge 均通过共享 Client，服务端继续规范化路径并覆盖任务权限；
+- 统一 API 的全部修改操作使用单一可测试清单进入 Pending→Completed 持久幂等日志；不确定崩溃窗口拒绝自动重放，删除/移除返回稳定对象结果，Runtime 状态可区分正常与安全排空；
 - Diff Snapshot、File、Review、Verification、Attribution、Commit Preview 与 Revert 使用协议 crate 的稳定 DTO；TUI Diff Center 的全部读写均通过共享 Runtime Client，精确快照、Workspace 授权、敏感命令过滤和 Recovery 撤销语义保持不变；
 - Web Session 列表、重命名、指定 Turn Fork、归档/恢复、精确确认删除和显式导出通过统一 Runtime API 与共享 Client；浏览器仍先校验启动时 Workspace 白名单，公开 Session DTO 不返回配置路径、内部错误或排队 Prompt；
 - TUI Session 搜索以及 TUI/Web Turn 提交与停止通过统一 Runtime API；文本和图片附件使用协议 crate DTO，服务端强制附件数量、文本长度、图片 MIME/尺寸、总载荷和 1 MiB Prompt 上限，客户端不能在 Turn 请求中覆盖 Workspace 或权限；
 - TUI Prompt 可用 `/webapp` 在当前 Workspace 启动仅监听回环地址的内嵌 Web App，并以 `/webapp status` 查看地址和进程状态；启动继承当前配置/Profile，并等待健康检查成功后才报告完成；
 - 后台子 Agent 的取消、失败和重试沿用稳定 Agent UUID；Runtime 通过受 Token 保护的持久命令队列向原 Harness 下发精确 stop/retry，CLI 与 TUI 均可操作并查看结果事件；
 - Web 文本/图片粘贴附件、发送前删除、`/` 命令和 `$` 技能候选；
-- Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 转发 Runtime 事件，真实停止 Turn，并可加载持久历史会话；浏览器断开不再杀死后台 Harness；
+- Web 与 TUI 共用持久 Runtime Session/Turn；Web SSE 事件携带单调游标，浏览器保存最后会话与活动 Turn 游标，刷新或普通网络断开后从持久历史自动重新附着同一 Turn，按游标去重且不重复提交 Prompt；停止操作仍精确终止该 Turn；
+- Web 恢复请求与 Turn 完成竞态安全：若断线期间活动 Turn 已进入终态，服务端从最新持久 Turn 和 Core Session 返回最终消息，而不是要求仍存在 `active_turn_id`；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
 - MCP stdio 工具发现、注册和调用。

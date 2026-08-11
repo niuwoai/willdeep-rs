@@ -336,6 +336,18 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     app.language.text("失败", "Failed", "失敗"),
                     app.tools.failed
                 )));
+                logical_hits.push((lines.len(), SidebarHit::NewAgent));
+                lines.push(Line::styled(
+                    format!(
+                        "  {}",
+                        app.language.text(
+                            "[N 新建只读 Agent]",
+                            "[N New read-only Agent]",
+                            "[N 読み取り専用 Agent を作成]"
+                        )
+                    ),
+                    Style::default().fg(Color::LightCyan),
+                ));
                 if !app.runtime_agents.is_empty() {
                     lines.push(Line::styled(
                         format!(
@@ -462,7 +474,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     if !app.sidebar_manual_scroll {
         if selected_row < app.sidebar_scroll {
             app.sidebar_scroll = selected_row;
-        } else if selected_row >= app.sidebar_scroll + viewport {
+        } else if selected_row >= app.sidebar_scroll.saturating_add(viewport) {
             app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
         }
     }
@@ -471,8 +483,14 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     app.sidebar_hits = logical_hits
         .into_iter()
         .filter_map(|(row, hit)| {
-            (row >= app.sidebar_scroll && row < app.sidebar_scroll + viewport)
-                .then_some((area.y + 1 + (row - app.sidebar_scroll) as u16, hit))
+            let visible_end = app.sidebar_scroll.saturating_add(viewport);
+            if row < app.sidebar_scroll || row >= visible_end {
+                return None;
+            }
+            let offset = row
+                .saturating_sub(app.sidebar_scroll)
+                .min(u16::MAX as usize) as u16;
+            Some((area.y.saturating_add(1).saturating_add(offset), hit))
         })
         .collect();
     let border = if app.focus == FocusPane::Sidebar {

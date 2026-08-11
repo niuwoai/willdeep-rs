@@ -138,6 +138,21 @@ pub struct IdParams {
     pub id: uuid::Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectMutationStatus {
+    Removed,
+    Deleted,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectMutationResult {
+    pub id: uuid::Uuid,
+    pub status: ObjectMutationStatus,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyParams {}
@@ -913,6 +928,24 @@ pub struct ProtocolLimits {
     pub max_worktree_patch_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHealth {
+    Ok,
+    Draining,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeStatus {
+    pub status: RuntimeHealth,
+    pub version: String,
+    pub pid: u32,
+    pub uptime_seconds: u64,
+    pub event_sequence: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
     pub protocol_version: String,
@@ -1190,10 +1223,20 @@ mod tests {
         let _: AnswerQuestionParams = serde_json::from_value(question.params).unwrap();
         let events: ApiRequest = serde_json::from_value(requests["event_list"].clone()).unwrap();
         let _: EventListParams = serde_json::from_value(events.params).unwrap();
+        let workspace: ApiRequest =
+            serde_json::from_value(requests["workspace_register"].clone()).unwrap();
+        assert_eq!(workspace.operation, "workspace.register");
+        let _: RegisterWorkspaceParams = serde_json::from_value(workspace.params).unwrap();
+        let deletion: ApiRequest =
+            serde_json::from_value(requests["session_delete"].clone()).unwrap();
+        assert_eq!(deletion.operation, "session.delete");
+        let _: DeleteSessionParams = serde_json::from_value(deletion.params).unwrap();
 
         let results = fixture["control_results"].as_object().unwrap();
         decode_fixture::<RuntimeAgentCommand>(results, "agent_command");
         decode_fixture::<RuntimeInteractionResult>(results, "interaction");
+        decode_fixture::<RuntimeStatus>(results, "runtime_status");
+        decode_fixture::<ObjectMutationResult>(results, "object_mutation");
     }
 
     #[test]
@@ -1630,6 +1673,48 @@ mod tests {
         ] {
             assert!(SUPPORTED_OPERATIONS.contains(&operation));
         }
+    }
+
+    #[test]
+    fn object_mutation_results_are_typed_and_forward_compatible() {
+        let id = uuid::Uuid::new_v4();
+        let removed: ObjectMutationResult = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "status": "removed"
+        }))
+        .unwrap();
+        assert_eq!(removed.id, id);
+        assert_eq!(removed.status, ObjectMutationStatus::Removed);
+
+        let future: ObjectMutationResult = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "status": "detached"
+        }))
+        .unwrap();
+        assert_eq!(future.status, ObjectMutationStatus::Unknown);
+    }
+
+    #[test]
+    fn runtime_status_reports_draining_without_breaking_future_states() {
+        let status: RuntimeStatus = serde_json::from_value(serde_json::json!({
+            "status": "draining",
+            "version": "0.21.0-rc59",
+            "pid": 42,
+            "uptime_seconds": 10,
+            "event_sequence": 7
+        }))
+        .unwrap();
+        assert_eq!(status.status, RuntimeHealth::Draining);
+
+        let future: RuntimeStatus = serde_json::from_value(serde_json::json!({
+            "status": "recovering",
+            "version": "0.21.0-rc59",
+            "pid": 42,
+            "uptime_seconds": 10,
+            "event_sequence": 7
+        }))
+        .unwrap();
+        assert_eq!(future.status, RuntimeHealth::Unknown);
     }
 
     #[test]

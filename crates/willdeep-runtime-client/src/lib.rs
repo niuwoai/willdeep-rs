@@ -6,16 +6,18 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use willdeep_runtime_protocol::{
     AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse,
-    DiffAttribution, DiffCommitPreview, DiffCommitPreviewParams, DiffContent, DiffContentParams,
-    DiffRevertParams, DiffRevertResult, DiffReview, DiffReviewParams, DiffSnapshot,
-    DiffSnapshotParams, DiffSnapshotQueryParams, DiffVerification, DiffVerificationParams,
-    EmptyParams, EventListParams, IdParams, ListArtifactsParams, ListToolsParams, ListTurnsParams,
-    PendingApproval, PendingQuestion, ResolveApprovalParams, RuntimeAgent, RuntimeAgentCommand,
-    RuntimeArtifact, RuntimeCapabilities, RuntimeEvent, RuntimeInteractionResult, RuntimeSession,
-    RuntimeTask, RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit,
-    RuntimeWorktreeMergeResult, RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview,
-    SearchSessionsParams, SubmitTurnParams, WorktreeMergeParams, WorktreeQuarantineParams,
-    WorktreeReviewParams,
+    ArchiveSessionParams, CreateSessionParams, DeleteSessionParams, DiffAttribution,
+    DiffCommitPreview, DiffCommitPreviewParams, DiffContent, DiffContentParams, DiffRevertParams,
+    DiffRevertResult, DiffReview, DiffReviewParams, DiffSnapshot, DiffSnapshotParams,
+    DiffSnapshotQueryParams, DiffVerification, DiffVerificationParams, EmptyParams,
+    EventListParams, ForkSessionParams, IdParams, ListArtifactsParams, ListToolsParams,
+    ListTurnsParams, ObjectMutationResult, PendingApproval, PendingQuestion,
+    RegisterWorkspaceParams, RenameSessionParams, ResolveApprovalParams, RuntimeAgent,
+    RuntimeAgentCommand, RuntimeArtifact, RuntimeCapabilities, RuntimeEvent,
+    RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTool, RuntimeTurn,
+    RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
+    RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SubmitTurnParams,
+    WorkspaceEnsureParams, WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -93,6 +95,11 @@ impl RuntimeClient {
         decode_response(request.send().await?).await
     }
 
+    pub async fn status(&self) -> Result<ApiResponse<RuntimeStatus>, ClientError> {
+        self.call("runtime.status", &EmptyParams::default(), None)
+            .await
+    }
+
     pub async fn get_json<T>(&self, path: &str) -> Result<T, ClientError>
     where
         T: DeserializeOwned,
@@ -101,22 +108,6 @@ impl RuntimeClient {
             self.http
                 .get(format!("{}{}", self.base_url, normalized_path(path)))
                 .header(TOKEN_HEADER, &self.token)
-                .send()
-                .await?,
-        )
-        .await
-    }
-
-    pub async fn get_json_with_query<Q, T>(&self, path: &str, query: &Q) -> Result<T, ClientError>
-    where
-        Q: Serialize + ?Sized,
-        T: DeserializeOwned,
-    {
-        decode_raw_response(
-            self.http
-                .get(format!("{}{}", self.base_url, normalized_path(path)))
-                .header(TOKEN_HEADER, &self.token)
-                .query(query)
                 .send()
                 .await?,
         )
@@ -135,22 +126,6 @@ impl RuntimeClient {
         } else {
             Err(ClientError::HttpStatus(response.status().as_u16()))
         }
-    }
-
-    pub async fn post_json<P, T>(&self, path: &str, payload: &P) -> Result<T, ClientError>
-    where
-        P: Serialize + ?Sized,
-        T: DeserializeOwned,
-    {
-        decode_raw_response(
-            self.http
-                .post(format!("{}{}", self.base_url, normalized_path(path)))
-                .header(TOKEN_HEADER, &self.token)
-                .json(payload)
-                .send()
-                .await?,
-        )
-        .await
     }
 
     pub async fn call<P, T>(
@@ -183,9 +158,53 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn register_workspace(
+        &self,
+        params: &RegisterWorkspaceParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeWorkspace>, ClientError> {
+        self.call("workspace.register", params, Some(request_id))
+            .await
+    }
+
+    pub async fn ensure_workspace(
+        &self,
+        params: &WorkspaceEnsureParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeWorkspace>, ClientError> {
+        self.call("workspace.ensure", params, Some(request_id))
+            .await
+    }
+
+    pub async fn activate_workspace(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeWorkspace>, ClientError> {
+        self.call("workspace.activate", &IdParams { id }, Some(request_id))
+            .await
+    }
+
+    pub async fn remove_workspace(
+        &self,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<ObjectMutationResult>, ClientError> {
+        self.call("workspace.remove", &IdParams { id }, Some(request_id))
+            .await
+    }
+
     pub async fn sessions(&self) -> Result<ApiResponse<Vec<RuntimeSession>>, ClientError> {
         self.call("session.list", &EmptyParams::default(), None)
             .await
+    }
+
+    pub async fn create_session(
+        &self,
+        params: &CreateSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.create", params, Some(request_id)).await
     }
 
     pub async fn search_sessions(
@@ -200,6 +219,45 @@ impl RuntimeClient {
         id: uuid::Uuid,
     ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
         self.call("session.get", &IdParams { id }, None).await
+    }
+
+    pub async fn rename_session(
+        &self,
+        params: &RenameSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.rename", params, Some(request_id)).await
+    }
+
+    pub async fn fork_session(
+        &self,
+        params: &ForkSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.fork", params, Some(request_id)).await
+    }
+
+    pub async fn archive_session(
+        &self,
+        params: &ArchiveSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.archive", params, Some(request_id)).await
+    }
+
+    pub async fn delete_session(
+        &self,
+        params: &DeleteSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<ObjectMutationResult>, ClientError> {
+        self.call("session.delete", params, Some(request_id)).await
+    }
+
+    pub async fn export_session(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<ApiResponse<serde_json::Value>, ClientError> {
+        self.call("session.export", &IdParams { id }, None).await
     }
 
     pub async fn agents(&self) -> Result<ApiResponse<Vec<RuntimeAgent>>, ClientError> {
@@ -597,7 +655,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_http_status_for_legacy_route_fallbacks() {
+    fn exposes_http_status_for_transport_diagnostics() {
         let invalid = ClientError::InvalidResponse {
             status: 404,
             source: serde_json::from_slice::<serde_json::Value>(b"").unwrap_err(),
@@ -638,6 +696,182 @@ mod tests {
         let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
         let response: serde_json::Value = client.get_json("/v1/health").await.unwrap();
         assert_eq!(response["status"], "ok");
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn typed_runtime_workspace_and_session_methods_preserve_contracts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn receive_request(stream: &mut tokio::net::UnixStream) -> ApiRequest {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(length, 0, "request ended before its JSON body arrived");
+                request.extend_from_slice(&chunk[..length]);
+                let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                assert!(headers.starts_with("POST /v1/api HTTP/1.1"));
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("x-willdeep-token: secret")
+                );
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + 4 + content_length {
+                    return serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                }
+            }
+        }
+
+        async fn send_response<T: Serialize>(
+            stream: &mut tokio::net::UnixStream,
+            value: &ApiResponse<T>,
+        ) {
+            let body = serde_json::to_string(value).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+
+        let root = std::path::Path::new("/private/tmp")
+            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let workspace_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let workspace_request_id = uuid::Uuid::new_v4();
+        let session_request_id = uuid::Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = receive_request(&mut stream).await;
+            assert_eq!(request.request_id, workspace_request_id);
+            assert_eq!(request.operation, "workspace.register");
+            let params: RegisterWorkspaceParams = serde_json::from_value(request.params).unwrap();
+            assert_eq!(params.root, "/workspace");
+            assert_eq!(
+                params.access,
+                willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite
+            );
+            send_response(
+                &mut stream,
+                &ApiResponse::ok(
+                    RuntimeWorkspace {
+                        id: workspace_id,
+                        name: "workspace".to_owned(),
+                        root: Some("/workspace".to_owned()),
+                        access: willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite,
+                        provider_profile: None,
+                        skills: Vec::new(),
+                        mcp_servers: Vec::new(),
+                        created_at: 1,
+                        updated_at: 1,
+                        active: true,
+                    },
+                    "test",
+                    Some(request.request_id),
+                ),
+            )
+            .await;
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = receive_request(&mut stream).await;
+            assert_eq!(request.request_id, session_request_id);
+            assert_eq!(request.operation, "session.delete");
+            let params: DeleteSessionParams = serde_json::from_value(request.params).unwrap();
+            assert_eq!(params.id, session_id);
+            assert_eq!(params.confirmation, session_id);
+            send_response(
+                &mut stream,
+                &ApiResponse::ok(
+                    ObjectMutationResult {
+                        id: session_id,
+                        status: willdeep_runtime_protocol::ObjectMutationStatus::Deleted,
+                    },
+                    "test",
+                    Some(request.request_id),
+                ),
+            )
+            .await;
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = receive_request(&mut stream).await;
+            assert_eq!(request.operation, "runtime.status");
+            assert_eq!(request.params, serde_json::json!({}));
+            send_response(
+                &mut stream,
+                &ApiResponse::ok(
+                    RuntimeStatus {
+                        status: willdeep_runtime_protocol::RuntimeHealth::Draining,
+                        version: "test".to_owned(),
+                        pid: 42,
+                        uptime_seconds: 10,
+                        event_sequence: 7,
+                    },
+                    "test",
+                    Some(request.request_id),
+                ),
+            )
+            .await;
+        });
+
+        let client = RuntimeClient::new_unix_socket(&socket, "secret").unwrap();
+        let workspace = client
+            .register_workspace(
+                &RegisterWorkspaceParams {
+                    root: "/workspace".to_owned(),
+                    name: None,
+                    access: willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite,
+                    provider_profile: None,
+                    skills: Vec::new(),
+                    mcp_servers: Vec::new(),
+                },
+                workspace_request_id,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(workspace, ApiResponse::Ok { data, .. } if data.id == workspace_id));
+
+        let deleted = client
+            .delete_session(
+                &DeleteSessionParams {
+                    id: session_id,
+                    confirmation: session_id,
+                },
+                session_request_id,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            deleted,
+            ApiResponse::Ok { data, .. }
+                if data.id == session_id
+                    && data.status == willdeep_runtime_protocol::ObjectMutationStatus::Deleted
+        ));
+
+        let status = client.status().await.unwrap();
+        assert!(matches!(
+            status,
+            ApiResponse::Ok { data, .. }
+                if data.status == willdeep_runtime_protocol::RuntimeHealth::Draining
+                    && data.event_sequence == 7
+        ));
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

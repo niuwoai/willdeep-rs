@@ -13,6 +13,7 @@ pub(super) struct ToolStore {
     path: PathBuf,
     records: Mutex<Vec<RuntimeTool>>,
     active: Mutex<HashMap<String, uuid::Uuid>>,
+    recovered_after_restart: Mutex<Vec<RuntimeTool>>,
 }
 
 pub(super) struct StartTool {
@@ -60,6 +61,28 @@ pub(super) fn observe(
         AgentEvent::SubagentToolCompleted { id, is_error, .. } => {
             store.finish(&format!("child:{id}"), *is_error)?;
         }
+        AgentEvent::BackgroundShellStarted { id } => {
+            store.start(StartTool {
+                session_id,
+                turn_id,
+                task_id,
+                agent_id: root_agent_id,
+                correlation: format!("background:{id}"),
+                name: format!("background_shell:{id}"),
+            })?;
+        }
+        AgentEvent::BackgroundShellCompleted { id, status, .. } => {
+            let status = match status {
+                willdeep_core::BackgroundTaskStatus::Completed => ToolStatus::Completed,
+                willdeep_core::BackgroundTaskStatus::Killed => ToolStatus::Interrupted,
+                willdeep_core::BackgroundTaskStatus::Running => ToolStatus::Running,
+                willdeep_core::BackgroundTaskStatus::Blocked
+                | willdeep_core::BackgroundTaskStatus::Failed
+                | willdeep_core::BackgroundTaskStatus::TimedOut
+                | willdeep_core::BackgroundTaskStatus::LaunchFailed => ToolStatus::Failed,
+            };
+            store.finish_with_status(&format!("background:{id}"), status)?;
+        }
         _ => {}
     }
     Ok(())
@@ -67,6 +90,11 @@ pub(super) fn observe(
 
 impl ToolStore {
     pub(super) fn open(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create Tool activity directory at {}", parent.display())
+            })?;
+        }
         let mut records = if path.exists() {
             serde_json::from_slice::<Vec<RuntimeTool>>(&std::fs::read(&path)?)?
         } else {
@@ -74,10 +102,12 @@ impl ToolStore {
         };
         let completed_at = now_ms();
         let mut changed = false;
+        let mut recovered_after_restart = Vec::new();
         for record in &mut records {
             if record.status == ToolStatus::Running {
                 record.status = ToolStatus::Interrupted;
                 record.completed_at_ms = Some(completed_at);
+                recovered_after_restart.push(record.clone());
                 changed = true;
             }
         }
@@ -85,11 +115,20 @@ impl ToolStore {
             path,
             records: Mutex::new(records),
             active: Mutex::new(HashMap::new()),
+            recovered_after_restart: Mutex::new(recovered_after_restart),
         };
         if changed {
             store.persist()?;
         }
         Ok(store)
+    }
+
+    pub(super) fn take_recovered_after_restart(&self) -> Result<Vec<RuntimeTool>> {
+        let mut recovered = self
+            .recovered_after_restart
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime recovered Tool index lock poisoned"))?;
+        Ok(std::mem::take(&mut *recovered))
     }
 
     pub(super) fn start(&self, input: StartTool) -> Result<RuntimeTool> {
@@ -123,6 +162,21 @@ impl ToolStore {
     }
 
     pub(super) fn finish(&self, correlation: &str, failed: bool) -> Result<Option<RuntimeTool>> {
+        self.finish_with_status(
+            correlation,
+            if failed {
+                ToolStatus::Failed
+            } else {
+                ToolStatus::Completed
+            },
+        )
+    }
+
+    fn finish_with_status(
+        &self,
+        correlation: &str,
+        status: ToolStatus,
+    ) -> Result<Option<RuntimeTool>> {
         let Some(id) = self
             .active
             .lock()
@@ -138,11 +192,7 @@ impl ToolStore {
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(None);
         };
-        record.status = if failed {
-            ToolStatus::Failed
-        } else {
-            ToolStatus::Completed
-        };
+        record.status = status;
         record.completed_at_ms = Some(now_ms());
         let result = record.clone();
         persist_records(&self.path, &records)?;

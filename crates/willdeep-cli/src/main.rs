@@ -1309,6 +1309,12 @@ impl EventSink for TerminalSink {
             AgentEvent::CompressionCompleted { estimated_tokens } => {
                 eprintln!("[context] compressed to approximately {estimated_tokens} tokens");
             }
+            AgentEvent::BackgroundShellStarted { id } => {
+                eprintln!("[background] started id={id}");
+            }
+            AgentEvent::BackgroundShellCompleted { id, status, .. } => {
+                eprintln!("[background] finished id={id} status={status:?}");
+            }
             AgentEvent::SubagentStarted {
                 id,
                 profile,
@@ -1374,6 +1380,24 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         AgentEvent::CompressionCompleted { estimated_tokens } => serde_json::json!({
             "type": "compression_completed",
             "estimated_tokens": estimated_tokens
+        }),
+        AgentEvent::BackgroundShellStarted { id } => serde_json::json!({
+            "type": "background_shell_started",
+            "id": id
+        }),
+        AgentEvent::BackgroundShellCompleted {
+            id,
+            status,
+            exit_code,
+            elapsed_millis,
+            output_bytes,
+        } => serde_json::json!({
+            "type": "background_shell_completed",
+            "id": id,
+            "status": status,
+            "exit_code": exit_code,
+            "elapsed_millis": elapsed_millis,
+            "output_bytes": output_bytes
         }),
         AgentEvent::SubagentStarted {
             id,
@@ -1734,6 +1758,23 @@ mod tests {
         assert_eq!(
             agent_event_json(AgentEvent::AssistantText("ready".to_string())),
             serde_json::json!({"type": "assistant_text", "text": "ready"})
+        );
+        assert_eq!(
+            agent_event_json(AgentEvent::BackgroundShellCompleted {
+                id: "job_123".to_owned(),
+                status: willdeep_core::BackgroundTaskStatus::TimedOut,
+                exit_code: None,
+                elapsed_millis: 60_000,
+                output_bytes: 512,
+            }),
+            serde_json::json!({
+                "type": "background_shell_completed",
+                "id": "job_123",
+                "status": "timed_out",
+                "exit_code": null,
+                "elapsed_millis": 60_000,
+                "output_bytes": 512
+            })
         );
     }
 }

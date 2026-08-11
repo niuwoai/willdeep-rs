@@ -64,12 +64,14 @@ pub(crate) struct RuntimeAgent {
 pub(super) struct AgentStore {
     path: PathBuf,
     agents: Mutex<HashMap<uuid::Uuid, RuntimeAgent>>,
+    recovered_after_restart: Mutex<Vec<RuntimeAgent>>,
 }
 
 impl AgentStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut agents = load_agents(&path)?;
         let mut changed = false;
+        let mut recovered_after_restart = Vec::new();
         for agent in agents.values_mut() {
             if matches!(
                 agent.status,
@@ -82,6 +84,7 @@ impl AgentStore {
                 agent.completed_at = Some(now());
                 agent.updated_at = now();
                 agent.error = Some("Runtime restarted while agent was active".to_owned());
+                recovered_after_restart.push(agent.clone());
                 changed = true;
             }
         }
@@ -91,7 +94,16 @@ impl AgentStore {
         Ok(Self {
             path,
             agents: Mutex::new(agents),
+            recovered_after_restart: Mutex::new(recovered_after_restart),
         })
+    }
+
+    pub fn take_recovered_after_restart(&self) -> Result<Vec<RuntimeAgent>> {
+        let mut recovered = self
+            .recovered_after_restart
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime recovered Agent index lock poisoned"))?;
+        Ok(std::mem::take(&mut *recovered))
     }
 
     pub fn ensure_root(
@@ -279,7 +291,10 @@ impl AgentStore {
     pub fn reject_external_child(&self, id: uuid::Uuid, error: String) -> Result<()> {
         let mut agents = self.lock()?;
         let agent = agents.get_mut(&id).context("Runtime Agent not found")?;
-        if agent.status != RuntimeAgentStatus::Queued {
+        if !matches!(
+            agent.status,
+            RuntimeAgentStatus::Queued | RuntimeAgentStatus::Interrupted
+        ) {
             return Ok(());
         }
         agent.status = RuntimeAgentStatus::Failed;

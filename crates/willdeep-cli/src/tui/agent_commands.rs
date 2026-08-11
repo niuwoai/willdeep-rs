@@ -13,36 +13,56 @@ enum AgentCommand<'a> {
         id: uuid::Uuid,
         model: Option<&'a str>,
     },
+    Spawn {
+        profile: &'a str,
+        prompt: &'a str,
+    },
+}
+
+fn split_head(value: &str) -> Option<(&str, &str)> {
+    let value = value.trim();
+    let index = value.find(char::is_whitespace).unwrap_or(value.len());
+    let head = &value[..index];
+    (!head.is_empty()).then_some((head, value[index..].trim()))
 }
 
 fn parse_agent_command(arguments: &str) -> Result<AgentCommand<'_>> {
-    let mut parts = arguments.split_whitespace();
-    let action = parts.next().context("missing Agent action")?;
-    let id = uuid::Uuid::parse_str(parts.next().context("missing Runtime Agent ID")?)
-        .context("invalid Runtime Agent ID")?;
+    let (action, arguments) = split_head(arguments).context("missing Agent action")?;
+    if action == "spawn" {
+        let (profile, prompt) = split_head(arguments).context("missing Agent profile")?;
+        if !matches!(profile, "scout" | "reader" | "deep") {
+            bail!("unsupported external Agent profile");
+        }
+        if prompt.is_empty() {
+            bail!("missing Agent task");
+        }
+        return Ok(AgentCommand::Spawn { profile, prompt });
+    }
+    let (id, trailing) = split_head(arguments).context("missing Runtime Agent ID")?;
+    let id = uuid::Uuid::parse_str(id).context("invalid Runtime Agent ID")?;
     match action {
         "instruct" => {
-            let id_end = arguments
-                .find(&id.to_string())
-                .context("missing Runtime Agent ID")?
-                + id.to_string().len();
-            let message = arguments[id_end..].trim();
+            let message = trailing;
             if message.is_empty() {
                 bail!("missing Agent instruction");
             }
             Ok(AgentCommand::Instruct { id, message })
         }
-        "stop" if parts.next().is_none() => Ok(AgentCommand::Stop { id }),
-        "retry" => match (parts.next(), parts.next(), parts.next()) {
-            (None, None, None) => Ok(AgentCommand::Retry { id, model: None }),
-            (Some("--model"), Some(model), None) if !model.trim().is_empty() => {
-                Ok(AgentCommand::Retry {
-                    id,
-                    model: Some(model),
-                })
+        "stop" if trailing.is_empty() => Ok(AgentCommand::Stop { id }),
+        "retry" => {
+            let mut parts = trailing.split_whitespace();
+            let options = (parts.next(), parts.next(), parts.next());
+            match options {
+                (None, None, None) => Ok(AgentCommand::Retry { id, model: None }),
+                (Some("--model"), Some(model), None) if !model.trim().is_empty() => {
+                    Ok(AgentCommand::Retry {
+                        id,
+                        model: Some(model),
+                    })
+                }
+                _ => bail!("invalid Agent retry options"),
             }
-            _ => bail!("invalid Agent retry options"),
-        },
+        }
         _ => bail!("unsupported Agent action"),
     }
 }
@@ -51,6 +71,7 @@ pub(super) async fn handle_agent_command(
     prompt: &str,
     app: &mut App,
     runtime: &TuiRuntime,
+    session_id: uuid::Uuid,
 ) -> Result<bool> {
     let value = prompt.trim();
     if value != "/agent" && !value.starts_with("/agent ") {
@@ -58,9 +79,9 @@ pub(super) async fn handle_agent_command(
     }
     let arguments = value.strip_prefix("/agent").unwrap_or_default().trim();
     let usage = app.language.text(
-        "用法：/agent instruct <ID> <指令> | stop <ID> | retry <ID> [--model <模型>]",
-        "Usage: /agent instruct <id> <message> | stop <id> | retry <id> [--model <model>]",
-        "使用法：/agent instruct <ID> <指示> | stop <ID> | retry <ID> [--model <モデル>]",
+        "用法：/agent spawn <scout|reader|deep> <任务> | instruct <ID> <指令> | stop <ID> | retry <ID> [--model <模型>]",
+        "Usage: /agent spawn <scout|reader|deep> <task> | instruct <id> <message> | stop <id> | retry <id> [--model <model>]",
+        "使用法：/agent spawn <scout|reader|deep> <タスク> | instruct <ID> <指示> | stop <ID> | retry <ID> [--model <モデル>]",
     );
     let command = match parse_agent_command(arguments) {
         Ok(command) => command,
@@ -107,6 +128,21 @@ pub(super) async fn handle_agent_command(
                 )
             }
         }
+        AgentCommand::Spawn { profile, prompt } => {
+            crate::daemon::spawn_remote_agent(
+                &runtime.home,
+                session_id,
+                prompt.to_owned(),
+                profile.to_owned(),
+                None,
+            )
+            .await?;
+            app.language.text(
+                "只读后台子 Agent 已排队",
+                "Read-only background child Agent queued",
+                "読み取り専用のバックグラウンド子 Agent をキューしました",
+            )
+        }
     };
     app.append_transcript(format!("System: {result}"));
     Ok(true)
@@ -139,5 +175,13 @@ mod tests {
         );
         assert!(parse_agent_command(&format!("retry {id} --model")).is_err());
         assert!(parse_agent_command(&format!("stop {id} extra")).is_err());
+        assert_eq!(
+            parse_agent_command("spawn scout inspect the repository").unwrap(),
+            AgentCommand::Spawn {
+                profile: "scout",
+                prompt: "inspect the repository"
+            }
+        );
+        assert!(parse_agent_command("spawn editor change files").is_err());
     }
 }

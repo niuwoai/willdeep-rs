@@ -2,7 +2,7 @@
 
 > 状态：实施中
 > 首个目标版本：v0.17.0
-> 最后更新：2026-08-11（v0.21.0-rc44 TUI/Web Agent 控制面与旧 Runtime Diff 兼容）
+> 最后更新：2026-08-11（v0.21.0-rc59 TUI 活动区交互一致性）
 
 ## 1. 目标
 
@@ -14,7 +14,11 @@ Provider Profile、模型和私有配置引用随 Session 持久化；客户端�
 
 Agent Store 的 input/output/total Token 是 Agent 身份级累计值，而不是最后一次响应快照。Root Agent 在同一 Session 的后续 Task 中延续累计值；Child Agent 同身份重试也延续。累计使用饱和加法并持久化，Daemon 重启不得清零。
 
+Daemon 异常重启后，运行中的 Child Agent、Tool 与后台 Shell 必须收敛为 Interrupted，未应用 Agent 命令收敛为 Rejected，尚未开始执行的外部 Spawn Child 收敛为 Failed。后台 Shell 以 `background_shell:<job_id>` Tool 资源绑定 Session、Turn、Execution Task 与 Root Agent；命令和输出正文不进入资源索引。每项恢复仅为本次启动补写一次脱敏事件，事件只含稳定归属 ID，不含 Prompt、命令正文、工具载荷或路径。专属 Worktree 及分支原地保留，必须继续通过 Diff Review、Merge 或 Quarantine 的精确快照流程处理。
+
 Root 与 Child Agent 都持久记录实际执行模型。Root 从 Runtime Task/Session 恢复；Child 从解析后的 Subagent Profile 生命周期事件恢复。公开 Agent DTO 的 `model` 为向后兼容的可选字段，TUI、Web、移动端和 Swift 观察客户端不得从 Profile 名称猜测模型。
+
+Web 的后台 Task 详情从 Runtime 公开 Task、Tool 与 Artifact DTO 投影，只显示状态、Profile、耗时、退出码、失败域和归属时间线。Workspace、Prompt、命令、工具参数、输出、内部错误、报告、路径、模型、配置与 PID 均不进入浏览器 DTO。
 
 本协议区分四种稳定身份：
 
@@ -65,29 +69,29 @@ Runtime Session（长期存在）
 
 待执行 Prompt 与附件在进入队列时必须私有、原子持久化。执行成功写入 Core Session 后，队列副本应清除正文，只保留审计摘要。
 
-## 3. 本地 API
+## 3. 统一控制 API
 
-所有端点必须携带 Runtime 随机 `x-willdeep-token`，并返回 `X-WillDeep-Version`。
+所有操作通过 `POST /v1/api` 的统一信封调用，必须携带 Runtime 随机 `x-willdeep-token`，并返回 `X-WillDeep-Version`。稳定操作名如下：
 
 ```text
-POST /v1/sessions
-GET  /v1/sessions
-GET  /v1/sessions/search?q={query}
-GET  /v1/sessions/{session_id}
-POST /v1/sessions/{session_id}/rename
-POST /v1/sessions/{session_id}/fork
-POST /v1/sessions/{session_id}/archive
-POST /v1/sessions/{session_id}/unarchive
-GET  /v1/sessions/{session_id}/export
-DELETE /v1/sessions/{session_id}
-POST /v1/sessions/{session_id}/turns
-GET  /v1/sessions/{session_id}/turns
-GET  /v1/turns/{turn_id}
-POST /v1/turns/{turn_id}/stop
-POST /v1/turns/{turn_id}/retry
+session.create
+session.list
+session.search
+session.get
+session.rename
+session.fork
+session.archive
+session.export
+session.delete
+turn.submit
+turn.list
+turn.get
+turn.stop
 ```
 
 创建 Turn 必须提供客户端生成的 `request_id`。同一 Session 内重复提交相同 `request_id` 返回原 Turn，不再次运行模型或工具。
+
+带私有配置文件引用的 Session 创建属于进程内 Harness 能力，使用 `/v1/internal/sessions`，不进入公开 DTO；普通客户端只能通过 `session.create` 提交公开字段。
 
 ### 3.1 会话管理语义
 
@@ -128,6 +132,8 @@ turn.retry_queued
 ```
 
 事件必须包含 `session_id`、`agent_id`、`turn_id` 和适用时的 `task_id`。SSE 使用全局单调序号，客户端以最后已应用序号恢复并去重。
+
+Web 会话摘要公开可选 `active_turn_id`。刷新时客户端先从 Core Session 重载已持久消息，再以 Session ID 和最后事件游标请求恢复；Runtime 重新查询活动 Turn/Task，并从 Task 的 `event_start_sequence` 起回放。客户端不得指定 Workspace、Task 或 Agent，初始 SSE 断开后也不得重新提交原 Prompt。
 
 ## 6. 崩溃恢复
 

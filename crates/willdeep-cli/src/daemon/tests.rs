@@ -174,6 +174,18 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
         is_error: false,
     })
     .await;
+    sink.emit(willdeep_core::AgentEvent::BackgroundShellStarted {
+        id: "job_exact".to_owned(),
+    })
+    .await;
+    sink.emit(willdeep_core::AgentEvent::BackgroundShellCompleted {
+        id: "job_exact".to_owned(),
+        status: willdeep_core::BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        elapsed_millis: 125,
+        output_bytes: 42,
+    })
+    .await;
 
     let records: Vec<diff_review::DiffAttributionRecord> = serde_json::from_slice(
         &std::fs::read(root.join("runtime/diff-attributions.json")).unwrap(),
@@ -192,13 +204,48 @@ async fn runtime_sink_attributes_child_agent_file_changes_without_chat_metadata(
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(tool_records.len(), 2);
+    assert_eq!(tool_records.len(), 3);
     assert!(tool_records.iter().all(|tool| {
         tool.status == willdeep_runtime_protocol::ToolStatus::Completed
             && tool.session_id == Some(session_id)
             && tool.turn_id == Some(turn_id)
+            && tool.task_id == task_id
     }));
+    let background = tool_records
+        .iter()
+        .find(|tool| tool.name == "background_shell:job_exact")
+        .expect("persisted background Shell resource");
+    assert_eq!(background.agent_id, root_agent_id);
+    let persisted_tools: Vec<willdeep_runtime_protocol::RuntimeTool> =
+        serde_json::from_slice(&std::fs::read(root.join("runtime/tools.json")).unwrap()).unwrap();
+    assert!(persisted_tools.iter().any(|tool| {
+        tool.name == "background_shell:job_exact"
+            && tool.status == willdeep_runtime_protocol::ToolStatus::Completed
+            && tool.session_id == Some(session_id)
+            && tool.turn_id == Some(turn_id)
+            && tool.task_id == task_id
+            && tool.agent_id == root_agent_id
+    }));
+    let events = std::fs::read_to_string(root.join("events.ndjson")).unwrap();
+    assert!(events.contains("background_shell_started"));
+    assert!(events.contains("background_shell_completed"));
+    assert!(!events.contains("private command"));
+    assert!(!events.contains("private output"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_signal_is_observed_by_late_and_parallel_listeners() {
+    let (shutdown, receiver) = watch::channel(false);
+    shutdown.send(true).unwrap();
+    let first = receiver.clone();
+    let second = receiver;
+
+    tokio::time::timeout(Duration::from_millis(100), async move {
+        tokio::join!(wait_for_shutdown(first), wait_for_shutdown(second));
+    })
+    .await
+    .expect("all Runtime listeners must observe an already-issued shutdown");
 }
 
 #[tokio::test]
@@ -211,7 +258,7 @@ async fn authorization_requires_exact_local_token() {
         home: root.clone(),
         token: "expected".to_owned(),
         started_at: 0,
-        shutdown: Arc::new(Notify::new()),
+        shutdown: watch::channel(false).0,
         events: events.clone(),
         tasks: Arc::new(
             TaskManager::open(TaskManagerOptions {
@@ -258,6 +305,12 @@ async fn authorization_requires_exact_local_token() {
     let mut headers = HeaderMap::new();
     headers.insert(TOKEN_HEADER, HeaderValue::from_static("expected"));
     assert_eq!(authorize(&state, &headers), Ok(()));
+    assert_eq!(
+        authorize_internal(&state, &headers),
+        Err(StatusCode::NOT_FOUND)
+    );
+    headers.insert(internal_transport::HEADER, HeaderValue::from_static("1"));
+    assert_eq!(authorize_internal(&state, &headers), Ok(()));
     assert_eq!(
         capabilities_handler(State(state.clone()), HeaderMap::new())
             .await
@@ -476,6 +529,186 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert_eq!(child.status, RuntimeAgentStatus::Cancelled);
     assert_eq!(child.current_turn, 0);
     assert_eq!(child.total_tokens, Some(9));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restart_recovery_closes_child_agent_tool_and_command_resources_once() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-execution-resource-recovery-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    let child_worktree = root.join("child-worktree");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&child_worktree).unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let child_id = uuid::Uuid::new_v4();
+    let reserved_spawn_id = uuid::Uuid::new_v4();
+    let agents_path = root.join("agents.json");
+    let commands_path = root.join("agent-commands.json");
+    let tools_path = root.join("tools.json");
+
+    let agents = AgentStore::open(agents_path.clone()).unwrap();
+    let root_agent = agents
+        .ensure_root(
+            task_id,
+            workspace.clone(),
+            None,
+            None,
+            RuntimeAgentStatus::Running,
+        )
+        .unwrap();
+    agents
+        .apply_harness_event(
+            task_id,
+            &serde_json::json!({
+                "type": "subagent_started",
+                "id": child_id,
+                "profile": "editor",
+                "background": true,
+                "workspace": child_worktree.clone(),
+                "root_workspace": workspace.clone(),
+                "worktree_branch": "willdeep/recovery-test",
+                "dedicated_worktree": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+    agents
+        .reserve_external_child(
+            reserved_spawn_id,
+            root_agent.id,
+            task_id,
+            "scout".to_owned(),
+            Some("pending scout".to_owned()),
+        )
+        .unwrap();
+    drop(agents);
+
+    let commands = AgentCommandStore::open(commands_path.clone()).unwrap();
+    commands
+        .enqueue(
+            task_id,
+            child_id,
+            agent_control::AgentCommandKind::Stop,
+            None,
+            None,
+        )
+        .unwrap();
+    commands
+        .enqueue_spawn(
+            task_id,
+            reserved_spawn_id,
+            "inspect the workspace".to_owned(),
+            Some("scout".to_owned()),
+            Some("pending scout".to_owned()),
+        )
+        .unwrap();
+    drop(commands);
+
+    let tools = tool_store::ToolStore::open(tools_path.clone()).unwrap();
+    let tool = tools
+        .start(tool_store::StartTool {
+            session_id: None,
+            turn_id: None,
+            task_id,
+            agent_id: child_id,
+            correlation: format!("child:{child_id}"),
+            name: "edit_file".to_owned(),
+        })
+        .unwrap();
+    let background_tool = tools
+        .start(tool_store::StartTool {
+            session_id: None,
+            turn_id: None,
+            task_id,
+            agent_id: root_agent.id,
+            correlation: "background:job_recover".to_owned(),
+            name: "background_shell:job_recover".to_owned(),
+        })
+        .unwrap();
+    drop(tools);
+
+    let agents = AgentStore::open(agents_path).unwrap();
+    let commands = AgentCommandStore::open(commands_path).unwrap();
+    let tools = tool_store::ToolStore::open(tools_path).unwrap();
+    let events = EventLog::open(root.join("events.ndjson")).unwrap();
+    report_execution_resource_recovery(&events, &agents, &commands, &tools).unwrap();
+
+    let child = agents.get(child_id).unwrap().unwrap();
+    assert_eq!(child.status, RuntimeAgentStatus::Interrupted);
+    assert_eq!(
+        child.worktree_branch.as_deref(),
+        Some("willdeep/recovery-test")
+    );
+    assert!(child.dedicated_worktree);
+    assert_eq!(child.workspace, child_worktree);
+    let rejected_spawn = agents.get(reserved_spawn_id).unwrap().unwrap();
+    assert_eq!(rejected_spawn.status, RuntimeAgentStatus::Failed);
+    assert!(
+        rejected_spawn
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("before external Agent spawn was applied"))
+    );
+    assert_eq!(
+        tools.get(tool.id).unwrap().unwrap().status,
+        willdeep_runtime_protocol::ToolStatus::Interrupted
+    );
+    assert_eq!(
+        tools.get(background_tool.id).unwrap().unwrap().status,
+        willdeep_runtime_protocol::ToolStatus::Interrupted
+    );
+
+    let recovered_events = events.read_after(0, 20).unwrap();
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| event.kind == "agent.command_rejected")
+            .count(),
+        2
+    );
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| event.kind == "agent.spawn_rejected")
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| event.kind == "agent.interrupted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| event.kind == "tool.interrupted")
+            .count(),
+        2
+    );
+    assert!(recovered_events.iter().any(|event| {
+        event.kind == "tool.interrupted"
+            && event
+                .message
+                .contains(&format!("tool_id={}", background_tool.id))
+            && event
+                .message
+                .contains(&format!("agent_id={}", root_agent.id))
+    }));
+    assert!(recovered_events.iter().all(|event| {
+        !event.message.contains(root.to_string_lossy().as_ref())
+            && !event.message.contains("inspect the workspace")
+    }));
+
+    report_execution_resource_recovery(&events, &agents, &commands, &tools).unwrap();
+    assert_eq!(
+        events.read_after(0, 20).unwrap().len(),
+        recovered_events.len()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -807,6 +1040,81 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
     }
     assert_eq!(load_tasks(&path).unwrap().len(), 20);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn drain_wait_ignores_stale_cancellation_for_terminal_task() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-drain-stale-cancellation-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: root.join("tasks.json"),
+        interactions_path: root.join("interactions.json"),
+        home: root.clone(),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: test_agent_store(&root),
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    manager
+        .insert_and_persist(RuntimeTask {
+            id: task_id,
+            session_id: None,
+            turn_id: None,
+            agent_id: None,
+            event_start_sequence: 0,
+            status: RuntimeTaskStatus::Completed,
+            workspace: root.clone(),
+            profile: None,
+            model: None,
+            pid: None,
+            created_at: 1,
+            started_at: Some(1),
+            completed_at: Some(2),
+            exit_code: Some(0),
+            failure_domain: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    manager
+        .cancellations
+        .lock()
+        .unwrap()
+        .insert(task_id, Arc::new(Notify::new()));
+
+    tokio::time::timeout(Duration::from_millis(100), manager.wait_until_idle())
+        .await
+        .expect("terminal tasks must not keep Runtime draining");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn active_runtime_task_statuses_are_explicit() {
+    for status in [
+        RuntimeTaskStatus::Queued,
+        RuntimeTaskStatus::Running,
+        RuntimeTaskStatus::Cancelling,
+        RuntimeTaskStatus::WaitingApproval,
+        RuntimeTaskStatus::WaitingAnswer,
+    ] {
+        assert!(runtime_task_status_is_active(status));
+    }
+    for status in [
+        RuntimeTaskStatus::Completed,
+        RuntimeTaskStatus::Failed,
+        RuntimeTaskStatus::Cancelled,
+        RuntimeTaskStatus::Interrupted,
+    ] {
+        assert!(!runtime_task_status_is_active(status));
+    }
 }
 
 #[tokio::test]

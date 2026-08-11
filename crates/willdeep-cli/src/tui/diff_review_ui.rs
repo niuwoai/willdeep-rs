@@ -115,7 +115,7 @@ pub(super) fn diff_review_lines(content: &str, search_query: Option<&str>) -> Ve
                 .is_some_and(|query| line.to_lowercase().contains(&query.to_lowercase()));
             let style = Style::default().fg(color);
             Line::styled(
-                line.to_owned(),
+                terminal_safe_diff_text(line),
                 if matched {
                     style.bg(Color::DarkGray)
                 } else {
@@ -124,6 +124,29 @@ pub(super) fn diff_review_lines(content: &str, search_query: Option<&str>) -> Ve
             )
         })
         .collect()
+}
+
+pub(super) fn terminal_safe_diff_text(value: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+
+    let mut output = String::with_capacity(value.len());
+    let mut column = 0;
+    for character in value.chars() {
+        if character == '\t' {
+            let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+            output.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else if character.is_control() {
+            for escaped in character.escape_default() {
+                output.push(escaped);
+                column += UnicodeWidthChar::width(escaped).unwrap_or(0);
+            }
+        } else {
+            output.push(character);
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    output
 }
 
 pub(super) fn diff_side_by_side_lines(
@@ -354,7 +377,7 @@ pub(super) fn commit_preview_draft_lines(draft: &CommitPreviewDraft) -> Vec<Line
 fn fit_diff_column(value: &str, width: usize) -> String {
     let mut output = String::new();
     let mut used = 0;
-    for character in value.chars() {
+    for character in terminal_safe_diff_text(value).chars() {
         let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
         if used + character_width > width {
             break;

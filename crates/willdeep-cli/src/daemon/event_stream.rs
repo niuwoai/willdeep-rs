@@ -122,6 +122,7 @@ fn redact_suffix(message: &str, marker: &str) -> String {
 struct LiveEventState {
     backlog: VecDeque<RuntimeEvent>,
     receiver: tokio::sync::broadcast::Receiver<RuntimeEvent>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     log: Arc<EventLog>,
     cursor: u64,
 }
@@ -143,6 +144,7 @@ pub(super) async fn events_stream_handler(
     let live = LiveEventState {
         backlog,
         receiver,
+        shutdown: state.shutdown.subscribe(),
         log: state.events.clone(),
         cursor: query.after,
     };
@@ -179,6 +181,7 @@ pub(super) async fn events_ndjson_handler(
     let live = LiveEventState {
         backlog,
         receiver,
+        shutdown: state.shutdown.subscribe(),
         log: state.events.clone(),
         cursor: query.after,
     };
@@ -205,6 +208,9 @@ fn ndjson_event(event: RuntimeEvent, request_id: Option<uuid::Uuid>) -> Bytes {
 
 async fn next_event(state: &mut LiveEventState) -> Option<RuntimeEvent> {
     loop {
+        if *state.shutdown.borrow() {
+            return None;
+        }
         while let Some(event) = state.backlog.pop_front() {
             if event.sequence > state.cursor {
                 state.cursor = event.sequence;
@@ -221,7 +227,16 @@ async fn next_event(state: &mut LiveEventState) -> Option<RuntimeEvent> {
                 continue;
             }
         }
-        match state.receiver.recv().await {
+        let received = tokio::select! {
+            changed = state.shutdown.changed() => {
+                if changed.is_err() || *state.shutdown.borrow() {
+                    return None;
+                }
+                continue;
+            }
+            received = state.receiver.recv() => received,
+        };
+        match received {
             Ok(event) if event.sequence > state.cursor => {
                 state.cursor = event.sequence;
                 return Some(event);
@@ -259,9 +274,11 @@ mod tests {
         log.append("first", "one").unwrap();
         let receiver = log.subscribe();
         log.append("second", "two").unwrap();
+        let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
         let mut state = LiveEventState {
             backlog: log.read_after(0, 1).unwrap().into(),
             receiver,
+            shutdown,
             log: log.clone(),
             cursor: 0,
         };
@@ -271,6 +288,34 @@ mod tests {
         log.append("third", "three").unwrap();
         // The queued broadcast copy of event 2 is skipped by the cursor.
         assert_eq!(next_event(&mut state).await.unwrap().sequence, 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_event_stream_ends_when_runtime_shutdown_starts() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-event-shutdown-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let mut state = LiveEventState {
+            backlog: VecDeque::new(),
+            receiver: log.subscribe(),
+            shutdown: receiver,
+            log,
+            cursor: 0,
+        };
+        let waiting = tokio::spawn(async move { next_event(&mut state).await });
+        tokio::task::yield_now().await;
+        shutdown.send(true).unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), waiting)
+                .await
+                .expect("event stream must not block Runtime shutdown")
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

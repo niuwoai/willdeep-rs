@@ -21,6 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use willdeep_core::{MessageAttachment, Role, Session, SessionStore, SkillCatalog};
 
 const MAX_PROMPT_CHARS: usize = 100_000;
+const MAX_AGENT_LABEL_CHARS: usize = 128;
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
@@ -66,6 +67,15 @@ struct SessionSummary {
     updated_at: u64,
     archived: bool,
     active: bool,
+    active_turn_id: Option<uuid::Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeStreamQuery {
+    #[serde(default)]
+    after: Option<u64>,
+    language: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +152,17 @@ struct WebAgentPromptAction {
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebAgentSpawnAction {
+    workspace: String,
+    session_id: uuid::Uuid,
+    profile: String,
+    prompt: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WebApprovalDecision {
@@ -169,6 +190,7 @@ struct RuntimeActivitySummary {
     tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
     agents: Vec<WebRuntimeAgent>,
+    tasks: Vec<WebRuntimeTask>,
     gates: Vec<WebRuntimeGate>,
     attention_count: usize,
 }
@@ -188,6 +210,19 @@ struct WebRuntimeAgent {
     elapsed_seconds: u64,
     worktree_branch: Option<String>,
     dedicated_worktree: bool,
+}
+
+#[derive(Serialize)]
+struct WebRuntimeTask {
+    id: uuid::Uuid,
+    session_id: Option<uuid::Uuid>,
+    turn_id: Option<uuid::Uuid>,
+    agent_id: Option<uuid::Uuid>,
+    status: &'static str,
+    profile: Option<String>,
+    elapsed_seconds: u64,
+    exit_code: Option<i32>,
+    failure_domain: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -246,6 +281,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
             "/api/sessions/{id}",
             get(session_detail).delete(delete_session),
         )
+        .route("/api/sessions/{id}/stream", get(resume_session_stream))
         .route("/api/sessions/{id}/rename", post(rename_session))
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
@@ -264,6 +300,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         )
         .route("/api/runtime/agents/{id}/stop", post(stop_runtime_agent))
         .route("/api/runtime/agents/{id}/retry", post(retry_runtime_agent))
+        .route("/api/runtime/agents/spawn", post(spawn_runtime_agent))
         .route(
             "/api/runtime/agents/{id}/prompt",
             post(prompt_runtime_agent),
@@ -369,28 +406,8 @@ async fn runtime_activity(
     Ok(Json(RuntimeActivitySummary {
         tools: snapshot.tools,
         artifacts: snapshot.artifacts,
-        agents: snapshot
-            .agents
-            .into_iter()
-            .map(|agent| {
-                let elapsed_seconds = agent_elapsed_seconds(&agent);
-                WebRuntimeAgent {
-                    id: agent.id,
-                    parent_id: agent.parent_id,
-                    label: agent.label,
-                    background: agent.background,
-                    profile: agent.profile,
-                    model: agent.model,
-                    status: runtime_status_name(agent.status),
-                    current_turn: agent.current_turn,
-                    current_tool: agent.current_tool,
-                    total_tokens: agent.total_tokens,
-                    elapsed_seconds,
-                    worktree_branch: agent.worktree_branch,
-                    dedicated_worktree: agent.dedicated_worktree,
-                }
-            })
-            .collect(),
+        agents: snapshot.agents.into_iter().map(web_runtime_agent).collect(),
+        tasks: snapshot.tasks.into_iter().map(web_runtime_task).collect(),
         gates: snapshot
             .gates
             .into_iter()
@@ -425,14 +442,76 @@ async fn runtime_activity(
     }))
 }
 
+fn web_runtime_agent(agent: crate::daemon::tui_bridge::RemoteAgent) -> WebRuntimeAgent {
+    let elapsed_seconds = agent_elapsed_seconds(&agent);
+    WebRuntimeAgent {
+        id: agent.id,
+        parent_id: agent.parent_id,
+        label: agent.label,
+        background: agent.background,
+        profile: agent.profile,
+        model: agent.model,
+        status: runtime_status_name(agent.status),
+        current_turn: agent.current_turn,
+        current_tool: agent.current_tool,
+        total_tokens: agent.total_tokens,
+        elapsed_seconds,
+        worktree_branch: agent.worktree_branch,
+        dedicated_worktree: agent.dedicated_worktree,
+    }
+}
+
+fn web_runtime_task(task: crate::daemon::tui_bridge::RemoteTask) -> WebRuntimeTask {
+    let started_at = task.started_at.unwrap_or(task.created_at);
+    let completed_at = task.completed_at.unwrap_or_else(now_seconds);
+    WebRuntimeTask {
+        id: task.id,
+        session_id: task.session_id,
+        turn_id: task.turn_id,
+        agent_id: task.agent_id,
+        status: task_status_name(task.status),
+        profile: task.profile,
+        elapsed_seconds: completed_at.saturating_sub(started_at),
+        exit_code: task.exit_code,
+        failure_domain: task.failure_domain.map(failure_domain_name),
+    }
+}
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> u64 {
-    let end = agent.completed_at.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    });
+    let end = agent.completed_at.unwrap_or_else(now_seconds);
     end.saturating_sub(agent.created_at)
+}
+
+fn task_status_name(status: willdeep_runtime_protocol::TaskStatus) -> &'static str {
+    match status {
+        willdeep_runtime_protocol::TaskStatus::Queued => "queued",
+        willdeep_runtime_protocol::TaskStatus::Running => "running",
+        willdeep_runtime_protocol::TaskStatus::Cancelling => "cancelling",
+        willdeep_runtime_protocol::TaskStatus::WaitingApproval => "waiting_approval",
+        willdeep_runtime_protocol::TaskStatus::WaitingAnswer => "waiting_answer",
+        willdeep_runtime_protocol::TaskStatus::Completed => "completed",
+        willdeep_runtime_protocol::TaskStatus::Failed => "failed",
+        willdeep_runtime_protocol::TaskStatus::Cancelled => "cancelled",
+        willdeep_runtime_protocol::TaskStatus::Interrupted => "interrupted",
+    }
+}
+
+fn failure_domain_name(domain: willdeep_runtime_protocol::FailureDomain) -> &'static str {
+    match domain {
+        willdeep_runtime_protocol::FailureDomain::Provider => "provider",
+        willdeep_runtime_protocol::FailureDomain::Policy => "policy",
+        willdeep_runtime_protocol::FailureDomain::Tool => "tool",
+        willdeep_runtime_protocol::FailureDomain::Harness => "harness",
+        willdeep_runtime_protocol::FailureDomain::Internal => "internal",
+        willdeep_runtime_protocol::FailureDomain::Unknown => "unknown",
+    }
 }
 
 fn runtime_status_name(status: willdeep_core::RuntimeStatus) -> &'static str {
@@ -535,6 +614,67 @@ async fn prompt_runtime_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn spawn_runtime_agent(
+    State(state): State<Arc<WebState>>,
+    Json(action): Json<WebAgentSpawnAction>,
+) -> Result<(StatusCode, Json<WebRuntimeAgent>), WebError> {
+    let workspace = select_workspace(&state, Some(&action.workspace)).await?;
+    let session = SessionStore::new(&state.home)
+        .load(action.session_id)
+        .map_err(|_| WebError::not_found("Session not found"))?;
+    if session.workspace != workspace.root {
+        return Err(WebError::not_found(
+            "Session not found in the selected workspace",
+        ));
+    }
+    let active = crate::daemon::remote_session_states(&state.home)
+        .await
+        .map_err(WebError::from_anyhow)?
+        .into_iter()
+        .any(|candidate| candidate.id == session.id && candidate.active && !candidate.archived);
+    if !active {
+        return Err(WebError::conflict(
+            "A read-only child Agent requires an active parent session",
+        ));
+    }
+    let (profile, prompt, label) = validate_agent_spawn(action)?;
+    let agent = crate::daemon::spawn_remote_agent(&state.home, session.id, prompt, profile, label)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok((StatusCode::ACCEPTED, Json(web_runtime_agent(agent))))
+}
+
+fn validate_agent_spawn(
+    action: WebAgentSpawnAction,
+) -> Result<(String, String, Option<String>), WebError> {
+    let profile = action.profile.trim().to_owned();
+    if !matches!(profile.as_str(), "scout" | "reader" | "deep") {
+        return Err(WebError::bad_request(
+            "profile must be one of scout, reader, or deep",
+        ));
+    }
+    let prompt = action.prompt.trim().to_owned();
+    let prompt_chars = prompt.chars().count();
+    if prompt_chars == 0 || prompt_chars > MAX_PROMPT_CHARS {
+        return Err(WebError::bad_request(format!(
+            "prompt must contain 1 to {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    let label = action
+        .label
+        .map(|label| label.trim().to_owned())
+        .filter(|label| !label.is_empty());
+    if label
+        .as_deref()
+        .is_some_and(|label| label.chars().count() > MAX_AGENT_LABEL_CHARS)
+    {
+        return Err(WebError::bad_request(format!(
+            "label must contain at most {MAX_AGENT_LABEL_CHARS} characters"
+        )));
+    }
+    Ok((profile, prompt, label))
+}
+
 async fn authorized_runtime_snapshot(
     state: &WebState,
     workspace: &str,
@@ -588,18 +728,29 @@ async fn sessions(
         .await
         .map_err(WebError::from_anyhow)?
         .into_iter()
-        .map(|session| (session.id, (session.archived, session.active)))
+        .map(|session| {
+            (
+                session.id,
+                (session.archived, session.active, session.active_turn_id),
+            )
+        })
         .collect::<HashMap<_, _>>();
     let values = SessionStore::new(&state.home)
         .list()
         .map_err(|error| WebError::internal(error.to_string()))?
         .into_iter()
         .filter(|session| allowed.contains(&session.workspace))
+        .filter(|session| {
+            session_has_user_input(session)
+                || runtime_states
+                    .get(&session.id)
+                    .is_some_and(|(_, active, active_turn_id)| *active || active_turn_id.is_some())
+        })
         .map(|session| {
-            let (archived, active) = runtime_states
+            let (archived, active, active_turn_id) = runtime_states
                 .get(&session.id)
                 .copied()
-                .unwrap_or((false, false));
+                .unwrap_or((false, false, None));
             SessionSummary {
                 id: session.id.to_string(),
                 title: session.title,
@@ -607,10 +758,18 @@ async fn sessions(
                 updated_at: session.updated_at,
                 archived,
                 active,
+                active_turn_id,
             }
         })
         .collect();
     Ok(Json(values))
+}
+
+fn session_has_user_input(session: &Session) -> bool {
+    session.messages.iter().any(|message| {
+        message.role == Role::User
+            && (!message.content.trim().is_empty() || !message.attachments.is_empty())
+    })
 }
 
 async fn session_detail(
@@ -783,6 +942,119 @@ async fn chat_stream(
     ))
 }
 
+async fn resume_session_stream(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<ResumeStreamQuery>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = SessionStore::new(&state.home)
+        .load(id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !workspace_allowed(&state, &session.workspace).await? {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    let event_head = crate::daemon::runtime_event_head(&state.home)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    let language = query
+        .language
+        .as_deref()
+        .map(|value| Language::parse(Some(value)))
+        .transpose()
+        .map_err(|error| WebError::bad_request(error.to_string()))?
+        .unwrap_or_else(|| state_language(&state));
+    let (tx, rx) = mpsc::channel(64);
+    let stream_state = state.clone();
+    if let Some(active) = crate::daemon::remote_active_turn(&state.home, id)
+        .await
+        .map_err(WebError::from_anyhow)?
+    {
+        let cursor = bounded_resume_cursor(query.after, active.replay_after, event_head);
+        tokio::spawn(async move {
+            send_event(
+                &tx,
+                serde_json::json!({
+                    "type":"resumed",
+                    "session_id":active.session_id,
+                    "turn_id":active.turn_id,
+                    "cursor":cursor,
+                }),
+            )
+            .await;
+            if relay_runtime_turn(
+                &stream_state,
+                &session.workspace,
+                RuntimeTurnRelay {
+                    cursor,
+                    session_id: active.session_id,
+                    turn_id: active.turn_id,
+                    task_id: active.task_id,
+                    language,
+                },
+                &tx,
+            )
+            .await
+            .is_err()
+            {
+                send_event(
+                    &tx,
+                    serde_json::json!({"type":"error","message":"Runtime stream unavailable"}),
+                )
+                .await;
+            }
+        });
+    } else {
+        let turn = crate::daemon::remote_latest_turn(&state.home, id)
+            .await
+            .map_err(WebError::from_anyhow)?
+            .ok_or_else(|| WebError::conflict("session has no Turn to resume"))?;
+        let cursor = query.after.unwrap_or(event_head).min(event_head);
+        let final_text = latest_assistant_text(&state.home, id).unwrap_or_default();
+        tokio::spawn(async move {
+            send_event_at(
+                &tx,
+                serde_json::json!({
+                    "type":"resumed",
+                    "session_id":id,
+                    "turn_id":turn.id,
+                    "cursor":cursor,
+                }),
+                cursor,
+            )
+            .await;
+            let event = match turn.status {
+                willdeep_runtime_protocol::TurnStatus::Completed => serde_json::json!({
+                    "type":"completed",
+                    "text":final_text,
+                    "session_id":id,
+                    "turn_id":turn.id,
+                }),
+                status => serde_json::json!({
+                    "type":"error",
+                    "message":format!("turn.{status:?}").to_ascii_lowercase(),
+                    "session_id":id,
+                    "turn_id":turn.id,
+                }),
+            };
+            send_event_at(&tx, event, event_head).await;
+        });
+    }
+    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("working"),
+    ))
+}
+
+fn bounded_resume_cursor(requested: Option<u64>, replay_after: u64, event_head: u64) -> u64 {
+    requested
+        .unwrap_or(replay_after)
+        .max(replay_after)
+        .min(event_head.max(replay_after))
+}
+
 async fn validate_chat(
     state: &WebState,
     input: &ChatRequest,
@@ -893,31 +1165,46 @@ async fn run_runtime_turn_inner(
             "session_id":remote_session.id,
             "turn_id":turn.id,
             "root_agent_id":remote_session.root_agent_id,
+            "cursor":event_head,
         }),
     )
     .await;
     relay_runtime_turn(
         &state,
         &workspace,
-        event_head,
-        remote_session.id,
-        turn.id,
-        Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
+        RuntimeTurnRelay {
+            cursor: event_head,
+            session_id: remote_session.id,
+            turn_id: turn.id,
+            task_id: None,
+            language: Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
+        },
         tx,
     )
     .await
 }
 
+struct RuntimeTurnRelay {
+    cursor: u64,
+    session_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    task_id: Option<uuid::Uuid>,
+    language: Language,
+}
+
 async fn relay_runtime_turn(
     state: &WebState,
     workspace: &std::path::Path,
-    mut cursor: u64,
-    session_id: uuid::Uuid,
-    turn_id: uuid::Uuid,
-    language: Language,
+    relay: RuntimeTurnRelay,
     tx: &mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<(), WebError> {
-    let mut task_id = None;
+    let RuntimeTurnRelay {
+        mut cursor,
+        session_id,
+        turn_id,
+        mut task_id,
+        language,
+    } = relay;
     let mut final_text = None;
     loop {
         if tx.is_closed() {
@@ -944,7 +1231,7 @@ async fn relay_runtime_turn(
                         .and_then(|value| value.as_str())
                         .map(ToOwned::to_owned);
                 } else if let Some(client) = client_event(value, language) {
-                    send_event(tx, client).await;
+                    send_event_at(tx, client, event.sequence).await;
                 }
             }
             if matches!(
@@ -956,7 +1243,7 @@ async fn relay_runtime_turn(
                     let text = final_text
                         .or_else(|| latest_assistant_text(&state.home, session_id))
                         .unwrap_or_default();
-                    send_event(
+                    send_event_at(
                         tx,
                         serde_json::json!({
                             "type":"completed",
@@ -964,10 +1251,11 @@ async fn relay_runtime_turn(
                             "session_id":session_id,
                             "turn_id":turn_id,
                         }),
+                        event.sequence,
                     )
                     .await;
                 } else {
-                    send_event(
+                    send_event_at(
                         tx,
                         serde_json::json!({
                             "type":"error",
@@ -975,6 +1263,7 @@ async fn relay_runtime_turn(
                             "session_id":session_id,
                             "turn_id":turn_id,
                         }),
+                        event.sequence,
                     )
                     .await;
                 }
@@ -1116,6 +1405,19 @@ async fn send_event(tx: &mpsc::Sender<Result<Event, Infallible>>, value: serde_j
     }
 }
 
+async fn send_event_at(
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+    mut value: serde_json::Value,
+    cursor: u64,
+) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cursor".to_owned(), serde_json::Value::from(cursor));
+    }
+    if let Ok(event) = Event::default().id(cursor.to_string()).json_data(value) {
+        let _ = tx.send(Ok(event)).await;
+    }
+}
+
 async fn registered_web_workspaces(
     state: &WebState,
 ) -> Result<Vec<crate::daemon::RuntimeWorkspace>, WebError> {
@@ -1209,6 +1511,12 @@ impl WebError {
             message: message.into(),
         }
     }
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
     fn from_anyhow(error: anyhow::Error) -> Self {
         Self::internal(error.to_string())
     }
@@ -1262,6 +1570,34 @@ mod tests {
             select_registered_workspace(allowed, None).unwrap().root,
             PathBuf::from("/workspace/b")
         );
+    }
+    #[test]
+    fn empty_sessions_stay_out_of_web_history_until_the_user_submits_input() {
+        let mut session = Session::new(PathBuf::from("/workspace/a"), None, "New session");
+        assert!(!session_has_user_input(&session));
+
+        session
+            .messages
+            .push(willdeep_core::Message::assistant("welcome", Vec::new()));
+        assert!(!session_has_user_input(&session));
+
+        session.messages.push(willdeep_core::Message::user("hello"));
+        assert!(session_has_user_input(&session));
+    }
+
+    #[test]
+    fn attachment_only_user_input_keeps_a_session_in_web_history() {
+        let mut session = Session::new(PathBuf::from("/workspace/a"), None, "New session");
+        session
+            .messages
+            .push(willdeep_core::Message::user_with_attachments(
+                "",
+                vec![MessageAttachment::Text {
+                    name: "notes.txt".into(),
+                    content: "context".into(),
+                }],
+            ));
+        assert!(session_has_user_input(&session));
     }
     #[test]
     fn embedded_frontend_exists() {
@@ -1339,6 +1675,107 @@ mod tests {
     }
 
     #[test]
+    fn web_runtime_task_summary_keeps_public_state_without_private_payloads() {
+        let task_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let agent_id = uuid::Uuid::new_v4();
+        let value = serde_json::to_value(web_runtime_task(crate::daemon::tui_bridge::RemoteTask {
+            id: task_id,
+            session_id: Some(session_id),
+            turn_id: None,
+            agent_id: Some(agent_id),
+            status: willdeep_runtime_protocol::TaskStatus::Failed,
+            profile: Some("reader".to_owned()),
+            created_at: 10,
+            started_at: Some(20),
+            completed_at: Some(32),
+            exit_code: Some(17),
+            failure_domain: Some(willdeep_runtime_protocol::FailureDomain::Tool),
+        }))
+        .expect("serialize public task summary");
+        assert_eq!(value["id"], task_id.to_string());
+        assert_eq!(value["session_id"], session_id.to_string());
+        assert_eq!(value["agent_id"], agent_id.to_string());
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["elapsed_seconds"], 12);
+        assert_eq!(value["exit_code"], 17);
+        assert_eq!(value["failure_domain"], "tool");
+        for private in [
+            "workspace",
+            "prompt",
+            "command",
+            "arguments",
+            "output",
+            "error",
+            "report",
+            "path",
+            "config",
+            "model",
+            "pid",
+        ] {
+            assert!(
+                value.get(private).is_none(),
+                "private field {private} leaked"
+            );
+        }
+    }
+
+    #[test]
+    fn web_structured_logs_keep_relations_without_private_tool_payloads() {
+        let agent_id = uuid::Uuid::new_v4();
+        let task_id = uuid::Uuid::new_v4();
+        let tool = serde_json::to_value(willdeep_runtime_protocol::RuntimeTool {
+            id: uuid::Uuid::new_v4(),
+            session_id: Some(uuid::Uuid::new_v4()),
+            turn_id: Some(uuid::Uuid::new_v4()),
+            task_id,
+            agent_id,
+            name: "read_file".to_owned(),
+            status: willdeep_runtime_protocol::ToolStatus::Completed,
+            started_at_ms: 10,
+            completed_at_ms: Some(20),
+        })
+        .expect("serialize public tool");
+        assert_eq!(tool["agent_id"], agent_id.to_string());
+        assert_eq!(tool["task_id"], task_id.to_string());
+        for private in [
+            "arguments",
+            "params",
+            "output",
+            "error",
+            "workspace",
+            "path",
+        ] {
+            assert!(
+                tool.get(private).is_none(),
+                "private field {private} leaked"
+            );
+        }
+
+        let artifact = serde_json::to_value(willdeep_runtime_protocol::RuntimeArtifact {
+            id: uuid::Uuid::new_v4(),
+            kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+            session_id: None,
+            turn_id: None,
+            task_id,
+            agent_id,
+            title: "Workspace changes".to_owned(),
+            source_id: "snapshot-id".to_owned(),
+            item_count: 3,
+            created_at: 30,
+        })
+        .expect("serialize public artifact");
+        assert_eq!(artifact["agent_id"], agent_id.to_string());
+        assert_eq!(artifact["task_id"], task_id.to_string());
+        for private in ["workspace", "path", "report", "error"] {
+            assert!(
+                artifact.get(private).is_none(),
+                "private field {private} leaked"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_actions_require_the_target_in_the_selected_workspace_snapshot() {
         let approval_id = uuid::Uuid::new_v4();
         let question_id = uuid::Uuid::new_v4();
@@ -1360,6 +1797,7 @@ mod tests {
                 },
             ],
             agents: Vec::new(),
+            tasks: Vec::new(),
             tools: Vec::new(),
             artifacts: Vec::new(),
         };
@@ -1367,6 +1805,36 @@ mod tests {
         assert!(snapshot_has_question(&snapshot, question_id));
         assert!(!snapshot_has_approval(&snapshot, uuid::Uuid::new_v4()));
         assert!(!snapshot_has_agent(&snapshot, uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn resume_cursor_stays_inside_the_active_turn_event_window() {
+        assert_eq!(bounded_resume_cursor(None, 10, 20), 10);
+        assert_eq!(bounded_resume_cursor(Some(5), 10, 20), 10);
+        assert_eq!(bounded_resume_cursor(Some(15), 10, 20), 15);
+        assert_eq!(bounded_resume_cursor(Some(99), 10, 20), 20);
+        assert_eq!(bounded_resume_cursor(Some(1), 30, 20), 30);
+    }
+
+    #[test]
+    fn resume_stream_query_rejects_client_selected_runtime_scope() {
+        assert!(
+            serde_json::from_value::<ResumeStreamQuery>(serde_json::json!({
+                "after": 12,
+                "language": "zh-CN"
+            }))
+            .is_ok()
+        );
+        for private_scope in ["workspace", "turn_id", "task_id", "agent_id"] {
+            assert!(
+                serde_json::from_value::<ResumeStreamQuery>(serde_json::json!({
+                    "after": 12,
+                    (private_scope): uuid::Uuid::new_v4()
+                }))
+                .is_err(),
+                "resume query accepted client scope {private_scope}"
+            );
+        }
     }
 
     #[test]
@@ -1400,6 +1868,60 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<WebAgentSpawnAction>(serde_json::json!({
+                "workspace": "/allowed",
+                "session_id": uuid::Uuid::new_v4(),
+                "profile": "scout",
+                "prompt": "inspect the repository",
+                "workspace_root": "/attacker-selected"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn web_agent_spawn_accepts_only_bounded_read_only_profiles() {
+        let session_id = uuid::Uuid::new_v4();
+        let valid = serde_json::from_value::<WebAgentSpawnAction>(serde_json::json!({
+            "workspace": "/allowed",
+            "session_id": session_id,
+            "profile": "reader",
+            "prompt": "  read the architecture docs  ",
+            "label": "  architecture reader  "
+        }))
+        .expect("valid spawn body");
+        let (profile, prompt, label) = validate_agent_spawn(valid).expect("valid spawn action");
+        assert_eq!(profile, "reader");
+        assert_eq!(prompt, "read the architecture docs");
+        assert_eq!(label.as_deref(), Some("architecture reader"));
+
+        for profile in ["editor", "writer", "shell"] {
+            let action = WebAgentSpawnAction {
+                workspace: "/allowed".to_owned(),
+                session_id,
+                profile: profile.to_owned(),
+                prompt: "do work".to_owned(),
+                label: None,
+            };
+            assert!(validate_agent_spawn(action).is_err());
+        }
+        let empty_prompt = WebAgentSpawnAction {
+            workspace: "/allowed".to_owned(),
+            session_id,
+            profile: "deep".to_owned(),
+            prompt: "   ".to_owned(),
+            label: None,
+        };
+        assert!(validate_agent_spawn(empty_prompt).is_err());
+        let long_label = WebAgentSpawnAction {
+            workspace: "/allowed".to_owned(),
+            session_id,
+            profile: "scout".to_owned(),
+            prompt: "inspect".to_owned(),
+            label: Some("x".repeat(MAX_AGENT_LABEL_CHARS + 1)),
+        };
+        assert!(validate_agent_spawn(long_label).is_err());
     }
 
     #[test]

@@ -35,8 +35,24 @@ pub(crate) struct RuntimeSnapshot {
     pub attention: Vec<willdeep_core::AttentionItem>,
     pub gates: Vec<RemoteGate>,
     pub agents: Vec<RemoteAgent>,
+    pub tasks: Vec<RemoteTask>,
     pub tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     pub artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteTask {
+    pub id: uuid::Uuid,
+    pub session_id: Option<uuid::Uuid>,
+    pub turn_id: Option<uuid::Uuid>,
+    pub agent_id: Option<uuid::Uuid>,
+    pub status: willdeep_runtime_protocol::TaskStatus,
+    pub profile: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
 }
 
 #[derive(Clone)]
@@ -87,6 +103,15 @@ pub(crate) struct RemoteSessionState {
     pub id: uuid::Uuid,
     pub archived: bool,
     pub active: bool,
+    pub active_turn_id: Option<uuid::Uuid>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteActiveTurn {
+    pub session_id: uuid::Uuid,
+    pub turn_id: uuid::Uuid,
+    pub task_id: Option<uuid::Uuid>,
+    pub replay_after: u64,
 }
 
 pub(crate) async fn remote_session_states(home: &Path) -> Result<Vec<RemoteSessionState>> {
@@ -98,6 +123,7 @@ pub(crate) async fn remote_session_states(home: &Path) -> Result<Vec<RemoteSessi
             id: session.id,
             archived: session.status == willdeep_runtime_protocol::SessionStatus::Archived,
             active: session.active_turn_id.is_some(),
+            active_turn_id: session.active_turn_id,
         })
         .collect())
 }
@@ -110,10 +136,9 @@ pub(crate) async fn rename_remote_session(
     let state = ensure_running(home).await?;
     api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
-                "session.rename",
+            .rename_session(
                 &willdeep_runtime_protocol::RenameSessionParams { id, title },
-                None,
+                uuid::Uuid::new_v4(),
             )
             .await?,
     )?;
@@ -131,8 +156,7 @@ pub(crate) async fn fork_remote_session(
     let state = ensure_running(home).await?;
     let session = api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
-                "session.fork",
+            .fork_session(
                 &willdeep_runtime_protocol::ForkSessionParams {
                     id,
                     title,
@@ -140,7 +164,7 @@ pub(crate) async fn fork_remote_session(
                     provider_profile,
                     model,
                 },
-                None,
+                uuid::Uuid::new_v4(),
             )
             .await?,
     )?;
@@ -155,10 +179,9 @@ pub(crate) async fn set_remote_session_archived(
     let state = ensure_running(home).await?;
     api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
-                "session.archive",
+            .archive_session(
                 &willdeep_runtime_protocol::ArchiveSessionParams { id, archived },
-                None,
+                uuid::Uuid::new_v4(),
             )
             .await?,
     )?;
@@ -169,13 +192,12 @@ pub(crate) async fn delete_remote_session(home: &Path, id: uuid::Uuid) -> Result
     let state = ensure_running(home).await?;
     api_data(
         runtime_client(&state)?
-            .call::<_, serde_json::Value>(
-                "session.delete",
+            .delete_session(
                 &willdeep_runtime_protocol::DeleteSessionParams {
                     id,
                     confirmation: id,
                 },
-                None,
+                uuid::Uuid::new_v4(),
             )
             .await?,
     )?;
@@ -187,11 +209,7 @@ pub(crate) async fn export_remote_session(
     id: uuid::Uuid,
 ) -> Result<serde_json::Value> {
     let state = ensure_running(home).await?;
-    api_data(
-        runtime_client(&state)?
-            .call::<_, serde_json::Value>("session.export", &serde_json::json!({"id": id}), None)
-            .await?,
-    )
+    api_data(runtime_client(&state)?.export_session(id).await?)
 }
 
 pub(crate) async fn search_remote_sessions(
@@ -235,8 +253,7 @@ pub(crate) async fn ensure_runtime_session(
     let state = ensure_running(home).await?;
     let session = api_data(
         runtime_client(&state)?
-            .call::<_, willdeep_runtime_protocol::RuntimeSession>(
-                "session.create",
+            .create_session(
                 &willdeep_runtime_protocol::CreateSessionParams {
                     id: Some(id),
                     workspace: workspace.canonicalize()?.display().to_string(),
@@ -244,7 +261,7 @@ pub(crate) async fn ensure_runtime_session(
                     model,
                     title: Some(title),
                 },
-                Some(id),
+                id,
             )
             .await?,
     )?;
@@ -273,32 +290,10 @@ pub(crate) async fn submit_runtime_turn(
     let params = willdeep_runtime_protocol::SubmitTurnParams {
         session_id,
         turn_request_id: request_id,
-        prompt: prompt.clone(),
-        attachments: public_attachments.clone(),
+        prompt,
+        attachments: public_attachments,
     };
-    let turn = match client.submit_turn(&params, request_id).await {
-        Ok(response) => api_data(response)?,
-        Err(error) if error.status_code() == Some(404) => {
-            #[derive(Serialize)]
-            struct LegacyTurnRequest<'a> {
-                request_id: uuid::Uuid,
-                prompt: &'a str,
-                attachments: &'a [willdeep_runtime_protocol::MessageAttachment],
-            }
-            client
-                .post_json::<_, willdeep_runtime_protocol::RuntimeTurn>(
-                    &format!("/v1/sessions/{session_id}/turns"),
-                    &LegacyTurnRequest {
-                        request_id,
-                        prompt: &prompt,
-                        attachments: &public_attachments,
-                    },
-                )
-                .await
-                .context("submit Turn through the legacy Runtime Session endpoint")?
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let turn = api_data(client.submit_turn(&params, request_id).await?)?;
     Ok(RemoteRuntimeTurn { id: turn.id })
 }
 
@@ -310,6 +305,63 @@ pub(crate) async fn stop_remote_turn(home: &Path, id: uuid::Uuid) -> Result<()> 
             .await?,
     )?;
     Ok(())
+}
+
+pub(crate) async fn remote_active_turn(
+    home: &Path,
+    session_id: uuid::Uuid,
+) -> Result<Option<RemoteActiveTurn>> {
+    let state = ensure_running(home).await?;
+    let client = runtime_client(&state)?;
+    let session = api_data(client.session(session_id).await?)?;
+    let Some(turn_id) = session.active_turn_id else {
+        return Ok(None);
+    };
+    let turn = api_data(client.turn(turn_id).await?)?;
+    if turn.session_id != session_id {
+        bail!("Runtime active Turn does not belong to its Session")
+    }
+    let (task_id, replay_after) = if let Some(task_id) = turn.active_task_id {
+        let task = api_data(client.task(task_id).await?)?;
+        if task.session_id != Some(session_id) || task.turn_id != Some(turn_id) {
+            bail!("Runtime active Task does not belong to its Turn")
+        }
+        (Some(task_id), task.event_start_sequence.saturating_sub(1))
+    } else {
+        let replay_after = probe(&state).await?.event_sequence;
+        let refreshed_turn = api_data(client.turn(turn_id).await?)?;
+        if let Some(task_id) = refreshed_turn.active_task_id {
+            let task = api_data(client.task(task_id).await?)?;
+            if task.session_id != Some(session_id) || task.turn_id != Some(turn_id) {
+                bail!("Runtime active Task does not belong to its Turn")
+            }
+            (Some(task_id), task.event_start_sequence.saturating_sub(1))
+        } else {
+            (None, replay_after)
+        }
+    };
+    if api_data(client.session(session_id).await?)?.active_turn_id != Some(turn_id) {
+        return Ok(None);
+    }
+    Ok(Some(RemoteActiveTurn {
+        session_id,
+        turn_id,
+        task_id,
+        replay_after,
+    }))
+}
+
+pub(crate) async fn remote_latest_turn(
+    home: &Path,
+    session_id: uuid::Uuid,
+) -> Result<Option<willdeep_runtime_protocol::RuntimeTurn>> {
+    let state = ensure_running(home).await?;
+    let mut turns = api_data(runtime_client(&state)?.turns(session_id).await?)?;
+    if turns.iter().any(|turn| turn.session_id != session_id) {
+        bail!("Runtime returned a Turn owned by another Session")
+    }
+    turns.sort_by_key(|turn| turn.queue_sequence);
+    Ok(turns.pop())
 }
 
 pub(crate) async fn runtime_event_head(home: &Path) -> Result<u64> {
@@ -440,14 +492,20 @@ async fn follow_runtime_events_once(
             if let Some(session_id) = visible_tasks.get(&task_id) {
                 *session_id
             } else {
-                let task = authorized_get::<RuntimeTask>(&state, &format!("/v1/tasks/{task_id}"))
-                    .await
-                    .ok();
-                let session_id = task
-                    .as_ref()
-                    .filter(|task| task.workspace == workspace)
-                    .and_then(|task| task.session_id);
-                if task.is_some() {
+                let client = runtime_client(&state)?;
+                let (task_found, session_id) = match client.task(task_id).await {
+                    Ok(response) => match api_data(response) {
+                        Ok(task) => (
+                            true,
+                            (task.workspace.as_deref().map(Path::new) == Some(workspace))
+                                .then_some(task.session_id)
+                                .flatten(),
+                        ),
+                        Err(_) => (false, None),
+                    },
+                    Err(_) => (false, None),
+                };
+                if task_found {
                     visible_tasks.insert(task_id, session_id);
                 }
                 session_id
@@ -488,6 +546,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
                 attention: Vec::new(),
                 gates: Vec::new(),
                 agents: Vec::new(),
+                tasks: Vec::new(),
                 tools: Vec::new(),
                 artifacts: Vec::new(),
             });
@@ -520,6 +579,25 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         })
         .map(|task| task.id)
         .collect::<std::collections::HashSet<_>>();
+    let remote_tasks = tasks
+        .iter()
+        .filter(|task| visible_tasks.contains(&task.id))
+        .filter(|task| runtime_task_visible(task, now()))
+        .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
+        .map(|task| RemoteTask {
+            id: task.id,
+            session_id: task.session_id,
+            turn_id: task.turn_id,
+            agent_id: task.agent_id,
+            status: task.status,
+            profile: task.profile.clone(),
+            created_at: task.created_at,
+            started_at: task.started_at,
+            completed_at: task.completed_at,
+            exit_code: task.exit_code,
+            failure_domain: task.failure_domain,
+        })
+        .collect();
     let tools = api_data(
         runtime_client(&state)?
             .tools(&willdeep_runtime_protocol::ListToolsParams {
@@ -593,6 +671,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         attention,
         gates,
         agents,
+        tasks: remote_tasks,
         tools,
         artifacts,
     })
@@ -629,6 +708,30 @@ pub(crate) async fn retry_remote_agent_with_model(
             .await?,
     )?;
     Ok(())
+}
+
+pub(crate) async fn spawn_remote_agent(
+    home: &Path,
+    session_id: uuid::Uuid,
+    prompt: String,
+    profile: String,
+    label: Option<String>,
+) -> Result<RemoteAgent> {
+    let state = ensure_running(home).await?;
+    let agent = api_data(
+        runtime_client(&state)?
+            .spawn_agent(
+                &willdeep_runtime_protocol::SpawnAgentParams {
+                    session_id,
+                    prompt,
+                    profile: Some(profile),
+                    label,
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .await?,
+    )?;
+    Ok(remote_agent(agent))
 }
 
 pub(crate) async fn instruct_remote_agent(

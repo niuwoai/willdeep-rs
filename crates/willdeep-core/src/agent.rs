@@ -61,6 +61,16 @@ pub enum AgentEvent {
     CompressionCompleted {
         estimated_tokens: u64,
     },
+    BackgroundShellStarted {
+        id: String,
+    },
+    BackgroundShellCompleted {
+        id: String,
+        status: crate::BackgroundTaskStatus,
+        exit_code: Option<i32>,
+        elapsed_millis: u64,
+        output_bytes: usize,
+    },
     SubagentStarted {
         id: uuid::Uuid,
         profile: String,

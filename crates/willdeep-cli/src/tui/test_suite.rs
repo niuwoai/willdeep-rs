@@ -276,6 +276,23 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(rows[1].as_str()), 43);
     }
     #[test]
+    fn diff_rendering_expands_tabs_and_escapes_terminal_control_characters() {
+        let lines = diff_review_lines("+\tmodel\u{1b}[2J\u{7}", None);
+        let rendered = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "+   model\\u{1b}[2J\\u{7}");
+        assert!(!rendered.chars().any(char::is_control));
+
+        let rows = diff_side_by_side_rows("-\told\n+\tnew", 43);
+        assert!(rows[0].contains("-   old"));
+        assert!(rows[0].contains("+   new"));
+        assert!(!rows[0].chars().any(char::is_control));
+    }
+    #[test]
     fn diff_area_cycles_without_skipping_a_scope() {
         use crate::daemon::diff_review::DiffArea;
 
@@ -333,10 +350,12 @@ mod tests {
         assert_eq!(app.sidebar_selected, 0);
     }
     #[test]
-    fn focus_cycles_through_prompt_chat_and_sidebar() {
+    fn focus_cycles_through_prompt_chat_activity_and_sidebar() {
         let mut app = App::new(Vec::new(), Language::En);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPane::Chat);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPane::Activity);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPane::Sidebar);
         app.cycle_focus();
@@ -349,7 +368,8 @@ mod tests {
         let skills = SkillCatalog::default();
         app.sidebar_rect = Rect::new(80, 0, 20, 30);
         app.prompt_rect = Rect::new(0, 20, 80, 8);
-        app.transcript_rect = Rect::new(0, 0, 80, 20);
+        app.transcript_rect = Rect::new(0, 0, 80, 18);
+        app.activity_rect = Rect::new(0, 18, 80, 2);
 
         app.handle_mouse(85, 5, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Sidebar);
@@ -357,6 +377,8 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Prompt);
         app.handle_mouse(5, 5, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Chat);
+        app.handle_mouse(5, 18, &registry, &skills);
+        assert_eq!(app.focus, FocusPane::Activity);
     }
     #[test]
     fn clicking_sidebar_hits_toggles_sections_and_opens_task_detail() {
@@ -396,6 +418,45 @@ mod tests {
         assert_eq!(app.sidebar_scroll, 3);
         assert!(app.sidebar_manual_scroll);
     }
+
+    #[test]
+    fn sidebar_render_clamps_extreme_manual_scroll_without_underflow() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.sidebar_manual_scroll = true;
+        app.sidebar_scroll = usize::MAX;
+        app.runtime_agents
+            .extend((0..8).map(|index| crate::daemon::tui_bridge::RemoteAgent {
+                id: uuid::Uuid::new_v4(),
+                parent_id: None,
+                label: Some(format!("agent-{index}")),
+                background: true,
+                profile: Some("scout".to_owned()),
+                model: None,
+                status: RuntimeStatus::Done,
+                current_turn: 1,
+                current_tool: None,
+                total_tokens: None,
+                max_turns: None,
+                token_budget: None,
+                timeout_seconds: None,
+                report: None,
+                workspace: PathBuf::from("/workspace"),
+                worktree_branch: None,
+                dedicated_worktree: false,
+                created_at: 1,
+                completed_at: Some(2),
+            }));
+        let backend = ratatui::backend::TestBackend::new(24, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| sidebar::render_sidebar(frame, &mut app, frame.area()))
+            .unwrap();
+
+        assert_ne!(app.sidebar_scroll, usize::MAX);
+        assert!(app.sidebar_hits.iter().all(|(row, _)| *row < 6));
+    }
+
     #[test]
     fn sidebar_renders_runtime_agent_lifecycle_summary() {
         let mut app = App::new(Vec::new(), Language::En);
@@ -685,6 +746,7 @@ mod tests {
     #[test]
     fn help_documents_current_focus_and_sidebar_shortcuts() {
         assert_eq!(focus_label(FocusPane::Sidebar, Language::ZhCn), "状态栏");
+        assert_eq!(focus_label(FocusPane::Activity, Language::ZhCn), "活动");
         let help = help_content(Language::ZhCn);
         assert!(help.contains("Ctrl+W"));
         assert!(help.contains("Enter 详情"));
@@ -1365,6 +1427,47 @@ mod tests {
         );
         assert_eq!(diff_attention_action_for_key(KeyCode::Char('x')), None);
     }
+
+    #[test]
+    fn text_selection_mode_uses_escape_or_ctrl_s_without_treating_copy_as_exit() {
+        assert!(selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn diff_review_consumes_every_mouse_event_and_routes_wheel_to_the_modal() {
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::ScrollUp),
+            Some(DiffReviewMouseAction::ScrollUp)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::ScrollDown),
+            Some(DiffReviewMouseAction::ScrollDown)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::Down(MouseButton::Left)),
+            Some(DiffReviewMouseAction::Consume)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::Moved),
+            Some(DiffReviewMouseAction::Consume)
+        );
+        assert_eq!(
+            diff_review_mouse_action(false, MouseEventKind::ScrollDown),
+            None
+        );
+    }
+
     #[test]
     fn mouse_click_inserts_command_candidate() {
         let registry = BackgroundTaskRegistry::default();

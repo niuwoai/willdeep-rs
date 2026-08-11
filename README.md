@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc44`，支持：
+当前版本为 `0.21.0-rc59`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -24,23 +24,26 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - GitHub Actions 的三系统测试、Linux AMD64/ARM64 交叉测试、WSL ABI 烟测和 tag 自动发布。
 - some.im 纯文本模型通过同一账号下的视觉模型理解图片；
 - 上下文自动摘要压缩、Token/耗时状态和宽屏后台状态栏。
-- 后台 Shell Job 完成/失败自动回流主 Harness；
+- 后台 Shell Job 由同版本内部 Supervisor 托管，完成/失败自动回流主 Harness；父 Harness 断开或取消时关闭私有存活管道，Unix 终止独立进程组，避免留下命令子进程；
 - 四种可独立绑定模型的子 Agent Profile：scout、reader、deep、editor。
 - 子 Agent Profile 可配置 Token 总预算、执行超时和连续失败熔断；Runtime/TUI 显示轮次、Token 与时限策略。
 - Root/Child Agent 的 input/output/total Token 按身份累计，跨 Session Turn、Child 重试和 Daemon 重启保持。
-- Runtime 持久保存子 Agent 的有界最终报告；CLI `daemon agent` 与 TUI 详情层可审计查看。TUI Agent 详情可用键盘或鼠标补充指令、停止、重试、指定模型重试和查看 Worktree Diff；`/agent` 同步支持 `instruct`、`stop` 与 `retry [--model]`。
+- Runtime 持久保存子 Agent 的有界最终报告；CLI `daemon agent` 与 TUI 详情层可审计查看。TUI Agent 详情可用键盘或鼠标补充指令、停止、重试、指定模型重试和查看 Worktree Diff；TUI `/agent spawn scout|reader|deep <task>` 与 Web Runtime 侧栏均可在活动父会话中创建只读子 Agent。
 - Runtime 提供带内容指纹的 Workspace Diff 快照与文件内容 API；CLI 可脚本化查询，TUI `/diff` 可浏览文件、增删统计和着色 Unified Diff。
-- TUI Diff Review 支持 Unified/Side-by-side 切换、Combined/Staged/Unstaged 范围切换，以及当前文件内搜索和前后匹配跳转。
+- TUI Diff Review 支持 Unified/Side-by-side 切换、Combined/Staged/Unstaged 范围切换、当前文件内搜索和鼠标滚轮浏览；Diff 模态会独占鼠标事件，不会滚动或点击底层聊天区。Diff 内容在渲染前展开 Tab 并转义终端控制字符，退出时完整重绘，不会在聊天区留下残影。
 - Diff Review 支持接受、打回、请求修改和标记已审；安全撤销要求精确快照并二次确认，未跟踪内容移入可恢复回收区。
 - 常见前后台测试命令完成后自动把命令、退出码、结果和有界摘要绑定到当时 Diff 快照；疑似含凭据命令拒绝记录。
 - TUI Diff Review 可生成只读 Commit Preview，汇总提交消息、暂存/未暂存文件、分支、脱敏后的 Remote/推送目标和可选 Tag；敏感文件、疑似凭据、冲突、空暂存区或无效目标会明确阻止确认。
 - Runtime TUI 聊天区只显示用户消息和 AI 最终回复；轮次、Task/Agent ID、工具活动和提交状态仅进入活动状态层。
+- TUI 活动区与输入、聊天、状态栏一样支持鼠标点击聚焦和 `Ctrl+W` 焦点循环；聚焦后可用 Enter/Space 展开或收起工具活动。
 - Runtime 在可能写入工作区的主/子 Agent 工具调用前后采集内容指纹，将真实变化路径绑定到 Session、Turn、Task、Agent 和 Tool；CLI `daemon diff-attributions` 与 TUI Diff Review 可沿快照链查看归属，调用窗口外已有脏文件不会被误算。
 - TUI Inbox 的已完成 Runtime 任务仅保留 5 分钟；点击或 Enter 打开等待审批的任务时，直接进入可执行 Allow、Disallow、Always Allow 的审批框。
 - Runtime 持久 Workspace 注册表、默认工作区切换与受 Token 保护的 CRUD API；每个 Workspace 保存独立访问策略、默认 Provider、Skill/MCP 允许列表。
 - Workspace 的 `read-only` 策略由 Runtime 服务端注入，客户端无法自报可写；Shell、文件写入、Worktree 创建、MCP 和 Editor 子 Agent 会在审批前被拒绝。
 - TUI 新增 `/workspace list` 与 `/workspace switch <id>`；切换后重载目标 Session、Workspace 状态、Skills、Runtime 事件跟随和右栏视图，原工作区后台任务继续由 Daemon 运行。
 - Web 工作区选择器读取 Runtime 注册表的名称、当前项和访问模式，同时继续与 `--workspace/--web-workspace` 启动白名单取交集；被移除或未授权的目录不会因浏览器请求重新开放。
+- Web Runtime 侧栏可查看进行中与最近五分钟完成的后台 Task，并打开 Agent/Task 详情；详情按 Agent/Task 关联工具状态、耗时、退出码、失败域和 Diff 产物，结构化日志不包含 Workspace、Prompt、命令、工具参数、输出、报告、路径、模型、配置、PID 或内部错误。
+- Web 聊天区使用紧凑消息、工具轨迹和单行思考间距；Composer 聚焦时只显示一条外框，不叠加 Textarea 内部轮廓。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
 - `willdeep daemon start/status/stop/logs/upgrade` 跨平台本地 Runtime 控制面；Upgrade 先排空活跃任务再由当前版本接管，不取消运行中的 Turn。
 - `willdeep doctor [--json] [--bundle PATH]` 离线检查配置、Provider 完整性、工作区、Git、内嵌 Web 资源与 Runtime 版本/传输状态，并可导出不含日志和本地路径的私有脱敏 ZIP。
@@ -218,7 +221,7 @@ WillDeep 会加载 `~/.willdeep/CLAUDE.md`，以及工作区根的 `PRODUCT_OVER
 willdeep --web --workspace /path/to/project
 ```
 
-浏览器打开 `http://127.0.0.1:9847`。前端采用 React + Chakra UI + Vite 纯客户端渲染，用户消息立即显示；单行工作状态吸附在 Composer 上方，每轮工具调用在聊天区精简保留。发送按钮在运行时切换为停止按钮，断开 SSE 的同时终止对应 Harness。Composer 支持粘贴长文本和图片、发送前删除、`/` 命令候选及 `$` 技能候选。
+浏览器打开 `http://127.0.0.1:9847`。前端采用 React + Chakra UI + Vite 纯客户端渲染，用户消息立即显示；单行工作状态吸附在 Composer 上方，每轮工具调用在聊天区精简保留。发送按钮在运行时切换为停止按钮并精确终止对应 Runtime Turn。浏览器保存当前工作区最后会话及每个活动 Turn 的事件游标；刷新会先重载持久历史，再从 `GET /api/sessions/{id}/stream?after=<cursor>` 重新附着，普通网络断开按有界指数退避续接，不重复提交 Prompt。Composer 支持粘贴长文本和图片、发送前删除、`/` 命令候选及 `$` 技能候选，并在候选层提供独立技能搜索框。Web 历史列表只展示已经收到用户输入或仍在运行的会话；Runtime 摘要默认收起，侧栏 Footer 从服务端健康接口显示当前版本。
 
 允许多个明确授权的工作区：
 
@@ -242,7 +245,7 @@ willdeep --profile some-im --workspace .
 | 按键 | 行为 |
 |---|---|
 | `F1`（空 Prompt 时也可按 `?`） | 打开全局快捷键帮助；`F1`、`?` 或 `Esc` 关闭 |
-| `Ctrl+W` | 在 Prompt、聊天区与右侧状态栏间循环切换焦点 |
+| `Ctrl+W` | 在 Prompt、聊天区、活动区与右侧状态栏间循环切换焦点 |
 | `Ctrl+B` | 显示或隐藏右侧状态栏；窄终端中打开覆盖层 |
 | `Ctrl+F` | 搜索聊天记录；`Enter`/`Shift+Enter` 前后跳转，`Esc` 关闭 |
 | `Ctrl+P` | 搜索命令、Skills、会话、Agent/任务和工作区文件 |
@@ -253,7 +256,7 @@ willdeep --profile some-im --workspace .
 | 鼠标滚轮 | 浏览聊天历史；回到底部后恢复自动跟随 |
 | `Ctrl+Home` / `Ctrl+End` | 跳到聊天顶部 / 回到底部并恢复自动跟随 |
 | `Ctrl+O` | 展开或收起最近 Tool Use 明细 |
-| `Ctrl+S` | 切换文本选择模式；启用后可拖选聊天文字并使用终端复制快捷键 |
+| `Ctrl+S` | 进入终端原生文本选择模式；拖选聊天文字后用 `Cmd+C` / `Ctrl+Shift+C` 复制，按 `Esc` 返回交互模式 |
 | `Enter` | 发送 Prompt |
 | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | 插入换行 |
 | `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
@@ -369,7 +372,7 @@ enabled = true
 
 `willdeep daemon worktrees-audit` 会列出 Active、Reviewable、Merged、Clean、Quarantined、Missing 和 Unknown 状态。只有终态且干净，或已按精确 Child 快照完成合并的 Worktree 才可执行 `quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_ID> --yes`。该操作不会删除目录、文件或分支，而是通过 `git worktree move` 将完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`；状态持久化失败时会尝试原路回滚。
 
-统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc31` 已覆盖全部 11 类公开对象 DTO，并提供真实 `agent.spawn`。外部 Spawn 只接受活跃 Session、Prompt、可选标签和 `scout`/`reader`/`deep` 只读 Profile；父 Agent、Task 与 Workspace 由 Runtime 推导，不能提交路径或写目标。共享 Rust Client 提供 Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff Review 与 Worktree Review/Merge/Audit/Quarantine 的类型化观察/控制方法；相关 CLI/TUI bridge 已迁移。统一 API 错误可通过 `ApiResponse::into_result()` 保留错误码和重试语义。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
+统一控制协议从 `v0.21.0-rc1` 起由独立 `willdeep-runtime-protocol` crate 定义。`v0.21.0-rc59` 已覆盖全部 11 类公开对象 DTO、Runtime 状态与删除/移除结果，并为所有公开操作提供类型化 Rust Client 方法。外部 Spawn 只接受活跃 Session、Prompt、可选标签和 `scout`/`reader`/`deep` 只读 Profile；父 Agent、Task 与 Workspace 由 Runtime 推导，不能提交路径或写目标。CLI/TUI 的 Workspace、Session、Turn、Task、Agent、审批、问答和 Diff 管理统一使用共享 Client，不再手写操作名、参数 JSON、旧资源 URL 或 404 兼容回退；修改操作携带显式 Request ID 并进入跨重启幂等日志。进程内 Harness 的 Task、Interaction、Agent 命令及 Daemon 生命周期使用带内部标记的 `/v1/internal` 私有传输，不属于公开协议。完整契约见 [`docs/RUNTIME_CONTROL_API.md`](docs/RUNTIME_CONTROL_API.md)。
 
 各工种可绑定不同模型：
 

@@ -15,24 +15,15 @@ pub(super) async fn control_agent(
     kind: AgentCommandKind,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let action = match kind {
-        AgentCommandKind::Stop => "stop",
-        AgentCommandKind::Retry => "retry",
-        AgentCommandKind::Instruct => "instruct",
-        AgentCommandKind::Spawn => "spawn",
+    let client = runtime_client(&state)?;
+    let command = match kind {
+        AgentCommandKind::Stop => client.stop_agent(id, uuid::Uuid::new_v4()).await?,
+        AgentCommandKind::Retry => client.retry_agent(id, uuid::Uuid::new_v4()).await?,
+        AgentCommandKind::Instruct | AgentCommandKind::Spawn => {
+            bail!("Agent command must use its dedicated Runtime Client method")
+        }
     };
-    let response = client()
-        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Agent {action}: {}",
-            response.text().await?
-        );
-    }
-    let command: AgentCommand = response.json().await?;
+    let command = command.into_result()?;
     println!(
         "agent_command\tid={}\tagent={}\taction={:?}\tstatus={:?}",
         command.id, command.agent_id, command.kind, command.status
@@ -46,24 +37,16 @@ pub(super) async fn instruct_agent(home: &Path, id: uuid::Uuid, message: String)
         bail!("Agent instruction must contain 1 to 16384 bytes");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/agents/{id}/instructions",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&AgentInstructionRequest {
-            message: message.to_owned(),
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Agent instruction: {}",
-            response.text().await?
-        );
-    }
-    let command: AgentCommand = response.json().await?;
+    let command = runtime_client(&state)?
+        .prompt_agent(
+            &willdeep_runtime_protocol::AgentPromptParams {
+                id,
+                message: message.to_owned(),
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?
+        .into_result()?;
     println!(
         "agent_command\tid={}\tagent={}\taction=instruct\tstatus={:?}",
         command.id, command.agent_id, command.status
@@ -209,7 +192,7 @@ pub(super) async fn agent_commands_handler(
     headers: HeaderMap,
     AxumPath(task_id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     if state.tasks.get(task_id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -226,7 +209,7 @@ pub(super) async fn resolve_agent_command_handler(
     AxumPath((task_id, command_id)): AxumPath<(uuid::Uuid, uuid::Uuid)>,
     Json(resolution): Json<ResolveAgentCommand>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     let command = state
         .agent_commands
         .resolve(task_id, command_id, resolution)
@@ -310,25 +293,22 @@ pub(crate) fn start_agent_command_watcher(
     let Some(connection) = connection.cloned() else {
         return Ok(None);
     };
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(3))
-        .build()?;
+    let client = internal_transport::InternalRuntimeClient::new(
+        connection.url.clone(),
+        connection.token.clone(),
+    )?;
     let task = tokio::spawn(async move {
         let mut resolved = HashMap::<uuid::Uuid, ResolveAgentCommand>::new();
         loop {
-            let response = client
-                .get(format!(
-                    "{}/v1/tasks/{}/agent-commands",
-                    connection.url, connection.task_id
-                ))
-                .header(TOKEN_HEADER, &connection.token)
-                .send()
-                .await;
-            if let Ok(response) = response
-                && response.status().is_success()
-                && let Ok(commands) = response.json::<Vec<AgentCommand>>().await
-            {
+            let commands = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.get::<Vec<AgentCommand>>(&format!(
+                    "/v1/internal/tasks/{}/agent-commands",
+                    connection.task_id
+                )),
+            )
+            .await;
+            if let Ok(Ok(commands)) = commands {
                 for command in commands {
                     let resolution = if let Some(resolution) = resolved.get(&command.id) {
                         resolution.clone()
@@ -339,16 +319,17 @@ pub(crate) fn start_agent_command_watcher(
                         resolved.insert(command.id, value.clone());
                         value
                     };
-                    if let Ok(response) = client
-                        .post(format!(
-                            "{}/v1/tasks/{}/agent-commands/{}/resolve",
-                            connection.url, connection.task_id, command.id
-                        ))
-                        .header(TOKEN_HEADER, &connection.token)
-                        .json(&resolution)
-                        .send()
-                        .await
-                        && response.status().is_success()
+                    if let Ok(Ok(_)) = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        client.post::<_, AgentCommand>(
+                            &format!(
+                                "/v1/internal/tasks/{}/agent-commands/{}/resolve",
+                                connection.task_id, command.id
+                            ),
+                            &resolution,
+                        ),
+                    )
+                    .await
                     {
                         resolved.remove(&command.id);
                     }
@@ -419,12 +400,14 @@ async fn apply_command(
 pub(super) struct AgentCommandStore {
     path: PathBuf,
     commands: Mutex<HashMap<uuid::Uuid, AgentCommand>>,
+    recovered_after_restart: Mutex<Vec<AgentCommand>>,
 }
 
 impl AgentCommandStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut commands = load_commands(&path)?;
         let mut changed = false;
+        let mut recovered_after_restart = Vec::new();
         for command in commands.values_mut() {
             if command.status == AgentCommandStatus::Pending {
                 command.status = AgentCommandStatus::Rejected;
@@ -434,6 +417,7 @@ impl AgentCommandStore {
                 command.profile = None;
                 command.label = None;
                 command.model = None;
+                recovered_after_restart.push(command.clone());
                 changed = true;
             }
         }
@@ -443,7 +427,16 @@ impl AgentCommandStore {
         Ok(Self {
             path,
             commands: Mutex::new(commands),
+            recovered_after_restart: Mutex::new(recovered_after_restart),
         })
+    }
+
+    pub fn take_recovered_after_restart(&self) -> Result<Vec<AgentCommand>> {
+        let mut recovered = self
+            .recovered_after_restart
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime recovered Agent command index lock poisoned"))?;
+        Ok(std::mem::take(&mut *recovered))
     }
 
     pub fn enqueue(
