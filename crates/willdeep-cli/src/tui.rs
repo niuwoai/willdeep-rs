@@ -319,6 +319,7 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    app.goal = session.goal.clone();
     if session.runtime_event_cursor == 0 {
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
             .await
@@ -746,7 +747,13 @@ async fn event_loop(
                                 continue;
                             }
                             let runtime_alias=prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ");
-                            if !runtime_alias&&app.handle_slash_command(&prompt,&runtime.skills){continue;}
+                            if !runtime_alias {
+                                let previous_goal=app.goal.clone();
+                                if app.handle_slash_command(&prompt,&runtime.skills){
+                                    if app.goal!=previous_goal{session.goal=app.goal.clone();store.save(session)?;}
+                                    continue;
+                                }
+                            }
                             let PromptExecution::Runtime(remote_prompt)=prompt_execution(&prompt) else {unreachable!("local prompts were handled above")};
                             match runtime_ui::submit_turn(&mut app,session,store,runtime,remote_prompt).await {
                                 Ok(())=>app.notice=Some(language.text("AI 正在处理…","AI is working…","AI が処理しています…").to_owned()),
@@ -901,6 +908,7 @@ impl App {
         self.attachments.clear();
         self.selected_attachment = 0;
         self.notice = None;
+        self.goal = session.goal.clone();
         self.transient_thought = None;
         self.progress_log.clear();
         self.search = None;

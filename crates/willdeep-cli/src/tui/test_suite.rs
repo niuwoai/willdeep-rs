@@ -59,6 +59,7 @@ mod tests {
             Message::assistant("target answer", Vec::new()),
         ];
         target.attention_read.insert("read-item".to_owned());
+        target.goal = Some("persisted target goal".to_owned());
         let mut app = App::new(vec!["old session output".to_owned()], Language::En);
         app.attachments.push(DraftAttachment {
             message: MessageAttachment::Text {
@@ -77,6 +78,7 @@ mod tests {
         assert!(app.attachments.is_empty());
         assert!(app.transient_thought.is_none());
         assert!(app.attention_read.contains("read-item"));
+        assert_eq!(app.goal.as_deref(), Some("persisted target goal"));
         assert_eq!(app.focus, FocusPane::Prompt);
     }
     #[tokio::test]

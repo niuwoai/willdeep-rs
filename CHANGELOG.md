@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0-rc34] - 2026-08-11
+
+### Changed
+
+- TUI `/goal <目标>` 与 `/goal off` 现在把 Goal 写入当前 Core Session；重启、同工作区切换 Session 或切换 Workspace 后会恢复各自的 Goal。
+- 旧版 Session 缺少 Goal 字段时按未设置处理，无需破坏性迁移；Goal 仍只在发送 Prompt 时注入，不会伪装成聊天消息。
+
 ## [0.21.0-rc33] - 2026-08-11
 
 ### Added

@@ -28,6 +28,8 @@ pub struct Session {
     pub runtime_event_cursor: u64,
     #[serde(default)]
     pub runtime_managed: bool,
+    #[serde(default)]
+    pub goal: Option<String>,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
@@ -48,6 +50,7 @@ impl Session {
             attention_read: BTreeSet::new(),
             runtime_event_cursor: 0,
             runtime_managed: false,
+            goal: None,
             swift_source: None,
         }
     }
@@ -221,6 +224,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         attention_read: BTreeSet::new(),
         runtime_event_cursor: 0,
         runtime_managed: false,
+        goal: None,
         swift_source: Some(path.to_path_buf()),
     })
 }
@@ -259,6 +263,7 @@ mod tests {
         let store = SessionStore::new(&root);
         let mut session = Session::new(root.clone(), None, "hello session");
         session.config = Some(root.join("config.toml"));
+        session.goal = Some("finish the migration".to_owned());
         session.messages.push(Message::user_with_attachments(
             "hello",
             vec![crate::MessageAttachment::Image {
@@ -272,6 +277,7 @@ mod tests {
         store.save(&mut session).unwrap();
         let loaded = store.load(session.id).unwrap();
         assert_eq!(loaded.config, session.config);
+        assert_eq!(loaded.goal, session.goal);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);
         assert!(loaded.attention_read.is_empty());
