@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.21.0-rc30] - 2026-08-11
+
+### Added
+
+- `willdeep run` 默认通过持久 Runtime 创建或续接 Session/Turn，断开客户端不再中止任务；`--local` 保留显式进程内兼容入口。
+- Runtime Task 公共 DTO 新增可向后兼容的失败域，用于保持 Provider、策略与 Harness/Tool 的稳定 CLI 退出码。
+- 新增真实二进制、隔离 Runtime Daemon 与回环 Mock Provider 组成的 Headless 进程级端到端测试。
+
+### Fixed
+
+- 修复活跃 Runtime 追加事件时，控制 API 偶发读取到未完成 NDJSON 末行并误报内部错误的竞态。
+- Headless 客户端在判断 Turn 终态前按游标读完全部事件页，避免高并发时遗漏生命周期事件或完成元数据。
+
+### Security
+
+- 进程级 API Key、API Base 和临时 Harness 参数不写入 Runtime Task；需要这些覆盖时自动保留本地执行路径。
+- Ctrl+C 仅停止本次 Headless 调用提交的精确 Turn，不猜测或停止其他 Session 的任务。
+
 ## [0.21.0-rc29] - 2026-08-11
 
 ### Added

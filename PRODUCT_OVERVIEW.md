@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc29
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc30
 
 ## 项目简介
 
@@ -16,7 +16,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 多轮 Tool Call Harness；
 - 工作区路径边界和写操作审批；
 - 人类输出与 NDJSON 自动化输出；
-- `willdeep run` 支持 Prompt/stdin、文本与图片附件、Session 续接、text/JSON/NDJSON、静默模式和稳定退出码；
+- `willdeep run` 默认通过持久 Runtime 执行，支持 Prompt/stdin、文本与图片附件、Session 续接、断开后继续、text/JSON/NDJSON、静默模式和稳定退出码；`--local` 保留显式进程内兼容入口；
 - Bash、Zsh、Fish、PowerShell 补全和 roff man page 从同一 Clap 命令树生成；
 - 顶层 `willdeep session list/get/turns/stop` 查询持久会话并精确停止其 active Turn；
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
@@ -52,8 +52,10 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 右栏通过统一 API 显示当前 Workspace 的结构化 Tool/Artifact 数量、运行态和最近工具，不从聊天文本反推持久状态；
 - Web 侧栏通过 Workspace 白名单约束的 Activity API 周期刷新结构化 Tool/Artifact 摘要，支持中英日显示；
 - Runtime 事件以 NDJSON 和单调序号持久化，`attach --after` 支持按游标补读并安全分离客户端；
+- Runtime 事件日志读写使用同一互斥边界，活跃追加期间的控制 API 不会读取到未完成的 NDJSON 末行；
 - Runtime 提供受 Token 保护的 SSE 事件流，按游标分页补历史后切换实时广播；慢客户端从持久日志恢复，TUI 长连接消费并对旧 Daemon 保留轮询降级；
 - 非交互 Harness 可通过 Runtime 提交、查询和取消；Daemon 直接持有进程内 Harness Future，并把模型输出、session_id 和终态写入可续传事件流，不再为每个 Turn 启动 CLI 子进程；
+- Headless CLI 默认创建或续接同一 Runtime Session/Turn，按游标分页追平脱敏持久事件并按失败域维持自动化退出码；进程级敏感覆盖保守留在 `--local` 路径；
 - CLI 与 Runtime 共用 Provider、视觉降级、审批、Skills、MCP、Tools、子 Agent Profile、会话写入和后台结果回流的 Harness Factory；Agent 事件直接写入 Runtime EventLog，不经过 stdout 文本中转；
 - Runtime 使用带心跳的单实例租约锁协调并发启动；异常退出后一次启动请求可在旧租约过期后安全接管，重启时将遗留 Running/Waiting Task、Turn、Agent 标记为 Interrupted、取消 Pending Interaction，并补写可续传恢复事件；
 - Runtime 优雅停止会先取消并收敛进程内 Harness Future，再关闭 HTTP Server，等待审批或回答的请求不会阻塞 Daemon 退出；

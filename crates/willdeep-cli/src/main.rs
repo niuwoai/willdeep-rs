@@ -231,6 +231,10 @@ struct RunArgs {
     /// Suppress successful output. Errors still use stderr and a non-zero exit code.
     #[arg(long)]
     quiet: bool,
+
+    /// Use the legacy in-process Harness instead of the persistent Runtime.
+    #[arg(long)]
+    local: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -280,6 +284,28 @@ async fn main() {
 #[derive(Debug)]
 struct RunInputError(String);
 
+#[derive(Debug)]
+struct HeadlessRuntimeExecutionError(daemon::HeadlessRuntimeStatus);
+
+impl std::fmt::Display for HeadlessRuntimeExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self.0 {
+            daemon::HeadlessRuntimeStatus::WaitingApproval => {
+                "Runtime Turn is waiting for approval; resolve it with `willdeep daemon pending`"
+            }
+            daemon::HeadlessRuntimeStatus::WaitingAnswer => {
+                "Runtime Turn is waiting for an answer; resolve it with `willdeep daemon pending`"
+            }
+            daemon::HeadlessRuntimeStatus::Failed(_) => "Runtime Turn failed",
+            daemon::HeadlessRuntimeStatus::Cancelled => "Runtime Turn was cancelled",
+            daemon::HeadlessRuntimeStatus::Interrupted => "Runtime Turn was interrupted",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for HeadlessRuntimeExecutionError {}
+
 impl std::fmt::Display for RunInputError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
@@ -321,7 +347,52 @@ fn stable_exit_code(error: &anyhow::Error) -> i32 {
             _ => 5,
         };
     }
+    if let Some(error) = error.downcast_ref::<HeadlessRuntimeExecutionError>() {
+        return match error.0 {
+            daemon::HeadlessRuntimeStatus::WaitingApproval
+            | daemon::HeadlessRuntimeStatus::WaitingAnswer
+            | daemon::HeadlessRuntimeStatus::Failed(Some(
+                willdeep_runtime_protocol::FailureDomain::Policy,
+            )) => 4,
+            daemon::HeadlessRuntimeStatus::Failed(Some(
+                willdeep_runtime_protocol::FailureDomain::Provider,
+            )) => 3,
+            _ => 5,
+        };
+    }
     1
+}
+
+fn runtime_failure_domain(error: &anyhow::Error) -> willdeep_runtime_protocol::FailureDomain {
+    use willdeep_runtime_protocol::FailureDomain;
+
+    if error
+        .downcast_ref::<willdeep_core::provider::ProviderError>()
+        .is_some()
+    {
+        return FailureDomain::Provider;
+    }
+    if let Some(error) = error.downcast_ref::<willdeep_core::AgentError>() {
+        return match error {
+            willdeep_core::AgentError::Provider(_) => FailureDomain::Provider,
+            willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::ApprovalDenied(_))
+            | willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::ReadOnlyPolicy(_))
+            | willdeep_core::AgentError::Tool(willdeep_core::tools::ToolError::OutsideWorkspace(
+                _,
+            )) => FailureDomain::Policy,
+            willdeep_core::AgentError::Tool(_) => FailureDomain::Tool,
+            _ => FailureDomain::Harness,
+        };
+    }
+    if let Some(error) = error.downcast_ref::<willdeep_core::tools::ToolError>() {
+        return match error {
+            willdeep_core::tools::ToolError::ApprovalDenied(_)
+            | willdeep_core::tools::ToolError::ReadOnlyPolicy(_)
+            | willdeep_core::tools::ToolError::OutsideWorkspace(_) => FailureDomain::Policy,
+            _ => FailureDomain::Tool,
+        };
+    }
+    FailureDomain::Internal
 }
 
 async fn run() -> Result<()> {
@@ -498,6 +569,24 @@ async fn run() -> Result<()> {
         .unwrap_or_default();
 
     let interactive_tui = prompt.is_none() && std::io::stdin().is_terminal() && !cli.no_tui;
+    if should_use_headless_runtime(
+        &cli,
+        run_args.as_ref(),
+        interactive_tui,
+        web_input.is_some(),
+    ) {
+        let prompt = prompt.context("provide a prompt argument or pipe one on stdin")?;
+        return run_with_runtime(
+            &cli,
+            &home,
+            &store,
+            resumed,
+            prompt,
+            run_attachments,
+            run_args.as_ref(),
+        )
+        .await;
+    }
     let (tui_tx, tui_rx) = tui::channel();
     let relay_bridge = mobile::RelayBridge::new();
     let frontend =
@@ -604,6 +693,134 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn should_use_headless_runtime(
+    cli: &Cli,
+    run_args: Option<&RunArgs>,
+    interactive_tui: bool,
+    web_bridge: bool,
+) -> bool {
+    if interactive_tui || web_bridge || run_args.is_some_and(|args| args.local) {
+        return false;
+    }
+    // These process-local overrides are intentionally not serialized into the
+    // Runtime task store. Use TOML profiles for persistent Runtime execution,
+    // or --local when an ephemeral override is required.
+    cli.api_base.is_none()
+        && cli.api_key.is_none()
+        && cli.provider.is_none()
+        && cli.api.is_none()
+        && !cli.full_auto
+        && cli.max_turns.is_none()
+        && cli.max_output_tokens.is_none()
+        && cli.language.is_none()
+}
+
+async fn run_with_runtime(
+    cli: &Cli,
+    home: &std::path::Path,
+    store: &willdeep_core::SessionStore,
+    resumed: Option<willdeep_core::Session>,
+    prompt: String,
+    attachments: Vec<willdeep_core::MessageAttachment>,
+    run_args: Option<&RunArgs>,
+) -> Result<()> {
+    let workspace = harness::resolve_workspace(cli, resumed.as_ref())?;
+    let mut session = resumed.unwrap_or_else(|| {
+        willdeep_core::Session::new(workspace.clone(), cli.profile.clone(), &prompt)
+    });
+    if session.config.is_none() {
+        session.config = Some(cli.config.clone().unwrap_or(config::default_config_path()?));
+    }
+    session.runtime_managed = true;
+    store.save(&mut session)?;
+
+    let quiet = run_args.is_some_and(|args| args.quiet || args.output == RunOutput::Json);
+    let machine_events = cli.json || run_args.is_some_and(|args| args.output == RunOutput::Ndjson);
+    let result = daemon::execute_headless_turn(
+        home,
+        daemon::HeadlessRuntimeRequest {
+            session_id: session.id,
+            workspace,
+            profile: session.profile.clone().or_else(|| cli.profile.clone()),
+            model: cli.model.clone(),
+            title: session.title.clone(),
+            prompt,
+            attachments,
+        },
+        |event| emit_headless_runtime_event(event, machine_events, quiet),
+    )
+    .await?;
+    let outcome =
+        result.map_err(|status| anyhow::Error::new(HeadlessRuntimeExecutionError(status)))?;
+    if let Some(args) = run_args {
+        match args.output {
+            RunOutput::Text if !args.quiet => println!("{}", outcome.final_text),
+            RunOutput::Json | RunOutput::Ndjson => println!(
+                "{}",
+                completion_json_values(&outcome.final_text, outcome.turns, outcome.session_id)
+            ),
+            RunOutput::Text => {}
+        }
+    } else if cli.json {
+        println!(
+            "{}",
+            completion_json_values(&outcome.final_text, outcome.turns, outcome.session_id)
+        );
+    } else {
+        println!("{}", outcome.final_text);
+    }
+    Ok(())
+}
+
+fn emit_headless_runtime_event(event: serde_json::Value, machine: bool, quiet: bool) {
+    if quiet {
+        return;
+    }
+    if machine {
+        println!("{event}");
+        return;
+    }
+    let kind = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("runtime");
+    match kind {
+        "turn_started" => {
+            if let Some(turn) = event.get("turn").and_then(serde_json::Value::as_u64) {
+                eprintln!("[turn {turn}]");
+            }
+        }
+        "tool_requested" => eprintln!(
+            "[tool] {}",
+            event
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        "tool_completed" => eprintln!(
+            "[tool:{}] {}",
+            if event
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "error"
+            } else {
+                "done"
+            },
+            event
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        "compression_started" => eprintln!("[context] compressing"),
+        "compression_completed" => eprintln!("[context] compressed"),
+        "subagent_started" => eprintln!("[subagent] started"),
+        "subagent_completed" => eprintln!("[subagent] finished"),
+        _ => {}
+    }
+}
+
 fn generate_completions(shell: clap_complete::Shell) -> Result<()> {
     let mut command = Cli::command();
     let name = command.get_name().to_owned();
@@ -618,10 +835,18 @@ fn generate_man_page() -> Result<()> {
 }
 
 fn completion_json(outcome: &harness::HarnessOutcome, session_id: uuid::Uuid) -> serde_json::Value {
+    completion_json_values(&outcome.final_text, outcome.turns, session_id)
+}
+
+fn completion_json_values(
+    final_text: &str,
+    turns: usize,
+    session_id: uuid::Uuid,
+) -> serde_json::Value {
     serde_json::json!({
         "type": "completed",
-        "turns": outcome.turns,
-        "text": outcome.final_text,
+        "turns": turns,
+        "text": final_text,
         "session_id": session_id
     })
 }
@@ -1254,6 +1479,44 @@ mod tests {
     }
 
     #[test]
+    fn headless_run_defaults_to_runtime_and_keeps_secret_overrides_local() {
+        let runtime = Cli::try_parse_from(["willdeep", "run", "inspect"]).unwrap();
+        let Some(CliCommand::Run(runtime_args)) = runtime.command.as_ref() else {
+            panic!("run command");
+        };
+        assert!(should_use_headless_runtime(
+            &runtime,
+            Some(runtime_args),
+            false,
+            false
+        ));
+
+        let local = Cli::try_parse_from(["willdeep", "run", "--local", "inspect"]).unwrap();
+        let Some(CliCommand::Run(local_args)) = local.command.as_ref() else {
+            panic!("run command");
+        };
+        assert!(!should_use_headless_runtime(
+            &local,
+            Some(local_args),
+            false,
+            false
+        ));
+
+        let secret =
+            Cli::try_parse_from(["willdeep", "run", "--api-key", "not-serialized", "inspect"])
+                .unwrap();
+        let Some(CliCommand::Run(secret_args)) = secret.command.as_ref() else {
+            panic!("run command");
+        };
+        assert!(!should_use_headless_runtime(
+            &secret,
+            Some(secret_args),
+            false,
+            false
+        ));
+    }
+
+    #[test]
     fn top_level_session_commands_parse_stable_targets() {
         let id = uuid::Uuid::new_v4();
         for action in ["get", "turns", "stop"] {
@@ -1346,6 +1609,20 @@ mod tests {
             5
         );
         assert_eq!(stable_exit_code(&anyhow::anyhow!("unknown")), 1);
+        assert_eq!(
+            stable_exit_code(&anyhow::Error::new(HeadlessRuntimeExecutionError(
+                daemon::HeadlessRuntimeStatus::Failed(Some(
+                    willdeep_runtime_protocol::FailureDomain::Provider
+                ))
+            ))),
+            3
+        );
+        assert_eq!(
+            stable_exit_code(&anyhow::Error::new(HeadlessRuntimeExecutionError(
+                daemon::HeadlessRuntimeStatus::WaitingApproval
+            ))),
+            4
+        );
     }
 
     #[test]

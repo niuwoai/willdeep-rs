@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc29
+> 当前实施版本：v0.21.0-rc30
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -224,6 +224,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
+v0.21.0-rc30（已完成）：Headless `willdeep run` 默认创建或续接同一持久 Runtime Session/Turn，按游标分页追平脱敏事件并等待真实终态；`--local` 保留显式进程内兼容入口，进程级凭据和临时 Provider/Harness 覆盖不会序列化到 Runtime。Runtime Task 公共 DTO 增加向后兼容的失败域，CLI 继续稳定区分 Provider、策略和 Harness/Tool 退出码；Ctrl+C 只停止本次精确 Turn。真实二进制 + 隔离 Daemon + 回环 Mock Provider 的进程级测试覆盖两轮续接、持久 Turn 与 Provider 失败。并行场景发现并修复 EventLog 读取未完成 NDJSON 末行的竞态。
+
 v0.21.0-rc29（已完成）：`willdeep doctor --bundle PATH` 可导出标准 ZIP 诊断包，包含稳定 Doctor 报告、仅计数的配置结构摘要和安全说明。包明确排除配置值、Provider/Profile 名称、模型、地址、API Key、Runtime Token、Prompt、工具载荷、日志和本地路径；同目录临时文件写入并同步后以硬链接原子发布，权限为 `0600`，目标存在时拒绝覆盖。ZIP 条目、CRC、EOCD、脱敏、权限和覆盖竞态边界均有回归测试。
 
 v0.21.0-rc28（已完成）：新增顶层 `willdeep doctor [--json]`。诊断完全离线，不联系 Provider；检查当前版本/平台、TOML 安全与 Provider 字段完整性、工作区、Git Worktree、内嵌 Web 资源、Runtime 存活/版本匹配和实际本地传输。报告只表达凭据是否可用，不输出 API Key、Runtime Token、环境变量名、Provider 地址或本地路径；旧 Runtime 版本会明确降级为 Warning。
@@ -342,7 +344,7 @@ v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架�
 - [x] 同一 Session 严格串行、请求幂等、取消、事件持久化和重启恢复。
 - [x] TUI 普通输入使用 Runtime Session/Turn。
 - [x] Web 使用相同 Session/Turn、历史和事件；浏览器只提交与观察，不再持有独立 Harness 生命周期。
-- [ ] Headless CLI 使用相同 Runtime。
+- [x] Headless CLI 使用相同 Runtime；`--local` 为显式兼容入口，进程级敏感覆盖不进入持久任务。
 - [x] Harness 从每 Turn 子进程过渡为 Daemon 内原生 Future；异常退出明确收敛为 Interrupted。
 - [-] 已清理重启后的孤儿 Task/Interaction/PID 并补写恢复事件；Session 并发写保护、能力诊断和更细粒度资源审计待完成。
 

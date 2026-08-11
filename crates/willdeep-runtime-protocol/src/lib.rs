@@ -480,6 +480,18 @@ pub enum TaskStatus {
     Interrupted,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureDomain {
+    Provider,
+    Policy,
+    Tool,
+    Harness,
+    Internal,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeTask {
     pub id: uuid::Uuid,
@@ -494,6 +506,8 @@ pub struct RuntimeTask {
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub failure_domain: Option<FailureDomain>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1362,10 +1376,30 @@ mod tests {
             started_at: Some(2),
             completed_at: None,
             exit_code: None,
+            failure_domain: None,
         };
         let json = serde_json::to_value(&task).unwrap();
         assert!(json.get("pid").is_none());
         assert!(json.get("error").is_none());
+        let mut future_task = json.clone();
+        future_task["failure_domain"] = serde_json::json!("future_domain");
+        assert_eq!(
+            serde_json::from_value::<RuntimeTask>(future_task)
+                .unwrap()
+                .failure_domain,
+            Some(FailureDomain::Unknown)
+        );
+        let mut legacy_task = json;
+        legacy_task
+            .as_object_mut()
+            .unwrap()
+            .remove("failure_domain");
+        assert_eq!(
+            serde_json::from_value::<RuntimeTask>(legacy_task)
+                .unwrap()
+                .failure_domain,
+            None
+        );
 
         let approval = PendingApproval {
             id: uuid::Uuid::new_v4(),

@@ -743,6 +743,7 @@ fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
         started_at: task.started_at,
         completed_at: task.completed_at,
         exit_code: task.exit_code,
+        failure_domain: task.failure_domain,
     }
 }
 

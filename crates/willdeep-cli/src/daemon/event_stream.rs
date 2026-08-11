@@ -58,6 +58,13 @@ impl EventLog {
     }
 
     pub(super) fn read_after(&self, after: u64, limit: usize) -> Result<Vec<RuntimeEvent>> {
+        // Append writes a JSON object and its trailing newline in separate I/O
+        // operations. Hold the same lock while reading so an active client can
+        // never observe the durable log between those operations.
+        let _state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime event log lock poisoned"))?;
         read_events(&self.path, after, limit)
     }
 
@@ -264,6 +271,49 @@ mod tests {
         log.append("third", "three").unwrap();
         // The queued broadcast copy of event 2 is skipped by the cursor.
         assert_eq!(next_event(&mut state).await.unwrap().sequence, 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn readers_wait_until_an_event_line_is_complete() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-event-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+        log.append("first", "one").unwrap();
+        let write_guard = log.state.lock().unwrap();
+        let event = RuntimeEvent {
+            sequence: 2,
+            timestamp: now(),
+            kind: "second".to_owned(),
+            message: "two".to_owned(),
+        };
+        let line = serde_json::to_vec(&event).unwrap();
+        let split = line.len() / 2;
+        let mut file = append_log(&log.path).unwrap();
+        file.write_all(&line[..split]).unwrap();
+        file.flush().unwrap();
+
+        let reader_log = Arc::clone(&log);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            tx.send(reader_log.read_after(0, 10)).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            rx.try_recv().is_err(),
+            "reader must not parse an event while append owns the log lock"
+        );
+
+        file.write_all(&line[split..]).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_data().unwrap();
+        drop(write_guard);
+        let events = rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        reader.join().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "first");
+        assert_eq!(events[1], event);
         std::fs::remove_dir_all(root).unwrap();
     }
 

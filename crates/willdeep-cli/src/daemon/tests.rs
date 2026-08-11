@@ -74,6 +74,7 @@ fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
         started_at: Some(10),
         completed_at: Some(completed_at),
         exit_code: Some(0),
+        failure_domain: None,
     };
     assert!(tui_bridge::runtime_task_visible(&task(700), 1_000));
     assert!(!tui_bridge::runtime_task_visible(&task(699), 1_000));
@@ -467,6 +468,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
         started_at: Some(2),
         completed_at: None,
         exit_code: None,
+        failure_domain: None,
         error: None,
     };
     persist_tasks(&path, &HashMap::from([(id, task)])).unwrap();
@@ -529,6 +531,7 @@ fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
                 started_at: Some(2),
                 completed_at: None,
                 exit_code: None,
+                failure_domain: None,
                 error: None,
             },
         )]),
@@ -625,6 +628,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
         started_at: Some(2),
         completed_at: None,
         exit_code: None,
+        failure_domain: None,
         error: None,
     };
     persist_tasks(&path, &HashMap::from([(task_id, task)])).unwrap();
@@ -752,6 +756,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
                     started_at: Some(index),
                     completed_at: Some(index),
                     exit_code: Some(0),
+                    failure_domain: None,
                     error: None,
                 })
                 .await
@@ -799,6 +804,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
             started_at: Some(1),
             completed_at: None,
             exit_code: None,
+            failure_domain: None,
             error: None,
         })
         .await

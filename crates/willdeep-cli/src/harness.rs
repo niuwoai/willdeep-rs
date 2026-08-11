@@ -248,16 +248,7 @@ pub(crate) async fn build(
     if !(1..=100).contains(&max_turns) {
         bail!("--max-turns must be between 1 and 100");
     }
-    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
-    let requested_workspace = cli
-        .workspace
-        .clone()
-        .or(project_workspace)
-        .or_else(|| resumed.map(|session| session.workspace.clone()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let workspace = requested_workspace
-        .canonicalize()
-        .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))?;
+    let workspace = resolve_workspace(cli, resumed)?;
     let api_key = resolve_api_key(cli, profile, kind)?;
     let model = cli
         .model
@@ -469,4 +460,20 @@ pub(crate) async fn build(
         context_window,
         _command_watcher: command_watcher,
     })
+}
+
+pub(crate) fn resolve_workspace(
+    cli: &Cli,
+    resumed: Option<&willdeep_core::Session>,
+) -> Result<PathBuf> {
+    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
+    let requested_workspace = cli
+        .workspace
+        .clone()
+        .or(project_workspace)
+        .or_else(|| resumed.map(|session| session.workspace.clone()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    requested_workspace
+        .canonicalize()
+        .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))
 }

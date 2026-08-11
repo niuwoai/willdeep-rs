@@ -31,6 +31,7 @@ mod agent_store;
 mod control_api;
 pub(crate) mod diff_review;
 mod event_stream;
+mod headless;
 mod herdr;
 mod local_transport;
 mod session_store;
@@ -44,6 +45,7 @@ use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
+pub(crate) use headless::{HeadlessRuntimeRequest, HeadlessRuntimeStatus, execute_headless_turn};
 use local_transport::LocalTransportState;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
@@ -557,6 +559,8 @@ pub(crate) struct RuntimeTask {
     started_at: Option<u64>,
     completed_at: Option<u64>,
     exit_code: Option<i32>,
+    #[serde(default)]
+    failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     error: Option<String>,
 }
 
@@ -2498,6 +2502,7 @@ impl TaskManager {
             started_at: None,
             completed_at: None,
             exit_code: None,
+            failure_domain: None,
             error: None,
         };
         let agent = if let Some(session_id) = request.session_id {
@@ -2598,8 +2603,8 @@ impl TaskManager {
             if let Ok(mut cancellations) = manager.cancellations.lock() {
                 cancellations.remove(&id);
             }
-            let (final_status, error) = match result {
-                _ if cancelled => (RuntimeTaskStatus::Cancelled, None),
+            let (final_status, error, failure_domain) = match result {
+                _ if cancelled => (RuntimeTaskStatus::Cancelled, None, None),
                 Some(Ok(outcome)) => {
                     let completed = serde_json::json!({
                         "type":"completed",
@@ -2610,12 +2615,19 @@ impl TaskManager {
                     let _ = manager
                         .events
                         .append("task.output", format!("task_id={id} {completed}"));
-                    (RuntimeTaskStatus::Completed, None)
+                    (RuntimeTaskStatus::Completed, None, None)
                 }
-                Some(Err(error)) => (RuntimeTaskStatus::Failed, Some(format!("{error:#}"))),
-                None => (RuntimeTaskStatus::Cancelled, None),
+                Some(Err(error)) => (
+                    RuntimeTaskStatus::Failed,
+                    Some(format!("{error:#}")),
+                    Some(crate::runtime_failure_domain(&error)),
+                ),
+                None => (RuntimeTaskStatus::Cancelled, None, None),
             };
-            if let Err(error) = manager.finish(id, final_status, None, error).await {
+            if let Err(error) = manager
+                .finish(id, final_status, None, error, failure_domain)
+                .await
+            {
                 eprintln!("persist Runtime task {id} completion: {error:#}");
             }
         });
@@ -2690,6 +2702,7 @@ impl TaskManager {
         status: RuntimeTaskStatus,
         exit_code: Option<i32>,
         error: Option<String>,
+        failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     ) -> Result<()> {
         let _persistence = self.persistence.lock().await;
         let (finished_task, snapshot) = {
@@ -2698,6 +2711,7 @@ impl TaskManager {
             task.status = status;
             task.completed_at = Some(now());
             task.exit_code = exit_code;
+            task.failure_domain = failure_domain;
             task.error = error.clone();
             (task.clone(), tasks.clone())
         };
@@ -2712,7 +2726,7 @@ impl TaskManager {
                 _ => "task.failed",
             },
             format!(
-                "task_id={id} session_id={} turn_id={} exit_code={} error={}",
+                "task_id={id} session_id={} turn_id={} exit_code={} failure_domain={} error={}",
                 finished_task
                     .session_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
@@ -2720,6 +2734,14 @@ impl TaskManager {
                     .turn_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                failure_domain.map_or("none", |domain| match domain {
+                    willdeep_runtime_protocol::FailureDomain::Provider => "provider",
+                    willdeep_runtime_protocol::FailureDomain::Policy => "policy",
+                    willdeep_runtime_protocol::FailureDomain::Tool => "tool",
+                    willdeep_runtime_protocol::FailureDomain::Harness => "harness",
+                    willdeep_runtime_protocol::FailureDomain::Internal => "internal",
+                    willdeep_runtime_protocol::FailureDomain::Unknown => "unknown",
+                }),
                 error.clone().unwrap_or_default()
             ),
         )?;

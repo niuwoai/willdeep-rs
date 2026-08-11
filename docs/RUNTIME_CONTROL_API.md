@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc29
+> 当前实现版本：v0.21.0-rc30
 
 ## 1. 目标
 
@@ -90,7 +90,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc29",
+    "server_version": "0.21.0-rc30",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -108,7 +108,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc29"
+    "server_version": "0.21.0-rc30"
   }
 }
 ```
@@ -129,6 +129,7 @@ diff.revert
 - API Key、Provider Secret、Runtime Token 永不进入 DTO、事件或错误字段；
 - Prompt、附件正文和工具参数默认仅在明确需要的目标操作中返回；
 - `RuntimeTool` 只公开稳定 ID、Session/Turn/Task/Agent 归属、工具名、状态和起止时间；Tool 索引不保存参数、输出正文、Workspace 路径或内部错误；
+- `RuntimeTask.failure_domain` 在失败时可取 `provider`、`policy`、`tool`、`harness` 或 `internal`，成功与旧记录为 `null`；未知未来值由旧客户端解码为 `unknown`，字段不包含内部错误正文；
 - Workspace Change `RuntimeArtifact` 由内容指纹确认的 Diff Attribution 生成，只公开归属、来源快照和变更项数量；路径与内容必须另走受授权的精确 Diff API；
 - Session 收养只接受稳定 ID、Workspace、Profile 与模型等公开字段；配置文件路径由 Runtime 从 Core Session 私有存储恢复，`CreateSessionParams` 拒绝客户端夹带 `config`；
 - 文件路径按调用方权限裁剪；公开能力响应不得包含任何用户路径；
