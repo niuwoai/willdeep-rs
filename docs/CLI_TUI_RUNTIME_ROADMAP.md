@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc32
+> 当前实施版本：v0.21.0-rc33
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -80,7 +80,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
 - [x] 已按持久消息边界支持从指定已完成 Turn 精确 Fork，并可为新 Session 覆盖 Provider Profile 和模型。
 - [x] 受 Token CLI/TUI 支持标题、消息内容、Workspace、状态、Provider Profile、模型和更新时间组合搜索；Web 保持当前 Workspace 标题筛选，不向未认证浏览器下发消息摘要。
-- [ ] 安全的自动标题与会话数据迁移版本。
+- [x] 安全的自动标题与会话数据迁移版本；schema 1 先私有备份再原子迁移到 schema 2，未来版本拒绝降级；首次 Turn 本地生成有界标题并对疑似凭据回退，人工/旧版/Fork 标题不被覆盖。
 
 验收：任意会话可恢复、Fork、归档和导出，安全策略与系统 Prompt 始终使用当前版本。
 
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc33（已完成）：Runtime Session 元数据从 schema 1 迁移到 schema 2，新增私有 `title_source` 所有权。首次读取旧文件时先原样写入不覆盖的私有备份，再用原子替换持久化新 schema；迁移完成后不重复备份，未来 schema 明确拒绝。新建未命名 Session 在首个 Turn 入队前本地生成最多 80 字符的标题，不调用 Provider；密码、Token、API Key、私钥、常见凭据前缀和高熵字段全部回退通用标题。Rename、收养旧 Core Session 和 Fork 标题保持人工/旧版所有权。专门测试覆盖原始字节备份、单次迁移、未来版本拒绝、人工标题保护、附件标题和敏感 Prompt 不外泄。
 
 v0.21.0-rc32（已完成）：新增 `willdeep daemon upgrade` 的 Drain-and-Handoff。异步读写闸门把新 Turn、Agent Spawn/Retry/Prompt、旧任务领取与 Drain 起点严格串行；旧 Runtime 进入 `draining` 后继续运行现有任务，未领取 Turn 保留在持久队列，活跃任务归零才释放租约并由当前二进制接管。停止、审批、回答和观察仍可用于促使任务收敛。Headless 观察者仅在确认 Runtime Token 更替后重建 Client，沿原事件游标继续，普通连接错误不会伪装成交接。真实二进制 + 延迟 Provider + 两个 Daemon 的进程测试覆盖任务零丢失、新请求未触达 Provider、PID 更替和替换进程继续执行。
 

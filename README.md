@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc32`，支持：
+当前版本为 `0.21.0-rc33`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -49,6 +49,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - Runtime Root Agent 持久生命周期、受 Token 保护的 Agent 查询 API/CLI，以及 TUI 右栏 Agent 状态摘要。
 - `spawn_agent` 稳定 UUID、Root→Child 父子关系以及子 Agent 轮次、工具、Token 和终态的 Runtime/TUI 实时展示。
 - Runtime Session 重命名、完整快照或指定已完成 Turn 的精确 Fork、Fork 时切换 Provider Profile/模型、归档/取消归档、带确认删除、安全 JSON 导出，以及文本、Workspace、状态、Profile、模型和时间组合搜索；CLI、TUI `/session` 与 Web 会话操作共用同一受保护状态机。
+- Runtime Session schema 1 可带私有原始备份原子迁移到 schema 2；未命名会话由首次 Turn 在本地生成有界标题，疑似凭据只使用通用标题，用户命名、旧会话与 Fork 标题不会被覆盖。
 - 可选 Herdr 集成：`willdeep integrations herdr status [--json]` 诊断 CLI/Pane/Socket；在 Herdr Pane 内将 Runtime Task 聚合为 `working/blocked/idle` 并非阻塞上报，Herdr 缺失或失败不影响任务。
 
 当前暂不包含 Computer Use 与 Browser Use；Runtime Daemon 控制面和进程内 Harness 已经可用，会话恢复、统一客户端 API 与后台资源恢复仍在继续完善。

@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc32
+> 最后更新：2026-08-11 | 当前版本：v0.21.0-rc33
 
 ## 项目简介
 
@@ -48,6 +48,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Git 冲突和待审 Diff 使用内容指纹进入 Inbox，子 Agent 审批阻塞结构化上报，状态按 Agent→会话→Workspace 上卷；
 - 跨平台 Runtime Daemon 提供 `start/status/stop/logs/upgrade`；Upgrade 以 draining 闸门拒绝新工作、保留活跃任务和持久排队 Turn，任务归零后由当前二进制接管。Headless 观察者识别 Runtime 身份更替后沿事件游标自动重附着；本机客户端优先通过权限为 `0600` 的 Unix Socket 或拒绝远程客户端的 Windows Named Pipe 通信，并兼容旧状态的受 Token 回环 TCP；
 - Session/Turn CLI、TUI 与 Web 共用统一 Runtime Client；收养既有 Session 时由 Runtime 从 Core 存储恢复私有配置引用，公共协议不传输配置路径；
+- Runtime Session 元数据使用可迁移 schema；schema 1 首次由 rc33 打开时先写私有原始备份，再原子升级为 schema 2。新建未命名会话以首次 Turn 生成本地有界标题，疑似凭据 Prompt 不复制到标题；显式 Rename、收养旧会话和 Fork 标题保持人工所有权；
 - Runtime 持久记录主 Agent 与子 Agent 的 Tool Activity，支持按 Session、Turn、Task、Agent 和状态查询；公开记录只含工具名与生命周期，不含参数、输出或 Workspace 路径；
 - 工具窗口内经内容指纹确认的真实文件变化会形成 Workspace Change Artifact；公开元数据包含来源快照和变更数量，文件路径与内容继续由受授权 Diff API 控制；
 - TUI 右栏通过统一 API 显示当前 Workspace 的结构化 Tool/Artifact 数量、运行态和最近工具，不从聊天文本反推持久状态；

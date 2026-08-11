@@ -2,7 +2,7 @@
 
 > 状态：实施中
 > 首个目标版本：v0.17.0
-> 最后更新：2026-08-10（v0.17.0-rc8 模型覆盖与组合搜索）
+> 最后更新：2026-08-11（v0.21.0-rc33 schema 迁移与安全自动标题）
 
 ## 1. 目标
 
@@ -38,6 +38,7 @@ Runtime Session（长期存在）
 - `created_at`
 - `updated_at`
 - `last_error`
+- `title_source`（私有元数据）：`auto_pending | auto | user | legacy`
 
 消息正文和附件继续使用 Core `SessionStore` 作为唯一来源；Runtime 元数据不得复制另一份消息历史。
 
@@ -83,6 +84,7 @@ POST /v1/turns/{turn_id}/retry
 ### 3.1 会话管理语义
 
 - 标题和消息正文仍以 Core `SessionStore` 为唯一来源；Runtime 元数据不得复制标题或消息。
+- 新建且未显式命名的 Session 以 `auto_pending` 开始，首个真实 Turn 入队前在本地从 Prompt 生成最多 80 字符的标题；不得为标题调用 Provider。疑似密码、Token、API Key、私钥、常见凭据前缀或高熵字段必须回退到通用标题。显式 Rename、旧会话收养与 Fork 不得被自动覆盖。
 - Rename 只更新 Core 标题，并同步推进 Runtime `updated_at`；标题去除首尾空白后必须为 1–200 个字符。
 - Fork 创建新的 Session ID 与 Root Agent ID，复制当前 Core 消息、Workspace、Profile、模型覆盖和配置引用，但不复制 Turn、Task、Interaction、事件游标和 Inbox 已读状态。请求可携带 `through_turn_id`，仅复制到该已完成 Turn 的持久 `message_end` 边界；缺失边界的旧 Turn 明确拒绝精确 Fork。`provider_profile` 和 `model` 可覆盖源 Session，并用于后续所有 Turn 的原生 Harness 构建。
 - Archive 禁止新 Turn，但不删除历史；Unarchive 恢复为 Idle。活跃或仍有 Queued Turn 的 Session 不允许归档。
@@ -126,6 +128,13 @@ turn.retry_queued
 - 已完成的 Core Session 消息不能因 Task 状态文件损坏而回滚。
 - Provider 请求是否可安全续跑无法证明时，只允许显式重试，避免重复工具副作用。
 - Pending Approval 与 `ask_user` 继续关联原 Turn；Turn 终止时自动安全拒绝并关闭等待者。
+
+### 6.1 数据迁移
+
+- Runtime Session 元数据当前 schema 为 2；schema 1 在内存完成确定性字段补全后升级。
+- 改写源文件前必须在同一私有 Runtime 目录创建原始字节备份，备份名包含源 schema、时间和随机 ID，且不得覆盖既有备份。
+- 新 schema 使用原子替换持久化；写入失败时原文件与备份仍可恢复。完成迁移后再次启动不得重复创建备份。
+- 高于当前实现的未来 schema 必须拒绝读取，不能忽略未知语义后降级写回。
 
 ## 7. 安全约束
 

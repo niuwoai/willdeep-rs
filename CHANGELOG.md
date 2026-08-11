@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0-rc33] - 2026-08-11
+
+### Added
+
+- Runtime Session 元数据升级为 schema 2，并加入显式标题来源，区分待自动命名、自动标题、用户标题和旧版标题。
+- 新建且未指定标题的 Session 在首个 Turn 入队前生成本地、有界的自动标题，并发布不含标题正文的 `session.renamed` 事件。
+
+### Changed
+
+- schema 1 会话文件在首次打开时先创建权限受限的原始备份，再通过既有原子写入升级；完成迁移后不会重复备份，未来 schema 继续明确拒绝降级读取。
+- 用户 Rename、收养已有 Core Session 和 Fork 标题被标记为非自动来源，后续 Prompt 不会覆盖。
+
+### Security
+
+- 自动标题不调用 Provider、不外发 Prompt；遇到密码、Token、API Key、私钥、常见凭据前缀或高熵字段时回退为通用标题，最大 80 个字符。
+
 ## [0.21.0-rc32] - 2026-08-11
 
 ### Added

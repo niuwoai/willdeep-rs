@@ -1073,9 +1073,9 @@ async fn turn_submit(state: &ServerState, request: &ApiRequest) -> ApiResult {
         .into_iter()
         .map(local_attachment)
         .collect();
-    let (turn, created) = state
+    let (turn, created, title_changed) = state
         .sessions
-        .enqueue_turn(
+        .enqueue_turn_observed(
             session_id,
             session_store::CreateRuntimeTurn {
                 request_id: params.turn_request_id,
@@ -1103,6 +1103,12 @@ async fn turn_submit(state: &ServerState, request: &ApiRequest) -> ApiResult {
         state
             .tasks
             .schedule_session(session_id)
+            .map_err(ApiFailure::internal)?;
+    }
+    if title_changed {
+        state
+            .events
+            .append("session.renamed", format!("session_id={session_id}"))
             .map_err(ApiFailure::internal)?;
     }
     let turn = state

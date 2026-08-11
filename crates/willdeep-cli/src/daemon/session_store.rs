@@ -1,11 +1,22 @@
 use super::*;
 
-const RUNTIME_SESSION_SCHEMA: u32 = 1;
+const RUNTIME_SESSION_SCHEMA: u32 = 2;
 const SESSION_EXPORT_SCHEMA: u32 = 1;
 const MAX_SESSION_TITLE_CHARS: usize = 200;
 const MAX_SEARCH_QUERY_CHARS: usize = 200;
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_SNIPPET_CHARS: usize = 160;
+const MAX_AUTO_TITLE_CHARS: usize = 80;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SessionTitleSource {
+    AutoPending,
+    Auto,
+    User,
+    #[default]
+    Legacy,
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +46,8 @@ pub(crate) struct RuntimeSession {
     pub created_at: u64,
     pub updated_at: u64,
     pub last_error: Option<String>,
+    #[serde(default)]
+    title_source: SessionTitleSource,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,7 +208,11 @@ pub(super) struct RuntimeSessionStore {
 
 impl RuntimeSessionStore {
     pub fn open(path: PathBuf, home: &Path) -> Result<Self> {
-        let mut sessions = load_sessions(&path)?;
+        let (mut sessions, migrated) = load_sessions(&path)?;
+        if migrated {
+            backup_sessions_before_migration(&path, 1)?;
+            persist_sessions(&path, &sessions)?;
+        }
         let turns_path = path.with_file_name("turns.json");
         let mut turns = load_turns(&turns_path)?;
         let mut changed = false;
@@ -263,7 +280,7 @@ impl RuntimeSessionStore {
             }
             return Ok((existing, false));
         }
-        let core = if let Some(id) = request.id {
+        let (core, title_source) = if let Some(id) = request.id {
             let core = self
                 .core
                 .load(id)
@@ -271,17 +288,21 @@ impl RuntimeSessionStore {
             if core.workspace.canonicalize()? != workspace {
                 bail!("Core Session workspace does not match Runtime Session request");
             }
-            core
+            (core, SessionTitleSource::Legacy)
         } else {
-            let title = request
-                .title
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "New Runtime session".to_owned());
+            let explicit_title = request.title.filter(|value| !value.trim().is_empty());
+            let (title, title_source) = match explicit_title {
+                Some(title) => (normalized_title(title)?, SessionTitleSource::User),
+                None => (
+                    "New Runtime session".to_owned(),
+                    SessionTitleSource::AutoPending,
+                ),
+            };
             let mut core =
                 willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
             core.config = request.config.clone();
             self.core.save(&mut core)?;
-            core
+            (core, title_source)
         };
         let config = core.config.clone().or(request.config);
         let timestamp = now();
@@ -298,6 +319,7 @@ impl RuntimeSessionStore {
             created_at: timestamp,
             updated_at: timestamp,
             last_error: None,
+            title_source,
         };
         let mut sessions = self.lock()?;
         sessions.insert(session.id, session.clone());
@@ -321,14 +343,15 @@ impl RuntimeSessionStore {
     pub fn rename(&self, id: uuid::Uuid, title: String) -> Result<RuntimeSession> {
         self.ensure_manageable(id)?;
         let title = normalized_title(title)?;
+        let mut sessions = self.lock()?;
+        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
         let mut core = self
             .core
             .load(id)
             .with_context(|| format!("load Core Session {id}"))?;
         core.title = title;
         self.core.save(&mut core)?;
-        let mut sessions = self.lock()?;
-        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
+        session.title_source = SessionTitleSource::User;
         session.updated_at = now();
         let result = session.clone();
         persist_sessions(&self.path, &sessions)?;
@@ -396,6 +419,7 @@ impl RuntimeSessionStore {
             created_at: timestamp,
             updated_at: timestamp,
             last_error: None,
+            title_source: SessionTitleSource::User,
         };
         let mut sessions = self.lock()?;
         sessions.insert(fork.id, fork.clone());
@@ -608,11 +632,21 @@ impl RuntimeSessionStore {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub fn enqueue_turn(
         &self,
         session_id: uuid::Uuid,
         request: CreateRuntimeTurn,
     ) -> Result<(RuntimeTurn, bool)> {
+        let (turn, created, _) = self.enqueue_turn_observed(session_id, request)?;
+        Ok((turn, created))
+    }
+
+    pub(super) fn enqueue_turn_observed(
+        &self,
+        session_id: uuid::Uuid,
+        request: CreateRuntimeTurn,
+    ) -> Result<(RuntimeTurn, bool, bool)> {
         if request.prompt.trim().is_empty() && request.attachments.is_empty() {
             bail!("Turn prompt and attachments must not both be empty");
         }
@@ -620,11 +654,13 @@ impl RuntimeSessionStore {
         if session.status == RuntimeSessionStatus::Archived {
             bail!("Runtime Session is archived");
         }
+        let title_changed =
+            self.apply_auto_title(session_id, &request.prompt, !request.attachments.is_empty())?;
         let mut turns = self.turns_lock()?;
         if let Some(turn) = turns.values().find(|turn| {
             turn.metadata.session_id == session_id && turn.metadata.request_id == request.request_id
         }) {
-            return Ok((turn.metadata.clone(), false));
+            return Ok((turn.metadata.clone(), false, title_changed));
         }
         let timestamp = now();
         let queue_sequence = turns
@@ -657,7 +693,32 @@ impl RuntimeSessionStore {
             },
         );
         persist_turns(&self.turns_path, &turns)?;
-        Ok((metadata, true))
+        Ok((metadata, true, title_changed))
+    }
+
+    fn apply_auto_title(
+        &self,
+        session_id: uuid::Uuid,
+        prompt: &str,
+        has_attachments: bool,
+    ) -> Result<bool> {
+        let mut sessions = self.lock()?;
+        let session = sessions
+            .get_mut(&session_id)
+            .context("Runtime Session not found")?;
+        if session.title_source != SessionTitleSource::AutoPending {
+            return Ok(false);
+        }
+        let mut core = self
+            .core
+            .load(session_id)
+            .with_context(|| format!("load Core Session {session_id} for automatic title"))?;
+        core.title = safe_auto_title(prompt, has_attachments);
+        self.core.save(&mut core)?;
+        session.title_source = SessionTitleSource::Auto;
+        session.updated_at = now();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(true)
     }
 
     pub fn list_turns(&self, session_id: uuid::Uuid) -> Result<Vec<RuntimeTurn>> {
@@ -1211,9 +1272,9 @@ pub(super) async fn create_turn_handler(
     if *work_guard {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    let (turn, created) = state
+    let (turn, created, title_changed) = state
         .sessions
-        .enqueue_turn(session_id, request)
+        .enqueue_turn_observed(session_id, request)
         .map_err(|error| {
             eprintln!("enqueue Runtime Turn: {error:#}");
             StatusCode::BAD_REQUEST
@@ -1239,6 +1300,12 @@ pub(super) async fn create_turn_handler(
         state
             .tasks
             .schedule_session(session_id)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if title_changed {
+        state
+            .events
+            .append("session.renamed", format!("session_id={session_id}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     let turn = state
@@ -1758,20 +1825,107 @@ fn print_session(session: &RuntimeSession) {
     );
 }
 
-fn load_sessions(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeSession>> {
+fn load_sessions(path: &Path) -> Result<(HashMap<uuid::Uuid, RuntimeSession>, bool)> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), false));
     }
-    let sessions: Vec<RuntimeSession> = serde_json::from_slice(&std::fs::read(path)?)?;
-    for session in &sessions {
-        if session.schema != RUNTIME_SESSION_SCHEMA {
-            bail!("unsupported Runtime Session schema {}", session.schema);
+    let mut sessions: Vec<RuntimeSession> = serde_json::from_slice(&std::fs::read(path)?)?;
+    let mut migrated = false;
+    for session in &mut sessions {
+        match session.schema {
+            RUNTIME_SESSION_SCHEMA => {}
+            1 => {
+                session.schema = RUNTIME_SESSION_SCHEMA;
+                session.title_source = SessionTitleSource::Legacy;
+                migrated = true;
+            }
+            _ => {
+                bail!("unsupported Runtime Session schema {}", session.schema);
+            }
         }
     }
-    Ok(sessions
-        .into_iter()
-        .map(|session| (session.id, session))
-        .collect())
+    Ok((
+        sessions
+            .into_iter()
+            .map(|session| (session.id, session))
+            .collect(),
+        migrated,
+    ))
+}
+
+fn backup_sessions_before_migration(path: &Path, source_schema: u32) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("sessions.json");
+    let backup = path.with_file_name(format!(
+        "{file_name}.schema{source_schema}.{}.{}.backup",
+        now(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let bytes = std::fs::read(path)?;
+    write_private(&backup, &bytes).with_context(|| {
+        format!(
+            "backup Runtime Sessions before schema migration: {}",
+            backup.display()
+        )
+    })
+}
+
+fn safe_auto_title(prompt: &str, has_attachments: bool) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return if has_attachments {
+            "Attachment conversation".to_owned()
+        } else {
+            "New Runtime session".to_owned()
+        };
+    }
+    let lowercase = normalized.to_ascii_lowercase();
+    let sensitive_marker = [
+        "api_key",
+        "api key",
+        "password",
+        "passwd",
+        "secret",
+        "authorization:",
+        "bearer ",
+        "private key",
+        "access_token",
+        "refresh_token",
+        "sk-",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "akia",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker));
+    let high_entropy_token = normalized.split_whitespace().any(|token| {
+        let token = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+        token.len() >= 24
+            && token.bytes().any(|byte| byte.is_ascii_lowercase())
+            && token.bytes().any(|byte| byte.is_ascii_uppercase())
+            && token.bytes().any(|byte| byte.is_ascii_digit())
+    });
+    if sensitive_marker || high_entropy_token {
+        return "New Runtime session".to_owned();
+    }
+    let truncated = normalized.chars().count() > MAX_AUTO_TITLE_CHARS;
+    let limit = if truncated {
+        MAX_AUTO_TITLE_CHARS.saturating_sub(1)
+    } else {
+        MAX_AUTO_TITLE_CHARS
+    };
+    let mut title = normalized.chars().take(limit).collect::<String>();
+    if truncated {
+        title.push('…');
+    }
+    title
 }
 
 fn load_turns(path: &Path) -> Result<HashMap<uuid::Uuid, StoredRuntimeTurn>> {
@@ -1806,6 +1960,168 @@ fn persist_turns(path: &Path, turns: &HashMap<uuid::Uuid, StoredRuntimeTurn>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_schema_one_with_private_backup_and_rejects_future_schema() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-session-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = root.join("runtime-sessions.json");
+        let id = uuid::Uuid::new_v4();
+        let legacy = serde_json::to_vec_pretty(&vec![serde_json::json!({
+            "schema": 1,
+            "id": id,
+            "root_agent_id": uuid::Uuid::new_v4(),
+            "workspace": workspace.canonicalize().unwrap(),
+            "profile": null,
+            "model": null,
+            "config": null,
+            "status": "idle",
+            "active_turn_id": null,
+            "created_at": 1,
+            "updated_at": 1,
+            "last_error": null
+        })])
+        .unwrap();
+        std::fs::write(&path, &legacy).unwrap();
+
+        let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
+        let migrated = store.get(id).unwrap().unwrap();
+        assert_eq!(migrated.schema, RUNTIME_SESSION_SCHEMA);
+        assert_eq!(migrated.title_source, SessionTitleSource::Legacy);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted[0]["schema"], RUNTIME_SESSION_SCHEMA);
+        assert_eq!(persisted[0]["title_source"], "legacy");
+        let backups = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".schema1."))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), legacy);
+        drop(store);
+        drop(RuntimeSessionStore::open(path.clone(), &root).unwrap());
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".schema1."))
+                .count(),
+            1,
+            "a completed migration must not create another backup"
+        );
+
+        let future = root.join("future-sessions.json");
+        let mut future_value: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        future_value[0]["schema"] = serde_json::json!(RUNTIME_SESSION_SCHEMA + 1);
+        std::fs::write(&future, serde_json::to_vec_pretty(&future_value).unwrap()).unwrap();
+        assert!(RuntimeSessionStore::open(future, &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_turn_titles_only_auto_pending_sessions_without_exposing_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-auto-title-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let core = willdeep_core::SessionStore::new(&root);
+        assert_eq!(
+            safe_auto_title("debug sk-FakeCredential1234567890", false),
+            "New Runtime session"
+        );
+        assert!(safe_auto_title(&"a".repeat(200), false).chars().count() <= 80);
+        let create = |title| {
+            store
+                .create(CreateRuntimeSession {
+                    id: None,
+                    workspace: workspace.clone(),
+                    profile: None,
+                    model: None,
+                    config: None,
+                    title,
+                })
+                .unwrap()
+        };
+
+        let automatic = create(None);
+        store
+            .enqueue_turn(
+                automatic.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "  Analyze   the session migration architecture  ".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            core.load(automatic.id).unwrap().title,
+            "Analyze the session migration architecture"
+        );
+        assert_eq!(
+            store.get(automatic.id).unwrap().unwrap().title_source,
+            SessionTitleSource::Auto
+        );
+
+        let renamed = create(None);
+        store.rename(renamed.id, "User title".to_owned()).unwrap();
+        store
+            .enqueue_turn(
+                renamed.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "must not replace the title".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(core.load(renamed.id).unwrap().title, "User title");
+
+        let sensitive = create(None);
+        store
+            .enqueue_turn(
+                sensitive.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: "debug password = NeverCopyThisValue123".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            core.load(sensitive.id).unwrap().title,
+            "New Runtime session"
+        );
+
+        let attachment = create(None);
+        store
+            .enqueue_turn(
+                attachment.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: String::new(),
+                    attachments: vec![willdeep_core::MessageAttachment::Text {
+                        name: "notes.txt".to_owned(),
+                        content: "fixture".to_owned(),
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            core.load(attachment.id).unwrap().title,
+            "Attachment conversation"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn manages_session_snapshot_lifecycle_without_exporting_private_queue_data() {
