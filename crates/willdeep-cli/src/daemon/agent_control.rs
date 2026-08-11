@@ -89,7 +89,7 @@ pub(super) async fn retry_agent_handler(
     headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry, None).await
+    enqueue_work_agent_command(&state, &headers, id, AgentCommandKind::Retry, None).await
 }
 
 pub(super) async fn instruct_agent_handler(
@@ -101,7 +101,7 @@ pub(super) async fn instruct_agent_handler(
     if request.message.trim().is_empty() || request.message.len() > 16 * 1024 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    enqueue_agent_command(
+    enqueue_work_agent_command(
         &state,
         &headers,
         id,
@@ -109,6 +109,23 @@ pub(super) async fn instruct_agent_handler(
         Some(request.message.trim().to_owned()),
     )
     .await
+}
+
+async fn enqueue_work_agent_command(
+    state: &ServerState,
+    headers: &HeaderMap,
+    id: uuid::Uuid,
+    kind: AgentCommandKind,
+    message: Option<String>,
+) -> Result<Response, StatusCode> {
+    authorize(state, headers)?;
+    let work_guard = state.work_gate.read().await;
+    if *work_guard {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let command = enqueue_agent_command_internal(state, id, kind, message).await?;
+    drop(work_guard);
+    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
 }
 
 async fn enqueue_agent_command(

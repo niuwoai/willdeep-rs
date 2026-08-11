@@ -243,6 +243,7 @@ async fn authorization_requires_exact_local_token() {
             path: root.join("control.sock"),
         }),
         tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
+        work_gate: Arc::new(RwLock::new(false)),
     });
     assert!(
         runtime_capabilities(&state)

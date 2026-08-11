@@ -2,7 +2,7 @@
 
 > 状态：实施中  
 > 协议版本：1.0  
-> 当前实现版本：v0.21.0-rc31
+> 当前实现版本：v0.21.0-rc32
 
 ## 1. 目标
 
@@ -32,6 +32,8 @@ X-WillDeep-Request-Id: <optional UUID>
 - `limits`：事件页、Prompt、附件和 Worktree Patch 等服务端限制。
 
 服务端只声明当前进程实际启用的传输。Unix 客户端优先连接 Runtime 目录内权限为 `0600` 的 Socket；Windows 客户端优先连接拒绝远程连接的随机 Named Pipe。回环 TCP 作为旧状态兼容和诊断回退继续受随机 Token 保护。
+
+本地生命周期端点 `POST /v1/drain` 自 rc32 起提供，仅供 `willdeep daemon upgrade` 使用。它将健康状态切换为 `draining`，原子阻止新的工作生产请求，同时允许停止、审批、回答和只读观察继续；活跃任务归零后旧进程自行退出。替换进程使用新的本地 Token/传输身份接管，长时间观察客户端只有确认身份已更替后才能重连并沿原事件游标续传。若源 Runtime 早于 rc32，Upgrade 收到 404 时必须保持任务原样并要求首次手动迁移，不能悄悄退化为会取消任务的 Shutdown。普通 `POST /v1/shutdown` 仍会取消活跃任务，不能用于版本交接。
 
 ## 3. 稳定对象
 
@@ -103,7 +105,7 @@ diff.revert
   "data": {},
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc31",
+    "server_version": "0.21.0-rc32",
     "request_id": "00000000-0000-0000-0000-000000000000"
   }
 }
@@ -121,7 +123,7 @@ diff.revert
   },
   "meta": {
     "protocol_version": "1.0",
-    "server_version": "0.21.0-rc31"
+    "server_version": "0.21.0-rc32"
   }
 }
 ```

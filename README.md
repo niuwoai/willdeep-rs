@@ -2,7 +2,7 @@
 
 WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 API Base、API Key 和模型名称，在本地工作区中运行模型—工具循环。
 
-当前版本为 `0.21.0-rc31`，支持：
+当前版本为 `0.21.0-rc32`，支持：
 
 - OpenAI Chat Completions；
 - OpenAI Responses；
@@ -41,7 +41,7 @@ WillDeep CLI 是跨平台 Coding Agent 的第一阶段实现。它接受一个 A
 - TUI 新增 `/workspace list` 与 `/workspace switch <id>`；切换后重载目标 Session、Workspace 状态、Skills、Runtime 事件跟随和右栏视图，原工作区后台任务继续由 Daemon 运行。
 - Web 工作区选择器读取 Runtime 注册表的名称、当前项和访问模式，同时继续与 `--workspace/--web-workspace` 启动白名单取交集；被移除或未授权的目录不会因浏览器请求重新开放。
 - `ask_user` 候选选择、多选和自由输入，以及 Allow once / Disallow / Always allow 审批。
-- `willdeep daemon start/status/stop/logs` 跨平台本地 Runtime 控制面。
+- `willdeep daemon start/status/stop/logs/upgrade` 跨平台本地 Runtime 控制面；Upgrade 先排空活跃任务再由当前版本接管，不取消运行中的 Turn。
 - `willdeep doctor [--json] [--bundle PATH]` 离线检查配置、Provider 完整性、工作区、Git、内嵌 Web 资源与 Runtime 版本/传输状态，并可导出不含日志和本地路径的私有脱敏 ZIP。
 - Runtime 进程内持有的非交互 Harness Future、任务提交、查询、取消及断线后事件补读，不再为每个 Turn 启动 CLI 子进程。
 - Runtime 后台审批与 ask_user 待处理列表、跨客户端解决和原任务续跑。
@@ -60,6 +60,7 @@ Daemon 管理命令不要求先配置 Provider，可独立启动和检查：
 ```bash
 willdeep daemon start
 willdeep daemon status
+willdeep daemon upgrade
 willdeep daemon logs --lines 100
 willdeep daemon submit --workspace . --profile some-im "检查项目并运行测试"
 willdeep daemon tasks
@@ -99,7 +100,7 @@ willdeep detach
 willdeep daemon stop
 ```
 
-本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Daemon 通过短周期心跳续租单实例锁；异常退出后，一次 `daemon start` 会等待旧租约过期并安全接管。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
+本地控制端点只监听随机 `127.0.0.1` 端口，认证 Token 保存在 `$WILLDEEP_HOME/runtime/daemon.json`。Daemon 通过短周期心跳续租单实例锁；异常退出后，一次 `daemon start` 会等待旧租约过期并安全接管。安装新二进制后运行 `willdeep daemon upgrade`：旧进程进入 `draining`，拒绝新的 Turn/Spawn/Retry/补充 Prompt，已运行或等待人工处理的任务继续；活跃任务归零后释放租约，当前二进制接管，排队 Turn 从持久队列继续。默认等待 300 秒，可用 `--timeout` 调整；同版本测试交接需显式 `--force`。安全 Drain 协议从 rc32 开始，因此从 rc31 或更早版本首次迁移时，命令会保持旧任务不动并明确要求等待任务完成后手动 stop/start；之后的版本可直接无损 Upgrade。`daemon stop` 仍表示主动取消活跃任务后停止，不能与 Upgrade 混用。Unix 下状态文件与日志权限为 `0600`；不要复制或提交该运行时目录。
 
 任务或 Session 首次使用目录时会自动注册 Workspace；也可用 `register-workspace` 显式保存名称、`read-only/smart/workspace-write`、默认 Provider Profile、Skill 与 MCP 允许列表。Coding Agent 的默认语义是 `workspace-write`：Workspace 内 `create_file/edit_file` 免审，Shell、MCP、网络和越界访问仍走原审批；`read-only` 仅在用户显式选择时启用。`activate-workspace` 只改变新客户端使用的默认项，已启动任务继续绑定原规范化根目录。`remove-workspace --yes` 仅移除注册信息，不删除文件、Session 或历史。Workspace 策略由 Runtime 在任务入队时覆盖客户端输入，非空 Skill/MCP 列表作为允许列表，空列表保持全局配置兼容行为。
 

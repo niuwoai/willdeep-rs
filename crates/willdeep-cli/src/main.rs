@@ -1479,6 +1479,31 @@ mod tests {
     }
 
     #[test]
+    fn daemon_upgrade_accepts_bounded_wait_and_force_handoff() {
+        let cli = Cli::try_parse_from([
+            "willdeep",
+            "daemon",
+            "upgrade",
+            "--timeout",
+            "45",
+            "--force",
+        ])
+        .unwrap();
+        let Some(CliCommand::Daemon {
+            action: daemon::DaemonAction::Upgrade { timeout, force },
+        }) = cli.command
+        else {
+            panic!("expected daemon upgrade command");
+        };
+        assert_eq!(timeout, 45);
+        assert!(force);
+        assert!(Cli::try_parse_from(["willdeep", "daemon", "upgrade", "--timeout", "0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["willdeep", "daemon", "upgrade", "--timeout", "86401"]).is_err()
+        );
+    }
+
+    #[test]
     fn headless_run_defaults_to_runtime_and_keeps_secret_overrides_local() {
         let runtime = Cli::try_parse_from(["willdeep", "run", "inspect"]).unwrap();
         let Some(CliCommand::Run(runtime_args)) = runtime.command.as_ref() else {

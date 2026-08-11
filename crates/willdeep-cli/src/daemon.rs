@@ -208,6 +208,19 @@ pub enum DaemonAction {
     Capabilities,
     /// Gracefully stop the local Runtime Daemon.
     Stop,
+    /// Drain active work and hand the Runtime lease to this executable.
+    Upgrade {
+        /// Maximum seconds to wait for active work to finish.
+        #[arg(
+            long,
+            default_value_t = 300,
+            value_parser = clap::value_parser!(u64).range(1..=86_400)
+        )]
+        timeout: u64,
+        /// Restart even when the running Runtime already has this version.
+        #[arg(long)]
+        force: bool,
+    },
     /// Print Runtime Daemon logs.
     Logs {
         #[arg(long, default_value_t = 100)]
@@ -522,6 +535,7 @@ struct ServerState {
     idempotency: Arc<control_api::IdempotencyStore>,
     local_transport: Option<LocalTransportState>,
     tools: Arc<tool_store::ToolStore>,
+    work_gate: Arc<RwLock<bool>>,
 }
 
 type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
@@ -688,6 +702,7 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Status => status(&home).await,
         DaemonAction::Capabilities => capabilities_cli(&home).await,
         DaemonAction::Stop => stop(&home).await,
+        DaemonAction::Upgrade { timeout, force } => upgrade(&home, timeout, force).await,
         DaemonAction::Logs { lines, follow } => logs(&home, lines, follow).await,
         DaemonAction::Submit {
             workspace,
@@ -1421,9 +1436,14 @@ async fn status(home: &Path) -> Result<()> {
     };
     match probe(&state).await {
         Ok(health) => {
+            let display_status = if health.status == "draining" {
+                "draining"
+            } else {
+                "running"
+            };
             println!(
-                "running\tpid={}\taddress={}\tversion={}\tuptime={}s",
-                state.pid, state.address, health.version, health.uptime_seconds
+                "{}\tpid={}\taddress={}\tversion={}\tuptime={}s",
+                display_status, state.pid, state.address, health.version, health.uptime_seconds
             );
             Ok(())
         }
@@ -1482,6 +1502,73 @@ async fn stop(home: &Path) -> Result<()> {
         }
     }
     bail!("Runtime Daemon acknowledged shutdown but did not exit")
+}
+
+async fn upgrade(home: &Path, timeout_seconds: u64, force: bool) -> Result<()> {
+    let paths = DaemonPaths::new(home);
+    let state = match load_state(&paths.state) {
+        Ok(state) => state,
+        Err(_) => {
+            start(home, true).await?;
+            return Ok(());
+        }
+    };
+    let health = probe(&state).await.context("contact Runtime Daemon")?;
+    if !force && health.version == willdeep_core::VERSION {
+        println!(
+            "WillDeep Runtime Daemon already runs version {} (pid {}).",
+            health.version, state.pid
+        );
+        return Ok(());
+    }
+    match runtime_client(&state)?.post_empty("/v1/drain").await {
+        Ok(()) => {}
+        Err(willdeep_runtime_client::ClientError::HttpStatus(404)) => {
+            bail!(
+                "Runtime {} predates safe drain handoff; no task was stopped. Finish active work, run `willdeep daemon stop`, then start this version once. Future upgrades from rc32 can use `daemon upgrade`",
+                health.version
+            );
+        }
+        Err(error) => return Err(error).context("request Runtime Daemon drain"),
+    }
+    println!(
+        "Draining Runtime {} (pid {}); active work will continue before handoff.",
+        health.version, state.pid
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut replacement = None;
+    loop {
+        match load_state(&paths.state) {
+            Ok(candidate) if candidate.token != state.token => {
+                if probe(&candidate).await.is_ok() {
+                    replacement = Some(candidate);
+                    break;
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "Runtime is still draining after {}s; it will stop after active work finishes. Run `willdeep daemon start` afterward",
+                timeout_seconds
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let replacement = match replacement {
+        Some(replacement) => replacement,
+        None => {
+            start(home, false).await?;
+            load_state(&paths.state)?
+        }
+    };
+    let replacement_health = probe(&replacement).await?;
+    println!(
+        "WillDeep Runtime handoff complete: {} -> {} (pid {}).",
+        health.version, replacement_health.version, replacement.pid
+    );
+    Ok(())
 }
 
 async fn logs(home: &Path, lines: usize, follow: bool) -> Result<()> {
@@ -1569,6 +1656,7 @@ async fn run(home: &Path) -> Result<()> {
         home,
     )?);
     let (turn_scheduler, mut scheduled_sessions) = tokio::sync::mpsc::unbounded_channel();
+    let work_gate = Arc::new(RwLock::new(false));
     let tasks = Arc::new(TaskManager::open(TaskManagerOptions {
         path: paths.tasks.clone(),
         interactions_path: paths.interactions.clone(),
@@ -1598,10 +1686,15 @@ async fn run(home: &Path) -> Result<()> {
         )?),
         local_transport: state.local_transport.clone(),
         tools: tasks.tools.clone(),
+        work_gate: work_gate.clone(),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
         while let Some(session_id) = scheduled_sessions.recv().await {
+            let work_guard = scheduler_state.work_gate.read().await;
+            if *work_guard {
+                continue;
+            }
             let claimed = scheduler_state.sessions.claim_next(session_id);
             let Ok(Some(claimed)) = claimed else {
                 continue;
@@ -1629,6 +1722,7 @@ async fn run(home: &Path) -> Result<()> {
                     let _ = scheduler_state.tasks.schedule_session(session_id);
                 }
             }
+            drop(work_guard);
         }
     });
     for session_id in sessions.schedulable_sessions()? {
@@ -1774,6 +1868,7 @@ async fn run(home: &Path) -> Result<()> {
             post(resolve_interaction_handler),
         )
         .route("/v1/shutdown", post(shutdown_handler))
+        .route("/v1/drain", post(drain_handler))
         .layer(middleware::from_fn(server_version_header))
         .with_state(server_state);
     events.append(
@@ -1807,7 +1902,12 @@ async fn health(
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
     let mut response = Json(Health {
-        status: "ok".to_owned(),
+        status: if *state.work_gate.read().await {
+            "draining"
+        } else {
+            "ok"
+        }
+        .to_owned(),
         version: willdeep_core::VERSION.to_owned(),
         pid: std::process::id(),
         uptime_seconds: now().saturating_sub(state.started_at),
@@ -1871,6 +1971,37 @@ async fn shutdown_handler(
     let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         tasks.cancel_all().await;
+        shutdown.notify_waiters();
+    });
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+async fn drain_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    {
+        let mut draining = state.work_gate.write().await;
+        if !*draining {
+            *draining = true;
+            state
+                .events
+                .append(
+                    "daemon.draining",
+                    format!(
+                        "pid={} version={}",
+                        std::process::id(),
+                        willdeep_core::VERSION
+                    ),
+                )
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+    }
+    let tasks = state.tasks.clone();
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tasks.wait_until_idle().await;
         shutdown.notify_waiters();
     });
     Ok(StatusCode::ACCEPTED.into_response())
@@ -1961,6 +2092,10 @@ async fn submit_task_handler(
     Json(mut request): Json<SubmitTask>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
+    let work_guard = state.work_gate.read().await;
+    if *work_guard {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let workspace = state
         .workspaces
         .ensure_registered(&request.workspace)
@@ -1976,6 +2111,7 @@ async fn submit_task_handler(
         eprintln!("Runtime task submission failed: {error:#}");
         StatusCode::BAD_REQUEST
     })?;
+    drop(work_guard);
     Ok((StatusCode::ACCEPTED, Json(task)).into_response())
 }
 
@@ -2677,6 +2813,30 @@ impl TaskManager {
                 .lock()
                 .is_ok_and(|items| items.is_empty())
             {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            let has_cancellations = self
+                .cancellations
+                .lock()
+                .map(|items| !items.is_empty())
+                .unwrap_or(true);
+            let has_active_tasks = self.tasks.read().await.values().any(|task| {
+                matches!(
+                    task.status,
+                    RuntimeTaskStatus::Queued
+                        | RuntimeTaskStatus::Running
+                        | RuntimeTaskStatus::Cancelling
+                        | RuntimeTaskStatus::WaitingApproval
+                        | RuntimeTaskStatus::WaitingAnswer
+                )
+            });
+            if !has_cancellations && !has_active_tasks {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

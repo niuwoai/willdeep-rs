@@ -1207,6 +1207,10 @@ pub(super) async fn create_turn_handler(
     Json(request): Json<CreateRuntimeTurn>,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
+    let work_guard = state.work_gate.read().await;
+    if *work_guard {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let (turn, created) = state
         .sessions
         .enqueue_turn(session_id, request)
@@ -1242,6 +1246,7 @@ pub(super) async fn create_turn_handler(
         .get_turn(turn.id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    drop(work_guard);
     Ok((
         if created {
             StatusCode::ACCEPTED

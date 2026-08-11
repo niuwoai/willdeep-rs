@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc31
+> 当前实施版本：v0.21.0-rc32
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -67,7 +67,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 受 Token 保护的 SSE 实时事件推送；按游标分页补读、慢客户端日志追赶、断线重连去重与 TUI 轮询降级。
 - [x] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
-- [ ] 无损优雅升级与版本交接。
+- [x] 无损优雅升级与版本交接；Drain 闸门保留活跃任务、拒绝新工作，任务归零后由当前二进制接管，Headless 客户端按新 Runtime 身份与原事件游标自动重附着。
 
 验收：客户端断开后任务继续运行，重连能补齐离线事件，异常退出不破坏会话。
 
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc32（已完成）：新增 `willdeep daemon upgrade` 的 Drain-and-Handoff。异步读写闸门把新 Turn、Agent Spawn/Retry/Prompt、旧任务领取与 Drain 起点严格串行；旧 Runtime 进入 `draining` 后继续运行现有任务，未领取 Turn 保留在持久队列，活跃任务归零才释放租约并由当前二进制接管。停止、审批、回答和观察仍可用于促使任务收敛。Headless 观察者仅在确认 Runtime Token 更替后重建 Client，沿原事件游标继续，普通连接错误不会伪装成交接。真实二进制 + 延迟 Provider + 两个 Daemon 的进程测试覆盖任务零丢失、新请求未触达 Provider、PID 更替和替换进程继续执行。
 
 v0.21.0-rc31（已完成）：补齐统一控制协议此前仅写入路线图、没有真实 Dispatch 的 `agent.spawn`。请求只接受活跃 Session、Prompt、标签和 `scout`/`reader`/`deep`；Runtime 从 Session → Turn → Task → Root Agent 推导父级与 Workspace，预分配稳定 Child ID，经原 Harness 的命令桥调用同一 SubagentCatalog，并可由 `agent.wait` 等待终态。Core 再次按实际 Profile 工具集合验证只读性，`editor`、未知 Profile、客户端路径和写目标均拒绝。真实二进制 + 等待中的 Root + Mock Provider 测试覆盖 Spawn/Wait 完整链路。
 

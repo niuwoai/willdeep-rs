@@ -101,11 +101,28 @@ pub(super) async fn handler(
             Some(request.request_id),
         );
     }
-    if is_mutating_operation(&request.operation) {
+    let work_guard = if is_work_producing_operation(&request.operation) {
+        let guard = state.work_gate.read().await;
+        if *guard {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "Runtime is draining for version handoff; retry against the replacement Runtime",
+                true,
+                Some(request.request_id),
+            );
+        }
+        Some(guard)
+    } else {
+        None
+    };
+    let response = if is_mutating_operation(&request.operation) {
         dispatch_idempotent(&state, request).await
     } else {
         dispatch(&state, request).await.into_response()
-    }
+    };
+    drop(work_guard);
+    response
 }
 
 async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Response {
@@ -539,6 +556,13 @@ fn is_mutating_operation(operation: &str) -> bool {
             | "diff.revert"
             | "worktree.merge"
             | "worktree.quarantine"
+    )
+}
+
+fn is_work_producing_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "turn.submit" | "agent.spawn" | "agent.prompt" | "agent.retry"
     )
 }
 
@@ -1547,6 +1571,12 @@ mod tests {
         assert!(is_mutating_operation("agent.prompt"));
         assert!(is_mutating_operation("agent.spawn"));
         assert!(!is_mutating_operation("session.list"));
+        assert!(is_work_producing_operation("turn.submit"));
+        assert!(is_work_producing_operation("agent.spawn"));
+        assert!(is_work_producing_operation("agent.prompt"));
+        assert!(is_work_producing_operation("agent.retry"));
+        assert!(!is_work_producing_operation("agent.stop"));
+        assert!(!is_work_producing_operation("approval.resolve"));
     }
 
     #[test]

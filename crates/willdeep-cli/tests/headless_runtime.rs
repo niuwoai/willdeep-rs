@@ -228,6 +228,89 @@ fn public_api_spawns_and_waits_for_a_read_only_child_agent() {
     );
 }
 
+#[test]
+fn daemon_upgrade_drains_active_work_and_hands_off_without_loss() {
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start_delayed(Duration::from_secs(3));
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root, home.clone());
+
+    let active = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "active during handoff",
+        ])
+        .spawn()
+        .expect("start active Runtime turn");
+    wait_until(Duration::from_secs(10), || provider.requests() == 1);
+
+    let before = daemon_status(&home);
+    let old_pid = status_value(&before, "pid");
+    let upgrade = willdeep(&home)
+        .args(["daemon", "upgrade", "--force", "--timeout", "15"])
+        .spawn()
+        .expect("start Runtime handoff");
+    wait_until(Duration::from_secs(5), || {
+        daemon_status(&home).starts_with("draining\t")
+    });
+
+    let rejected = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "must wait for replacement runtime",
+        ])
+        .output()
+        .expect("submit while draining");
+    assert!(
+        !rejected.status.success(),
+        "draining Runtime must reject new work"
+    );
+    assert_eq!(
+        provider.requests(),
+        1,
+        "rejected work must not reach Provider"
+    );
+
+    let active = active
+        .wait_with_output()
+        .expect("wait for active Runtime turn");
+    assert_success(&active, "active turn during Runtime handoff");
+    let upgrade = upgrade
+        .wait_with_output()
+        .expect("wait for Runtime handoff");
+    assert_success(&upgrade, "Runtime handoff");
+    let after = daemon_status(&home);
+    assert!(after.starts_with("running\t"));
+    assert_ne!(status_value(&after, "pid"), old_pid);
+
+    let replacement = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "replacement runtime turn",
+        ])
+        .output()
+        .expect("run turn on replacement Runtime");
+    assert_success(&replacement, "replacement Runtime turn");
+    assert_eq!(provider.requests(), 2);
+}
+
 fn willdeep(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_willdeep"));
     command
@@ -301,6 +384,36 @@ fn temporary_root() -> PathBuf {
     base.join(format!("wdhl-{}", uuid::Uuid::new_v4().simple()))
 }
 
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("condition was not met within {timeout:?}");
+}
+
+fn daemon_status(home: &Path) -> String {
+    let output = willdeep(home)
+        .args(["daemon", "status"])
+        .output()
+        .expect("query Runtime status");
+    assert_success(&output, "query Runtime status");
+    String::from_utf8(output.stdout)
+        .expect("Runtime status is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn status_value<'a>(status: &'a str, name: &str) -> &'a str {
+    status
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&format!("{name}=")))
+        .unwrap_or_else(|| panic!("missing {name} in Runtime status: {status}"))
+}
+
 struct TestGuard {
     root: PathBuf,
     home: PathBuf,
@@ -358,6 +471,10 @@ impl MockProvider {
         Self::start_with_mode(MockMode::WaitThenSuccess)
     }
 
+    fn start_delayed(delay: Duration) -> Self {
+        Self::start_with_mode(MockMode::DelayedSuccess(delay))
+    }
+
     fn start_with_mode(mode: MockMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Provider");
         listener
@@ -372,7 +489,9 @@ impl MockProvider {
             while !worker_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        read_request(&mut stream);
+                        if !read_request(&mut stream) {
+                            continue;
+                        }
                         let index = worker_requests.fetch_add(1, Ordering::Relaxed);
                         write_response(&mut stream, mode, index);
                     }
@@ -405,6 +524,7 @@ enum MockMode {
     Success,
     Status(u16),
     WaitThenSuccess,
+    DelayedSuccess(Duration),
 }
 
 impl Drop for MockProvider {
@@ -417,15 +537,30 @@ impl Drop for MockProvider {
     }
 }
 
-fn read_request(stream: &mut TcpStream) {
+fn read_request(stream: &mut TcpStream) -> bool {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set Provider read timeout");
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
     let header_end = loop {
-        let read = stream.read(&mut chunk).expect("read Provider request");
-        assert!(read > 0, "Provider connection closed before headers");
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return false;
+            }
+            Err(error) => panic!("read Provider request: {error}"),
+        };
+        if read == 0 {
+            return false;
+        }
         bytes.extend_from_slice(&chunk[..read]);
         if let Some(position) = find_bytes(&bytes, b"\r\n\r\n") {
             break position + 4;
@@ -443,16 +578,35 @@ fn read_request(stream: &mut TcpStream) {
         })
         .unwrap_or(0);
     while bytes.len() < header_end + content_length {
-        let read = stream.read(&mut chunk).expect("read Provider body");
-        assert!(read > 0, "Provider connection closed before body");
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return false;
+            }
+            Err(error) => panic!("read Provider body: {error}"),
+        };
+        if read == 0 {
+            return false;
+        }
         bytes.extend_from_slice(&chunk[..read]);
     }
+    true
 }
 
 fn write_response(stream: &mut TcpStream, mode: MockMode, request_index: usize) {
+    if let MockMode::DelayedSuccess(delay) = mode {
+        thread::sleep(delay);
+    }
     let status = match mode {
         MockMode::Status(status) => status,
-        MockMode::Success | MockMode::WaitThenSuccess => 200,
+        MockMode::Success | MockMode::WaitThenSuccess | MockMode::DelayedSuccess(_) => 200,
     };
     let (reason, body) = if mode_is_waiting_root(mode, request_index) {
         (

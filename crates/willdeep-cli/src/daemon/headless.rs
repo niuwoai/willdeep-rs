@@ -50,23 +50,38 @@ pub(crate) async fn execute_headless_turn(
         request.attachments,
     )
     .await?;
-    let state = ensure_running(home).await?;
-    let client = runtime_client(&state)?;
     let mut task_id = None;
     let mut completed_payload = None;
 
-    loop {
-        let turn = api_data(client.turn(submitted.id).await?)?;
+    'poll: loop {
+        let state = ensure_running(home).await?;
+        let client = runtime_client(&state)?;
+        let turn = match client.turn(submitted.id).await {
+            Ok(response) => api_data(response)?,
+            Err(error) => {
+                if wait_for_runtime_handoff(home, &state.token).await {
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
         task_id = turn.active_task_id.or(task_id);
         loop {
-            let events = api_data(
-                client
-                    .events(&willdeep_runtime_protocol::EventListParams {
-                        after: cursor,
-                        limit: EVENT_PAGE_LIMIT,
-                    })
-                    .await?,
-            )?;
+            let events = match client
+                .events(&willdeep_runtime_protocol::EventListParams {
+                    after: cursor,
+                    limit: EVENT_PAGE_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => api_data(response)?,
+                Err(error) => {
+                    if wait_for_runtime_handoff(home, &state.token).await {
+                        continue 'poll;
+                    }
+                    return Err(error.into());
+                }
+            };
             let page_is_full = events.len() == EVENT_PAGE_LIMIT;
             task_id = events
                 .iter()
@@ -118,7 +133,15 @@ pub(crate) async fn execute_headless_turn(
             TurnStatus::WaitingAnswer => return Ok(Err(HeadlessRuntimeStatus::WaitingAnswer)),
             TurnStatus::Failed => {
                 let failure_domain = match task_id {
-                    Some(id) => api_data(client.task(id).await?)?.failure_domain,
+                    Some(id) => match client.task(id).await {
+                        Ok(response) => api_data(response)?.failure_domain,
+                        Err(error) => {
+                            if wait_for_runtime_handoff(home, &state.token).await {
+                                continue 'poll;
+                            }
+                            return Err(error.into());
+                        }
+                    },
                     None => None,
                 };
                 return Ok(Err(HeadlessRuntimeStatus::Failed(failure_domain)));
@@ -136,6 +159,21 @@ pub(crate) async fn execute_headless_turn(
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
+}
+
+async fn wait_for_runtime_handoff(home: &Path, previous_token: &str) -> bool {
+    let state_path = DaemonPaths::new(home).state;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(state) = load_state(&state_path)
+            && state.token != previous_token
+            && probe(&state).await.is_ok()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 fn completion_values(value: Option<&serde_json::Value>) -> Option<(String, usize)> {

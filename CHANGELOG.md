@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0-rc32] - 2026-08-11
+
+### Added
+
+- 新增 `willdeep daemon upgrade [--timeout SECONDS] [--force]`，以 Drain-and-Handoff 完成 Runtime 版本交接：旧进程继续执行活跃任务，归零后释放单实例租约，由当前二进制接管。
+- Runtime 健康状态新增 `draining`，事件日志记录 `daemon.draining`；进程级端到端测试覆盖旧任务完成、新工作拒绝、PID 更替和替换进程继续执行。
+
+### Changed
+
+- draining 期间拒绝新的 Turn、外部 Agent Spawn、Retry 和补充 Prompt；停止/审批/回答等收敛操作保持可用，尚未领取的 Turn 留在持久队列由替换 Runtime 调度。
+- Headless 客户端在确认 Runtime Token 已更替后重建本地 Client，并沿原事件游标继续读取，避免 Unix Socket/Named Pipe 交接窗口造成假失败。
+- 源 Runtime 早于 rc32、不支持 Drain 时明确保持任务原样并要求首次手动迁移，不会暗中退化为取消活跃任务的 Shutdown。
+
+### Fixed
+
+- 通过异步读写闸门串行化任务领取、提交与 Drain 起点，消除升级开始瞬间仍有新任务穿透并被旧进程关闭流程取消的竞态。
+
 ## [0.21.0-rc31] - 2026-08-11
 
 ### Added
