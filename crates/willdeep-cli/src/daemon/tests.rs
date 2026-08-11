@@ -330,6 +330,12 @@ fn agent_store_persists_structured_harness_lifecycle() {
             r#"{"type":"usage","input_tokens":10,"output_tokens":4,"total_tokens":14}"#,
         )
         .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            r#"{"type":"usage","input_tokens":5,"output_tokens":1,"total_tokens":6}"#,
+        )
+        .unwrap();
     let child_id = uuid::Uuid::new_v4();
     let child_event = |kind: &str, extra: serde_json::Value| {
         let mut value = serde_json::json!({"type": kind, "id": child_id});
@@ -410,7 +416,7 @@ fn agent_store_persists_structured_harness_lifecycle() {
     let retried_child = store.get(child_id).unwrap().unwrap();
     assert_eq!(retried_child.status, RuntimeAgentStatus::Running);
     assert_eq!(retried_child.current_turn, 0);
-    assert_eq!(retried_child.total_tokens, None);
+    assert_eq!(retried_child.total_tokens, Some(9));
     store
         .apply_harness_event(
             task_id,
@@ -423,6 +429,22 @@ fn agent_store_persists_structured_harness_lifecycle() {
     store
         .set_status_for_task(task_id, RuntimeAgentStatus::Completed, None)
         .unwrap();
+    let next_task_id = uuid::Uuid::new_v4();
+    let continued_root = store
+        .ensure_session_root(
+            agent.id,
+            next_task_id,
+            root.clone(),
+            Some("mock".to_owned()),
+            RuntimeAgentStatus::Queued,
+        )
+        .unwrap();
+    assert_eq!(continued_root.input_tokens, Some(15));
+    assert_eq!(continued_root.output_tokens, Some(5));
+    assert_eq!(continued_root.total_tokens, Some(20));
+    store
+        .set_status_for_task(next_task_id, RuntimeAgentStatus::Completed, None)
+        .unwrap();
     drop(store);
 
     let restored = AgentStore::open(path)
@@ -431,9 +453,11 @@ fn agent_store_persists_structured_harness_lifecycle() {
         .unwrap()
         .unwrap();
     assert_eq!(restored.status, RuntimeAgentStatus::Completed);
-    assert_eq!(restored.current_turn, 2);
+    assert_eq!(restored.current_turn, 0);
     assert_eq!(restored.current_tool, None);
-    assert_eq!(restored.total_tokens, Some(14));
+    assert_eq!(restored.input_tokens, Some(15));
+    assert_eq!(restored.output_tokens, Some(5));
+    assert_eq!(restored.total_tokens, Some(20));
     assert!(restored.completed_at.is_some());
     let child = AgentStore::open(root.join("agents.json"))
         .unwrap()
@@ -445,7 +469,7 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert!(child.background);
     assert_eq!(child.status, RuntimeAgentStatus::Cancelled);
     assert_eq!(child.current_turn, 0);
-    assert_eq!(child.total_tokens, None);
+    assert_eq!(child.total_tokens, Some(9));
     std::fs::remove_dir_all(root).unwrap();
 }
 

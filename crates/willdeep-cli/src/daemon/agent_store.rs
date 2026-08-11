@@ -162,9 +162,6 @@ impl AgentStore {
             agent.status = status;
             agent.current_turn = 0;
             agent.current_tool = None;
-            agent.input_tokens = None;
-            agent.output_tokens = None;
-            agent.total_tokens = None;
             agent.max_turns = None;
             agent.token_budget = None;
             agent.timeout_seconds = None;
@@ -360,9 +357,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("usage") => self.update_task_agent(task_id, |agent| {
-                agent.input_tokens = value.get("input_tokens").and_then(|value| value.as_u64());
-                agent.output_tokens = value.get("output_tokens").and_then(|value| value.as_u64());
-                agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
+                accumulate_usage(agent, &value);
                 agent.updated_at = now();
             }),
             Some("subagent_started") => self.create_child_from_event(task_id, &value),
@@ -387,9 +382,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("subagent_usage") => self.update_child_from_event(&value, |agent| {
-                agent.input_tokens = value.get("input_tokens").and_then(|value| value.as_u64());
-                agent.output_tokens = value.get("output_tokens").and_then(|value| value.as_u64());
-                agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
+                accumulate_usage(agent, &value);
                 agent.updated_at = now();
             }),
             _ => Ok(()),
@@ -438,9 +431,6 @@ impl AgentStore {
             agent.status = RuntimeAgentStatus::Running;
             agent.current_turn = 0;
             agent.current_tool = None;
-            agent.input_tokens = None;
-            agent.output_tokens = None;
-            agent.total_tokens = None;
             agent.max_turns = value.get("max_turns").and_then(|value| value.as_u64());
             agent.token_budget = value.get("token_budget").and_then(|value| value.as_u64());
             agent.timeout_seconds = value
@@ -578,6 +568,30 @@ impl AgentStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime agent store lock poisoned"))
     }
+}
+
+fn accumulate_usage(agent: &mut RuntimeAgent, value: &serde_json::Value) {
+    let input = value.get("input_tokens").and_then(|value| value.as_u64());
+    let output = value.get("output_tokens").and_then(|value| value.as_u64());
+    let total = value
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            (input.is_some() || output.is_some()).then(|| {
+                input
+                    .unwrap_or_default()
+                    .saturating_add(output.unwrap_or_default())
+            })
+        });
+    agent.input_tokens = saturating_optional_add(agent.input_tokens, input);
+    agent.output_tokens = saturating_optional_add(agent.output_tokens, output);
+    agent.total_tokens = saturating_optional_add(agent.total_tokens, total);
+}
+
+fn saturating_optional_add(current: Option<u64>, increment: Option<u64>) -> Option<u64> {
+    increment.map_or(current, |increment| {
+        Some(current.unwrap_or_default().saturating_add(increment))
+    })
 }
 
 fn event_path(value: &serde_json::Value, field: &str) -> Option<PathBuf> {

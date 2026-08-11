@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0-rc37] - 2026-08-11
+
+### Changed
+
+- Root 与 Child Agent 的 Usage 事件改为饱和累计 input/output/total Token；Provider 未给 total 时使用 input + output 补全。
+- 同一 Session Root 进入下一 Task 时保留累计 Token，Child Agent 重试也保留既有消耗；轮次、当前工具和终态仍按新执行重置。
+
+### Fixed
+
+- 修复 Agent 右栏与统一控制 API 只显示最后一次 Provider Usage、并在下一 Turn 清零的问题；累计值现在随 Agent Store 持久化并在 Daemon 重启后恢复。
+
 ## [0.21.0-rc36] - 2026-08-11
 
 ### Added

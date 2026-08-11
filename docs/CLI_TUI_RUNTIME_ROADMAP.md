@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc36
+> 当前实施版本：v0.21.0-rc37
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -77,7 +77,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
 - [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
 - [x] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 支持同 Workspace 原地切换并按 Session 隔离聊天事件。
-- [-] Goal、Provider Profile、模型和配置已按 Session 恢复；Skills/MCP 按当前持久 Workspace 策略重新绑定；可证明安全的活跃 Turn/Task 已自动重放，旧审批取消后重新申请。Agent 树、Worktree、Token、压缩点及更完整任务资源恢复继续补齐。
+- [-] Goal、Provider Profile、模型、配置和 Agent Token 已恢复；Skills/MCP 按当前持久 Workspace 策略重新绑定；可证明安全的活跃 Turn/Task 已自动重放，旧审批取消后重新申请。Agent 树运行资源、Worktree、压缩点及更完整任务资源恢复继续补齐。
 - [x] 已按持久消息边界支持从指定已完成 Turn 精确 Fork，并可为新 Session 覆盖 Provider Profile 和模型。
 - [x] 受 Token CLI/TUI 支持标题、消息内容、Workspace、状态、Provider Profile、模型和更新时间组合搜索；Web 保持当前 Workspace 标题筛选，不向未认证浏览器下发消息摘要。
 - [x] 安全的自动标题与会话数据迁移版本；schema 1 先私有备份再原子迁移到 schema 2，未来版本拒绝降级；首次 Turn 本地生成有界标题并对疑似凭据回退，人工/旧版/Fork 标题不被覆盖。
@@ -223,6 +223,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 6. 每项完成必须有覆盖其验收条件的测试或可重复验证步骤。
 
 ## 5. 当前执行批次
+
+v0.21.0-rc37（已完成）：Agent Store 的 Usage 从“覆盖最后一次响应”改为 input/output/total 饱和累计；Provider 缺少 total 时以 input + output 补全。同一 Session Root 绑定下一 Task 时保留累计值，Child Agent 使用同一身份重试时同样保留；当前轮次、工具、报告与终态仍按新执行重置。统一控制 API 与 TUI 右栏复用现有公开字段即可显示正确总量。测试覆盖多次 Usage、Root 跨 Task、Child 重试和 Store 重开后的数值一致性。
 
 v0.21.0-rc36（已完成）：Daemon 启动时不再一律终止活跃 Turn。只有旧 Task 没有任何持久 Tool 活动，且 Core 消息数仍在 `message_start`，或只多出与私有 Turn 队列 Prompt/附件完全一致的一条用户消息，才重置 Task 绑定、保留尝试次数并重新排队；后者通过私有重放标记让 Harness 复用原消息，不修改 Core 历史，连续重启也不会重复。存在工具副作用证据、额外持久消息或任何边界歧义时，完整保留历史并维持 Interrupted。旧 Task 记录为 `task.interrupted`，可恢复 Turn 记录 `turn.requeued`；Pending Approval/Ask User 保守取消，重放再次到达人类门时必须重新申请。测试覆盖已有用户消息、连续两次重启、工具活动阻断和歧义部分输出零删除。
 
