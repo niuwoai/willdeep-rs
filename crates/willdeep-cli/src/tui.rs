@@ -1793,6 +1793,20 @@ impl App {
             return false;
         }
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
+        if matches!(
+            command,
+            "/agent"
+                | "/compress"
+                | "/diff"
+                | "/local"
+                | "/mobile"
+                | "/runtime"
+                | "/session"
+                | "/webapp"
+                | "/workspace"
+        ) {
+            return false;
+        }
         match command {
             "/help" => self.append_transcript(
                 "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /webapp [status|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"

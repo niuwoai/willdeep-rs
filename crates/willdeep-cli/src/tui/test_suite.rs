@@ -28,6 +28,15 @@ mod command_tests {
     }
 
     #[test]
+    fn delegated_webapp_command_is_not_rejected_by_the_fallback_handler() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+
+        assert!(!app.handle_slash_command("/webapp", &skills));
+        assert!(app.transcript.is_empty());
+    }
+
+    #[test]
     fn ordinary_prompt_is_not_treated_as_command() {
         let mut app = App::new(Vec::new(), Language::En);
         assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
@@ -42,6 +51,14 @@ mod tests {
         a.requested("read_file");
         a.completed("read_file", true);
         assert!(a.summary(Language::En).contains("1 failed"));
+    }
+
+    #[test]
+    fn command_menu_discovers_webapp() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/web");
+        let matches = app.command_matches();
+        assert!(matches.iter().any(|(command, _)| *command == "/webapp"));
     }
 
     #[test]

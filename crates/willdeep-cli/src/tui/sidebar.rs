@@ -158,7 +158,15 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
         app.language
             .text("移动中继", "Mobile relay", "モバイルリレー"),
     ];
-    let mut lines = Vec::new();
+    let mut lines = vec![
+        Line::styled(
+            format!("WillDeep v{}", willdeep_core::VERSION),
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+    ];
     let mut headers = [0usize; 4];
     let mut logical_hits = Vec::new();
     let mut selected_attention_row = None;
