@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use http::header::HeaderValue;
 use qrcode::{EcLevel, QrCode};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
@@ -15,7 +16,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use uuid::Uuid;
 
 const DEFAULT_RELAY_BASE_URL: &str = "https://j.niuwoai.com";
-const PROTOCOL_VERSION: &str = "mobile-gateway.v1";
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const ROOM_PREFIX: &str = "wd-";
 /// 128 位随机 token 的十六进制长度；配对 JSON 里出现两次，是二维码尺寸的大头。
@@ -23,13 +23,13 @@ const TOKEN_HEX_LEN: usize = 32;
 const ROOM_ID_HEX_LEN: usize = 32;
 /// 桌面名只是给手机端展示，超长主机名会白白把二维码撑大一个版本。
 const MAX_DESKTOP_NAME_LEN: usize = 16;
-/// 配对二维码在终端里的尺寸（含 4 模块静区）：65 模块 + 静区 = 73 列，
-/// Dense1x2 一个字符格装两行模块，所以是 37 行。再大弹窗就开始吞掉整屏。
+/// 配对二维码在终端里的尺寸（含 4 模块静区）：41 模块 + 静区 = 49 列，
+/// Dense1x2 一个字符格装两行模块，所以是 25 行。再大弹窗就开始吞掉整屏。
 /// 仅作为回归测试的断言基准。
 #[cfg(test)]
-const MAX_QR_WIDTH: usize = 73;
+const MAX_QR_WIDTH: usize = 49;
 #[cfg(test)]
-const MAX_QR_HEIGHT: usize = 37;
+const MAX_QR_HEIGHT: usize = 25;
 
 #[derive(Clone, Debug)]
 pub struct MobilePrompt {
@@ -101,8 +101,7 @@ impl RelayGateway {
         snapshot: Value,
     ) -> Result<Self> {
         let credentials = RelayCredentials::load_or_create(home)?;
-        let pairing = PairingPayload::new(&credentials);
-        let qr = render_qr(&serde_json::to_string(&pairing)?)?;
+        let qr = render_qr(&pairing_url(&credentials)?)?;
         let room = credentials.room.clone();
         let task = tokio::spawn(run_relay(credentials, bridge, prompts, snapshot));
         Ok(Self { task, qr, room })
@@ -172,31 +171,34 @@ impl RelayCredentials {
     }
 }
 
-#[derive(Serialize)]
-struct PairingPayload<'a> {
-    base_url: &'a str,
-    pairing_token: &'a str,
-    protocol_version: &'static str,
-    desktop_name: String,
-    expires_at: &'static str,
-    relay_base_url: &'a str,
-    relay_room: &'a str,
-    relay_token: &'a str,
+/// `mobile-gateway.v1` 的紧凑配对 URL（手机端 `compactPairingPayloadJSON` 的输入）：
+/// `r` = relay room，`t` = relay token，`u` = relay base url（等于默认值时省略），
+/// `d` = 桌面名。协议版本不进二维码：`v` 缺省时手机按 `mobile-gateway.v1` 处理，
+/// 协议真升版时再补 `v`。手机会把这几个参数补全成完整的配对 JSON，
+/// `base_url`/`pairing_token` 由 `u`/`t` 推出，`expires_at`/`protocol_version` 取默认值——
+/// 所以这些字段没必要再进二维码。
+///
+/// 相比原先直接编码完整 JSON（437 字节、81×81 模块），这里最多 118 字节、41×41 模块。
+fn pairing_url(credentials: &RelayCredentials) -> Result<String> {
+    pairing_url_named(credentials, &desktop_name())
 }
 
-impl<'a> PairingPayload<'a> {
-    fn new(credentials: &'a RelayCredentials) -> Self {
-        Self {
-            base_url: &credentials.relay_base_url,
-            pairing_token: &credentials.token,
-            protocol_version: PROTOCOL_VERSION,
-            desktop_name: desktop_name(),
-            expires_at: "2099-12-31T23:59:59Z",
-            relay_base_url: &credentials.relay_base_url,
-            relay_room: &credentials.room,
-            relay_token: &credentials.token,
+/// 桌面名由调用方给出，`pairing_url` 之外只有测试会用——桌面名长度取决于 `HOSTNAME`，
+/// 尺寸断言不能跟着环境走。
+fn pairing_url_named(credentials: &RelayCredentials, desktop_name: &str) -> Result<String> {
+    let base = credentials.relay_base_url.trim_end_matches('/');
+    let mut url = Url::parse(&format!("{base}/pair")).context("build mobile pairing URL")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("r", &credentials.room);
+        query.append_pair("t", &credentials.token);
+        query.append_pair("d", desktop_name);
+        // 手机端 `u` 缺省时按 DEFAULT_RELAY_BASE_URL 处理，自建中继才需要多带这一段。
+        if base != DEFAULT_RELAY_BASE_URL {
+            query.append_pair("u", base);
         }
     }
+    Ok(url.to_string())
 }
 
 async fn run_relay(
@@ -387,35 +389,65 @@ mod tests {
     }
 
     #[test]
-    fn pairing_payload_matches_android_relay_contract() {
+    fn pairing_url_matches_android_compact_contract() {
         let credentials = RelayCredentials {
             relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
-            room: "willdeep-cli-test".to_owned(),
+            room: "wd-test".to_owned(),
             token: "secret".to_owned(),
         };
-        let payload = serde_json::to_value(PairingPayload::new(&credentials)).unwrap();
-        assert_eq!(payload["protocol_version"], PROTOCOL_VERSION);
-        assert_eq!(payload["relay_room"], "willdeep-cli-test");
-        assert_eq!(payload["relay_token"], "secret");
+        let url = pairing_url(&credentials).unwrap();
+        assert!(url.starts_with("https://j.niuwoai.com/pair?"), "{url}");
+        assert!(url.contains("r=wd-test"), "{url}");
+        assert!(url.contains("t=secret"), "{url}");
+        // 默认中继地址由手机端补全，不进二维码。
+        assert!(!url.contains("u="), "{url}");
     }
 
     #[test]
+    fn self_hosted_relay_keeps_its_base_url_in_the_pairing_url() {
+        let credentials = RelayCredentials {
+            relay_base_url: "https://relay.example.com".to_owned(),
+            room: "wd-test".to_owned(),
+            token: "secret".to_owned(),
+        };
+        let url = pairing_url(&credentials).unwrap();
+        assert!(
+            url.contains("u=https%3A%2F%2Frelay.example.com"),
+            "自建中继地址必须随二维码下发：{url}"
+        );
+    }
+
+    /// 最坏情况：桌面名顶满 `MAX_DESKTOP_NAME_LEN`，且每个字符都要百分号转义（一个字符占三字节）。
+    /// 真实主机名只会比这短，所以这就是二维码尺寸的上界。
+    #[test]
     fn pairing_qr_fits_the_terminal_popup() {
         let credentials = RelayCredentials::generate();
-        let payload = serde_json::to_string(&PairingPayload::new(&credentials)).unwrap();
-        let qr = render_qr(&payload).unwrap();
-        let width = qr
-            .lines()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or_default();
-        let height = qr.lines().count();
+        let worst_case_name = "中".repeat(MAX_DESKTOP_NAME_LEN);
+        let payload = pairing_url_named(&credentials, &worst_case_name).unwrap();
+        let (width, height) = qr_size(&payload);
         assert_eq!(
             (width, height),
             (MAX_QR_WIDTH, MAX_QR_HEIGHT),
             "配对二维码尺寸变了（载荷 {} 字节）",
             payload.len()
         );
+
+        // 当前环境下的真实二维码不得超过这个上界。
+        let (actual_width, actual_height) = qr_size(&pairing_url(&credentials).unwrap());
+        assert!(
+            actual_width <= MAX_QR_WIDTH && actual_height <= MAX_QR_HEIGHT,
+            "实际二维码 {actual_width}×{actual_height} 超出上界 {MAX_QR_WIDTH}×{MAX_QR_HEIGHT}"
+        );
+    }
+
+    fn qr_size(payload: &str) -> (usize, usize) {
+        let qr = render_qr(payload).unwrap();
+        let width = qr
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default();
+        (width, qr.lines().count())
     }
 
     #[test]
