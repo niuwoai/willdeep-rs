@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0-rc63] - 2026-08-12
+
+### Fixed
+- `SessionStore` 不再从非默认家目录去桥接桌面 App 的会话：`list()` / `load()` 此前无条件扫描并全量解析 `~/Library/Application Support/WillDeep/agent-sessions`，与 Store 自己的家目录无关。现在只有默认家目录（`~/.willdeep/sessions`）下的 Store 才合并桌面会话，`WILLDEEP_HOME` 指向别处的 Store（测试、沙箱、独立数据根）保持自足。这是 `headless_runtime.rs` 中 `web_sse_disconnect_resumes_the_same_runtime_turn_without_resubmission` 间歇失败的真正原因：该目录在开发机上有 293 个文件 / 67 MB，Web `GET /api/sessions` 的每一次请求都要重新解析一遍，实测单次耗时 4–5 秒（高负载下 12–32 秒），而测试用来等待的 `active_turn_id` 只存在约 5 秒——第一次轮询就把 10 秒预算耗光，超时报出的 `Elapsed(())` 与调度无关。Runtime 侧调度无竞态：`turn.queued` 到 `turn.started` 实测 5–17 ms。
+- Web `web_runtime_agent_summary_excludes_workspace_report_and_internal_errors` 单测补上 `finished_seconds_ago` 字段，此前 `cargo test --workspace` 因该测试无法编译而整体失败。
+
+### Tests
+- `headless_runtime.rs` 的活跃 Turn 等待改为可自证的形式：每次 `GET /api/sessions` 单独设 2 秒超时（一次卡死的请求不再吃掉整个等待预算），Turn 提前进入非在途状态时立即带着 Runtime 侧 Session/Turn 的 status 与 error 退出，超时信息同样附带该摘要，不再只报一个 `Elapsed(())`。
+- 新增 `bridges_desktop_sessions_only_for_the_default_home`，锁定桌面会话桥接只在默认家目录生效。
+
 ## [0.21.0-rc62] - 2026-08-12
 
 ### Fixed

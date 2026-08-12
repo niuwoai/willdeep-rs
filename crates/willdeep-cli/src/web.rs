@@ -1736,6 +1736,7 @@ mod tests {
             current_tool: Some("read_file".to_owned()),
             total_tokens: Some(100),
             elapsed_seconds: 12,
+            finished_seconds_ago: None,
             worktree_branch: None,
             dedicated_worktree: false,
         })

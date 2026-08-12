@@ -179,16 +179,25 @@ fn web_sse_disconnect_resumes_the_same_runtime_turn_without_resubmission() {
         let cursor = submitted["cursor"].as_u64().expect("submitted cursor");
         drop(initial_stream);
 
+        // 这一步只在 Turn 还活着时成立，所以既要给每次请求单独设超时（一个卡住的
+        // 请求不能吃掉整个等待预算），也要在 Turn 提前失败时立刻带着真实错误退出，
+        // 而不是空转到超时报一个什么都没说的 Elapsed。
         let active_turn_id = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let sessions = client
                     .get(format!("{base}/api/sessions"))
+                    .timeout(Duration::from_secs(2))
                     .send()
                     .await
-                    .expect("list Web Sessions")
-                    .json::<Vec<serde_json::Value>>()
-                    .await
-                    .expect("decode Web Sessions");
+                    .and_then(reqwest::Response::error_for_status);
+                let sessions = match sessions {
+                    Ok(response) => response
+                        .json::<Vec<serde_json::Value>>()
+                        .await
+                        .expect("decode Web Sessions"),
+                    // 慢一次不算失败，下一轮再问；真出不来由外层超时兜底。
+                    Err(_) => Vec::new(),
+                };
                 if let Some(active_turn_id) = sessions
                     .iter()
                     .find(|session| session["id"] == session_id)
@@ -196,11 +205,24 @@ fn web_sse_disconnect_resumes_the_same_runtime_turn_without_resubmission() {
                 {
                     break active_turn_id.to_owned();
                 }
+                // 只有确实读到终态才判失败；`unknown` 表示这一刻没读到状态本身，
+                // 不能拿它当作 Turn 已经结束的证据。
+                let status = runtime_turn_status(&home, &turn_id);
+                assert!(
+                    matches!(status.as_str(), "queued" | "running" | "unknown"),
+                    "Turn must stay in flight until the Web client reattaches, but the Runtime reports {}",
+                    runtime_turn_report(&home)
+                );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("Session exposes its active Turn");
+        .unwrap_or_else(|_| {
+            panic!(
+                "Session never exposed its active Turn; Runtime reports {}",
+                runtime_turn_report(&home)
+            )
+        });
         assert_eq!(active_turn_id, turn_id);
 
         let response = client
@@ -1070,6 +1092,54 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!("condition was not met within {timeout:?}");
+}
+
+/// 持久化的 Turn 状态（`queued` / `running` / `completed` / `failed` ...）。
+/// 读不到就返回 `unknown`：这是给失败诊断用的，不该自己再制造一个 panic。
+fn runtime_turn_status(home: &Path, turn_id: &str) -> String {
+    runtime_state(home, "turns.json")
+        .iter()
+        .find(|turn| turn["metadata"]["id"] == turn_id)
+        .and_then(|turn| turn["metadata"]["status"].as_str())
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// Runtime 侧 Session 与 Turn 的状态摘要，用于把"等不到活跃 Turn"变成一条能直接
+/// 定位的失败信息，而不是一个光秃秃的超时。
+fn runtime_turn_report(home: &Path) -> String {
+    let sessions = runtime_state(home, "sessions.json")
+        .iter()
+        .map(|session| {
+            format!(
+                "session {} status={} active_turn={} last_error={}",
+                session["id"],
+                session["status"],
+                session["active_turn_id"],
+                session["last_error"]
+            )
+        })
+        .collect::<Vec<_>>();
+    let turns = runtime_state(home, "turns.json")
+        .iter()
+        .map(|turn| {
+            format!(
+                "turn {} status={} attempts={} error={}",
+                turn["metadata"]["id"],
+                turn["metadata"]["status"],
+                turn["metadata"]["attempts"],
+                turn["metadata"]["error"]
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}] [{}]", sessions.join("; "), turns.join("; "))
+}
+
+fn runtime_state(home: &Path, name: &str) -> Vec<serde_json::Value> {
+    std::fs::read(home.join("runtime").join(name))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<Vec<serde_json::Value>>(&data).ok())
+        .unwrap_or_default()
 }
 
 fn daemon_status(home: &Path) -> String {
