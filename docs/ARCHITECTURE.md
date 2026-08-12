@@ -89,7 +89,7 @@ Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% �
 
 ### Mobile Relay
 
-`/mobile` 按需创建独立于 Swift App 的 CLI room/token，并主动连接 `wss://j.niuwoai.com/ws/broadcast/<room>`。二维码沿用 `mobile-gateway.v1` 的 `relay_base_url`、`relay_room`、`relay_token` 字段；Android 与 CLI 使用同一 Bearer Token 加入广播房间。CLI 不开放本地监听端口。
+`/mobile` 按需创建独立于 Swift App 的 CLI room/token，并主动连接 `wss://j.niuwoai.com/ws/broadcast/<room>`。二维码里是 `mobile-gateway.v1` 的紧凑配对 URL（`?r=<room>&t=<token>&d=<桌面名>`，自建中继另带 `u`），由手机端补全成完整配对 JSON；`base_url`/`pairing_token`/`expires_at` 是中继字段的副本或常量，不进二维码（详见 [手机中继](MOBILE.md)）。Android 与 CLI 使用同一 Bearer Token 加入广播房间。CLI 不开放本地监听端口。
 
 Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。手机的 `message.send` 进入当前会话；Agent 忙碌时请求按到达顺序排队，最终回复使用 Android 已支持的 `message.append` 与 `message.done` 事件返回。
 
