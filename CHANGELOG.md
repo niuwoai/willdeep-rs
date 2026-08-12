@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc7] - 2026-08-12
+
+### Fixed
+
+- 修复 `SessionStore::list()` 每次调用都完整反序列化所有会话文件（含全部消息历史）导致 Web 会话侧栏每次刷新卡顿数秒的问题；列表改为只解析 id、title、workspace、created_at、updated_at 等摘要字段，并按文件 mtime + 大小缓存，未变更的文件不再重复读取和解析。
+- `SessionStore::latest()` 不再为了取最新一条而加载全部会话正文，改为先按摘要定位再单独 `load` 目标会话。
+- `list()` 现在会跳过 `load()` 无法接受的不兼容版本会话，避免 `--resume latest` 选中一个随后加载失败的会话。
+
+### Changed
+
+- `SessionStore::list()` 返回类型由 `Vec<Session>` 改为 `Vec<SessionSummary>`；调用方本就只使用摘要字段，字段名保持不变。
+
 ## [0.17.0-rc6] - 2026-08-10
 
 ### Added

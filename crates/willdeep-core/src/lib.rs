@@ -23,7 +23,7 @@ pub use background::{
 };
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
-pub use session::{Session, SessionStore};
+pub use session::{Session, SessionStore, SessionSummary};
 pub use skills::SkillCatalog;
 pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
 pub use tools::{
