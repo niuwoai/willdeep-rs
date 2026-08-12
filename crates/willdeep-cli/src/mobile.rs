@@ -21,15 +21,15 @@ const ROOM_PREFIX: &str = "wd-";
 /// 128 位随机 token 的十六进制长度；配对 JSON 里出现两次，是二维码尺寸的大头。
 const TOKEN_HEX_LEN: usize = 32;
 const ROOM_ID_HEX_LEN: usize = 32;
-/// 桌面名只是给手机端展示，超长主机名会白白把二维码撑大一个版本。
+/// 桌面名只是给手机端展示，超长主机名会白白把二维码撑大一个版本。按 UTF-8 字节数截断。
 const MAX_DESKTOP_NAME_LEN: usize = 16;
-/// 配对二维码在终端里的尺寸（含 4 模块静区）：41 模块 + 静区 = 49 列，
-/// Dense1x2 一个字符格装两行模块，所以是 25 行。再大弹窗就开始吞掉整屏。
-/// 仅作为回归测试的断言基准。
+/// 配对二维码在终端里的尺寸上界（含 4 模块静区）：桌面名顶满且全需转义时 45 模块 + 静区 = 53 列，
+/// Dense1x2 一个字符格装两行模块，所以是 27 行。ASCII 主机名的常见情况是 41 模块 / 49×25。
+/// 再大弹窗就开始吞掉整屏。仅作为回归测试的断言基准。
 #[cfg(test)]
-const MAX_QR_WIDTH: usize = 49;
+const MAX_QR_WIDTH: usize = 53;
 #[cfg(test)]
-const MAX_QR_HEIGHT: usize = 25;
+const MAX_QR_HEIGHT: usize = 27;
 
 #[derive(Clone, Debug)]
 pub struct MobilePrompt {
@@ -323,10 +323,16 @@ fn desktop_name() -> String {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "WillDeep CLI".to_owned());
-    match name.char_indices().nth(MAX_DESKTOP_NAME_LEN) {
-        Some((index, _)) => name[..index].to_owned(),
-        None => name,
+    // 按字节截断（在字符边界上切）：URL 里每个非 ASCII 字节要百分号转义成三个字符，
+    // 按字符数截断的话一个中文主机名就能把二维码顶大一圈。
+    if name.len() <= MAX_DESKTOP_NAME_LEN {
+        return name;
     }
+    let mut end = MAX_DESKTOP_NAME_LEN;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
 }
 
 fn random_token() -> String {
@@ -417,12 +423,12 @@ mod tests {
         );
     }
 
-    /// 最坏情况：桌面名顶满 `MAX_DESKTOP_NAME_LEN`，且每个字符都要百分号转义（一个字符占三字节）。
+    /// 最坏情况：桌面名顶满 `MAX_DESKTOP_NAME_LEN` 字节，且每个字节都要百分号转义成三个字符。
     /// 真实主机名只会比这短，所以这就是二维码尺寸的上界。
     #[test]
     fn pairing_qr_fits_the_terminal_popup() {
         let credentials = RelayCredentials::generate();
-        let worst_case_name = "中".repeat(MAX_DESKTOP_NAME_LEN);
+        let worst_case_name = "中".repeat(MAX_DESKTOP_NAME_LEN / "中".len());
         let payload = pairing_url_named(&credentials, &worst_case_name).unwrap();
         let (width, height) = qr_size(&payload);
         assert_eq!(
