@@ -11,6 +11,11 @@ use crate::types::Role;
 
 pub const SESSION_VERSION: u32 = 1;
 
+/// 默认家目录名，`~/<DEFAULT_HOME_DIRECTORY>` 即未设置 `WILLDEEP_HOME` 时 CLI 用的家目录。
+/// 只有 macOS 才有桌面 App 会话桥接，其他平台仅测试引用它。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const DEFAULT_HOME_DIRECTORY: &str = ".willdeep";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompressionCheckpoint {
     pub generation: u64,
@@ -122,7 +127,7 @@ impl SessionStore {
         let local = self.path(id);
         let session: Session = if local.exists() {
             serde_json::from_slice(&std::fs::read(local)?)?
-        } else if let Some(path) = swift_session_directory()
+        } else if let Some(path) = swift_session_directory(&self.directory)
             .map(|dir| dir.join(format!("{id}.json")))
             .filter(|path| path.exists())
         {
@@ -158,7 +163,7 @@ impl SessionStore {
                 values.push(digest);
             }
         }
-        if let Some(directory) = swift_session_directory() {
+        if let Some(directory) = swift_session_directory(&self.directory) {
             for path in json_files(&directory) {
                 let Some(digest) = cached_digest(&path, swift_digest) else {
                     continue;
@@ -195,7 +200,7 @@ impl SessionStore {
                 }
             }
         }
-        if let Some(directory) = swift_session_directory()
+        if let Some(directory) = swift_session_directory(&self.directory)
             && let Ok(entries) = std::fs::read_dir(directory)
         {
             for entry in entries.flatten() {
@@ -464,18 +469,28 @@ fn swift_digest(path: &Path, metadata: &std::fs::Metadata) -> Option<SessionDige
     })
 }
 
-fn swift_session_directory() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        Some(
-            PathBuf::from(std::env::var_os("HOME")?)
-                .join("Library/Application Support/WillDeep/agent-sessions"),
-        )
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+fn swift_session_directory(store_directory: &Path) -> Option<PathBuf> {
+    swift_bridge_directory(
+        store_directory,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    )
+}
+
+/// 桌面 App 把自己的 Session 写在固定的 Application Support 目录里，只有默认
+/// 家目录（`~/.willdeep`）下的 Store 才代表"这台机器上这个用户的 CLI 历史"，
+/// 才该把它们合并进来。任何别的家目录——测试、`WILLDEEP_HOME`、沙箱——必须保持
+/// 自足：既不读别人的 Session，也不为解析它们付出代价（真实机器上这个目录可以
+/// 有几百个文件、几十 MB，每次 list 都要全量解析）。
+#[cfg(target_os = "macos")]
+fn swift_bridge_directory(store_directory: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let home = home?;
+    (store_directory == home.join(DEFAULT_HOME_DIRECTORY).join("sessions"))
+        .then(|| home.join("Library/Application Support/WillDeep/agent-sessions"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn swift_bridge_directory(_store_directory: &Path, _home: Option<&Path>) -> Option<PathBuf> {
+    None
 }
 
 fn swift_session(path: &Path) -> Result<Session, SessionError> {
@@ -779,6 +794,27 @@ mod tests {
         assert_eq!(unpinned.pinned_at, None);
         assert_eq!(store.load(session.id).unwrap().pinned_at, None);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridges_desktop_sessions_only_for_the_default_home() {
+        let home = PathBuf::from("/Users/tester");
+        let bridged = home.join("Library/Application Support/WillDeep/agent-sessions");
+
+        let default_home_store = home.join(DEFAULT_HOME_DIRECTORY).join("sessions");
+        assert_eq!(
+            swift_bridge_directory(&default_home_store, Some(&home)),
+            cfg!(target_os = "macos").then_some(bridged)
+        );
+
+        // 自定义家目录（测试、WILLDEEP_HOME、沙箱）必须自足，不去碰桌面 App 的 Session。
+        for foreign in [
+            PathBuf::from("/tmp/willdeep-test-home/sessions"),
+            home.join("other-home").join("sessions"),
+        ] {
+            assert_eq!(swift_bridge_directory(&foreign, Some(&home)), None);
+        }
+        assert_eq!(swift_bridge_directory(&default_home_store, None), None);
     }
 
     #[test]
