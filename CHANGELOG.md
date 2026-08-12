@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.21.0-rc65] - 2026-08-12
+
+### Fixed
+- `/mobile` 配对二维码不再铺满整个终端。终端里一个二维码模块占一个字符格，尺寸只由配对载荷字节数和纠错等级决定；此前载荷 437 字节 + 默认 M 级纠错 = 81×81 模块，弹窗要 93 列 × 49 行。现在载荷 337 字节、纠错取 L 级，二维码 65×65 模块，弹窗 73 列 × 37 行，面积约为原先的 60%。
+
+### Changed
+- 中继 token 由两个 UUID 拼成的 64 位十六进制改为单个 UUID 的 32 位十六进制（128 位熵，仍是随机 UUIDv4）；room 由 `willdeep-cli-<带连字符 UUID>` 改为 `wd-<32 位十六进制>`。两者在配对 JSON 里各出现一次或两次，是载荷的大头。
+- 二维码纠错等级由默认的 M（15% 冗余）降为 L（7%）。屏幕显示不存在印刷污损与折角，L 级足够，且省下一到两个版本的模块数。
+- 配对载荷中的 `desktop_name` 截断到 16 字符，避免长主机名把二维码顶到下一个版本。无 `HOSTNAME` 时仍为 `WillDeep CLI`，有则直接用主机名（不再加 `WillDeep CLI · ` 前缀）。
+- 旧格式凭据（`willdeep-cli-<uuid>` room + 64 位 token）在下次加载 `mobile-relay.toml` 时自动重新生成为紧凑格式并覆盖原文件：**已配对的手机需要重新扫码**。`mobile-gateway.v1` 的字段本身未改动，Android 端无需跟进。
+
+### Tests
+- 新增 `pairing_qr_fits_the_terminal_popup`：渲染真实配对载荷，断言二维码列宽不超过 `MAX_QR_WIDTH`（73），任何加长配对字段的改动都会先撞到这条测试。
+- 新增 `legacy_credentials_are_recompacted_on_load`：旧格式凭据加载后被重写为紧凑格式，且紧凑凭据不会被反复重置。
+
+## [0.21.0-rc64] - 2026-08-12
+
+### Fixed
+- `GET /api/sessions` 不再把整个会话目录反复全量反序列化，Web 进程不再长期占满 CPU。此前 `SessionStore::list()` 会把每个会话文件连同全部消息正文解析成 `Session`，本机实测 290 个文件、67 MB；前端每 2 秒轮询一次，而单次请求要 40 秒以上，请求持续堆积，8 个 tokio worker 全被 serde_json 占死（`sample` 采样热点集中在 `SliceRead::parse_str` / `Value::deserialize`）。
+- 会话列表的文件解析不再阻塞 async worker：`/api/sessions` 的目录扫描改走 `spawn_blocking`。
+
+### Added
+- `willdeep_core::SessionDigest` 与 `SessionStore::digests()`：只解析列表视图需要的元数据（id、标题、工作区、时间、置顶、是否有用户输入），不物化消息正文，并按文件 `(mtime, size)` 缓存解析结果，只有变动过的文件才重新解析；缓存清理只针对本次扫过的目录，不影响其它 `SessionStore` 实例。
+- 消息正文用探针结构折叠成"是否非空"的布尔值，避免为正文分配 `String`。
+
+### Changed
+- `SessionStore::latest()`、`--list-sessions`、TUI 命令面板的会话列表、TUI 切换工作区时挑选最近会话，全部改用 `digests()`；需要完整会话的地方再按 id `load()`。`SessionStore::list()` 保留，但已不在任何轮询路径上。
+- Web 前端 `/api/sessions` + `/api/runtime/activity` 轮询加入 in-flight 去重：上一轮没返回就跳过这一轮，避免慢响应时请求叠加放大。
+
+### Performance
+- 本机真实数据（290 个会话、67 MB）实测，release 构建：首轮 `digests()` 462 ms，命中缓存后 1.3–2.7 ms；对照 `list()` 2.17 s。debug 构建：首轮 2.71 s，命中缓存后 7–16 ms；对照 `list()` 3.85 s。稳态下这条路径的开销降到千分之一量级。
+
+### Tests
+- 新增 `digest_reports_user_input_and_reuses_the_cache_until_the_file_changes`：覆盖"空会话不算用户输入""只有附件也算用户输入"，以及文件未变动时缓存结果一致。
+- 新增 `digest_drops_cache_entries_for_deleted_sessions`：会话删除后缓存条目同步清理。
+- 原 `web.rs` 中的 `session_has_user_input` 及其两条测试随函数一起移除，语义改由上述 core 测试覆盖。
+
+## [0.21.0-rc63] - 2026-08-12
+
+### Fixed
+- Web Runtime 侧栏不再把已结束的历史 Agent 当成活动 Agent 展示。此前 `GET /api/runtime/activity` 返回该工作区 `agents.json` 中的全部记录（只按工作区过滤，无状态或时间过滤），侧栏取前 4 条渲染，结果长期被"已完成、轮次 0"的历史根 Agent 占满，真正在跑的 Agent 反而看不到。
+- Agent 时长不再产生误导。此前运行中和已结束共用同一个"XX 秒"字段，而已结束根 Agent 的 `elapsed_seconds = completed_at - created_at` 是整个会话跨度（实测显示到 47148 秒），看起来像有进程活了 13 小时。现在运行中标注"已运行"，已结束标注"耗时"，并按 `秒 / 分秒 / 时分` 分级格式化。
+
+### Changed
+- 侧栏 Agent 列表只展示：仍在运行的 Agent（`idle` / `working` / `queued` / `blocked` / `waiting_*` / `cancelling`）、Runtime 未记录结束时间的 Agent，以及结束不超过 5 分钟的 Agent；从未执行过轮次（`current_turn = 0`）的已结束根 Agent 直接过滤掉。Web 与 TUI 套用同一套规则。
+- TUI 状态栏「Runtime 智能体」同步上述过滤：`sidebar_runtime_agents()` 成为唯一可见列表来源，`runtime_agent_move()` 与 `selected_runtime_agent()` 都基于它取值，避免键盘选中项与屏幕上看到的行错位而把指令发给一个已经结束几小时的 Agent。TUI 时长同样改为「已运行 / 耗时」并按 `s / m s / h m` 分级，替换原先的 `{:.1}s`。
+- 计数行的 Agent 数量改为可见活动 Agent 数，被折叠的历史记录以 `(+N 已结束)` 附注，不再用一个只增不减的总数冒充活动量。
+- `GET /api/runtime/activity` 的 Agent 摘要新增 `finished_seconds_ago` 字段（未结束为 `null`），供前端判断"刚结束"；该字段与既有摘要一样不含 Workspace、Prompt、报告或内部错误。
+- 新增 `web/src/runtimeAgents.ts` 承载 Agent 可见性与时长格式化逻辑，供侧栏和详情面板共用，避免 `RuntimeSidebar` 与 `RuntimeDetailPanel` 之间产生运行时循环依赖。
+
+### Tests
+- 新增 `web_runtime_agent_reports_run_duration_and_time_since_completion`：校验已结束 Agent 的 `elapsed_seconds` 取运行区间、`finished_seconds_ago` 取距今时长。
+- 既有脱敏回归测试补充 `finished_seconds_ago` 在运行中 Agent 上为 `null` 的断言。
+- 新增 `sidebar_drops_long_finished_agents_and_keeps_selection_on_the_visible_ones`：13 小时前结束、轮次 0 的根 Agent 不渲染，计数行显示 `(+1 finished)`，`selected_runtime_agent()` 命中可见的子 Agent。
+- 既有 TUI 渲染测试的 Agent 时间戳改用真实时钟基准（原先用 epoch 1/2，在新规则下会被整体过滤掉，测不到渲染路径）。
+- `cargo test --bin willdeep` 181 passed；Web ESLint 与 TypeScript/Vite 构建通过。
+
+### Known gaps
+- `agents.json` 仍无保留策略，终态记录只增不删；两端侧栏已不受影响，但文件会持续增长，计划单独一版处理。
+- 可见性规则目前在 TS（`web/src/runtimeAgents.ts`）和 Rust（`tui/sidebar.rs`）各实现一份，语义手工对齐，没有跨语言的一致性测试。
+
 ## [0.21.0-rc62] - 2026-08-12
 
 ### Fixed

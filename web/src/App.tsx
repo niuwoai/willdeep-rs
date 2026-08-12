@@ -139,7 +139,16 @@ export function App() {
   useEffect(() => {
     if (!workspace) { setRuntimeActivity({ tools: [], artifacts: [], agents: [], tasks: [], gates: [], attention_count: 0 }); return; }
     let active = true;
-    const refresh = () => Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions")]).then(([runtime, currentSessions]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); } }).catch(() => undefined);
+    // 上一轮没回来就跳过这一轮，避免慢响应时请求堆积、把服务端 CPU 顶满。
+    let inFlight = false;
+    const refresh = () => {
+      if (inFlight) return Promise.resolve();
+      inFlight = true;
+      return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions")])
+        .then(([runtime, currentSessions]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); } })
+        .catch(() => undefined)
+        .finally(() => { inFlight = false; });
+    };
     void refresh(); const timer = window.setInterval(refresh, 2000);
     return () => { active = false; window.clearInterval(timer); };
   }, [workspace]);

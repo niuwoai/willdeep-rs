@@ -91,7 +91,7 @@ async fn switch(
     session.runtime_event_cursor = app.runtime_event_cursor;
     store.save(session)?;
     let target = store
-        .list()?
+        .digests()
         .into_iter()
         .filter(|candidate| {
             candidate
@@ -99,7 +99,8 @@ async fn switch(
                 .canonicalize()
                 .is_ok_and(|root| root == workspace.root)
         })
-        .max_by_key(|candidate| candidate.updated_at);
+        .max_by_key(|candidate| candidate.updated_at)
+        .and_then(|candidate| store.load(candidate.id).ok());
     let mut target = target.unwrap_or_else(|| {
         Session::new(
             workspace.root.clone(),

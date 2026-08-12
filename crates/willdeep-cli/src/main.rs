@@ -530,7 +530,7 @@ async fn run() -> Result<()> {
     }
     let store = willdeep_core::SessionStore::new(&home);
     if cli.list_sessions {
-        for session in store.list()? {
+        for session in store.digests() {
             println!(
                 "{}\t{}\t{}\t{}",
                 session.id,

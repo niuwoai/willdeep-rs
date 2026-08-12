@@ -763,13 +763,16 @@ async fn sessions(
             )
         })
         .collect::<HashMap<_, _>>();
-    let values = SessionStore::new(&state.home)
-        .list()
-        .map_err(|error| WebError::internal(error.to_string()))?
+    // 会话目录可能有上百个文件、几十 MB；解析走 blocking 线程池，别堵 tokio worker。
+    let home = state.home.clone();
+    let digests = tokio::task::spawn_blocking(move || SessionStore::new(&home).digests())
+        .await
+        .map_err(|error| WebError::internal(error.to_string()))?;
+    let values = digests
         .into_iter()
         .filter(|session| allowed.contains(&session.workspace))
         .filter(|session| {
-            session_has_user_input(session)
+            session.has_user_input
                 || runtime_states
                     .get(&session.id)
                     .is_some_and(|(_, active, active_turn_id)| *active || active_turn_id.is_some())
@@ -792,13 +795,6 @@ async fn sessions(
         })
         .collect();
     Ok(Json(values))
-}
-
-fn session_has_user_input(session: &Session) -> bool {
-    session.messages.iter().any(|message| {
-        message.role == Role::User
-            && (!message.content.trim().is_empty() || !message.attachments.is_empty())
-    })
 }
 
 async fn session_detail(
@@ -1643,34 +1639,8 @@ mod tests {
             PathBuf::from("/workspace/b")
         );
     }
-    #[test]
-    fn empty_sessions_stay_out_of_web_history_until_the_user_submits_input() {
-        let mut session = Session::new(PathBuf::from("/workspace/a"), None, "New session");
-        assert!(!session_has_user_input(&session));
-
-        session
-            .messages
-            .push(willdeep_core::Message::assistant("welcome", Vec::new()));
-        assert!(!session_has_user_input(&session));
-
-        session.messages.push(willdeep_core::Message::user("hello"));
-        assert!(session_has_user_input(&session));
-    }
-
-    #[test]
-    fn attachment_only_user_input_keeps_a_session_in_web_history() {
-        let mut session = Session::new(PathBuf::from("/workspace/a"), None, "New session");
-        session
-            .messages
-            .push(willdeep_core::Message::user_with_attachments(
-                "",
-                vec![MessageAttachment::Text {
-                    name: "notes.txt".into(),
-                    content: "context".into(),
-                }],
-            ));
-        assert!(session_has_user_input(&session));
-    }
+    // 「空会话不进 Web 历史」「只有附件也算用户输入」这两条语义，
+    // 现在由 willdeep_core::session 的 digest 测试覆盖。
     #[test]
     fn embedded_frontend_exists() {
         assert!(WebAssets::get("index.html").is_some());
@@ -1736,14 +1706,46 @@ mod tests {
             current_tool: Some("read_file".to_owned()),
             total_tokens: Some(100),
             elapsed_seconds: 12,
+            finished_seconds_ago: None,
             worktree_branch: None,
             dedicated_worktree: false,
         })
         .unwrap();
         assert_eq!(value["status"], "working");
+        assert!(value["finished_seconds_ago"].is_null());
         assert!(value.get("workspace").is_none());
         assert!(value.get("report").is_none());
         assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn web_runtime_agent_reports_run_duration_and_time_since_completion() {
+        let completed_at = now_seconds() - 120;
+        let value =
+            serde_json::to_value(web_runtime_agent(crate::daemon::tui_bridge::RemoteAgent {
+                id: uuid::Uuid::new_v4(),
+                parent_id: None,
+                label: Some("root".to_owned()),
+                background: false,
+                profile: None,
+                model: None,
+                status: willdeep_core::RuntimeStatus::Done,
+                current_turn: 0,
+                current_tool: None,
+                total_tokens: None,
+                max_turns: None,
+                token_budget: None,
+                timeout_seconds: None,
+                report: None,
+                workspace: std::path::PathBuf::from("/tmp"),
+                worktree_branch: None,
+                dedicated_worktree: false,
+                created_at: completed_at - 30,
+                completed_at: Some(completed_at),
+            }))
+            .expect("serialize public agent summary");
+        assert_eq!(value["elapsed_seconds"], 30);
+        assert!(value["finished_seconds_ago"].as_u64().unwrap_or_default() >= 120);
     }
 
     #[test]

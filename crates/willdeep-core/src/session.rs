@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,19 @@ impl Session {
     }
 }
 
+/// 会话列表视图需要的元数据快照，不携带消息正文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionDigest {
+    pub id: Uuid,
+    pub title: String,
+    pub workspace: PathBuf,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub pinned_at: Option<u64>,
+    /// 是否存在非空的用户输入（正文非空或带附件）。
+    pub has_user_input: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionStore {
     directory: PathBuf,
@@ -126,7 +140,46 @@ impl SessionStore {
         Ok(session)
     }
     pub fn latest(&self) -> Result<Option<Session>, SessionError> {
-        Ok(self.list()?.into_iter().max_by_key(|s| s.updated_at))
+        match self.digests().into_iter().max_by_key(|s| s.updated_at) {
+            Some(digest) => Ok(Some(self.load(digest.id)?)),
+            None => Ok(None),
+        }
+    }
+    /// 列出所有会话的元数据。只解析列表视图需要的字段，不物化消息正文，
+    /// 并按 (mtime, size) 缓存解析结果——会话目录动辄上百个文件、几十 MB，
+    /// 每次轮询全量反序列化会把 CPU 吃满。需要完整会话请用 [`SessionStore::load`]。
+    pub fn digests(&self) -> Vec<SessionDigest> {
+        let mut values = Vec::new();
+        let mut visited = HashSet::new();
+        let mut scanned = HashSet::from([self.directory.clone()]);
+        for path in json_files(&self.directory) {
+            if let Some(digest) = cached_digest(&path, local_digest) {
+                visited.insert(path);
+                values.push(digest);
+            }
+        }
+        if let Some(directory) = swift_session_directory() {
+            for path in json_files(&directory) {
+                let Some(digest) = cached_digest(&path, swift_digest) else {
+                    continue;
+                };
+                visited.insert(path);
+                if !values.iter().any(|existing| existing.id == digest.id) {
+                    values.push(digest);
+                }
+            }
+            scanned.insert(directory);
+        }
+        // 只清理本次扫过的目录里已消失的文件；别动其它 SessionStore 的缓存。
+        digest_cache()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|path, _| {
+                visited.contains(path)
+                    || !path.parent().is_some_and(|parent| scanned.contains(parent))
+            });
+        values.sort_by_key(|digest| std::cmp::Reverse(digest.updated_at));
+        values
     }
     pub fn list(&self) -> Result<Vec<Session>, SessionError> {
         let mut values = Vec::new();
@@ -212,6 +265,203 @@ impl SessionStore {
     fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
+}
+
+struct CachedDigest {
+    fingerprint: (u64, u64),
+    digest: SessionDigest,
+}
+
+fn digest_cache() -> &'static Mutex<HashMap<PathBuf, CachedDigest>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedDigest>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn json_files(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect()
+}
+
+/// 文件指纹：修改时间（纳秒）+ 字节数。任一变化都重新解析。
+fn fingerprint(metadata: &std::fs::Metadata) -> (u64, u64) {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or_default();
+    (modified, metadata.len())
+}
+
+fn cached_digest(
+    path: &Path,
+    parse: fn(&Path, &std::fs::Metadata) -> Option<SessionDigest>,
+) -> Option<SessionDigest> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let fingerprint = fingerprint(&metadata);
+    if let Some(cached) = digest_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .filter(|cached| cached.fingerprint == fingerprint)
+    {
+        return Some(cached.digest.clone());
+    }
+    let digest = parse(path, &metadata)?;
+    digest_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            path.to_path_buf(),
+            CachedDigest {
+                fingerprint,
+                digest: digest.clone(),
+            },
+        );
+    Some(digest)
+}
+
+/// 只声明列表视图用得到的字段；`messages` 用探针结构跳过正文的分配。
+#[derive(Deserialize)]
+struct LocalDigestProbe {
+    id: Uuid,
+    title: String,
+    workspace: PathBuf,
+    created_at: u64,
+    updated_at: u64,
+    #[serde(default)]
+    pinned_at: Option<u64>,
+    #[serde(default)]
+    messages: Vec<MessageProbe>,
+}
+
+#[derive(Deserialize)]
+struct MessageProbe {
+    #[serde(default)]
+    role: String,
+    #[serde(default, deserialize_with = "non_empty_text")]
+    content: bool,
+    #[serde(default)]
+    attachments: Option<Vec<serde::de::IgnoredAny>>,
+}
+
+impl MessageProbe {
+    fn is_user_input(&self) -> bool {
+        self.role == "user"
+            && (self.content
+                || self
+                    .attachments
+                    .as_ref()
+                    .is_some_and(|values| !values.is_empty()))
+    }
+}
+
+/// 把任意 JSON 值折叠成"是否为非空文本"，避免为消息正文分配 String。
+fn non_empty_text<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TextVisitor;
+    impl<'de> serde::de::Visitor<'de> for TextVisitor {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("message content")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<bool, E> {
+            Ok(!value.trim().is_empty())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<bool, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            let mut present = false;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                present = true;
+            }
+            Ok(present)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut present = false;
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {
+                present = true;
+            }
+            Ok(present)
+        }
+    }
+    deserializer.deserialize_any(TextVisitor)
+}
+
+fn local_digest(path: &Path, _metadata: &std::fs::Metadata) -> Option<SessionDigest> {
+    let probe: LocalDigestProbe = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    Some(SessionDigest {
+        id: probe.id,
+        title: probe.title,
+        workspace: probe.workspace,
+        created_at: probe.created_at,
+        updated_at: probe.updated_at,
+        pinned_at: probe.pinned_at,
+        has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+    })
+}
+
+/// Xedit（Swift）写出的会话文件：字段名是 camelCase，时间以文件 mtime 为准。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwiftDigestProbe {
+    id: Uuid,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    workspace_location: Option<SwiftWorkspaceLocation>,
+    #[serde(default)]
+    workspace_root_path: Option<String>,
+    #[serde(default)]
+    pinned_at: Option<String>,
+    #[serde(default)]
+    messages: Vec<MessageProbe>,
+}
+
+#[derive(Deserialize)]
+struct SwiftWorkspaceLocation {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn swift_digest(path: &Path, metadata: &std::fs::Metadata) -> Option<SessionDigest> {
+    let probe: SwiftDigestProbe = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let workspace = probe
+        .workspace_location
+        .and_then(|location| location.path)
+        .or(probe.workspace_root_path)
+        .unwrap_or_else(|| ".".to_owned());
+    let updated = fingerprint(metadata).0 / 1_000_000_000;
+    Some(SessionDigest {
+        id: probe.id,
+        title: probe.title.unwrap_or_else(|| "Swift session".to_owned()),
+        workspace: PathBuf::from(workspace),
+        created_at: updated,
+        updated_at: updated,
+        pinned_at: probe.pinned_at.as_deref().and_then(parse_iso8601),
+        has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+    })
 }
 
 fn swift_session_directory() -> Option<PathBuf> {
@@ -440,6 +690,76 @@ mod tests {
         assert!(store.delete(session.id).unwrap());
         assert!(!store.delete(session.id).unwrap());
         assert!(store.load(session.id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn digest_reports_user_input_and_reuses_the_cache_until_the_file_changes() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-digest-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "New session");
+        store.save(&mut session).unwrap();
+        let id = session.id;
+        let digest = || {
+            store
+                .digests()
+                .into_iter()
+                .find(|digest| digest.id == id)
+                .expect("digest for the saved session")
+        };
+        assert!(!digest().has_user_input);
+
+        session
+            .messages
+            .push(Message::assistant("welcome", Vec::new()));
+        store.save(&mut session).unwrap();
+        assert!(!digest().has_user_input);
+
+        // 只有附件、没有正文，也算用户输入。
+        session.messages.push(Message::user_with_attachments(
+            "",
+            vec![crate::MessageAttachment::Text {
+                name: "notes.txt".to_owned(),
+                content: "context".to_owned(),
+            }],
+        ));
+        store.save(&mut session).unwrap();
+        assert!(digest().has_user_input);
+
+        session.messages.push(Message::user("hello"));
+        store.save(&mut session).unwrap();
+        let current = digest();
+        assert!(current.has_user_input);
+        assert_eq!(current.title, session.title);
+        assert_eq!(current.updated_at, session.updated_at);
+
+        // 文件没动时走缓存，结果必须与上一轮完全一致。
+        assert_eq!(digest(), current);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn digest_drops_cache_entries_for_deleted_sessions() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-prune-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "temporary");
+        store.save(&mut session).unwrap();
+        let path = store.path(session.id);
+        assert!(store.digests().iter().any(|digest| digest.id == session.id));
+        assert!(
+            digest_cache()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&path)
+        );
+        assert!(store.delete(session.id).unwrap());
+        assert!(!store.digests().iter().any(|digest| digest.id == session.id));
+        assert!(
+            !digest_cache()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&path)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1566,9 +1566,10 @@ impl App {
             ),
             action: PaletteAction::Session(session.id.to_string()),
         });
-        if let Ok(sessions) = store.list() {
+        {
             items.extend(
-                sessions
+                store
+                    .digests()
                     .into_iter()
                     .filter(|candidate| candidate.id != session.id)
                     .take(30)

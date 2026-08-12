@@ -154,8 +154,18 @@ impl App {
         self.sidebar_manual_scroll = false;
     }
 
+    /// 侧栏是活动面板，不是归档：只保留在跑的 Agent 和刚结束的，
+    /// 且丢掉没有任何轮次的已结束根 Agent。与 Web 侧栏同一套规则。
+    pub(super) fn sidebar_runtime_agents(&self) -> Vec<&crate::daemon::tui_bridge::RemoteAgent> {
+        let now = now_seconds();
+        self.runtime_agents
+            .iter()
+            .filter(|agent| sidebar_runtime_agent_visible(agent, now))
+            .collect()
+    }
+
     pub(super) fn runtime_agent_move(&mut self, delta: isize) {
-        let count = self.runtime_agents.len().min(5);
+        let count = self.sidebar_runtime_agents().len().min(5);
         if count == 0 {
             self.runtime_agent_selected = 0;
             return;
@@ -171,9 +181,9 @@ impl App {
     }
 
     pub(super) fn selected_runtime_agent(&self) -> Option<crate::daemon::tui_bridge::RemoteAgent> {
-        self.runtime_agents
+        self.sidebar_runtime_agents()
             .get(self.runtime_agent_selected)
-            .cloned()
+            .map(|agent| (*agent).clone())
     }
 }
 
@@ -348,29 +358,43 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     ),
                     Style::default().fg(Color::LightCyan),
                 ));
-                if !app.runtime_agents.is_empty() {
+                let sidebar_agents = app
+                    .sidebar_runtime_agents()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let hidden_agents = app.runtime_agents.len() - sidebar_agents.len();
+                if !sidebar_agents.is_empty() {
+                    let hidden_note = if hidden_agents > 0 {
+                        format!(
+                            " (+{hidden_agents} {})",
+                            app.language.text("已结束", "finished", "終了済み")
+                        )
+                    } else {
+                        String::new()
+                    };
                     lines.push(Line::styled(
                         format!(
-                            "  {} · {}",
+                            "  {} · {}{hidden_note}",
                             app.language.text(
                                 "Runtime 智能体",
                                 "Runtime agents",
                                 "Runtime エージェント"
                             ),
-                            app.runtime_agents.len()
+                            sidebar_agents.len()
                         ),
                         Style::default().fg(Color::Gray),
                     ));
                     app.runtime_agent_selected = app
                         .runtime_agent_selected
-                        .min(app.runtime_agents.len().min(5).saturating_sub(1));
-                    for (agent_index, agent) in app.runtime_agents.iter().take(5).enumerate() {
+                        .min(sidebar_agents.len().min(5).saturating_sub(1));
+                    for (agent_index, agent) in sidebar_agents.iter().take(5).enumerate() {
                         let short = agent.id.to_string();
                         let short = short.get(..6).unwrap_or(&short);
                         let profile = agent.profile.as_deref().unwrap_or("root");
                         let label = agent.label.as_deref().unwrap_or(profile);
                         let mode = if agent.background { " bg" } else { "" };
-                        let elapsed = agent_elapsed_seconds(agent);
+                        let duration = agent_duration_label(agent, app.language);
                         let prefix = if agent.parent_id.is_some() {
                             "      ↳"
                         } else {
@@ -393,9 +417,8 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ));
                         lines.push(Line::styled(
                             format!(
-                                "        {label} · {} · {:.1}s",
-                                agent.model.as_deref().unwrap_or("-"),
-                                elapsed
+                                "        {label} · {} · {duration}",
+                                agent.model.as_deref().unwrap_or("-")
                             ),
                             Style::default().fg(Color::DarkGray),
                         ));
@@ -524,12 +547,65 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     }
 }
 
-fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> f64 {
-    let end = agent.completed_at.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    });
-    end.saturating_sub(agent.created_at) as f64
+/// 已结束超过这个时长的 Agent 退出侧栏，去详情/历史里找。
+const RECENTLY_FINISHED_SECONDS: u64 = 300;
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn agent_is_live(agent: &crate::daemon::tui_bridge::RemoteAgent) -> bool {
+    matches!(
+        agent.status,
+        willdeep_core::RuntimeStatus::Idle
+            | willdeep_core::RuntimeStatus::Working
+            | willdeep_core::RuntimeStatus::Blocked
+            | willdeep_core::RuntimeStatus::WaitingApproval
+            | willdeep_core::RuntimeStatus::WaitingAnswer
+    )
+}
+
+fn sidebar_runtime_agent_visible(agent: &crate::daemon::tui_bridge::RemoteAgent, now: u64) -> bool {
+    if agent_is_live(agent) {
+        return true;
+    }
+    // Runtime 没记下结束时间的一律当活着，宁可多显示也不隐藏可能还在跑的 Agent。
+    let Some(completed_at) = agent.completed_at else {
+        return true;
+    };
+    if agent.parent_id.is_none() && agent.current_turn == 0 {
+        return false;
+    }
+    now.saturating_sub(completed_at) < RECENTLY_FINISHED_SECONDS
+}
+
+fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> u64 {
+    let end = agent.completed_at.unwrap_or_else(now_seconds);
+    end.saturating_sub(agent.created_at)
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// 运行中的是「已运行」，结束的是「耗时」——同一个数字混着显示会让人以为进程还活着。
+fn agent_duration_label(
+    agent: &crate::daemon::tui_bridge::RemoteAgent,
+    language: Language,
+) -> String {
+    let label = if agent_is_live(agent) {
+        language.text("已运行", "running for", "実行時間")
+    } else {
+        language.text("耗时", "took", "所要時間")
+    };
+    format!("{label} {}", format_duration(agent_elapsed_seconds(agent)))
 }

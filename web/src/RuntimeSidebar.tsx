@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Box, Button, Flex, Input, NativeSelect, Text, Textarea, VStack } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
 import { RuntimeDetailPanel, type RuntimeDetailTarget } from "./RuntimeDetailPanel";
+import { agentDuration, isSidebarAgent } from "./runtimeAgents";
 
 export type AgentSpawnProfile = "scout" | "reader" | "deep";
 
@@ -41,6 +42,7 @@ export type RuntimeAgent = {
   current_tool: string | null;
   total_tokens: number | null;
   elapsed_seconds: number;
+  finished_seconds_ago: number | null;
   worktree_branch: string | null;
   dedicated_worktree: boolean;
 };
@@ -113,6 +115,8 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
   const [detail, setDetail] = useState<RuntimeDetailTarget | null>(null);
   const [expanded, setExpanded] = useState(false);
   const runningTools = activity.tools.filter((tool) => tool.status === "running").length;
+  const sidebarAgents = activity.agents.filter(isSidebarAgent);
+  const hiddenAgents = activity.agents.length - sidebarAgents.length;
   async function runControl(action: () => Promise<void>) {
     if (controlBusy) return;
     setControlBusy(true);
@@ -136,7 +140,7 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
       <Text fontSize="sm">{t.artifacts}: {activity.artifacts.length}</Text>
     </Flex>
     <Flex gap="3" mt="2" wrap="wrap">
-      <Text fontSize="sm">{t.agents}: {activity.agents.length}</Text>
+      <Text fontSize="sm">{t.agents}: {sidebarAgents.length}{hiddenAgents > 0 ? ` (+${hiddenAgents} ${t.finishedHidden})` : ""}</Text>
       <Text fontSize="sm">{t.tasks}: {activity.tasks.length}</Text>
       <Text fontSize="sm">{t.needsAttention}: {activity.attention_count}</Text>
     </Flex>
@@ -190,10 +194,10 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
         </Text>}
       </Box>)}
     </VStack>}
-    {activity.agents.length > 0 && <VStack align="stretch" gap="1" mt="3">
-      {activity.agents.slice(0, 4).map((agent) => <Box key={agent.id} pl={agent.parent_id ? "3" : "0"}>
+    {sidebarAgents.length > 0 && <VStack align="stretch" gap="1" mt="3">
+      {sidebarAgents.slice(0, 4).map((agent) => <Box key={agent.id} pl={agent.parent_id ? "3" : "0"}>
         <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Flex align="center" gap="1" flexShrink="0"><Text color="#8290a3">{runtimeStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "agent", id: agent.id })}>{t.details}</Button></Flex></Flex>
-        <Text fontSize="2xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agent.elapsed_seconds}{t.secondsUnit}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
+        <Text fontSize="2xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
         {agent.background && <Flex gap="1" mt="1">
           {agent.status === "working" && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "prompt"))}>{t.instruct}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "stop"))}>{t.stop}</Button></>}
           {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry"))}>{t.retry}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry_model", agent.model))}>{t.changeModel}</Button></>}

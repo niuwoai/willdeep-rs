@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
 > 最后更新：2026-08-11
-> 当前实施版本：v0.21.0-rc62
+> 当前实施版本：v0.21.0-rc63
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -225,7 +225,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.21.0-rc62（进行中）：Web 会话列表默认只展示未归档会话，底部新增"已归档 (N)"折叠组，收起时不渲染归档行 DOM，点击展开全部归档会话并保留悬停操作；切换工作区自动收起。列表限制最大高度并启用独立细滚动条，移除仅显示前 20 条的截断。修复 Runtime 启动恢复对已删除 Session 悬空任务引用的硬失败，Daemon 在用户删除会话后可正常重启。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+v0.21.0-rc63（进行中）：Web Runtime 侧栏的 Agent 列表从"全量历史"改回"活动面板"——只展示运行中的 Agent 和结束不超过 5 分钟的 Agent，从未执行轮次的已结束根 Agent 不再占位，计数行以 `(+N 已结束)` 附注被折叠的历史；活动快照新增 `finished_seconds_ago`，时长按运行中/已结束分别标注"已运行"和"耗时"，不再把会话跨度显示成仍在执行。TUI 状态栏套用同一套规则，且键盘选中与可见列表对齐，避免把指令发给已结束几小时的 Agent。下一步：给 `agents.json` 增加终态记录保留策略（当前无界增长）。
+
+v0.21.0-rc62（已完成）：Web 会话列表默认只展示未归档会话，底部新增"已归档 (N)"折叠组，收起时不渲染归档行 DOM，点击展开全部归档会话并保留悬停操作；切换工作区自动收起。列表限制最大高度并启用独立细滚动条，移除仅显示前 20 条的截断。修复 Runtime 启动恢复对已删除 Session 悬空任务引用的硬失败，Daemon 在用户删除会话后可正常重启。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
 
 v0.21.0-rc60（已完成）：Web 聊天 AI 回复接入 `react-markdown` + `remark-gfm` 基础 Markdown 渲染（标题、列表、代码块、表格、引用、链接），仅作用于 assistant 消息且不引入 `dangerouslySetInnerHTML`；侧栏"新建只读子 Agent"改为纵向布局，任务描述升级为整行两行 Textarea，解决 282px 侧栏内下拉、输入、按钮挤在一行的问题。会话新增 `pinned_at` 置顶元数据（与 Xedit `pinnedAt` 语义兼容，桥接会话就地补丁 Xedit JSON），Web 提供 pin/unpin 接口；会话列表行悬停显示重命名、置顶、归档、删除图标，删除改用 Chakra Dialog 确认。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
 

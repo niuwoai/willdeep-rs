@@ -1,6 +1,14 @@
 use super::*;
 
 #[cfg(test)]
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(test)]
 mod command_tests {
     use super::*;
 
@@ -424,6 +432,7 @@ mod tests {
         let mut app = App::new(Vec::new(), Language::En);
         app.sidebar_manual_scroll = true;
         app.sidebar_scroll = usize::MAX;
+        let now = unix_now();
         app.runtime_agents
             .extend((0..8).map(|index| crate::daemon::tui_bridge::RemoteAgent {
                 id: uuid::Uuid::new_v4(),
@@ -443,8 +452,8 @@ mod tests {
                 workspace: PathBuf::from("/workspace"),
                 worktree_branch: None,
                 dedicated_worktree: false,
-                created_at: 1,
-                completed_at: Some(2),
+                created_at: now - 5,
+                completed_at: Some(now - 1),
             }));
         let backend = ratatui::backend::TestBackend::new(24, 6);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -460,6 +469,7 @@ mod tests {
     #[test]
     fn sidebar_renders_runtime_agent_lifecycle_summary() {
         let mut app = App::new(Vec::new(), Language::En);
+        let now = unix_now();
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
                 id: "abe596f8-940d-4629-9a82-339796029947".parse().unwrap(),
@@ -479,8 +489,8 @@ mod tests {
                 workspace: PathBuf::from("/workspace"),
                 worktree_branch: None,
                 dedicated_worktree: false,
-                created_at: 1,
-                completed_at: Some(2),
+                created_at: now - 1,
+                completed_at: Some(now),
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -501,7 +511,7 @@ mod tests {
                 workspace: PathBuf::from("/worktrees/agent"),
                 worktree_branch: Some("willdeep/agent-test".to_owned()),
                 dedicated_worktree: true,
-                created_at: 1,
+                created_at: now - 5,
                 completed_at: None,
             });
         app.runtime_tools
@@ -546,9 +556,9 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Runtime agents · 2"));
         assert!(rendered.contains("abe596 · editor · done"));
-        assert!(rendered.contains("root · root-model · 1.0s"));
+        assert!(rendered.contains("root · root-model · took 1s"));
         assert!(rendered.contains("T3/- · - · 42t/- · -s"));
-        assert!(rendered.contains("inspect · scout-model ·"));
+        assert!(rendered.contains("inspect · scout-model · running for"));
         assert!(rendered.contains("T1/8 · read_file · 9t/32000t · 300s"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
         assert!(rendered.contains("Tools: 1 · Running: 1 · Artifacts: 1"));
@@ -575,6 +585,70 @@ mod tests {
         app.runtime_agent_move(1);
         assert_eq!(app.runtime_agent_selected, 0);
     }
+
+    #[test]
+    fn sidebar_drops_long_finished_agents_and_keeps_selection_on_the_visible_ones() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let now = unix_now();
+        let stale_root = crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            label: Some("stale-root".to_owned()),
+            background: false,
+            profile: None,
+            model: None,
+            status: RuntimeStatus::Done,
+            current_turn: 0,
+            current_tool: None,
+            total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
+            workspace: PathBuf::from("/workspace"),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            created_at: now - 47_148,
+            completed_at: Some(now - 43_200),
+        };
+        let live_child = crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: Some(uuid::Uuid::new_v4()),
+            label: Some("live-child".to_owned()),
+            background: true,
+            profile: Some("scout".to_owned()),
+            model: Some("scout-model".to_owned()),
+            status: RuntimeStatus::Working,
+            current_turn: 1,
+            created_at: now - 5,
+            completed_at: None,
+            ..stale_root.clone()
+        };
+        app.runtime_agents.push(stale_root);
+        app.runtime_agents.push(live_child);
+
+        let backend = ratatui::backend::TestBackend::new(80, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar::render_sidebar(frame, &mut app, frame.area()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Runtime agents · 1 (+1 finished)"));
+        assert!(rendered.contains("live-child"));
+        assert!(!rendered.contains("stale-root"));
+        assert_eq!(
+            app.selected_runtime_agent().unwrap().label.as_deref(),
+            Some("live-child")
+        );
+    }
+
     #[test]
     fn agent_detail_filters_tool_timeline_and_diff_by_agent() {
         let mut app = App::new(Vec::new(), Language::En);

@@ -33,11 +33,19 @@ CLI 使用**独立于 Swift App** 的 room 与 token，保存在 `$WILLDEEP_HOME
 
 ```toml
 relay_base_url = "https://j.niuwoai.com"
-room = "willdeep-cli-<uuid>"
-token = "<64 位十六进制随机值>"
+room = "wd-<32 位十六进制>"
+token = "<32 位十六进制随机值，即 128 位熵>"
 ```
 
 Unix 权限为 `0600`。首次生成时先写临时文件并设好权限再 rename，不存在权限窗口。已存在的文件在使用前会校验权限，不合规则拒绝启动中继并提示 `chmod 600`。
+
+旧版凭据（`willdeep-cli-<uuid>` room + 64 位 token）会在下次加载时自动重新生成为紧凑格式并覆盖原文件——手机重新扫一次码即可，无需其它操作。
+
+## 二维码尺寸
+
+二维码在终端里每个模块占一个字符格，尺寸完全由配对 JSON 的字节数和纠错等级决定。当前配置下配对载荷不超过 337 字节，纠错取 L 级（屏幕显示不存在印刷污损，7% 冗余足够），二维码稳定在 65×65 模块，加静区即 73 列宽、37 行高（Dense1x2 渲染，一个字符格装两行模块）。`mobile.rs` 的 `pairing_qr_fits_the_terminal_popup` 测试把这个宽度钉在 `MAX_QR_WIDTH`，任何加长配对字段的改动都会先撞到它。
+
+再往下压需要改动 `mobile-gateway.v1` 契约本身（`base_url`/`relay_base_url` 和 `pairing_token`/`relay_token` 目前各重复一份，约占 100 字节），必须与 Android 端同步，暂未做。
 
 该文件不会写入仓库。
 

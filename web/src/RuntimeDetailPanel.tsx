@@ -1,6 +1,7 @@
 import { Box, Button, Flex, Text, VStack } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
 import type { RuntimeActivity, RuntimeAgent, RuntimeArtifact, RuntimeGate, RuntimeTask, RuntimeTool } from "./RuntimeSidebar";
+import { agentDuration, formatDuration } from "./runtimeAgents";
 
 export type RuntimeDetailTarget = { kind: "agent" | "task"; id: string };
 
@@ -98,13 +99,13 @@ export function RuntimeDetailPanel({ activity, messages: t, target, onClose }: P
     {agent && <VStack align="stretch" gap="1" mb="2">
       <Flex justify="space-between" gap="2" fontSize="xs"><Text>{agent.label || agent.profile || t.agent}</Text><Text color="#8290a3">{statusLabel(agent.status, t)}</Text></Flex>
       <Text fontSize="2xs" color="#718096">{agent.profile || t.unknownValue} · {agent.model || t.unknownValue}</Text>
-      <Text fontSize="2xs" color="#718096">{t.turn} {agent.current_turn} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agent.elapsed_seconds}{t.secondsUnit}</Text>
+      <Text fontSize="2xs" color="#718096">{t.turn} {agent.current_turn} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}</Text>
       {agent.current_tool && <Text fontSize="2xs" color="#718096">{t.currentTool}: {agent.current_tool}</Text>}
       {agent.dedicated_worktree && <Text fontSize="2xs" color="#718096">{t.worktree}: {agent.worktree_branch || t.unknownValue}</Text>}
     </VStack>}
     {task && <VStack align="stretch" gap="1" mb="2">
       <Flex justify="space-between" gap="2" fontSize="xs"><Text>{task.profile || t.task}</Text><Text color="#8290a3">{statusLabel(task.status, t)}</Text></Flex>
-      <Text fontSize="2xs" color="#718096">{t.duration}: {task.elapsed_seconds}{t.secondsUnit}</Text>
+      <Text fontSize="2xs" color="#718096">{t.duration}: {formatDuration(task.elapsed_seconds, t)}</Text>
       {task.exit_code !== null && <Text fontSize="2xs" color="#718096">{t.exitCode}: {task.exit_code}</Text>}
       {task.failure_domain && <Text fontSize="2xs" color="#718096">{t.failureDomain}: {failureDomainLabel(task.failure_domain, t)}</Text>}
     </VStack>}
