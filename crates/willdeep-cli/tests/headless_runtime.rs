@@ -1289,10 +1289,7 @@ fn runtime_turn_report(home: &Path) -> String {
         .map(|session| {
             format!(
                 "session {} status={} active_turn={} last_error={}",
-                session["id"],
-                session["status"],
-                session["active_turn_id"],
-                session["last_error"]
+                session["id"], session["status"], session["active_turn_id"], session["last_error"]
             )
         })
         .collect::<Vec<_>>();
