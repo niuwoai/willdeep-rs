@@ -129,6 +129,7 @@ impl App {
         items.extend(
             self.background_tasks
                 .iter()
+                .filter(|task| background_task_visible(task))
                 .map(AttentionItem::from_background),
         );
         if !self.running {
@@ -549,6 +550,18 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
 
 /// 已结束超过这个时长的 Agent 退出侧栏，去详情/历史里找。
 const RECENTLY_FINISHED_SECONDS: u64 = 300;
+
+/// 顺利收尾的后台任务在 Inbox 里停留这么久就自动回收；
+/// 失败/超时/被杀的留着，那些还需要人处理。
+const SETTLED_TASK_RETENTION_MILLIS: u64 = 60_000;
+
+fn background_task_visible(task: &willdeep_core::BackgroundTaskSnapshot) -> bool {
+    if task.status != willdeep_core::BackgroundTaskStatus::Completed {
+        return true;
+    }
+    task.settled_millis
+        .is_none_or(|settled| settled < SETTLED_TASK_RETENTION_MILLIS)
+}
 
 fn now_seconds() -> u64 {
     std::time::SystemTime::now()

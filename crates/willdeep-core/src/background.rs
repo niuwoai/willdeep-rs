@@ -44,6 +44,9 @@ pub struct BackgroundTaskSnapshot {
     pub label: String,
     pub status: BackgroundTaskStatus,
     pub elapsed_millis: u64,
+    /// 结束多久了；运行中为 None。侧栏靠它把已收尾的任务回收掉。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_millis: Option<u64>,
     pub exit_code: Option<i32>,
     pub output_bytes: usize,
 }
@@ -57,6 +60,7 @@ pub struct BackgroundTaskEvent {
 struct TaskRecord {
     snapshot: BackgroundTaskSnapshot,
     started: Instant,
+    finished: Option<Instant>,
     output: String,
     cancel: watch::Sender<bool>,
     retry: Option<TaskLauncher>,
@@ -127,6 +131,9 @@ impl BackgroundTaskRegistry {
                 if value.status == BackgroundTaskStatus::Running {
                     value.elapsed_millis = task.started.elapsed().as_millis() as u64;
                 }
+                value.settled_millis = task
+                    .finished
+                    .map(|finished| finished.elapsed().as_millis() as u64);
                 value
             })
             .collect()
@@ -315,6 +322,7 @@ impl BackgroundTaskRegistry {
             label,
             status: BackgroundTaskStatus::Running,
             elapsed_millis: 0,
+            settled_millis: None,
             exit_code: None,
             output_bytes: 0,
         };
@@ -325,6 +333,7 @@ impl BackgroundTaskRegistry {
             .push(TaskRecord {
                 snapshot: snapshot.clone(),
                 started: Instant::now(),
+                finished: None,
                 output: String::new(),
                 cancel,
                 retry,
@@ -365,7 +374,9 @@ impl BackgroundTaskRegistry {
             task.snapshot.status = result.status;
             task.snapshot.exit_code = result.exit_code;
             task.snapshot.elapsed_millis = task.started.elapsed().as_millis() as u64;
+            task.snapshot.settled_millis = Some(0);
             task.snapshot.output_bytes = task.output.len();
+            task.finished = Some(Instant::now());
             let snapshot = task.snapshot.clone();
             BackgroundTaskEvent {
                 notice: completion_notice(&snapshot, &task.output),

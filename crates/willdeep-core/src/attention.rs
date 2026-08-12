@@ -197,6 +197,7 @@ mod tests {
             label: "Inspect repository".to_owned(),
             status,
             elapsed_millis: 1_500,
+            settled_millis: None,
             exit_code: None,
             output_bytes: 0,
         }
