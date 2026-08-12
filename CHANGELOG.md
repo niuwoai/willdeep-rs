@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.21.0-rc66] - 2026-08-12
+
+汇总合并三条并行开发分支。
+
+### Fixed
+- `SessionStore` 不再从非默认家目录去桥接桌面 App 的会话：`load()` / `list()` / `digests()` 此前无条件扫描 `~/Library/Application Support/WillDeep/agent-sessions`，与 Store 自己的家目录无关。现在只有默认家目录（`~/.willdeep/sessions`）下的 Store 才合并桌面会话，`WILLDEEP_HOME` 指向别处的 Store（测试、沙箱、独立数据根）保持自足。这是 `headless_runtime.rs` 中 `web_sse_disconnect_resumes_the_same_runtime_turn_without_resubmission` 间歇失败的真正原因：该目录在开发机上有 293 个文件 / 67 MB，测试等待的 `active_turn_id` 只存在约 5 秒，而首次轮询就把 10 秒预算耗光。Runtime 侧调度无竞态：`turn.queued` 到 `turn.started` 实测 5–17 ms。
+- `/mobile` 配对二维码改为编码紧凑配对 URL（`/pair?r=<room>&t=<token>&d=<桌面名>`，自建中继追加 `u=<base>`）而非完整配对 JSON：载荷从 437 字节降到 114 字节，二维码从 81×81 模块降到 41×41，终端弹窗从 73 列 × 37 行降到 49 列 × 25 行（桌面名顶满 16 字节且全需百分号转义时的上界为 53 列 × 27 行）。`mobile-gateway.v1` 字段本身未改，`base_url`/`pairing_token`/`expires_at` 由手机端从 `u`/`t` 与常量补全，不再占二维码体积。配套改动：桌面名按 UTF-8 字节（而非字符数）截断到 16 字节——中文主机名每字节在 URL 里要转义成三个字符，按字符截断能把二维码顶大一整圈；手机端（Android 1.25.0-rc5、macOS Xedit 1.247.0-rc12）同步接受省略这三个字段的配对载荷。
+
+### Tests
+- 新增 `web_compress_command_is_served_by_the_harness_instead_of_the_provider`：经由 `POST /api/chat/stream` 提交 `/compress`，断言回复来自 Harness 压缩分支、Provider 请求数不增加、`/compress` 不落入会话历史。此前 Web 侧 `/compress` 依赖 `execute_runtime` 中硬编码的 `allow_compress_command: true`，链路上没有任何断言保护——把该开关改为 `false` 时全工作区测试仍全绿。
+- 测试配置写入器支持可选 `[agent] language`，便于对多语言 Harness 文案做确定性断言。
+- 新增 `bridges_desktop_sessions_only_for_the_default_home`，锁定桌面会话桥接只在默认家目录生效。
+- 新增 `self_hosted_relay_keeps_its_base_url_in_the_pairing_url`，锁定自建中继地址必须随二维码下发。
+- `headless_runtime.rs` 的活跃 Turn 等待改为可自证的形式：每次 `GET /api/sessions` 单独设 2 秒超时（一次卡死的请求不再吃掉整个等待预算），Turn 提前进入非在途状态时立即带着 Runtime 侧 Session/Turn 的 status 与 error 退出，超时信息同样附带该摘要，不再只报一个 `Elapsed(())`。
+
+### Docs
+- `MOBILE.md` 的"二维码尺寸"一节改写为"配对二维码"：列出 `r`/`t`/`d`/`u`/`v` 五个参数及缺省行为，说明哪些字段不进二维码及原因；房间格式同步为 `wd-<32 位十六进制>`。`ARCHITECTURE.md` 的 Mobile Relay 段同步更新。
+
 ## [0.21.0-rc65] - 2026-08-12
 
 ### Fixed
