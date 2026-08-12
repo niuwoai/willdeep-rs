@@ -1,6 +1,123 @@
 use super::*;
 
+pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App) {
+    app.attention_diff_rect = Rect::default();
+    app.attention_allow_rect = Rect::default();
+    app.attention_deny_rect = Rect::default();
+    let Some(detail) = &app.attention_detail else {
+        return;
+    };
+    let actionable = app.selected_remote_gate().is_some();
+    let diff_review = detail.source == AttentionSource::DiffReview;
+    let content = format!(
+        "{} · {}\n\n{}\n\n{}{}",
+        attention_source_label(detail.source, app.language),
+        runtime_status_label(detail.status, app.language),
+        detail.title,
+        detail.detail,
+        if diff_review {
+            "\n\n "
+        } else if actionable {
+            app.language.text(
+                "\n\nEnter 打开审批",
+                "\n\nEnter opens approval",
+                "\n\nEnter で承認を開く",
+            )
+        } else {
+            ""
+        }
+    );
+    let popup = centered_rect(
+        f.area().width.min(82),
+        (visual_lines(&content, f.area().width.min(80) as usize) as u16 + 2)
+            .min(f.area().height)
+            .max(1),
+        f.area(),
+    );
+    f.render_widget(Clear, popup);
+    let title = if diff_review {
+        app.language.text(
+            "Diff 审批 · D/Enter 查看 · Y 通过 · N 拒绝 · Esc 关闭",
+            "Diff review · D/Enter view · Y accept · N reject · Esc closes",
+            "Diff レビュー · D/Enter 表示 · Y 承認 · N 拒否 · Esc 閉じる",
+        )
+    } else if actionable {
+        app.language.text(
+            "Inbox 详情 · Enter 审批 · Esc 关闭",
+            "Inbox detail · Enter approve · Esc closes",
+            "Inbox 詳細 · Enter 承認 · Esc 閉じる",
+        )
+    } else {
+        app.language.text(
+            "Inbox 详情 · Esc 关闭",
+            "Inbox detail · Esc closes",
+            "Inbox 詳細 · Esc で閉じる",
+        )
+    };
+    f.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(attention_style(detail.status)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+    if diff_review && popup.height >= 3 {
+        let labels = [
+            app.language
+                .text("[D 查看 Diff]", "[D View Diff]", "[D Diff 表示]"),
+            app.language.text("[Y 通过]", "[Y Accept]", "[Y 承認]"),
+            app.language.text("[N 拒绝]", "[N Reject]", "[N 拒否]"),
+        ];
+        let widths = labels.map(|label| label.chars().count() as u16 + 1);
+        let total = widths
+            .iter()
+            .sum::<u16>()
+            .min(popup.width.saturating_sub(2));
+        let mut x = popup.x + popup.width.saturating_sub(total + 1);
+        let y = popup.y + popup.height.saturating_sub(2);
+        for (index, (label, width)) in labels.into_iter().zip(widths).enumerate() {
+            let rect = Rect::new(x, y, width.min(popup.right().saturating_sub(x)), 1);
+            match index {
+                0 => app.attention_diff_rect = rect,
+                1 => app.attention_allow_rect = rect,
+                _ => app.attention_deny_rect = rect,
+            }
+            let color = match index {
+                0 => Color::LightCyan,
+                1 => Color::Green,
+                _ => Color::Red,
+            };
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(color)),
+                rect,
+            );
+            x = x.saturating_add(width);
+        }
+    }
+}
+
 impl App {
+    pub(super) fn diff_attention_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<DiffAttentionAction> {
+        let point = (column, row).into();
+        if self.attention_diff_rect.contains(point) {
+            Some(DiffAttentionAction::Open)
+        } else if self.attention_allow_rect.contains(point) {
+            Some(DiffAttentionAction::Accept)
+        } else if self.attention_deny_rect.contains(point) {
+            Some(DiffAttentionAction::Reject)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn attention_items(&self) -> Vec<AttentionItem> {
         let mut items = Vec::new();
         if let Some((description, _, _)) = &self.approval {
@@ -37,8 +154,18 @@ impl App {
         self.sidebar_manual_scroll = false;
     }
 
+    /// 侧栏是活动面板，不是归档：只保留在跑的 Agent 和刚结束的，
+    /// 且丢掉没有任何轮次的已结束根 Agent。与 Web 侧栏同一套规则。
+    pub(super) fn sidebar_runtime_agents(&self) -> Vec<&crate::daemon::tui_bridge::RemoteAgent> {
+        let now = now_seconds();
+        self.runtime_agents
+            .iter()
+            .filter(|agent| sidebar_runtime_agent_visible(agent, now))
+            .collect()
+    }
+
     pub(super) fn runtime_agent_move(&mut self, delta: isize) {
-        let count = self.runtime_agents.len().min(5);
+        let count = self.sidebar_runtime_agents().len().min(5);
         if count == 0 {
             self.runtime_agent_selected = 0;
             return;
@@ -54,9 +181,9 @@ impl App {
     }
 
     pub(super) fn selected_runtime_agent(&self) -> Option<crate::daemon::tui_bridge::RemoteAgent> {
-        self.runtime_agents
+        self.sidebar_runtime_agents()
             .get(self.runtime_agent_selected)
-            .cloned()
+            .map(|agent| (*agent).clone())
     }
 }
 
@@ -219,28 +346,55 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     app.language.text("失败", "Failed", "失敗"),
                     app.tools.failed
                 )));
-                if !app.runtime_agents.is_empty() {
+                logical_hits.push((lines.len(), SidebarHit::NewAgent));
+                lines.push(Line::styled(
+                    format!(
+                        "  {}",
+                        app.language.text(
+                            "[N 新建只读 Agent]",
+                            "[N New read-only Agent]",
+                            "[N 読み取り専用 Agent を作成]"
+                        )
+                    ),
+                    Style::default().fg(Color::LightCyan),
+                ));
+                let sidebar_agents = app
+                    .sidebar_runtime_agents()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let hidden_agents = app.runtime_agents.len() - sidebar_agents.len();
+                if !sidebar_agents.is_empty() {
+                    let hidden_note = if hidden_agents > 0 {
+                        format!(
+                            " (+{hidden_agents} {})",
+                            app.language.text("已结束", "finished", "終了済み")
+                        )
+                    } else {
+                        String::new()
+                    };
                     lines.push(Line::styled(
                         format!(
-                            "  {} · {}",
+                            "  {} · {}{hidden_note}",
                             app.language.text(
                                 "Runtime 智能体",
                                 "Runtime agents",
                                 "Runtime エージェント"
                             ),
-                            app.runtime_agents.len()
+                            sidebar_agents.len()
                         ),
                         Style::default().fg(Color::Gray),
                     ));
                     app.runtime_agent_selected = app
                         .runtime_agent_selected
-                        .min(app.runtime_agents.len().min(5).saturating_sub(1));
-                    for (agent_index, agent) in app.runtime_agents.iter().take(5).enumerate() {
+                        .min(sidebar_agents.len().min(5).saturating_sub(1));
+                    for (agent_index, agent) in sidebar_agents.iter().take(5).enumerate() {
                         let short = agent.id.to_string();
                         let short = short.get(..6).unwrap_or(&short);
                         let profile = agent.profile.as_deref().unwrap_or("root");
                         let label = agent.label.as_deref().unwrap_or(profile);
                         let mode = if agent.background { " bg" } else { "" };
+                        let duration = agent_duration_label(agent, app.language);
                         let prefix = if agent.parent_id.is_some() {
                             "      ↳"
                         } else {
@@ -263,13 +417,56 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         ));
                         lines.push(Line::styled(
                             format!(
-                                "        {label} · T{} · {} · {}",
+                                "        {label} · {} · {duration}",
+                                agent.model.as_deref().unwrap_or("-")
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                        lines.push(Line::styled(
+                            format!(
+                                "        T{}/{} · {} · {}/{} · {}s",
                                 agent.current_turn,
+                                agent
+                                    .max_turns
+                                    .map_or_else(|| "-".to_owned(), |turns| turns.to_string()),
                                 agent.current_tool.as_deref().unwrap_or("-"),
                                 agent
                                     .total_tokens
-                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t"))
+                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t")),
+                                agent
+                                    .token_budget
+                                    .map_or_else(|| "-".to_owned(), |tokens| format!("{tokens}t")),
+                                agent
+                                    .timeout_seconds
+                                    .map_or_else(|| "-".to_owned(), |seconds| seconds.to_string())
                             ),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                }
+                if !app.runtime_tools.is_empty() || !app.runtime_artifacts.is_empty() {
+                    let running = app
+                        .runtime_tools
+                        .iter()
+                        .filter(|tool| {
+                            tool.status == willdeep_runtime_protocol::ToolStatus::Running
+                        })
+                        .count();
+                    lines.push(Line::styled(
+                        format!(
+                            "  {}: {} · {}: {} · {}: {}",
+                            app.language.text("工具", "Tools", "ツール"),
+                            app.runtime_tools.len(),
+                            app.language.text("运行中", "Running", "実行中"),
+                            running,
+                            app.language.text("产物", "Artifacts", "成果物"),
+                            app.runtime_artifacts.len()
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    if let Some(tool) = app.runtime_tools.first() {
+                        lines.push(Line::styled(
+                            format!("    {} · {:?}", tool.name, tool.status),
                             Style::default().fg(Color::DarkGray),
                         ));
                     }
@@ -291,7 +488,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
         }
         lines.push(Line::raw(""));
     }
-    let viewport = area.height.saturating_sub(2).max(1) as usize;
+    let viewport = area.height.saturating_sub(3).max(1) as usize;
     let selected_row = if app.sidebar_selected == 1 {
         selected_attention_row.unwrap_or(headers[1])
     } else {
@@ -300,7 +497,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     if !app.sidebar_manual_scroll {
         if selected_row < app.sidebar_scroll {
             app.sidebar_scroll = selected_row;
-        } else if selected_row >= app.sidebar_scroll + viewport {
+        } else if selected_row >= app.sidebar_scroll.saturating_add(viewport) {
             app.sidebar_scroll = selected_row.saturating_sub(viewport - 1);
         }
     }
@@ -309,8 +506,14 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
     app.sidebar_hits = logical_hits
         .into_iter()
         .filter_map(|(row, hit)| {
-            (row >= app.sidebar_scroll && row < app.sidebar_scroll + viewport)
-                .then_some((area.y + 1 + (row - app.sidebar_scroll) as u16, hit))
+            let visible_end = app.sidebar_scroll.saturating_add(viewport);
+            if row < app.sidebar_scroll || row >= visible_end {
+                return None;
+            }
+            let offset = row
+                .saturating_sub(app.sidebar_scroll)
+                .min(u16::MAX as usize) as u16;
+            Some((area.y.saturating_add(1).saturating_add(offset), hit))
         })
         .collect();
     let border = if app.focus == FocusPane::Sidebar {
@@ -328,9 +531,81 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         "状態 · Ctrl+W フォーカス · Ctrl+B 非表示",
                     ))
                     .borders(Borders::ALL)
+                    .padding(Padding::new(0, 0, 0, 1))
                     .border_style(Style::default().fg(border)),
             )
             .scroll((app.sidebar_scroll.min(u16::MAX as usize) as u16, 0)),
         area,
     );
+    if area.width > 4 && area.height > 2 {
+        f.render_widget(
+            Paragraph::new(format!("WillDeep v{}", willdeep_core::VERSION))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1),
+        );
+    }
+}
+
+/// 已结束超过这个时长的 Agent 退出侧栏，去详情/历史里找。
+const RECENTLY_FINISHED_SECONDS: u64 = 300;
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn agent_is_live(agent: &crate::daemon::tui_bridge::RemoteAgent) -> bool {
+    matches!(
+        agent.status,
+        willdeep_core::RuntimeStatus::Idle
+            | willdeep_core::RuntimeStatus::Working
+            | willdeep_core::RuntimeStatus::Blocked
+            | willdeep_core::RuntimeStatus::WaitingApproval
+            | willdeep_core::RuntimeStatus::WaitingAnswer
+    )
+}
+
+fn sidebar_runtime_agent_visible(agent: &crate::daemon::tui_bridge::RemoteAgent, now: u64) -> bool {
+    if agent_is_live(agent) {
+        return true;
+    }
+    // Runtime 没记下结束时间的一律当活着，宁可多显示也不隐藏可能还在跑的 Agent。
+    let Some(completed_at) = agent.completed_at else {
+        return true;
+    };
+    if agent.parent_id.is_none() && agent.current_turn == 0 {
+        return false;
+    }
+    now.saturating_sub(completed_at) < RECENTLY_FINISHED_SECONDS
+}
+
+fn agent_elapsed_seconds(agent: &crate::daemon::tui_bridge::RemoteAgent) -> u64 {
+    let end = agent.completed_at.unwrap_or_else(now_seconds);
+    end.saturating_sub(agent.created_at)
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// 运行中的是「已运行」，结束的是「耗时」——同一个数字混着显示会让人以为进程还活着。
+fn agent_duration_label(
+    agent: &crate::daemon::tui_bridge::RemoteAgent,
+    language: Language,
+) -> String {
+    let label = if agent_is_live(agent) {
+        language.text("已运行", "running for", "実行時間")
+    } else {
+        language.text("耗时", "took", "所要時間")
+    };
+    format!("{label} {}", format_duration(agent_elapsed_seconds(agent)))
 }

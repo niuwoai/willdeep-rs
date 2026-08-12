@@ -309,6 +309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -327,6 +336,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clap_mangen"
+version = "0.2.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e30ffc187e2e3aeafcd1c6e2aa416e29739454c0ccaa419226d5ecd181f2d78"
+dependencies = [
+ "clap",
+ "roff",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -334,6 +353,12 @@ checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
 dependencies = [
  "error-code",
 ]
+
+[[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "colorchoice"
@@ -798,6 +823,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "globset"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1091,10 +1126,25 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -1725,6 +1775,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "roff"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rust-embed"
@@ -2635,7 +2691,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "willdeep"
-version = "0.17.0-rc6"
+version = "0.21.0-rc65"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2643,6 +2699,9 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "clap_complete",
+ "clap_mangen",
+ "crc32fast",
  "crossterm 0.29.0",
  "futures-util",
  "http",
@@ -2654,6 +2713,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
@@ -2661,21 +2721,50 @@ dependencies = [
  "unicode-width 0.2.0",
  "uuid",
  "willdeep-core",
+ "willdeep-runtime-client",
+ "willdeep-runtime-protocol",
 ]
 
 [[package]]
 name = "willdeep-core"
-version = "0.17.0-rc6"
+version = "0.21.0-rc65"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "futures-util",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "willdeep-runtime-client"
+version = "0.21.0-rc65"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+ "willdeep-runtime-protocol",
+]
+
+[[package]]
+name = "willdeep-runtime-protocol"
+version = "0.21.0-rc65"
+dependencies = [
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

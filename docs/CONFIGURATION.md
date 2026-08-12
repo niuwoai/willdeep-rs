@@ -1,0 +1,211 @@
+# 配置指南
+
+## 配置文件位置
+
+默认配置文件为 `~/.willdeep/config.toml`。两种改变方式：
+
+- 设置 `WILLDEEP_HOME` 改变整个配置目录；
+- 用 `--config /path/to/config.toml` 指定单个文件。
+
+`--config` 必须放在子命令**之前**：
+
+```bash
+willdeep --config ./config.toml config check
+```
+
+首次运行且没有配置时会自动进入交互式设置，也可随时执行 `willdeep --onboarding`。生成的配置在 Unix 上自动设为 `0600`。
+
+## 完整示例
+
+完整模板见仓库根目录的 [config.example.toml](../config.example.toml)。
+
+```toml
+version = 1
+default_provider = "some-im"
+
+[agent]
+max_turns = 24
+approval = "smart"
+language = "zh-CN"      # zh-CN | en | ja
+
+[providers.some-im]
+provider = "some-im"
+api = "chat-completions"
+api_base = "https://some.im/v1"
+api_key_env = "SOMEIM_API_KEY"
+model = "deepseek-v4-flash"
+vision_model = "qwen3-vl-plus"
+context_window = 128000
+
+[providers.openai]
+provider = "openai-compatible"
+api = "responses"
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5"
+
+[providers.anthropic]
+provider = "anthropic"
+api = "anthropic-messages"
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-4-5"
+max_output_tokens = 16384
+```
+
+选择 Provider：
+
+```bash
+willdeep --profile anthropic --workspace . "检查当前项目"
+```
+
+如果只配置了一个 Provider，可以省略 `default_provider`，WillDeep 会自动选择唯一项。
+
+## `[agent]` 段
+
+| 键 | 说明 |
+|---|---|
+| `max_turns` | 模型/工具轮次上限 |
+| `approval` | `strict` / `smart`（默认）/ `workspace-write`，见 [审批与自动化](APPROVALS.md) |
+| `language` | 界面语言 `zh-CN` / `en` / `ja` |
+
+## `[providers.*]` 段
+
+| 键 | 说明 |
+|---|---|
+| `provider` | 身份：`some-im` / `openai-compatible` / `anthropic` |
+| `api` | 线格式：`chat-completions` / `responses` / `anthropic-messages` |
+| `api_base` | API Base URL |
+| `api_key_env` | 存放 Key 的环境变量名（**推荐**） |
+| `api_key` | 内联明文 Key（触发 `0600` 权限强制） |
+| `model` | 模型 ID |
+| `vision_model` | some.im 纯文本模型的视觉回退模型 |
+| `context_window` | 上下文窗口，用于状态栏占比显示 |
+| `max_output_tokens` | Anthropic Messages 的输出上限 |
+
+`api_key` 与 `api_key_env` 不能同时定义，也不允许为空字符串。
+
+## Provider 与 API 是两个维度
+
+这是最容易混淆的一点：**`--provider` 决定身份、鉴权和专属请求头；`--api` 决定请求/响应的线格式。**
+
+```text
+--provider auto | openai-compatible | some-im | anthropic
+--api      auto | chat-completions  | responses | anthropic-messages
+```
+
+`auto` 的规则：
+
+- host 精确等于 `some.im`、`api.some.im`、`api.niuwoai.com` → 识别为 some.im；
+- host 精确等于 `api.anthropic.com` → 识别为 Anthropic Messages；
+- 其他 API Base → OpenAI-compatible Chat Completions；
+- Responses 必须显式指定 `--api responses`，`auto` 永远不会选它。
+
+两者可以自由组合。例如 some.im 中转提供 Anthropic Messages 线格式时：
+
+```bash
+willdeep --provider some-im --api anthropic-messages ...
+```
+
+此时仍使用 some.im 的 Bearer 鉴权和上下文头，而消息体使用 Anthropic 格式。
+
+三种线格式的具体契约见 [Provider 协议契约](PROVIDER_PROTOCOLS.md)。
+
+## 三种 Provider 的最小配置
+
+### some.im
+
+```bash
+export SOMEIM_API_KEY="<your-key>"
+willdeep --provider some-im --model deepseek-v4-flash --workspace . "检查当前仓库"
+```
+
+详见 [some.im 集成](SOMEIM_INTEGRATION.md)。
+
+### OpenAI-compatible Chat Completions
+
+```bash
+export WILLDEEP_API_BASE="https://provider.example/v1"
+export WILLDEEP_API_KEY="<your-key>"
+export WILLDEEP_MODEL="model-id"
+
+willdeep --api chat-completions --workspace . "解释这个项目"
+```
+
+### OpenAI Responses
+
+```bash
+willdeep \
+  --api-base https://api.openai.com/v1 \
+  --api responses \
+  --model gpt-5 \
+  --workspace . \
+  "检查 Git 状态并总结风险"
+```
+
+### Anthropic Messages
+
+```bash
+export ANTHROPIC_API_KEY="<your-key>"
+
+willdeep \
+  --provider anthropic \
+  --api anthropic-messages \
+  --model claude-sonnet-4-5 \
+  --workspace . \
+  "阅读 README 并提出改进建议"
+```
+
+原生 Anthropic 使用 `x-api-key` 和 `anthropic-version: 2023-06-01`。API Base 可写成 `https://api.anthropic.com` 或带尾部 `/v1` 的形式。
+
+## 配置优先级
+
+```text
+命令行参数 / WILLDEEP_* 环境变量
+  → 当前 Provider Profile
+    → Provider 专属环境变量
+      → 内置安全默认值
+```
+
+API Key 的完整解析链和权限强制规则见 [认证与凭据](AUTHENTICATION.md)。
+
+## 环境变量
+
+| 环境变量 | 用途 |
+|---|---|
+| `WILLDEEP_API_BASE` | API Base |
+| `WILLDEEP_API_KEY` | 通用 API Key |
+| `WILLDEEP_MODEL` | 模型 ID |
+| `WILLDEEP_CONFIG` | 显式 TOML 配置文件路径 |
+| `WILLDEEP_HOME` | 配置与运行时目录，默认 `~/.willdeep` |
+| `WILLDEEP_LANGUAGE` | 界面语言 `zh-CN` / `en` / `ja` |
+| `WILLDEEP_CLIENT_LOGIN_SECRET` | some.im 浏览器登录的客户端密钥，构建时注入 |
+| `SOMEIM_API_KEY` | some.im Key 回退 |
+| `ANTHROPIC_API_KEY` | Anthropic Key 回退 |
+| `OPENAI_API_KEY` | OpenAI-compatible Key 回退 |
+
+## 界面语言
+
+支持简体中文、英语和日语。三种设置方式，优先级从高到低：
+
+1. `--language` 或 `WILLDEEP_LANGUAGE`；
+2. `[agent]` 的 `language`；
+3. 自动探测（Web 端读浏览器语言，默认 `zh-CN`）。
+
+Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage 中。
+
+## 其他配置段
+
+- `[subagents.*]` — 子 Agent 的模型绑定、Token 预算、超时与熔断，见 [子 Agent 与后台任务](SUBAGENTS.md)；
+- `[mcp_servers.*]` — MCP stdio server，见 [Skills 与 MCP](SKILLS_AND_MCP.md)；
+- `[skills]` 的 `roots` — 额外的 Skill 搜索根目录，见 [Skills 与 MCP](SKILLS_AND_MCP.md)。
+
+## 配置命令
+
+```bash
+willdeep config init     # 用私有权限创建示例文件，不覆盖已有配置
+willdeep config check    # 解析并严格校验
+willdeep config show     # 打印校验后配置，内联 api_key 替换为 [REDACTED]
+```
+
+生产配置推荐只使用 `api_key_env`。

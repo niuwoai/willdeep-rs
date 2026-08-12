@@ -4,8 +4,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
+
+use crate::agent::AgentInstructionInbox;
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -21,7 +23,7 @@ pub enum BackgroundTaskKind {
     Subagent,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
@@ -59,6 +61,7 @@ struct TaskRecord {
     cancel: watch::Sender<bool>,
     retry: Option<TaskLauncher>,
     lifecycle: Option<TaskLifecycleHook>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 }
 
 struct RegistryState {
@@ -66,10 +69,21 @@ struct RegistryState {
     pending: VecDeque<BackgroundTaskEvent>,
 }
 
+struct LaunchSpec {
+    agent_id: Option<uuid::Uuid>,
+    kind: BackgroundTaskKind,
+    label: String,
+    future: TaskFuture,
+    retry: Option<TaskLauncher>,
+    lifecycle: Option<TaskLifecycleHook>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
+}
+
 #[derive(Clone)]
 pub struct BackgroundTaskRegistry {
     inner: Arc<Mutex<RegistryState>>,
     events: broadcast::Sender<BackgroundTaskEvent>,
+    lifecycle: Option<TaskLifecycleHook>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -81,11 +95,21 @@ impl Default for BackgroundTaskRegistry {
                 pending: VecDeque::new(),
             })),
             events,
+            lifecycle: None,
         }
     }
 }
 
 impl BackgroundTaskRegistry {
+    pub fn with_lifecycle_observer<H, HFut>(mut self, lifecycle: H) -> Self
+    where
+        H: Fn(BackgroundTaskSnapshot) -> HFut + Send + Sync + 'static,
+        HFut: Future<Output = ()> + Send + 'static,
+    {
+        self.lifecycle = Some(Arc::new(move |snapshot| Box::pin(lifecycle(snapshot))));
+        self
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<BackgroundTaskEvent> {
         self.events.subscribe()
     }
@@ -153,7 +177,7 @@ impl BackgroundTaskRegistry {
     }
 
     pub fn retry(&self, id: &str) -> Option<String> {
-        let (agent_id, kind, label, launcher, lifecycle) = {
+        let (agent_id, kind, label, launcher, lifecycle, instruction_inbox) = {
             let state = self.inner.lock().expect("background registry");
             let task = state.tasks.iter().find(|task| task.snapshot.id == id)?;
             if task.snapshot.status == BackgroundTaskStatus::Running {
@@ -165,10 +189,19 @@ impl BackgroundTaskRegistry {
                 task.snapshot.label.clone(),
                 task.retry.clone()?,
                 task.lifecycle.clone(),
+                task.instruction_inbox.clone(),
             )
         };
         let future = launcher();
-        Some(self.launch(agent_id, kind, label, future, Some(launcher), lifecycle))
+        Some(self.launch(LaunchSpec {
+            agent_id,
+            kind,
+            label,
+            future,
+            retry: Some(launcher),
+            lifecycle,
+            instruction_inbox,
+        }))
     }
 
     pub fn retry_agent(&self, agent_id: uuid::Uuid) -> Option<String> {
@@ -186,6 +219,21 @@ impl BackgroundTaskRegistry {
         self.retry(&id)
     }
 
+    pub fn instruct_agent(&self, agent_id: uuid::Uuid, instruction: String) -> bool {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| {
+                task.snapshot.agent_id == Some(agent_id)
+                    && task.snapshot.status == BackgroundTaskStatus::Running
+            })
+            .and_then(|task| task.instruction_inbox.as_ref())
+            .is_some_and(|inbox| inbox.push(instruction))
+    }
+
     /// Internal lifecycle entry. Callers must complete their own approval
     /// before registering work; no command-launch API is publicly exported.
     pub(crate) fn start_retriable<F, Fut>(
@@ -200,7 +248,15 @@ impl BackgroundTaskRegistry {
     {
         let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
         let future = launcher();
-        self.launch(None, kind, label, future, Some(launcher), None)
+        self.launch(LaunchSpec {
+            agent_id: None,
+            kind,
+            label,
+            future,
+            retry: Some(launcher),
+            lifecycle: None,
+            instruction_inbox: None,
+        })
     }
 
     pub(crate) fn start_retriable_with_lifecycle<F, Fut, H, HFut>(
@@ -208,6 +264,7 @@ impl BackgroundTaskRegistry {
         agent_id: uuid::Uuid,
         kind: BackgroundTaskKind,
         label: String,
+        instruction_inbox: Arc<AgentInstructionInbox>,
         launcher: F,
         lifecycle: H,
     ) -> String
@@ -220,25 +277,27 @@ impl BackgroundTaskRegistry {
         let launcher: TaskLauncher = Arc::new(move || Box::pin(launcher()));
         let lifecycle: TaskLifecycleHook = Arc::new(move |snapshot| Box::pin(lifecycle(snapshot)));
         let future = launcher();
-        self.launch(
-            Some(agent_id),
+        self.launch(LaunchSpec {
+            agent_id: Some(agent_id),
             kind,
             label,
             future,
-            Some(launcher),
-            Some(lifecycle),
-        )
+            retry: Some(launcher),
+            lifecycle: Some(lifecycle),
+            instruction_inbox: Some(instruction_inbox),
+        })
     }
 
-    fn launch(
-        &self,
-        agent_id: Option<uuid::Uuid>,
-        kind: BackgroundTaskKind,
-        label: String,
-        future: TaskFuture,
-        retry: Option<TaskLauncher>,
-        lifecycle: Option<TaskLifecycleHook>,
-    ) -> String {
+    fn launch(&self, spec: LaunchSpec) -> String {
+        let LaunchSpec {
+            agent_id,
+            kind,
+            label,
+            future,
+            retry,
+            lifecycle,
+            instruction_inbox,
+        } = spec;
         let prefix = if kind == BackgroundTaskKind::Shell {
             "job"
         } else {
@@ -270,10 +329,15 @@ impl BackgroundTaskRegistry {
                 cancel,
                 retry,
                 lifecycle: lifecycle.clone(),
+                instruction_inbox,
             });
         let registry = self.clone();
         let task_id = id.clone();
+        let observer = self.lifecycle.clone();
         tokio::spawn(async move {
+            if let Some(observer) = &observer {
+                observer(snapshot.clone()).await;
+            }
             if let Some(lifecycle) = &lifecycle {
                 lifecycle(snapshot).await;
             }
@@ -281,10 +345,13 @@ impl BackgroundTaskRegistry {
                 result = future => result,
                 _ = cancelled.changed() => TaskResult { status: BackgroundTaskStatus::Killed, exit_code: None, output: "task cancelled".to_owned() },
             };
-            if let Some(event) = registry.finish(&task_id, result)
-                && let Some(lifecycle) = &lifecycle
-            {
-                lifecycle(event.snapshot).await;
+            if let Some(event) = registry.finish(&task_id, result) {
+                if let Some(observer) = &observer {
+                    observer(event.snapshot.clone()).await;
+                }
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event.snapshot).await;
+                }
             }
         });
         id
@@ -453,6 +520,7 @@ mod tests {
             cancelled_agent_id,
             BackgroundTaskKind::Subagent,
             "cancelled agent".to_owned(),
+            Arc::new(AgentInstructionInbox::default()),
             || async { std::future::pending::<TaskResult>().await },
             move |snapshot| {
                 let tx = lifecycle_tx.clone();
@@ -481,6 +549,7 @@ mod tests {
             retried_agent_id,
             BackgroundTaskKind::Subagent,
             "retried agent".to_owned(),
+            Arc::new(AgentInstructionInbox::default()),
             move || {
                 let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
@@ -523,5 +592,37 @@ mod tests {
             lifecycle_rx.recv().await.unwrap().status,
             BackgroundTaskStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn registry_lifecycle_observer_sees_shell_start_and_terminal_snapshot() {
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = BackgroundTaskRegistry::default().with_lifecycle_observer(move |snapshot| {
+            let tx = lifecycle_tx.clone();
+            async move {
+                let _ = tx.send(snapshot);
+            }
+        });
+        let id = registry.start_retriable(
+            BackgroundTaskKind::Shell,
+            "private command label".to_owned(),
+            || async {
+                TaskResult {
+                    status: BackgroundTaskStatus::Completed,
+                    exit_code: Some(0),
+                    output: "private output".to_owned(),
+                }
+            },
+        );
+
+        let started = lifecycle_rx.recv().await.unwrap();
+        assert_eq!(started.id, id);
+        assert_eq!(started.status, BackgroundTaskStatus::Running);
+        assert_eq!(started.output_bytes, 0);
+        let completed = lifecycle_rx.recv().await.unwrap();
+        assert_eq!(completed.id, id);
+        assert_eq!(completed.status, BackgroundTaskStatus::Completed);
+        assert_eq!(completed.exit_code, Some(0));
+        assert_eq!(completed.output_bytes, "private output".len());
     }
 }

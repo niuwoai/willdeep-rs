@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,42 +16,176 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, watch};
 
 const STATE_SCHEMA: u32 = 1;
 const TOKEN_HEADER: &str = "x-willdeep-token";
 const SERVER_VERSION_HEADER: &str = "x-willdeep-version";
+const REQUEST_ID_HEADER: &str = "x-willdeep-request-id";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 const LOCK_HEARTBEAT_SECONDS: u64 = 2;
 const LOCK_RECOVERY_ATTEMPTS: usize = 120;
 
 mod agent_control;
 mod agent_store;
+mod control_api;
+pub(crate) mod diff_review;
 mod event_stream;
+mod headless;
+mod herdr;
+mod internal_transport;
+mod local_transport;
 mod session_store;
+mod tool_store;
 pub(crate) mod tui_bridge;
+mod workspace_store;
+mod worktree_maintenance;
+mod worktree_review;
+
 use agent_control::AgentCommandStore;
 pub(crate) use agent_control::{AgentCommandWatcher, start_agent_command_watcher};
 use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
+pub(crate) use headless::{HeadlessRuntimeRequest, HeadlessRuntimeStatus, execute_headless_turn};
+use local_transport::LocalTransportState;
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
     delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
-    remote_session_states, rename_remote_session, resolve_remote_approval, retry_remote_agent,
-    runtime_event_head, runtime_events, runtime_snapshot, search_remote_sessions,
-    set_remote_session_archived, start_runtime_event_follower, stop_remote_agent, stop_remote_turn,
-    submit_runtime_turn,
+    instruct_remote_agent, remote_active_turn, remote_agent_detail, remote_latest_turn,
+    remote_session_states, remote_turn_session, rename_remote_session, resolve_remote_approval,
+    retry_remote_agent, retry_remote_agent_with_model, runtime_event_head, runtime_events,
+    runtime_snapshot, search_remote_sessions, set_remote_session_archived, spawn_remote_agent,
+    start_runtime_event_follower, stop_remote_agent, stop_remote_turn, submit_runtime_turn,
 };
+pub(crate) use workspace_store::WorkspaceAccess;
+pub(crate) use workspace_store::{
+    RuntimeWorkspace, activate_remote_workspace, ensure_remote_workspace, remote_workspaces,
+};
+pub(crate) use worktree_review::{WorktreeReview, remote_merge, remote_review};
 
 struct RuntimeEventSink {
     task_id: uuid::Uuid,
+    session_id: Option<uuid::Uuid>,
+    turn_id: Option<uuid::Uuid>,
+    root_agent_id: uuid::Uuid,
+    home: PathBuf,
+    workspace: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    tools: Arc<tool_store::ToolStore>,
+    diff_baselines: AsyncMutex<HashMap<String, (PathBuf, diff_review::DiffCapture)>>,
+    child_workspaces: AsyncMutex<HashMap<uuid::Uuid, PathBuf>>,
+}
+
+impl RuntimeEventSink {
+    async fn observe_diff(&self, event: &willdeep_core::AgentEvent) {
+        use willdeep_core::AgentEvent;
+        if let AgentEvent::SubagentStarted { id, workspace, .. } = event {
+            self.child_workspaces
+                .lock()
+                .await
+                .insert(*id, workspace.clone());
+            return;
+        }
+        let requested = match event {
+            AgentEvent::ToolRequested(call) => Some((
+                format!("root:{}", call.id),
+                self.root_agent_id,
+                call.name.clone(),
+            )),
+            AgentEvent::SubagentToolRequested { id, name } => {
+                Some((format!("child:{id}"), *id, name.clone()))
+            }
+            _ => None,
+        };
+        if let Some((key, agent_id, tool)) = requested {
+            if !tool_may_modify_workspace(&tool) {
+                return;
+            }
+            let workspace = self.agent_workspace(agent_id).await;
+            if let Ok(capture) = diff_review::capture(&workspace) {
+                self.diff_baselines
+                    .lock()
+                    .await
+                    .insert(key, (workspace, capture));
+            }
+            return;
+        }
+        let completed = match event {
+            AgentEvent::ToolCompleted { call, .. } => Some((
+                format!("root:{}", call.id),
+                self.root_agent_id,
+                call.name.clone(),
+            )),
+            AgentEvent::SubagentToolCompleted { id, name, .. } => {
+                Some((format!("child:{id}"), *id, name.clone()))
+            }
+            _ => None,
+        };
+        let Some((key, agent_id, tool)) = completed else {
+            return;
+        };
+        if !tool_may_modify_workspace(&tool) {
+            return;
+        }
+        let Some((workspace, before)) = self.diff_baselines.lock().await.remove(&key) else {
+            return;
+        };
+        if let Err(error) = diff_review::record_tool_attribution(
+            &self.home,
+            before,
+            &workspace,
+            diff_review::AttributionContext {
+                session_id: self.session_id,
+                turn_id: self.turn_id,
+                task_id: self.task_id,
+                agent_id,
+                tool,
+            },
+        )
+        .await
+        {
+            eprintln!(
+                "record Diff attribution for task {}: {error:#}",
+                self.task_id
+            );
+        }
+    }
+
+    async fn agent_workspace(&self, agent_id: uuid::Uuid) -> PathBuf {
+        if agent_id == self.root_agent_id {
+            return self.workspace.clone();
+        }
+        self.child_workspaces
+            .lock()
+            .await
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_else(|| self.workspace.clone())
+    }
+}
+
+fn tool_may_modify_workspace(name: &str) -> bool {
+    matches!(
+        name,
+        "create_file" | "edit_file" | "run_command" | "create_worktree" | "computer_use"
+    ) || name.starts_with("mcp__")
 }
 
 #[async_trait]
 impl willdeep_core::EventSink for RuntimeEventSink {
     async fn emit(&self, event: willdeep_core::AgentEvent) {
+        if let Err(error) = tool_store::observe(
+            &self.tools,
+            self.session_id,
+            self.turn_id,
+            self.task_id,
+            self.root_agent_id,
+            &event,
+        ) {
+            eprintln!("record Tool activity for task {}: {error:#}", self.task_id);
+        }
+        self.observe_diff(&event).await;
         let line = crate::agent_event_json(event).to_string();
         if self
             .agents
@@ -72,8 +206,23 @@ pub enum DaemonAction {
     Start,
     /// Show Runtime Daemon health and endpoint information.
     Status,
+    /// Show negotiated Runtime protocol objects, operations, transports and limits.
+    Capabilities,
     /// Gracefully stop the local Runtime Daemon.
     Stop,
+    /// Drain active work and hand the Runtime lease to this executable.
+    Upgrade {
+        /// Maximum seconds to wait for active work to finish.
+        #[arg(
+            long,
+            default_value_t = 300,
+            value_parser = clap::value_parser!(u64).range(1..=86_400)
+        )]
+        timeout: u64,
+        /// Restart even when the running Runtime already has this version.
+        #[arg(long)]
+        force: bool,
+    },
     /// Print Runtime Daemon logs.
     Logs {
         #[arg(long, default_value_t = 100)]
@@ -89,6 +238,9 @@ pub enum DaemonAction {
         /// Provider profile from config.toml.
         #[arg(long)]
         profile: Option<String>,
+        /// Optional model override for the selected Provider profile.
+        #[arg(long)]
+        model: Option<String>,
         /// TOML configuration path inherited by the task.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -104,6 +256,26 @@ pub enum DaemonAction {
     Agents,
     /// Show one Runtime-owned agent.
     Agent { id: uuid::Uuid },
+    /// Preview an exact Diff and conflict check for a child Agent worktree.
+    AgentWorktreeReview { id: uuid::Uuid },
+    /// Apply an exact reviewed child Agent patch to its root Workspace.
+    MergeAgentWorktree {
+        id: uuid::Uuid,
+        #[arg(long)]
+        review: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Audit managed, missing, reviewable, merged and unknown child Worktrees.
+    WorktreesAudit,
+    /// Move an exact clean or merged Worktree into recoverable quarantine.
+    QuarantineAgentWorktree {
+        id: uuid::Uuid,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Create a persistent interactive Runtime Session.
     CreateSession {
         #[arg(long)]
@@ -111,18 +283,57 @@ pub enum DaemonAction {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         config: Option<PathBuf>,
         #[arg(long)]
         title: Option<String>,
     },
     /// List persistent interactive Runtime Sessions.
     Sessions,
+    /// List registered Runtime Workspaces.
+    Workspaces,
+    /// Register or update a Runtime Workspace and its independent settings.
+    RegisterWorkspace {
+        #[arg(value_name = "PATH")]
+        root: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum, default_value_t = workspace_store::WorkspaceAccess::WorkspaceWrite)]
+        access: workspace_store::WorkspaceAccess,
+        #[arg(long)]
+        provider_profile: Option<String>,
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        #[arg(long = "mcp-server")]
+        mcp_servers: Vec<String>,
+    },
+    /// Make one registered Workspace the default for new clients.
+    ActivateWorkspace { id: uuid::Uuid },
+    /// Remove a Workspace registration without deleting files or Sessions.
+    RemoveWorkspace {
+        id: uuid::Uuid,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show one persistent Runtime Session.
     Session { id: uuid::Uuid },
     /// Search persistent Runtime Sessions by title or message text.
     SearchSessions {
-        #[arg(value_name = "QUERY", num_args = 1.., trailing_var_arg = true)]
+        #[arg(value_name = "QUERY", num_args = 0.., trailing_var_arg = true)]
         query: Vec<String>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        updated_after: Option<u64>,
+        #[arg(long)]
+        updated_before: Option<u64>,
     },
     /// Rename a persistent Runtime Session.
     RenameSession {
@@ -135,6 +346,12 @@ pub enum DaemonAction {
         id: uuid::Uuid,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long, value_name = "TURN_ID")]
+        through_turn: Option<uuid::Uuid>,
+        #[arg(long, value_name = "PROFILE")]
+        provider_profile: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Archive an inactive Runtime Session.
     ArchiveSession { id: uuid::Uuid },
@@ -170,6 +387,79 @@ pub enum DaemonAction {
     StopAgent { id: uuid::Uuid },
     /// Retry a terminal background child Agent.
     RetryAgent { id: uuid::Uuid },
+    /// Add instructions to a running background child Agent.
+    InstructAgent {
+        id: uuid::Uuid,
+        #[arg(value_name = "INSTRUCTION", num_args = 1.., trailing_var_arg = true)]
+        instruction: Vec<String>,
+    },
+    /// Capture a structured Diff snapshot for a Runtime Workspace.
+    DiffSnapshot {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Show one file from an exact Diff snapshot.
+    DiffFile {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum, default_value_t = diff_review::DiffArea::Combined)]
+        area: diff_review::DiffArea,
+    },
+    /// Save a decision for one file in an exact Diff snapshot.
+    DiffReview {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum)]
+        decision: diff_review::ReviewDecision,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List test verifications bound to an exact Diff snapshot.
+    DiffVerifications {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+    },
+    /// List Turn, Task, Agent, and Tool attribution for an exact Diff snapshot.
+    DiffAttributions {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+    },
+    /// Preview an exact commit, tag, and push target without mutating Git.
+    DiffCommitPreview {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Safely revert one file from an exact Diff snapshot.
+    DiffRevert {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_enum, default_value_t = diff_review::DiffArea::Combined)]
+        area: diff_review::DiffArea,
+    },
     /// Request cancellation of a Runtime-owned task.
     Cancel { id: uuid::Uuid },
     /// List approvals and questions currently blocking Runtime tasks.
@@ -189,6 +479,31 @@ pub enum DaemonAction {
     /// Internal foreground server entry used by `daemon start`.
     #[command(hide = true)]
     Run,
+    /// Internal background Shell supervisor connected to its parent by stdin.
+    #[command(hide = true)]
+    BackgroundSupervisor,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum SessionAction {
+    /// List persistent Runtime Sessions.
+    List,
+    /// Show one Session and its active Turn.
+    Get { id: uuid::Uuid },
+    /// List Turns owned by one Session.
+    Turns { id: uuid::Uuid },
+    /// Stop the Session's active or queued Turn.
+    Stop { id: uuid::Uuid },
+}
+
+pub async fn handle_session(action: SessionAction) -> Result<()> {
+    let home = crate::config::willdeep_home()?;
+    match action {
+        SessionAction::List => session_store::list_sessions_cli(&home).await,
+        SessionAction::Get { id } => session_store::show_session_cli(&home, id).await,
+        SessionAction::Turns { id } => session_store::list_turns_cli(&home, id).await,
+        SessionAction::Stop { id } => session_store::stop_session_cli(&home, id).await,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,6 +514,8 @@ struct DaemonState {
     address: SocketAddr,
     token: String,
     started_at: u64,
+    #[serde(default)]
+    local_transport: Option<LocalTransportState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,23 +526,24 @@ struct DaemonLock {
 
 #[derive(Clone)]
 struct ServerState {
+    home: PathBuf,
     token: String,
     started_at: u64,
-    shutdown: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
     events: Arc<EventLog>,
     tasks: Arc<TaskManager>,
     agents: Arc<AgentStore>,
     agent_commands: Arc<AgentCommandStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
+    workspaces: Arc<workspace_store::WorkspaceStore>,
+    diff_review_lock: Arc<tokio::sync::Mutex<()>>,
+    idempotency: Arc<control_api::IdempotencyStore>,
+    local_transport: Option<LocalTransportState>,
+    tools: Arc<tool_store::ToolStore>,
+    work_gate: Arc<RwLock<bool>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct RuntimeEvent {
-    sequence: u64,
-    timestamp: u64,
-    kind: String,
-    message: String,
-}
+type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -255,11 +573,15 @@ pub(crate) struct RuntimeTask {
     status: RuntimeTaskStatus,
     workspace: PathBuf,
     profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     pid: Option<u32>,
     created_at: u64,
     started_at: Option<u64>,
     completed_at: Option<u64>,
     exit_code: Option<i32>,
+    #[serde(default)]
+    failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     error: Option<String>,
 }
 
@@ -269,18 +591,29 @@ pub(crate) struct SubmitTask {
     #[serde(default)]
     pub(crate) attachments: Vec<willdeep_core::MessageAttachment>,
     pub(crate) workspace: PathBuf,
+    #[serde(skip)]
+    pub(crate) workspace_access: Option<WorkspaceAccess>,
+    #[serde(skip)]
+    pub(crate) workspace_skills: Option<Vec<String>>,
+    #[serde(skip)]
+    pub(crate) workspace_mcp_servers: Option<Vec<String>>,
     pub(crate) profile: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
     pub(crate) config: Option<PathBuf>,
     #[serde(default)]
     pub(crate) session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub(crate) turn_id: Option<uuid::Uuid>,
+    #[serde(skip)]
+    pub(crate) replay_existing_user_message: bool,
 }
 
 #[derive(Clone)]
 pub(crate) struct RuntimeSubmitOptions {
     pub workspace: PathBuf,
     pub profile: Option<String>,
+    pub model: Option<String>,
     pub config: Option<PathBuf>,
 }
 
@@ -345,17 +678,14 @@ struct CreateInteraction {
     kind: InteractionKind,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ResolveInteraction {
-    resolution: InteractionResolution,
-}
-
 struct TaskManager {
     path: PathBuf,
     home: PathBuf,
     events: Arc<EventLog>,
     agents: Arc<AgentStore>,
+    tools: Arc<tool_store::ToolStore>,
     sessions: Arc<session_store::RuntimeSessionStore>,
+    workspaces: Arc<workspace_store::WorkspaceStore>,
     runtime_url: String,
     runtime_token: String,
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
@@ -366,41 +696,108 @@ struct TaskManager {
     interaction_waiters:
         Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<InteractionResolution>>>,
     turn_scheduler: tokio::sync::mpsc::UnboundedSender<uuid::Uuid>,
+    herdr: Option<herdr::HerdrReporter>,
 }
 
 pub async fn handle(action: DaemonAction) -> Result<()> {
+    if matches!(&action, DaemonAction::BackgroundSupervisor) {
+        return willdeep_core::run_background_supervisor().await;
+    }
     let home = crate::config::willdeep_home()?;
     match action {
-        DaemonAction::Start => start(&home).await,
+        DaemonAction::Start => start(&home, true).await,
         DaemonAction::Status => status(&home).await,
+        DaemonAction::Capabilities => capabilities_cli(&home).await,
         DaemonAction::Stop => stop(&home).await,
+        DaemonAction::Upgrade { timeout, force } => upgrade(&home, timeout, force).await,
         DaemonAction::Logs { lines, follow } => logs(&home, lines, follow).await,
         DaemonAction::Submit {
             workspace,
             profile,
+            model,
             config,
             prompt,
-        } => submit(&home, workspace, profile, config, prompt).await,
+        } => submit(&home, workspace, profile, model, config, prompt).await,
         DaemonAction::Tasks => list_tasks(&home).await,
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
+        DaemonAction::AgentWorktreeReview { id } => worktree_review::review_cli(&home, id).await,
+        DaemonAction::MergeAgentWorktree { id, review, yes } => {
+            worktree_review::merge_cli(&home, id, review, yes).await
+        }
+        DaemonAction::WorktreesAudit => worktree_maintenance::audit_cli(&home).await,
+        DaemonAction::QuarantineAgentWorktree { id, snapshot, yes } => {
+            worktree_maintenance::quarantine_cli(&home, id, snapshot, yes).await
+        }
         DaemonAction::CreateSession {
             workspace,
             profile,
+            model,
             config,
             title,
-        } => session_store::create_session_cli(&home, workspace, profile, config, title).await,
+        } => {
+            session_store::create_session_cli(&home, workspace, profile, model, config, title).await
+        }
         DaemonAction::Sessions => session_store::list_sessions_cli(&home).await,
+        DaemonAction::Workspaces => workspace_store::list_cli(&home).await,
+        DaemonAction::RegisterWorkspace {
+            root,
+            name,
+            access,
+            provider_profile,
+            skills,
+            mcp_servers,
+        } => {
+            workspace_store::register_cli(
+                &home,
+                root,
+                name,
+                access,
+                provider_profile,
+                skills,
+                mcp_servers,
+            )
+            .await
+        }
+        DaemonAction::ActivateWorkspace { id } => workspace_store::activate_cli(&home, id).await,
+        DaemonAction::RemoveWorkspace { id, yes } => {
+            workspace_store::remove_cli(&home, id, yes).await
+        }
         DaemonAction::Session { id } => session_store::show_session_cli(&home, id).await,
-        DaemonAction::SearchSessions { query } => {
-            session_store::search_sessions_cli(&home, query).await
+        DaemonAction::SearchSessions {
+            query,
+            workspace,
+            status,
+            profile,
+            model,
+            updated_after,
+            updated_before,
+        } => {
+            session_store::search_sessions_cli(
+                &home,
+                query,
+                workspace,
+                status,
+                profile,
+                model,
+                updated_after,
+                updated_before,
+            )
+            .await
         }
         DaemonAction::RenameSession { id, title } => {
             session_store::rename_session_cli(&home, id, title).await
         }
-        DaemonAction::ForkSession { id, title } => {
-            session_store::fork_session_cli(&home, id, title).await
+        DaemonAction::ForkSession {
+            id,
+            title,
+            through_turn,
+            provider_profile,
+            model,
+        } => {
+            session_store::fork_session_cli(&home, id, title, through_turn, provider_profile, model)
+                .await
         }
         DaemonAction::ArchiveSession { id } => {
             session_store::archive_session_cli(&home, id, false).await
@@ -430,11 +827,56 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::RetryAgent { id } => {
             agent_control::control_agent(&home, id, agent_control::AgentCommandKind::Retry).await
         }
+        DaemonAction::InstructAgent { id, instruction } => {
+            agent_control::instruct_agent(&home, id, instruction.join(" ")).await
+        }
+        DaemonAction::DiffSnapshot { workspace } => {
+            diff_review::snapshot_cli(&home, workspace).await
+        }
+        DaemonAction::DiffFile {
+            workspace,
+            snapshot,
+            path,
+            area,
+        } => diff_review::content_cli(&home, workspace, snapshot, path, area).await,
+        DaemonAction::DiffReview {
+            workspace,
+            snapshot,
+            path,
+            decision,
+            note,
+        } => diff_review::review_cli(&home, workspace, snapshot, path, decision, note).await,
+        DaemonAction::DiffVerifications {
+            workspace,
+            snapshot,
+        } => diff_review::verifications_cli(&home, workspace, snapshot).await,
+        DaemonAction::DiffAttributions {
+            workspace,
+            snapshot,
+        } => diff_review::attributions_cli(&home, workspace, snapshot).await,
+        DaemonAction::DiffCommitPreview {
+            workspace,
+            snapshot,
+            message,
+            remote,
+            tag,
+        } => {
+            diff_review::commit_preview_cli(&home, workspace, snapshot, message, remote, tag).await
+        }
+        DaemonAction::DiffRevert {
+            workspace,
+            snapshot,
+            path,
+            area,
+        } => diff_review::revert_cli(&home, workspace, snapshot, path, area).await,
         DaemonAction::Cancel { id } => cancel_task(&home, id).await,
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
         DaemonAction::Answer { id, answer } => answer_pending(&home, id, answer).await,
         DaemonAction::Run => run(&home).await,
+        DaemonAction::BackgroundSupervisor => {
+            unreachable!("background supervisor handled before loading Runtime home")
+        }
     }
 }
 
@@ -480,19 +922,107 @@ pub async fn detach() -> Result<()> {
     Ok(())
 }
 
+pub async fn api(
+    operation: String,
+    params_file: Option<PathBuf>,
+    request_id: Option<uuid::Uuid>,
+    ndjson: bool,
+) -> Result<()> {
+    if !willdeep_runtime_protocol::SUPPORTED_OPERATIONS.contains(&operation.as_str())
+        && !matches!(operation.as_str(), "agent.prompt" | "agent.wait")
+    {
+        bail!("unknown Runtime operation: {operation}");
+    }
+    let params = match params_file.as_deref() {
+        None => serde_json::json!({}),
+        Some(path) if path == Path::new("-") => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            serde_json::from_str(&input).context("parse API params from stdin")?
+        }
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)
+            .with_context(|| format!("parse API params file as JSON: {}", path.display()))?,
+    };
+    if !params.is_object() {
+        bail!("API params must be a JSON object");
+    }
+    let home = crate::config::willdeep_home()?;
+    let state = ensure_running(&home).await?;
+    if operation == "event.stream" {
+        if !ndjson {
+            bail!("event.stream is an NDJSON stream; pass --ndjson");
+        }
+        return stream_api_events(
+            &state,
+            &params,
+            request_id.unwrap_or_else(uuid::Uuid::new_v4),
+        )
+        .await;
+    }
+    let response: willdeep_runtime_protocol::ApiResponse<serde_json::Value> =
+        runtime_client(&state)?
+            .call(operation, &params, request_id)
+            .await?;
+    let failed = matches!(
+        response,
+        willdeep_runtime_protocol::ApiResponse::Error { .. }
+    );
+    let value = serde_json::to_value(response)?;
+    if ndjson {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+    if failed {
+        bail!("Runtime API operation failed; inspect the error envelope above");
+    }
+    Ok(())
+}
+
+async fn stream_api_events(
+    state: &DaemonState,
+    params: &serde_json::Value,
+    request_id: uuid::Uuid,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StreamParams {
+        #[serde(default)]
+        after: u64,
+        #[serde(default = "default_event_limit")]
+        limit: usize,
+    }
+
+    let params: StreamParams = serde_json::from_value(params.clone())
+        .context("event.stream params must contain only after and limit")?;
+    let mut events = runtime_client(state)?
+        .stream_events(params.after, params.limit, Some(request_id))
+        .await?;
+    let mut stdout = std::io::stdout().lock();
+    while let Some(event) = events.next::<RuntimeEvent>().await? {
+        serde_json::to_writer(&mut stdout, &event)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
 async fn submit(
     home: &Path,
     workspace: Option<PathBuf>,
     profile: Option<String>,
+    model: Option<String>,
     config: Option<PathBuf>,
     prompt: Vec<String>,
 ) -> Result<()> {
     let prompt = prompt.join(" ");
+    let workspace = workspace_store::resolve_cli_root(home, workspace).await?;
     let task = submit_runtime_prompt(
         home,
         &RuntimeSubmitOptions {
-            workspace: workspace.unwrap_or(std::env::current_dir()?),
+            workspace,
             profile,
+            model,
             config,
         },
         prompt,
@@ -518,74 +1048,81 @@ pub(crate) async fn submit_runtime_prompt(
         bail!("Runtime task prompt and attachments must not both be empty");
     }
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/tasks", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&SubmitTask {
-            prompt,
-            attachments,
-            workspace: options.workspace.canonicalize()?,
-            profile: options.profile.clone(),
-            config: options.config.clone(),
-            session_id: None,
-            turn_id: None,
-        })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected task submission: {}",
-            response.text().await?
-        );
-    }
-    Ok(response.json().await?)
+    Ok(
+        internal_transport::InternalRuntimeClient::from_state(&state)?
+            .post(
+                "/v1/internal/tasks",
+                &SubmitTask {
+                    prompt,
+                    attachments,
+                    workspace: options.workspace.canonicalize()?,
+                    workspace_access: None,
+                    workspace_skills: None,
+                    workspace_mcp_servers: None,
+                    profile: options.profile.clone(),
+                    model: options.model.clone(),
+                    config: options.config.clone(),
+                    session_id: None,
+                    turn_id: None,
+                    replay_existing_user_message: false,
+                },
+            )
+            .await?,
+    )
 }
 
 async fn list_tasks(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let tasks: Vec<RuntimeTask> = authorized_get(&state, "/v1/tasks").await?;
-    for task in tasks {
-        print_task(&task);
+    for task in runtime_client(&state)?.tasks().await?.into_result()? {
+        print_public_task(&task);
     }
     Ok(())
 }
 
 async fn show_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let task: RuntimeTask = authorized_get(&state, &format!("/v1/tasks/{id}")).await?;
-    print_task(&task);
+    let task = runtime_client(&state)?.task(id).await?.into_result()?;
+    print_public_task(&task);
     Ok(())
 }
 
 async fn list_agents(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let agents: Vec<agent_store::RuntimeAgent> = authorized_get(&state, "/v1/agents").await?;
-    for agent in agents {
-        print_agent(&agent);
+    for agent in runtime_client(&state)?.agents().await?.into_result()? {
+        print_public_agent(&agent);
     }
     Ok(())
 }
 
 async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let agent: agent_store::RuntimeAgent =
-        authorized_get(&state, &format!("/v1/agents/{id}")).await?;
-    print_agent(&agent);
+    let agent = runtime_client(&state)?.agent(id).await?.into_result()?;
+    print_public_agent(&agent);
+    println!(
+        "policy\tmax_turns={}\ttoken_budget={}\ttimeout_seconds={}",
+        agent
+            .max_turns
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .token_budget
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .timeout_seconds
+            .map_or_else(|| "-".to_owned(), |value| value.to_string())
+    );
+    if let Some(report) = &agent.report {
+        println!("report\n{report}");
+    }
     Ok(())
 }
 
 async fn cancel_task(home: &Path, id: uuid::Uuid) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!("http://{}/v1/tasks/{id}/stop", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("Runtime rejected cancellation: {}", response.text().await?);
-    }
-    let task: RuntimeTask = response.json().await?;
-    print_task(&task);
+    let task = runtime_client(&state)?
+        .cancel_task(id, uuid::Uuid::new_v4())
+        .await?
+        .into_result()?;
+    print_public_task(&task);
     Ok(())
 }
 
@@ -596,41 +1133,24 @@ async fn ensure_running(home: &Path) -> Result<DaemonState> {
     {
         return Ok(state);
     }
-    start(home).await?;
+    start(home, false).await?;
     load_state(&path)
 }
 
-async fn authorized_get<T: serde::de::DeserializeOwned>(
-    state: &DaemonState,
-    path: &str,
-) -> Result<T> {
-    let response = client()
-        .get(format!("http://{}{}", state.address, path))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("Runtime request failed: {}", response.text().await?);
-    }
-    Ok(response.json().await?)
-}
-
-fn print_task(task: &RuntimeTask) {
+fn print_public_task(task: &willdeep_runtime_protocol::RuntimeTask) {
     println!(
-        "{}\t{:?}\tpid={}\texit={}\t{}",
+        "{}\t{:?}\texit={}\t{}",
         task.id,
         task.status,
-        task.pid
-            .map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
         task.exit_code
             .map_or_else(|| "-".to_owned(), |code| code.to_string()),
-        task.workspace.display()
+        task.workspace.as_deref().unwrap_or("-")
     );
 }
 
-fn print_agent(agent: &agent_store::RuntimeAgent) {
+fn print_public_agent(agent: &willdeep_runtime_protocol::RuntimeAgent) {
     println!(
-        "{}\t{:?}\ttask={}\tparent={}\tprofile={}\tlabel={}\tmode={}\tturn={}\ttool={}\ttokens={}\t{}",
+        "{}\t{:?}\ttask={}\tparent={}\tprofile={}\tlabel={}\tmode={}\tturn={}/{}\ttool={}\ttokens={}/{}\ttimeout={}\t{}",
         agent.id,
         agent.status,
         agent.task_id,
@@ -645,39 +1165,57 @@ fn print_agent(agent: &agent_store::RuntimeAgent) {
             "foreground"
         },
         agent.current_turn,
+        agent
+            .max_turns
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
         agent.current_tool.as_deref().unwrap_or("-"),
         agent
             .total_tokens
             .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string()),
-        agent.workspace.display()
+        agent
+            .token_budget
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .timeout_seconds
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent.workspace.as_deref().unwrap_or("-")
     );
 }
 
 async fn list_pending(home: &Path) -> Result<()> {
     let state = ensure_running(home).await?;
-    let interactions: Vec<RuntimeInteraction> = authorized_get(&state, "/v1/interactions").await?;
-    for interaction in interactions {
-        match &interaction.kind {
-            InteractionKind::Approval { description, .. } => println!(
-                "{}\tapproval\ttask={}\t{}",
-                interaction.id, interaction.task_id, description
-            ),
-            InteractionKind::Question { question, .. } => println!(
-                "{}\tquestion\ttask={}\t{}",
-                interaction.id, interaction.task_id, question
-            ),
-        }
+    let client = runtime_client(&state)?;
+    for approval in client.approvals().await?.into_result()? {
+        println!(
+            "{}\tapproval\ttask={}\t{}",
+            approval.id, approval.task_id, approval.description
+        );
+    }
+    for question in client.questions().await?.into_result()? {
+        println!(
+            "{}\tquestion\ttask={}\t{}",
+            question.id, question.task_id, question.question
+        );
     }
     Ok(())
 }
 
 async fn resolve_pending(home: &Path, id: uuid::Uuid, decision: ApprovalArg) -> Result<()> {
-    let resolution = match decision {
-        ApprovalArg::AllowOnce => InteractionResolution::AllowOnce,
-        ApprovalArg::Deny => InteractionResolution::Deny,
-        ApprovalArg::AlwaysAllow => InteractionResolution::AlwaysAllow,
+    let decision = match decision {
+        ApprovalArg::AllowOnce => willdeep_runtime_protocol::ApprovalDecision::AllowOnce,
+        ApprovalArg::Deny => willdeep_runtime_protocol::ApprovalDecision::Deny,
+        ApprovalArg::AlwaysAllow => willdeep_runtime_protocol::ApprovalDecision::AlwaysAllow,
     };
-    resolve_interaction(home, id, resolution).await
+    let state = ensure_running(home).await?;
+    let result = runtime_client(&state)?
+        .resolve_approval(
+            &willdeep_runtime_protocol::ResolveApprovalParams { id, decision },
+            uuid::Uuid::new_v4(),
+        )
+        .await?
+        .into_result()?;
+    print_interaction_result(&result);
+    Ok(())
 }
 
 async fn answer_pending(home: &Path, id: uuid::Uuid, answer: Vec<String>) -> Result<()> {
@@ -685,43 +1223,31 @@ async fn answer_pending(home: &Path, id: uuid::Uuid, answer: Vec<String>) -> Res
     if answer.trim().is_empty() {
         bail!("answer must not be empty");
     }
-    resolve_interaction(home, id, InteractionResolution::Answer(Some(answer))).await
-}
-
-async fn resolve_interaction(
-    home: &Path,
-    id: uuid::Uuid,
-    resolution: InteractionResolution,
-) -> Result<()> {
     let state = ensure_running(home).await?;
-    let response = client()
-        .post(format!(
-            "http://{}/v1/interactions/{id}/resolve",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .json(&ResolveInteraction { resolution })
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected interaction resolution: {}",
-            response.text().await?
-        );
-    }
-    let interaction: RuntimeInteraction = response.json().await?;
-    println!(
-        "resolved\tid={}\ttask={}\tstatus={:?}",
-        interaction.id, interaction.task_id, interaction.status
-    );
+    let result = runtime_client(&state)?
+        .answer_question(
+            &willdeep_runtime_protocol::AnswerQuestionParams {
+                id,
+                answer: Some(answer),
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?
+        .into_result()?;
+    print_interaction_result(&result);
     Ok(())
 }
 
+fn print_interaction_result(result: &willdeep_runtime_protocol::RuntimeInteractionResult) {
+    println!(
+        "resolved\tid={}\ttask={}\tstatus={:?}",
+        result.id, result.task_id, result.status
+    );
+}
+
 struct RuntimeApprover {
-    url: String,
-    token: String,
+    client: internal_transport::InternalRuntimeClient,
     task_id: uuid::Uuid,
-    client: reqwest::Client,
 }
 
 pub fn runtime_approver(
@@ -731,31 +1257,23 @@ pub fn runtime_approver(
         return Ok(None);
     };
     Ok(Some(Arc::new(RuntimeApprover {
-        url: connection.url.clone(),
-        token: connection.token.clone(),
+        client: internal_transport::InternalRuntimeClient::new(
+            connection.url.clone(),
+            connection.token.clone(),
+        )?,
         task_id: connection.task_id,
-        client: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .build()?,
     })))
 }
 
 impl RuntimeApprover {
     async fn interact(&self, kind: InteractionKind) -> Result<InteractionResolution> {
-        let response = self
+        Ok(self
             .client
-            .post(format!(
-                "{}/v1/tasks/{}/interactions",
-                self.url, self.task_id
-            ))
-            .header(TOKEN_HEADER, &self.token)
-            .json(&CreateInteraction { kind })
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            bail!("Runtime interaction failed: HTTP {}", response.status());
-        }
-        Ok(response.json().await?)
+            .post(
+                &format!("/v1/internal/tasks/{}/interactions", self.task_id),
+                &CreateInteraction { kind },
+            )
+            .await?)
     }
 }
 
@@ -796,16 +1314,18 @@ impl willdeep_core::Approver for RuntimeApprover {
     }
 }
 
-async fn start(home: &Path) -> Result<()> {
+async fn start(home: &Path, announce: bool) -> Result<()> {
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.directory)?;
     if let Ok(state) = load_state(&paths.state)
         && probe(&state).await.is_ok()
     {
-        println!(
-            "WillDeep Runtime Daemon is already running (pid {}).",
-            state.pid
-        );
+        if announce {
+            println!(
+                "WillDeep Runtime Daemon is already running (pid {}).",
+                state.pid
+            );
+        }
         return Ok(());
     }
     let lock = match acquire_daemon_lock(&paths.lock) {
@@ -817,10 +1337,12 @@ async fn start(home: &Path) -> Result<()> {
                 if let Ok(state) = load_state(&paths.state)
                     && probe(&state).await.is_ok()
                 {
-                    println!(
-                        "WillDeep Runtime Daemon is already running (pid {}).",
-                        state.pid
-                    );
+                    if announce {
+                        println!(
+                            "WillDeep Runtime Daemon is already running (pid {}).",
+                            state.pid
+                        );
+                    }
                     return Ok(());
                 }
                 match acquire_daemon_lock(&paths.lock) {
@@ -856,10 +1378,12 @@ async fn start(home: &Path) -> Result<()> {
         if let Ok(state) = load_state(&paths.state)
             && probe(&state).await.is_ok()
         {
-            println!(
-                "WillDeep Runtime Daemon started (pid {}, {}).",
-                state.pid, state.address
-            );
+            if announce {
+                println!(
+                    "WillDeep Runtime Daemon started (pid {}, {}).",
+                    state.pid, state.address
+                );
+            }
             lock_cleanup.disarm();
             return Ok(());
         }
@@ -882,14 +1406,49 @@ async fn status(home: &Path) -> Result<()> {
     };
     match probe(&state).await {
         Ok(health) => {
+            let display_status = if health.status == "draining" {
+                "draining"
+            } else {
+                "running"
+            };
             println!(
-                "running\tpid={}\taddress={}\tversion={}\tuptime={}s",
-                state.pid, state.address, health.version, health.uptime_seconds
+                "{}\tpid={}\taddress={}\tversion={}\tuptime={}s",
+                display_status, state.pid, state.address, health.version, health.uptime_seconds
             );
             Ok(())
         }
         Err(error) => bail!("Runtime Daemon state is stale (pid {}): {error}", state.pid),
     }
+}
+
+async fn capabilities_cli(home: &Path) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let response = runtime_client(&state)?.capabilities(None).await?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn runtime_client(state: &DaemonState) -> Result<willdeep_runtime_client::RuntimeClient> {
+    #[cfg(unix)]
+    if let Some(LocalTransportState::UnixSocket { path }) = &state.local_transport {
+        return Ok(willdeep_runtime_client::RuntimeClient::new_unix_socket(
+            path,
+            state.token.clone(),
+        )?);
+    }
+    #[cfg(windows)]
+    if let Some(LocalTransportState::WindowsNamedPipe { name }) = &state.local_transport {
+        return Ok(
+            willdeep_runtime_client::RuntimeClient::new_windows_named_pipe(
+                name,
+                state.token.clone(),
+            )?,
+        );
+    }
+    Ok(willdeep_runtime_client::RuntimeClient::new(
+        format!("http://{}", state.address),
+        state.token.clone(),
+    )?)
 }
 
 async fn stop(home: &Path) -> Result<()> {
@@ -901,17 +1460,16 @@ async fn stop(home: &Path) -> Result<()> {
             return Ok(());
         }
     };
-    let response = client()
-        .post(format!("http://{}/v1/shutdown", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
+    match internal_transport::InternalRuntimeClient::from_state(&state)?
+        .post_empty("/v1/internal/shutdown")
         .await
-        .context("contact Runtime Daemon")?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime Daemon rejected shutdown: HTTP {}",
-            response.status()
-        );
+    {
+        Ok(()) => {}
+        Err(error) if error.status_code() == Some(404) => runtime_client(&state)?
+            .post_empty("/v1/shutdown")
+            .await
+            .context("contact pre-internal-transport Runtime Daemon")?,
+        Err(error) => return Err(error).context("contact Runtime Daemon"),
     }
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -921,6 +1479,82 @@ async fn stop(home: &Path) -> Result<()> {
         }
     }
     bail!("Runtime Daemon acknowledged shutdown but did not exit")
+}
+
+async fn upgrade(home: &Path, timeout_seconds: u64, force: bool) -> Result<()> {
+    let paths = DaemonPaths::new(home);
+    let state = match load_state(&paths.state) {
+        Ok(state) => state,
+        Err(_) => {
+            start(home, true).await?;
+            return Ok(());
+        }
+    };
+    let health = probe(&state).await.context("contact Runtime Daemon")?;
+    if !force && health.version == willdeep_core::VERSION {
+        println!(
+            "WillDeep Runtime Daemon already runs version {} (pid {}).",
+            health.version, state.pid
+        );
+        return Ok(());
+    }
+    let internal_drain = internal_transport::InternalRuntimeClient::from_state(&state)?
+        .post_empty("/v1/internal/drain")
+        .await;
+    match internal_drain {
+        Ok(()) => {}
+        Err(error) if error.status_code() == Some(404) => {
+            match runtime_client(&state)?.post_empty("/v1/drain").await {
+                Ok(()) => {}
+                Err(willdeep_runtime_client::ClientError::HttpStatus(404)) => {
+                    bail!(
+                        "Runtime {} predates safe drain handoff; no task was stopped. Finish active work, run `willdeep daemon stop`, then start this version once",
+                        health.version
+                    );
+                }
+                Err(error) => return Err(error).context("request legacy Runtime Daemon drain"),
+            }
+        }
+        Err(error) => return Err(error).context("request Runtime Daemon drain"),
+    }
+    println!(
+        "Draining Runtime {} (pid {}); active work will continue before handoff.",
+        health.version, state.pid
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut replacement = None;
+    loop {
+        match load_state(&paths.state) {
+            Ok(candidate) if candidate.token != state.token => {
+                if probe(&candidate).await.is_ok() {
+                    replacement = Some(candidate);
+                    break;
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "Runtime is still draining after {}s; it will stop after active work finishes. Run `willdeep daemon start` afterward",
+                timeout_seconds
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let replacement = match replacement {
+        Some(replacement) => replacement,
+        None => {
+            start(home, false).await?;
+            load_state(&paths.state)?
+        }
+    };
+    let replacement_health = probe(&replacement).await?;
+    println!(
+        "WillDeep Runtime handoff complete: {} -> {} (pid {}).",
+        health.version, replacement_health.version, replacement.pid
+    );
+    Ok(())
 }
 
 async fn logs(home: &Path, lines: usize, follow: bool) -> Result<()> {
@@ -979,13 +1613,16 @@ async fn run(home: &Path) -> Result<()> {
         .context("bind Runtime Daemon control endpoint")?;
     let address = listener.local_addr()?;
     let started_at = now();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let (local_listener, local_transport) = local_transport::bind(&paths.local_socket, &token)?;
     let state = DaemonState {
         schema: STATE_SCHEMA,
         version: willdeep_core::VERSION.to_owned(),
         pid: std::process::id(),
         address,
-        token: uuid::Uuid::new_v4().simple().to_string(),
+        token,
         started_at,
+        local_transport: Some(local_transport),
     };
     write_state(&paths.state, &state)?;
     let cleanup = StateCleanup {
@@ -993,17 +1630,20 @@ async fn run(home: &Path) -> Result<()> {
         token: state.token.clone(),
         lock_path: paths.lock.clone(),
         lock_token,
+        local_socket: paths.local_socket.clone(),
     };
     let lock_heartbeat = spawn_lock_heartbeat(paths.lock.clone(), cleanup.lock_token.clone());
-    let shutdown_signal = Arc::new(Notify::new());
+    let (shutdown_signal, shutdown_receiver) = watch::channel(false);
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
     let agent_commands = Arc::new(AgentCommandStore::open(paths.agent_commands.clone())?);
-    let sessions = Arc::new(session_store::RuntimeSessionStore::open(
+    let sessions = Arc::new(session_store::RuntimeSessionStore::open_guarded(
         paths.runtime_sessions.clone(),
         home,
+        &paths.tools,
     )?);
     let (turn_scheduler, mut scheduled_sessions) = tokio::sync::mpsc::unbounded_channel();
+    let work_gate = Arc::new(RwLock::new(false));
     let tasks = Arc::new(TaskManager::open(TaskManagerOptions {
         path: paths.tasks.clone(),
         interactions_path: paths.interactions.clone(),
@@ -1015,8 +1655,11 @@ async fn run(home: &Path) -> Result<()> {
         runtime_url: format!("http://{address}"),
         runtime_token: state.token.clone(),
     })?);
+    report_execution_resource_recovery(&events, &agents, &agent_commands, &tasks.tools)?;
+    tasks.report_herdr_state().await;
     let server_state = Arc::new(ServerState {
-        token: state.token,
+        home: home.to_path_buf(),
+        token: state.token.clone(),
         started_at,
         shutdown: shutdown_signal.clone(),
         events: events.clone(),
@@ -1024,10 +1667,22 @@ async fn run(home: &Path) -> Result<()> {
         agents: agents.clone(),
         agent_commands: agent_commands.clone(),
         sessions: sessions.clone(),
+        workspaces: tasks.workspaces.clone(),
+        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
+        idempotency: Arc::new(control_api::IdempotencyStore::open(
+            paths.idempotency.clone(),
+        )?),
+        local_transport: state.local_transport.clone(),
+        tools: tasks.tools.clone(),
+        work_gate: work_gate.clone(),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
         while let Some(session_id) = scheduled_sessions.recv().await {
+            let work_guard = scheduler_state.work_gate.read().await;
+            if *work_guard {
+                continue;
+            }
             let claimed = scheduler_state.sessions.claim_next(session_id);
             let Ok(Some(claimed)) = claimed else {
                 continue;
@@ -1055,6 +1710,7 @@ async fn run(home: &Path) -> Result<()> {
                     let _ = scheduler_state.tasks.schedule_session(session_id);
                 }
             }
+            drop(work_guard);
         }
     });
     for session_id in sessions.schedulable_sessions()? {
@@ -1062,13 +1718,51 @@ async fn run(home: &Path) -> Result<()> {
     }
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/capabilities", get(capabilities_handler))
+        .route("/v1/api", post(control_api::handler))
         .route("/v1/events", get(events_handler))
         .route(
             "/v1/events/stream",
             get(event_stream::events_stream_handler),
         )
+        .route(
+            "/v1/events/stream.ndjson",
+            get(event_stream::events_ndjson_handler),
+        )
         .route("/v1/agents", get(agents_handler))
         .route("/v1/agents/{id}", get(agent_handler))
+        .route(
+            "/v1/agents/{id}/worktree-review",
+            get(worktree_review::review_handler),
+        )
+        .route(
+            "/v1/agents/{id}/worktree-merge",
+            post(worktree_review::merge_handler),
+        )
+        .route(
+            "/v1/worktrees/audit",
+            get(worktree_maintenance::audit_handler),
+        )
+        .route(
+            "/v1/agents/{id}/worktree-quarantine",
+            post(worktree_maintenance::quarantine_handler),
+        )
+        .route(
+            "/v1/workspaces",
+            get(workspace_store::list_handler).post(workspace_store::register_handler),
+        )
+        .route(
+            "/v1/workspaces/ensure",
+            post(workspace_store::ensure_handler),
+        )
+        .route(
+            "/v1/workspaces/{id}",
+            get(workspace_store::get_handler).delete(workspace_store::remove_handler),
+        )
+        .route(
+            "/v1/workspaces/{id}/activate",
+            post(workspace_store::activate_handler),
+        )
         .route(
             "/v1/agents/{id}/stop",
             post(agent_control::stop_agent_handler),
@@ -1077,11 +1771,31 @@ async fn run(home: &Path) -> Result<()> {
             "/v1/agents/{id}/retry",
             post(agent_control::retry_agent_handler),
         )
-        .route("/v1/tasks", get(tasks_handler).post(submit_task_handler))
         .route(
-            "/v1/sessions",
-            get(session_store::sessions_handler).post(session_store::create_session_handler),
+            "/v1/agents/{id}/instructions",
+            post(agent_control::instruct_agent_handler),
         )
+        .route("/v1/diffs", get(diff_review::snapshot_handler))
+        .route("/v1/diffs/{id}/content", get(diff_review::content_handler))
+        .route(
+            "/v1/diffs/{id}/reviews",
+            get(diff_review::reviews_handler).post(diff_review::review_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/verifications",
+            get(diff_review::verifications_handler).post(diff_review::verification_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/attributions",
+            get(diff_review::attributions_handler),
+        )
+        .route(
+            "/v1/diffs/{id}/commit-preview",
+            get(diff_review::commit_preview_handler),
+        )
+        .route("/v1/diffs/{id}/revert", post(diff_review::revert_handler))
+        .route("/v1/tasks", get(tasks_handler))
+        .route("/v1/sessions", get(session_store::sessions_handler))
         .route(
             "/v1/sessions/search",
             get(session_store::search_sessions_handler),
@@ -1122,23 +1836,24 @@ async fn run(home: &Path) -> Result<()> {
         .route("/v1/tasks/{id}", get(task_handler))
         .route("/v1/tasks/{id}/stop", post(stop_task_handler))
         .route(
-            "/v1/tasks/{id}/agent-commands",
+            "/v1/internal/tasks/{id}/agent-commands",
             get(agent_control::agent_commands_handler),
         )
         .route(
-            "/v1/tasks/{task_id}/agent-commands/{command_id}/resolve",
+            "/v1/internal/tasks/{task_id}/agent-commands/{command_id}/resolve",
             post(agent_control::resolve_agent_command_handler),
         )
         .route(
-            "/v1/tasks/{id}/interactions",
+            "/v1/internal/tasks/{id}/interactions",
             post(create_interaction_handler),
         )
-        .route("/v1/interactions", get(interactions_handler))
+        .route("/v1/internal/tasks", post(submit_task_handler))
         .route(
-            "/v1/interactions/{id}/resolve",
-            post(resolve_interaction_handler),
+            "/v1/internal/sessions",
+            post(session_store::create_session_handler),
         )
-        .route("/v1/shutdown", post(shutdown_handler))
+        .route("/v1/internal/shutdown", post(shutdown_handler))
+        .route("/v1/internal/drain", post(drain_handler))
         .layer(middleware::from_fn(server_version_header))
         .with_state(server_state);
     events.append(
@@ -1146,15 +1861,18 @@ async fn run(home: &Path) -> Result<()> {
         format!("pid={} address={address}", std::process::id()),
     )?;
     eprintln!(
-        "WillDeep Runtime Daemon {} listening on {} (pid {})",
+        "WillDeep Runtime Daemon {} listening on {} and local transport (pid {})",
         willdeep_core::VERSION,
         address,
         std::process::id()
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown_signal.notified().await })
-        .await
-        .context("run Runtime Daemon control server")?;
+    let tcp_shutdown = shutdown_receiver.clone();
+    let local_shutdown = shutdown_receiver;
+    let tcp_server =
+        axum::serve(listener, app.clone()).with_graceful_shutdown(wait_for_shutdown(tcp_shutdown));
+    let local_server =
+        axum::serve(local_listener, app).with_graceful_shutdown(wait_for_shutdown(local_shutdown));
+    tokio::try_join!(tcp_server, local_server).context("run Runtime Daemon control servers")?;
     tasks.cancel_all().await;
     events.append("daemon.stopped", format!("pid={}", std::process::id()))?;
     lock_heartbeat.abort();
@@ -1163,13 +1881,86 @@ async fn run(home: &Path) -> Result<()> {
     Ok(())
 }
 
+fn report_execution_resource_recovery(
+    events: &EventLog,
+    agents: &AgentStore,
+    commands: &AgentCommandStore,
+    tools: &tool_store::ToolStore,
+) -> Result<()> {
+    let mut rejected_spawns = HashSet::new();
+    for command in commands.take_recovered_after_restart()? {
+        events.append(
+            "agent.command_rejected",
+            format!(
+                "task_id={} agent_id={} command_id={} kind={:?} reason=runtime_restarted",
+                command.task_id, command.agent_id, command.id, command.kind
+            ),
+        )?;
+        if command.kind == agent_control::AgentCommandKind::Spawn {
+            rejected_spawns.insert(command.agent_id);
+            agents.reject_external_child(
+                command.agent_id,
+                "Runtime restarted before external Agent spawn was applied".to_owned(),
+            )?;
+            events.append(
+                "agent.spawn_rejected",
+                format!(
+                    "task_id={} agent_id={} command_id={} reason=runtime_restarted",
+                    command.task_id, command.agent_id, command.id
+                ),
+            )?;
+        }
+    }
+    for agent in agents.take_recovered_after_restart()? {
+        if agent.parent_id.is_none() || rejected_spawns.contains(&agent.id) {
+            continue;
+        }
+        events.append(
+            "agent.interrupted",
+            format!(
+                "task_id={} agent_id={} parent_agent_id={} worktree_retained={} reason=runtime_restarted",
+                agent.task_id,
+                agent.id,
+                agent.parent_id.expect("child Agent has parent ID"),
+                agent.dedicated_worktree
+            ),
+        )?;
+    }
+    for tool in tools.take_recovered_after_restart()? {
+        events.append(
+            "tool.interrupted",
+            format!(
+                "session_id={} turn_id={} task_id={} agent_id={} tool_id={} reason=runtime_restarted",
+                tool.session_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                tool.turn_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                tool.task_id,
+                tool.agent_id,
+                tool.id
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
+}
+
 async fn health(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     authorize(&state, &headers)?;
     let mut response = Json(Health {
-        status: "ok".to_owned(),
+        status: if *state.work_gate.read().await {
+            "draining"
+        } else {
+            "ok"
+        }
+        .to_owned(),
         version: willdeep_core::VERSION.to_owned(),
         pid: std::process::id(),
         uptime_seconds: now().saturating_sub(state.started_at),
@@ -1181,6 +1972,38 @@ async fn health(
         HeaderValue::from_static(willdeep_core::VERSION),
     );
     Ok(response)
+}
+
+async fn capabilities_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers)?;
+    let request_id = headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<uuid::Uuid>().ok());
+    Ok(Json(willdeep_runtime_protocol::ApiResponse::ok(
+        runtime_capabilities(&state),
+        willdeep_core::VERSION,
+        request_id,
+    ))
+    .into_response())
+}
+
+fn runtime_capabilities(state: &ServerState) -> willdeep_runtime_protocol::RuntimeCapabilities {
+    let mut capabilities =
+        willdeep_runtime_protocol::RuntimeCapabilities::current(willdeep_core::VERSION);
+    match state.local_transport {
+        Some(LocalTransportState::UnixSocket { .. }) => capabilities
+            .transports
+            .push(willdeep_runtime_protocol::TransportKind::UnixSocket),
+        Some(LocalTransportState::WindowsNamedPipe { .. }) => capabilities
+            .transports
+            .push(willdeep_runtime_protocol::TransportKind::WindowsNamedPipe),
+        None => {}
+    }
+    capabilities
 }
 
 async fn server_version_header(request: Request, next: middleware::Next) -> Response {
@@ -1196,12 +2019,43 @@ async fn shutdown_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     let tasks = state.tasks.clone();
     let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         tasks.cancel_all().await;
-        shutdown.notify_one();
+        let _ = shutdown.send(true);
+    });
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+async fn drain_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    authorize_internal(&state, &headers)?;
+    {
+        let mut draining = state.work_gate.write().await;
+        if !*draining {
+            *draining = true;
+            state
+                .events
+                .append(
+                    "daemon.draining",
+                    format!(
+                        "pid={} version={}",
+                        std::process::id(),
+                        willdeep_core::VERSION
+                    ),
+                )
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+    }
+    let tasks = state.tasks.clone();
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tasks.wait_until_idle().await;
+        let _ = shutdown.send(true);
     });
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -1288,13 +2142,29 @@ async fn task_handler(
 async fn submit_task_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SubmitTask>,
+    Json(mut request): Json<SubmitTask>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
+    let work_guard = state.work_gate.read().await;
+    if *work_guard {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let workspace = state
+        .workspaces
+        .ensure_registered(&request.workspace)
+        .map_err(|error| {
+            eprintln!("register submitted Runtime Workspace: {error:#}");
+            StatusCode::BAD_REQUEST
+        })?;
+    request.workspace = workspace.root;
+    if request.profile.is_none() {
+        request.profile = workspace.provider_profile;
+    }
     let task = state.tasks.submit(request).await.map_err(|error| {
         eprintln!("Runtime task submission failed: {error:#}");
         StatusCode::BAD_REQUEST
     })?;
+    drop(work_guard);
     Ok((StatusCode::ACCEPTED, Json(task)).into_response())
 }
 
@@ -1314,21 +2184,13 @@ async fn stop_task_handler(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn interactions_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
-    Ok(Json(state.tasks.pending_interactions().await).into_response())
-}
-
 async fn create_interaction_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     AxumPath(task_id): AxumPath<uuid::Uuid>,
     Json(request): Json<CreateInteraction>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     let receiver = state
         .tasks
         .create_interaction(task_id, request.kind)
@@ -1344,26 +2206,6 @@ async fn create_interaction_handler(
         .map_err(|_| StatusCode::GONE)
 }
 
-async fn resolve_interaction_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<uuid::Uuid>,
-    Json(request): Json<ResolveInteraction>,
-) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
-    state
-        .tasks
-        .resolve_interaction(id, request.resolution)
-        .await
-        .map_err(|error| {
-            eprintln!("resolve Runtime interaction: {error:#}");
-            StatusCode::BAD_REQUEST
-        })?
-        .map(Json)
-        .map(IntoResponse::into_response)
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
 fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
     if headers
         .get(TOKEN_HEADER)
@@ -1376,6 +2218,11 @@ fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode>
     }
 }
 
+fn authorize_internal(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    authorize(state, headers)?;
+    internal_transport::authorize(headers)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Health {
     status: String,
@@ -1386,42 +2233,56 @@ struct Health {
     event_sequence: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeDiagnostic {
+    pub status: &'static str,
+    pub version: Option<String>,
+    pub uptime_seconds: Option<u64>,
+    pub transport: Option<&'static str>,
+}
+
+pub(crate) async fn diagnostic(home: &Path) -> RuntimeDiagnostic {
+    let path = DaemonPaths::new(home).state;
+    let Ok(state) = load_state(&path) else {
+        return RuntimeDiagnostic {
+            status: "stopped",
+            version: None,
+            uptime_seconds: None,
+            transport: None,
+        };
+    };
+    let transport = match &state.local_transport {
+        Some(LocalTransportState::UnixSocket { .. }) => "unix_socket",
+        Some(LocalTransportState::WindowsNamedPipe { .. }) => "windows_named_pipe",
+        None => "loopback_http",
+    };
+    match probe(&state).await {
+        Ok(health) => RuntimeDiagnostic {
+            status: "running",
+            version: Some(health.version),
+            uptime_seconds: Some(health.uptime_seconds),
+            transport: Some(transport),
+        },
+        Err(_) => RuntimeDiagnostic {
+            status: "stale",
+            version: None,
+            uptime_seconds: None,
+            transport: Some(transport),
+        },
+    }
+}
+
 async fn probe(state: &DaemonState) -> Result<Health> {
     if state.schema != STATE_SCHEMA {
         bail!("unsupported state schema {}", state.schema);
     }
-    let response = client()
-        .get(format!("http://{}/v1/health", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("health endpoint returned HTTP {}", response.status());
-    }
-    Ok(response.json().await?)
+    Ok(runtime_client(state)?.get_json("/v1/health").await?)
 }
 
 async fn fetch_events(state: &DaemonState, after: u64) -> Result<Vec<RuntimeEvent>> {
-    let response = client()
-        .get(format!(
-            "http://{}/v1/events?after={after}&limit=200",
-            state.address
-        ))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!("events endpoint returned HTTP {}", response.status());
-    }
-    Ok(response.json().await?)
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(1))
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("daemon HTTP client")
+    Ok(runtime_client(state)?
+        .get_json(&format!("/v1/events?after={after}&limit=200"))
+        .await?)
 }
 
 struct DaemonPaths {
@@ -1430,11 +2291,14 @@ struct DaemonPaths {
     log: PathBuf,
     events: PathBuf,
     tasks: PathBuf,
+    tools: PathBuf,
     agents: PathBuf,
     agent_commands: PathBuf,
+    idempotency: PathBuf,
     runtime_sessions: PathBuf,
     lock: PathBuf,
     interactions: PathBuf,
+    local_socket: PathBuf,
 }
 
 impl DaemonPaths {
@@ -1445,11 +2309,14 @@ impl DaemonPaths {
             log: directory.join("daemon.log"),
             events: directory.join("events.ndjson"),
             tasks: directory.join("tasks.json"),
+            tools: directory.join("tools.json"),
             agents: directory.join("agents.json"),
             agent_commands: directory.join("agent-commands.json"),
+            idempotency: directory.join("idempotency.json"),
             runtime_sessions: directory.join("sessions.json"),
             lock: directory.join("daemon.lock"),
             interactions: directory.join("interactions.json"),
+            local_socket: directory.join("control.sock"),
             directory,
         }
     }
@@ -1500,15 +2367,20 @@ impl TaskManager {
                 recovered = true;
                 recovered_tasks.push(task.clone());
             }
-            let agent = if let Some(session_id) = task.session_id {
-                let session = sessions
-                    .get(session_id)?
-                    .with_context(|| format!("Runtime Session {session_id} for recovered task"))?;
+            // 会话可能已被用户删除；历史任务保留，但降级为无会话根 Agent，
+            // 绝不能让悬空引用阻止 Runtime 启动。
+            let agent = if let Some(session) = task
+                .session_id
+                .map(|session_id| sessions.get(session_id))
+                .transpose()?
+                .flatten()
+            {
                 agents.ensure_session_root(
                     session.root_agent_id,
                     task.id,
                     task.workspace.clone(),
                     task.profile.clone(),
+                    task.model.clone(),
                     agent_status(task.status),
                 )?
             } else {
@@ -1516,6 +2388,7 @@ impl TaskManager {
                     task.id,
                     task.workspace.clone(),
                     task.profile.clone(),
+                    task.model.clone(),
                     agent_status(task.status),
                 )?
             };
@@ -1558,11 +2431,18 @@ impl TaskManager {
                 ),
             )?;
             if let (Some(session_id), Some(turn_id)) = (task.session_id, task.turn_id) {
+                let requeued = sessions
+                    .get_turn(turn_id)?
+                    .is_some_and(|turn| turn.status == session_store::RuntimeTurnStatus::Queued);
                 events.append(
-                    "turn.interrupted",
+                    if requeued {
+                        "turn.requeued"
+                    } else {
+                        "turn.interrupted"
+                    },
                     format!(
-                        "session_id={session_id} turn_id={turn_id} task_id={} exit_code=none error={error}",
-                        task.id
+                        "session_id={session_id} turn_id={turn_id} task_id={} exit_code=none replay={} error={error}",
+                        task.id, requeued
                     ),
                 )?;
             }
@@ -1575,12 +2455,20 @@ impl TaskManager {
                 ),
             )?;
         }
+        let workspaces = Arc::new(workspace_store::WorkspaceStore::open(
+            home.join("runtime/workspaces.json"),
+        )?);
+        let tools = Arc::new(tool_store::ToolStore::open(
+            home.join("runtime/tools.json"),
+        )?);
         Ok(Self {
             path,
             home,
             events,
             agents,
+            tools,
             sessions,
+            workspaces,
             runtime_url,
             runtime_token,
             tasks: RwLock::new(tasks),
@@ -1590,6 +2478,7 @@ impl TaskManager {
             interactions: RwLock::new(interactions),
             interaction_waiters: Mutex::new(HashMap::new()),
             turn_scheduler,
+            herdr: herdr::HerdrReporter::detect(),
         })
     }
 
@@ -1690,6 +2579,7 @@ impl TaskManager {
                 interaction.task_id, interaction.id
             ),
         )?;
+        self.report_herdr_state().await;
         Ok(receiver)
     }
 
@@ -1748,6 +2638,7 @@ impl TaskManager {
                 interaction.task_id, interaction.id
             ),
         )?;
+        self.report_herdr_state().await;
         Ok(Some(interaction))
     }
 
@@ -1755,10 +2646,14 @@ impl TaskManager {
         if request.prompt.trim().is_empty() && request.attachments.is_empty() {
             bail!("task prompt and attachments must not both be empty");
         }
-        request.workspace = request
-            .workspace
-            .canonicalize()
-            .with_context(|| format!("invalid workspace: {}", request.workspace.display()))?;
+        let workspace = self.workspaces.ensure_registered(&request.workspace)?;
+        request.workspace = workspace.root;
+        request.workspace_access = Some(workspace.access);
+        request.workspace_skills = Some(workspace.skills);
+        request.workspace_mcp_servers = Some(workspace.mcp_servers);
+        if request.profile.is_none() {
+            request.profile = workspace.provider_profile;
+        }
         if let Some(config) = request.config.as_mut() {
             *config = config
                 .canonicalize()
@@ -1775,11 +2670,13 @@ impl TaskManager {
             status: RuntimeTaskStatus::Queued,
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
+            model: request.model.clone(),
             pid: None,
             created_at: now(),
             started_at: None,
             completed_at: None,
             exit_code: None,
+            failure_domain: None,
             error: None,
         };
         let agent = if let Some(session_id) = request.session_id {
@@ -1792,6 +2689,7 @@ impl TaskManager {
                 id,
                 request.workspace.clone(),
                 request.profile.clone(),
+                request.model.clone(),
                 RuntimeAgentStatus::Queued,
             )?
         } else {
@@ -1799,6 +2697,7 @@ impl TaskManager {
                 id,
                 request.workspace.clone(),
                 request.profile.clone(),
+                request.model.clone(),
                 RuntimeAgentStatus::Queued,
             )?
         };
@@ -1858,8 +2757,16 @@ impl TaskManager {
         };
         let sink: Arc<dyn willdeep_core::EventSink> = Arc::new(RuntimeEventSink {
             task_id: id,
+            session_id: task.session_id,
+            turn_id: task.turn_id,
+            root_agent_id: agent.id,
+            home: self.home.clone(),
+            workspace: request.workspace.clone(),
             events: self.events.clone(),
             agents: self.agents.clone(),
+            tools: self.tools.clone(),
+            diff_baselines: AsyncMutex::new(HashMap::new()),
+            child_workspaces: AsyncMutex::new(HashMap::new()),
         });
         tokio::spawn(async move {
             let execution = crate::harness::execute_runtime(&home, request, connection, sink);
@@ -1872,8 +2779,8 @@ impl TaskManager {
             if let Ok(mut cancellations) = manager.cancellations.lock() {
                 cancellations.remove(&id);
             }
-            let (final_status, error) = match result {
-                _ if cancelled => (RuntimeTaskStatus::Cancelled, None),
+            let (final_status, error, failure_domain) = match result {
+                _ if cancelled => (RuntimeTaskStatus::Cancelled, None, None),
                 Some(Ok(outcome)) => {
                     let completed = serde_json::json!({
                         "type":"completed",
@@ -1884,12 +2791,19 @@ impl TaskManager {
                     let _ = manager
                         .events
                         .append("task.output", format!("task_id={id} {completed}"));
-                    (RuntimeTaskStatus::Completed, None)
+                    (RuntimeTaskStatus::Completed, None, None)
                 }
-                Some(Err(error)) => (RuntimeTaskStatus::Failed, Some(format!("{error:#}"))),
-                None => (RuntimeTaskStatus::Cancelled, None),
+                Some(Err(error)) => (
+                    RuntimeTaskStatus::Failed,
+                    Some(format!("{error:#}")),
+                    Some(crate::runtime_failure_domain(&error)),
+                ),
+                None => (RuntimeTaskStatus::Cancelled, None, None),
             };
-            if let Err(error) = manager.finish(id, final_status, None, error).await {
+            if let Err(error) = manager
+                .finish(id, final_status, None, error, failure_domain)
+                .await
+            {
                 eprintln!("persist Runtime task {id} completion: {error:#}");
             }
         });
@@ -1917,6 +2831,8 @@ impl TaskManager {
             cancellation.notify_one();
             self.events
                 .append("task.cancellation_requested", format!("task_id={id}"))?;
+            drop(_persistence);
+            self.report_herdr_state().await;
             return Ok(Some(task));
         }
         Ok(self.get(id).await)
@@ -1943,6 +2859,21 @@ impl TaskManager {
         }
     }
 
+    async fn wait_until_idle(&self) {
+        loop {
+            let has_active_tasks = self
+                .tasks
+                .read()
+                .await
+                .values()
+                .any(|task| runtime_task_status_is_active(task.status));
+            if !has_active_tasks {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn insert_and_persist(&self, task: RuntimeTask) -> Result<()> {
         let _persistence = self.persistence.lock().await;
         let snapshot = {
@@ -1950,7 +2881,10 @@ impl TaskManager {
             tasks.insert(task.id, task);
             tasks.clone()
         };
-        persist_tasks(&self.path, &snapshot)
+        persist_tasks(&self.path, &snapshot)?;
+        drop(_persistence);
+        self.report_herdr_state().await;
+        Ok(())
     }
 
     async fn finish(
@@ -1959,6 +2893,7 @@ impl TaskManager {
         status: RuntimeTaskStatus,
         exit_code: Option<i32>,
         error: Option<String>,
+        failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     ) -> Result<()> {
         let _persistence = self.persistence.lock().await;
         let (finished_task, snapshot) = {
@@ -1967,6 +2902,7 @@ impl TaskManager {
             task.status = status;
             task.completed_at = Some(now());
             task.exit_code = exit_code;
+            task.failure_domain = failure_domain;
             task.error = error.clone();
             (task.clone(), tasks.clone())
         };
@@ -1981,7 +2917,7 @@ impl TaskManager {
                 _ => "task.failed",
             },
             format!(
-                "task_id={id} session_id={} turn_id={} exit_code={} error={}",
+                "task_id={id} session_id={} turn_id={} exit_code={} failure_domain={} error={}",
                 finished_task
                     .session_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
@@ -1989,6 +2925,14 @@ impl TaskManager {
                     .turn_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                failure_domain.map_or("none", |domain| match domain {
+                    willdeep_runtime_protocol::FailureDomain::Provider => "provider",
+                    willdeep_runtime_protocol::FailureDomain::Policy => "policy",
+                    willdeep_runtime_protocol::FailureDomain::Tool => "tool",
+                    willdeep_runtime_protocol::FailureDomain::Harness => "harness",
+                    willdeep_runtime_protocol::FailureDomain::Internal => "internal",
+                    willdeep_runtime_protocol::FailureDomain::Unknown => "unknown",
+                }),
                 error.clone().unwrap_or_default()
             ),
         )?;
@@ -2014,7 +2958,22 @@ impl TaskManager {
         if let Some(session_id) = runtime_session {
             self.schedule_session(session_id)?;
         }
+        self.report_herdr_state().await;
         Ok(())
+    }
+
+    async fn report_herdr_state(&self) {
+        let Some(reporter) = &self.herdr else {
+            return;
+        };
+        let statuses = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .map(|task| task.status)
+            .collect::<Vec<_>>();
+        reporter.report(statuses.into_iter());
     }
 
     async fn cancel_task_interactions(&self, task_id: uuid::Uuid) -> Result<()> {
@@ -2053,6 +3012,17 @@ fn validate_resolution(kind: &InteractionKind, resolution: &InteractionResolutio
         ) => Ok(()),
         _ => bail!("resolution does not match the pending interaction"),
     }
+}
+
+fn runtime_task_status_is_active(status: RuntimeTaskStatus) -> bool {
+    matches!(
+        status,
+        RuntimeTaskStatus::Queued
+            | RuntimeTaskStatus::Running
+            | RuntimeTaskStatus::Cancelling
+            | RuntimeTaskStatus::WaitingApproval
+            | RuntimeTaskStatus::WaitingAnswer
+    )
 }
 
 fn agent_status(status: RuntimeTaskStatus) -> RuntimeAgentStatus {
@@ -2130,6 +3100,7 @@ struct StateCleanup {
     token: String,
     lock_path: PathBuf,
     lock_token: String,
+    local_socket: PathBuf,
 }
 
 impl Drop for StateCleanup {
@@ -2138,6 +3109,7 @@ impl Drop for StateCleanup {
             let _ = std::fs::remove_file(&self.path);
         }
         remove_owned_lock(&self.lock_path, &self.lock_token);
+        local_transport::remove_if_owned(&self.local_socket);
     }
 }
 

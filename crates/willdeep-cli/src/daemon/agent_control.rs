@@ -5,6 +5,8 @@ use super::*;
 pub(crate) enum AgentCommandKind {
     Stop,
     Retry,
+    Instruct,
+    Spawn,
 }
 
 pub(super) async fn control_agent(
@@ -13,22 +15,15 @@ pub(super) async fn control_agent(
     kind: AgentCommandKind,
 ) -> Result<()> {
     let state = ensure_running(home).await?;
-    let action = match kind {
-        AgentCommandKind::Stop => "stop",
-        AgentCommandKind::Retry => "retry",
+    let client = runtime_client(&state)?;
+    let command = match kind {
+        AgentCommandKind::Stop => client.stop_agent(id, uuid::Uuid::new_v4()).await?,
+        AgentCommandKind::Retry => client.retry_agent(id, uuid::Uuid::new_v4()).await?,
+        AgentCommandKind::Instruct | AgentCommandKind::Spawn => {
+            bail!("Agent command must use its dedicated Runtime Client method")
+        }
     };
-    let response = client()
-        .post(format!("http://{}/v1/agents/{id}/{action}", state.address))
-        .header(TOKEN_HEADER, &state.token)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime rejected Agent {action}: {}",
-            response.text().await?
-        );
-    }
-    let command: AgentCommand = response.json().await?;
+    let command = command.into_result()?;
     println!(
         "agent_command\tid={}\tagent={}\taction={:?}\tstatus={:?}",
         command.id, command.agent_id, command.kind, command.status
@@ -36,12 +31,40 @@ pub(super) async fn control_agent(
     Ok(())
 }
 
+pub(super) async fn instruct_agent(home: &Path, id: uuid::Uuid, message: String) -> Result<()> {
+    let message = message.trim();
+    if message.is_empty() || message.len() > 16 * 1024 {
+        bail!("Agent instruction must contain 1 to 16384 bytes");
+    }
+    let state = ensure_running(home).await?;
+    let command = runtime_client(&state)?
+        .prompt_agent(
+            &willdeep_runtime_protocol::AgentPromptParams {
+                id,
+                message: message.to_owned(),
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?
+        .into_result()?;
+    println!(
+        "agent_command\tid={}\tagent={}\taction=instruct\tstatus={:?}",
+        command.id, command.agent_id, command.status
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct AgentInstructionRequest {
+    pub message: String,
+}
+
 pub(super) async fn stop_agent_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop).await
+    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Stop, None, None).await
 }
 
 pub(super) async fn retry_agent_handler(
@@ -49,7 +72,45 @@ pub(super) async fn retry_agent_handler(
     headers: HeaderMap,
     AxumPath(id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    enqueue_agent_command(&state, &headers, id, AgentCommandKind::Retry).await
+    enqueue_work_agent_command(&state, &headers, id, AgentCommandKind::Retry, None, None).await
+}
+
+pub(super) async fn instruct_agent_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(request): Json<AgentInstructionRequest>,
+) -> Result<Response, StatusCode> {
+    if request.message.trim().is_empty() || request.message.len() > 16 * 1024 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    enqueue_work_agent_command(
+        &state,
+        &headers,
+        id,
+        AgentCommandKind::Instruct,
+        Some(request.message.trim().to_owned()),
+        None,
+    )
+    .await
+}
+
+async fn enqueue_work_agent_command(
+    state: &ServerState,
+    headers: &HeaderMap,
+    id: uuid::Uuid,
+    kind: AgentCommandKind,
+    message: Option<String>,
+    model: Option<String>,
+) -> Result<Response, StatusCode> {
+    authorize(state, headers)?;
+    let work_guard = state.work_gate.read().await;
+    if *work_guard {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let command = enqueue_agent_command_internal(state, id, kind, message, model).await?;
+    drop(work_guard);
+    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
 }
 
 async fn enqueue_agent_command(
@@ -57,8 +118,21 @@ async fn enqueue_agent_command(
     headers: &HeaderMap,
     id: uuid::Uuid,
     kind: AgentCommandKind,
+    message: Option<String>,
+    model: Option<String>,
 ) -> Result<Response, StatusCode> {
     authorize(state, headers)?;
+    let command = enqueue_agent_command_internal(state, id, kind, message, model).await?;
+    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
+}
+
+pub(super) async fn enqueue_agent_command_internal(
+    state: &ServerState,
+    id: uuid::Uuid,
+    kind: AgentCommandKind,
+    message: Option<String>,
+    model: Option<String>,
+) -> Result<AgentCommand, StatusCode> {
     let agent = state
         .agents
         .get(id)
@@ -90,13 +164,15 @@ async fn enqueue_agent_command(
                 | RuntimeAgentStatus::Cancelled
                 | RuntimeAgentStatus::Interrupted
         ),
+        AgentCommandKind::Instruct => agent.status == RuntimeAgentStatus::Running,
+        AgentCommandKind::Spawn => false,
     };
     if !valid_status {
         return Err(StatusCode::CONFLICT);
     }
     let command = state
         .agent_commands
-        .enqueue(agent.task_id, agent.id, kind)
+        .enqueue(agent.task_id, agent.id, kind, message, model)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .events
@@ -108,7 +184,7 @@ async fn enqueue_agent_command(
             ),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::ACCEPTED, Json(command)).into_response())
+    Ok(command)
 }
 
 pub(super) async fn agent_commands_handler(
@@ -116,7 +192,7 @@ pub(super) async fn agent_commands_handler(
     headers: HeaderMap,
     AxumPath(task_id): AxumPath<uuid::Uuid>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     if state.tasks.get(task_id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -133,12 +209,24 @@ pub(super) async fn resolve_agent_command_handler(
     AxumPath((task_id, command_id)): AxumPath<(uuid::Uuid, uuid::Uuid)>,
     Json(resolution): Json<ResolveAgentCommand>,
 ) -> Result<Response, StatusCode> {
-    authorize(&state, &headers)?;
+    authorize_internal(&state, &headers)?;
     let command = state
         .agent_commands
         .resolve(task_id, command_id, resolution)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if command.kind == AgentCommandKind::Spawn && command.status == AgentCommandStatus::Rejected {
+        state
+            .agents
+            .reject_external_child(
+                command.agent_id,
+                command
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "external spawn was rejected".to_owned()),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     state
         .events
         .append(
@@ -170,6 +258,14 @@ pub(crate) struct AgentCommand {
     pub created_at: u64,
     pub resolved_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,47 +288,48 @@ impl Drop for AgentCommandWatcher {
 pub(crate) fn start_agent_command_watcher(
     connection: Option<&RuntimeConnection>,
     background: Arc<willdeep_core::BackgroundTaskRegistry>,
+    subagents: Arc<willdeep_core::SubagentCatalog>,
 ) -> Result<Option<AgentCommandWatcher>> {
     let Some(connection) = connection.cloned() else {
         return Ok(None);
     };
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(3))
-        .build()?;
+    let client = internal_transport::InternalRuntimeClient::new(
+        connection.url.clone(),
+        connection.token.clone(),
+    )?;
     let task = tokio::spawn(async move {
         let mut resolved = HashMap::<uuid::Uuid, ResolveAgentCommand>::new();
         loop {
-            let response = client
-                .get(format!(
-                    "{}/v1/tasks/{}/agent-commands",
-                    connection.url, connection.task_id
-                ))
-                .header(TOKEN_HEADER, &connection.token)
-                .send()
-                .await;
-            if let Ok(response) = response
-                && response.status().is_success()
-                && let Ok(commands) = response.json::<Vec<AgentCommand>>().await
-            {
+            let commands = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.get::<Vec<AgentCommand>>(&format!(
+                    "/v1/internal/tasks/{}/agent-commands",
+                    connection.task_id
+                )),
+            )
+            .await;
+            if let Ok(Ok(commands)) = commands {
                 for command in commands {
-                    let resolution = resolved
-                        .entry(command.id)
-                        .or_insert_with(|| {
-                            let (applied, error) = apply_command(&background, &command);
-                            ResolveAgentCommand { applied, error }
-                        })
-                        .clone();
-                    if let Ok(response) = client
-                        .post(format!(
-                            "{}/v1/tasks/{}/agent-commands/{}/resolve",
-                            connection.url, connection.task_id, command.id
-                        ))
-                        .header(TOKEN_HEADER, &connection.token)
-                        .json(&resolution)
-                        .send()
-                        .await
-                        && response.status().is_success()
+                    let resolution = if let Some(resolution) = resolved.get(&command.id) {
+                        resolution.clone()
+                    } else {
+                        let (applied, error) =
+                            apply_command(&background, &subagents, &command).await;
+                        let value = ResolveAgentCommand { applied, error };
+                        resolved.insert(command.id, value.clone());
+                        value
+                    };
+                    if let Ok(Ok(_)) = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        client.post::<_, AgentCommand>(
+                            &format!(
+                                "/v1/internal/tasks/{}/agent-commands/{}/resolve",
+                                connection.task_id, command.id
+                            ),
+                            &resolution,
+                        ),
+                    )
+                    .await
                     {
                         resolved.remove(&command.id);
                     }
@@ -244,40 +341,83 @@ pub(crate) fn start_agent_command_watcher(
     Ok(Some(AgentCommandWatcher { task }))
 }
 
-fn apply_command(
+async fn apply_command(
     background: &willdeep_core::BackgroundTaskRegistry,
+    subagents: &willdeep_core::SubagentCatalog,
     command: &AgentCommand,
 ) -> (bool, Option<String>) {
     match command.kind {
         AgentCommandKind::Stop if background.kill_agent(command.agent_id) => (true, None),
-        AgentCommandKind::Retry if background.retry_agent(command.agent_id).is_some() => {
+        AgentCommandKind::Retry => match subagents
+            .retry_background_agent(command.agent_id, command.model.as_deref())
+        {
+            Ok(Some(_)) => (true, None),
+            Ok(None) => (
+                false,
+                Some("Agent has no retriable terminal background task in this Harness".to_owned()),
+            ),
+            Err(error) => (false, Some(error.to_string())),
+        },
+        AgentCommandKind::Instruct
+            if command
+                .message
+                .clone()
+                .is_some_and(|message| background.instruct_agent(command.agent_id, message)) =>
+        {
             (true, None)
         }
         AgentCommandKind::Stop => (
             false,
             Some("Agent is not an active background task in this Harness".to_owned()),
         ),
-        AgentCommandKind::Retry => (
+        AgentCommandKind::Instruct => (
             false,
-            Some("Agent has no retriable terminal background task in this Harness".to_owned()),
+            Some("Agent is not running or cannot accept instructions".to_owned()),
         ),
+        AgentCommandKind::Spawn => {
+            let Some(prompt) = command.message.clone() else {
+                return (
+                    false,
+                    Some("Spawn command is missing its prompt".to_owned()),
+                );
+            };
+            match subagents
+                .spawn_external_read_only(
+                    command.agent_id,
+                    prompt,
+                    command.label.clone(),
+                    command.profile.clone(),
+                )
+                .await
+            {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(error.to_string())),
+            }
+        }
     }
 }
 
 pub(super) struct AgentCommandStore {
     path: PathBuf,
     commands: Mutex<HashMap<uuid::Uuid, AgentCommand>>,
+    recovered_after_restart: Mutex<Vec<AgentCommand>>,
 }
 
 impl AgentCommandStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut commands = load_commands(&path)?;
         let mut changed = false;
+        let mut recovered_after_restart = Vec::new();
         for command in commands.values_mut() {
             if command.status == AgentCommandStatus::Pending {
                 command.status = AgentCommandStatus::Rejected;
                 command.resolved_at = Some(now());
                 command.error = Some("Runtime restarted before command was applied".to_owned());
+                command.message = None;
+                command.profile = None;
+                command.label = None;
+                command.model = None;
+                recovered_after_restart.push(command.clone());
                 changed = true;
             }
         }
@@ -287,7 +427,16 @@ impl AgentCommandStore {
         Ok(Self {
             path,
             commands: Mutex::new(commands),
+            recovered_after_restart: Mutex::new(recovered_after_restart),
         })
+    }
+
+    pub fn take_recovered_after_restart(&self) -> Result<Vec<AgentCommand>> {
+        let mut recovered = self
+            .recovered_after_restart
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime recovered Agent command index lock poisoned"))?;
+        Ok(std::mem::take(&mut *recovered))
     }
 
     pub fn enqueue(
@@ -295,12 +444,16 @@ impl AgentCommandStore {
         task_id: uuid::Uuid,
         agent_id: uuid::Uuid,
         kind: AgentCommandKind,
+        message: Option<String>,
+        model: Option<String>,
     ) -> Result<AgentCommand> {
         let mut commands = self.lock()?;
         if let Some(existing) = commands.values().find(|command| {
             command.task_id == task_id
                 && command.agent_id == agent_id
                 && command.kind == kind
+                && command.message == message
+                && command.model == model
                 && command.status == AgentCommandStatus::Pending
         }) {
             return Ok(existing.clone());
@@ -314,6 +467,38 @@ impl AgentCommandStore {
             created_at: now(),
             resolved_at: None,
             error: None,
+            message,
+            profile: None,
+            label: None,
+            model,
+        };
+        commands.insert(command.id, command.clone());
+        persist_commands(&self.path, &commands)?;
+        Ok(command)
+    }
+
+    pub fn enqueue_spawn(
+        &self,
+        task_id: uuid::Uuid,
+        agent_id: uuid::Uuid,
+        prompt: String,
+        profile: Option<String>,
+        label: Option<String>,
+    ) -> Result<AgentCommand> {
+        let mut commands = self.lock()?;
+        let command = AgentCommand {
+            id: uuid::Uuid::new_v4(),
+            task_id,
+            agent_id,
+            kind: AgentCommandKind::Spawn,
+            status: AgentCommandStatus::Pending,
+            created_at: now(),
+            resolved_at: None,
+            error: None,
+            message: Some(prompt),
+            profile,
+            label,
+            model: None,
         };
         commands.insert(command.id, command.clone());
         persist_commands(&self.path, &commands)?;
@@ -356,6 +541,10 @@ impl AgentCommandStore {
         };
         command.resolved_at = Some(now());
         command.error = resolution.error;
+        command.message = None;
+        command.profile = None;
+        command.label = None;
+        command.model = None;
         let command = command.clone();
         persist_commands(&self.path, &commands)?;
         Ok(Some(command))
@@ -399,10 +588,10 @@ mod tests {
         let task_id = uuid::Uuid::new_v4();
         let agent_id = uuid::Uuid::new_v4();
         let first = store
-            .enqueue(task_id, agent_id, AgentCommandKind::Stop)
+            .enqueue(task_id, agent_id, AgentCommandKind::Stop, None, None)
             .unwrap();
         let duplicate = store
-            .enqueue(task_id, agent_id, AgentCommandKind::Stop)
+            .enqueue(task_id, agent_id, AgentCommandKind::Stop, None, None)
             .unwrap();
         assert_eq!(first.id, duplicate.id);
         assert_eq!(
@@ -426,6 +615,53 @@ mod tests {
 
         let reopened = AgentCommandStore::open(path).unwrap();
         assert!(reopened.pending_for_task(task_id).unwrap().is_empty());
+
+        let store = AgentCommandStore::open(root.join("instruction-commands.json")).unwrap();
+        let instruction = store
+            .enqueue(
+                task_id,
+                agent_id,
+                AgentCommandKind::Instruct,
+                Some("inspect tests too".to_owned()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(instruction.message.as_deref(), Some("inspect tests too"));
+        let resolved = store
+            .resolve(
+                task_id,
+                instruction.id,
+                ResolveAgentCommand {
+                    applied: true,
+                    error: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(resolved.message.is_none());
+
+        let retry = store
+            .enqueue(
+                task_id,
+                agent_id,
+                AgentCommandKind::Retry,
+                None,
+                Some("new-model".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(retry.model.as_deref(), Some("new-model"));
+        let resolved = store
+            .resolve(
+                task_id,
+                retry.id,
+                ResolveAgentCommand {
+                    applied: true,
+                    error: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(resolved.model.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

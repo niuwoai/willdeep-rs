@@ -1,6 +1,14 @@
 use super::*;
 
 #[cfg(test)]
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(test)]
 mod command_tests {
     use super::*;
 
@@ -28,6 +36,15 @@ mod command_tests {
     }
 
     #[test]
+    fn delegated_webapp_command_is_not_rejected_by_the_fallback_handler() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+
+        assert!(!app.handle_slash_command("/webapp", &skills));
+        assert!(app.transcript.is_empty());
+    }
+
+    #[test]
     fn ordinary_prompt_is_not_treated_as_command() {
         let mut app = App::new(Vec::new(), Language::En);
         assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
@@ -45,10 +62,118 @@ mod tests {
     }
 
     #[test]
+    fn command_menu_discovers_webapp() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/web");
+        let matches = app.command_matches();
+        assert!(matches.iter().any(|(command, _)| *command == "/webapp"));
+    }
+
+    #[test]
     fn welcome_mentions_workspace_without_entering_model_history() {
         let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"), Language::ZhCn);
         assert!(welcome.starts_with("WillDeep:"));
         assert!(welcome.contains("willdeep-rs"));
+    }
+    #[test]
+    fn loading_another_session_replaces_transient_chat_state() {
+        let workspace = std::env::temp_dir();
+        let mut target = Session::new(workspace, None, "target");
+        target.messages = vec![
+            Message::user("target question"),
+            Message::assistant("target answer", Vec::new()),
+        ];
+        target.attention_read.insert("read-item".to_owned());
+        target.goal = Some("persisted target goal".to_owned());
+        let mut app = App::new(vec!["old session output".to_owned()], Language::En);
+        app.attachments.push(DraftAttachment {
+            message: MessageAttachment::Text {
+                name: "old.txt".to_owned(),
+                content: "old".to_owned(),
+            },
+        });
+        app.transient_thought = Some("old thought".to_owned());
+
+        app.load_session(&target);
+
+        assert_eq!(
+            app.transcript,
+            vec!["You: target question", "WillDeep: target answer"]
+        );
+        assert!(app.attachments.is_empty());
+        assert!(app.transient_thought.is_none());
+        assert!(app.attention_read.contains("read-item"));
+        assert_eq!(app.goal.as_deref(), Some("persisted target goal"));
+        assert_eq!(app.focus, FocusPane::Prompt);
+    }
+    #[tokio::test]
+    async fn session_switch_replaces_the_open_session_without_restarting_tui() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-session-switch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::new(&root);
+        let mut current = Session::new(workspace.clone(), None, "current");
+        store.save(&mut current).unwrap();
+        let mut target = Session::new(workspace.clone(), None, "target");
+        target.messages.push(Message::user("restored question"));
+        target
+            .messages
+            .push(Message::assistant("restored answer", Vec::new()));
+        store.save(&mut target).unwrap();
+        let mut app = App::new(vec!["old transcript".to_owned()], Language::En);
+        app.runtime_event_cursor = 17;
+        let (tx, rx) = mpsc::unbounded_channel();
+        target.profile = Some("target-provider".to_owned());
+        target.model = Some("target-model".to_owned());
+        target.config = Some(root.join("target-config.toml"));
+        store.save(&mut target).unwrap();
+        let mut runtime = TuiRuntime {
+            home: root.clone(),
+            skills: Arc::new(SkillCatalog::default()),
+            relay_bridge: RelayBridge::new(),
+            context_window: 128_000,
+            background_tasks: Arc::new(BackgroundTaskRegistry::default()),
+            runtime_submit: crate::daemon::RuntimeSubmitOptions {
+                workspace,
+                profile: None,
+                model: None,
+                config: None,
+            },
+            local_workspace: root.join("workspace"),
+            tx,
+            rx,
+        };
+
+        assert!(
+            handle_session_command(
+                &format!("/session switch {}", target.id),
+                &mut app,
+                &mut current,
+                &store,
+                &mut runtime,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(current.id, target.id);
+        assert_eq!(
+            app.transcript[..2],
+            ["You: restored question", "WillDeep: restored answer"]
+        );
+        assert_eq!(store.load(target.id).unwrap().runtime_event_cursor, 17);
+        assert_eq!(
+            runtime.runtime_submit.profile.as_deref(),
+            Some("target-provider")
+        );
+        assert_eq!(
+            runtime.runtime_submit.model.as_deref(),
+            Some("target-model")
+        );
+        assert_eq!(runtime.runtime_submit.config, target.config);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn approval_shortcuts_are_colored_and_localized() {
@@ -133,6 +258,94 @@ mod tests {
         assert!(app.transcript.is_empty());
     }
     #[test]
+    fn command_menu_discovers_workspace_switching() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/work");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/workspace ");
+        assert!(app.transcript.is_empty());
+    }
+    #[test]
+    fn command_menu_discovers_diff_review() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/dif");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/diff");
+    }
+    #[test]
+    fn side_by_side_diff_pairs_replacements_and_preserves_cjk_width() {
+        let rows = diff_side_by_side_rows("@@ -1 +1 @@\n-old 中文\n+new 中文\n context", 43);
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1].contains("-old 中文"));
+        assert!(rows[1].contains("+new 中文"));
+        assert_eq!(UnicodeWidthStr::width(rows[1].as_str()), 43);
+    }
+    #[test]
+    fn diff_rendering_expands_tabs_and_escapes_terminal_control_characters() {
+        let lines = diff_review_lines("+\tmodel\u{1b}[2J\u{7}", None);
+        let rendered = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "+   model\\u{1b}[2J\\u{7}");
+        assert!(!rendered.chars().any(char::is_control));
+
+        let rows = diff_side_by_side_rows("-\told\n+\tnew", 43);
+        assert!(rows[0].contains("-   old"));
+        assert!(rows[0].contains("+   new"));
+        assert!(!rows[0].chars().any(char::is_control));
+    }
+    #[test]
+    fn diff_area_cycles_without_skipping_a_scope() {
+        use crate::daemon::diff_review::DiffArea;
+
+        assert!(matches!(
+            next_diff_area(DiffArea::Combined),
+            DiffArea::Staged
+        ));
+        assert!(matches!(
+            next_diff_area(DiffArea::Staged),
+            DiffArea::Unstaged
+        ));
+        assert!(matches!(
+            next_diff_area(DiffArea::Unstaged),
+            DiffArea::Combined
+        ));
+    }
+    #[test]
+    fn session_fork_options_select_turn_provider_model_and_title() {
+        let turn_id = uuid::Uuid::new_v4();
+        let options = session_commands::parse_fork_options(&format!(
+            "--through {turn_id} --profile research --model qwen3-max investigate branch"
+        ))
+        .unwrap();
+        assert_eq!(options.through_turn_id, Some(turn_id));
+        assert_eq!(options.provider_profile.as_deref(), Some("research"));
+        assert_eq!(options.model.as_deref(), Some("qwen3-max"));
+        assert_eq!(options.title.as_deref(), Some("investigate branch"));
+        assert!(session_commands::parse_fork_options("--model").is_err());
+        assert!(session_commands::parse_fork_options("--unknown value").is_err());
+    }
+    #[test]
+    fn session_search_options_combine_structured_filters_and_text() {
+        let parameters = session_commands::parse_search_options(
+            "--status idle --profile research --model qwen3 --after 10 --before 20 durable answer",
+        )
+        .unwrap();
+        assert!(parameters.contains(&("status".to_owned(), "idle".to_owned())));
+        assert!(parameters.contains(&("profile".to_owned(), "research".to_owned())));
+        assert!(parameters.contains(&("model".to_owned(), "qwen3".to_owned())));
+        assert!(parameters.contains(&("updated_after".to_owned(), "10".to_owned())));
+        assert!(parameters.contains(&("updated_before".to_owned(), "20".to_owned())));
+        assert!(parameters.contains(&("q".to_owned(), "durable answer".to_owned())));
+        assert!(session_commands::parse_search_options("--status").is_err());
+    }
+    #[test]
     fn sidebar_navigation_wraps_and_toggles_sections() {
         let mut app = App::new(Vec::new(), Language::ZhCn);
         app.sidebar_move(-1);
@@ -145,10 +358,12 @@ mod tests {
         assert_eq!(app.sidebar_selected, 0);
     }
     #[test]
-    fn focus_cycles_through_prompt_chat_and_sidebar() {
+    fn focus_cycles_through_prompt_chat_activity_and_sidebar() {
         let mut app = App::new(Vec::new(), Language::En);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPane::Chat);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPane::Activity);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPane::Sidebar);
         app.cycle_focus();
@@ -161,7 +376,8 @@ mod tests {
         let skills = SkillCatalog::default();
         app.sidebar_rect = Rect::new(80, 0, 20, 30);
         app.prompt_rect = Rect::new(0, 20, 80, 8);
-        app.transcript_rect = Rect::new(0, 0, 80, 20);
+        app.transcript_rect = Rect::new(0, 0, 80, 18);
+        app.activity_rect = Rect::new(0, 18, 80, 2);
 
         app.handle_mouse(85, 5, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Sidebar);
@@ -169,6 +385,8 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Prompt);
         app.handle_mouse(5, 5, &registry, &skills);
         assert_eq!(app.focus, FocusPane::Chat);
+        app.handle_mouse(5, 18, &registry, &skills);
+        assert_eq!(app.focus, FocusPane::Activity);
     }
     #[test]
     fn clicking_sidebar_hits_toggles_sections_and_opens_task_detail() {
@@ -208,9 +426,50 @@ mod tests {
         assert_eq!(app.sidebar_scroll, 3);
         assert!(app.sidebar_manual_scroll);
     }
+
+    #[test]
+    fn sidebar_render_clamps_extreme_manual_scroll_without_underflow() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.sidebar_manual_scroll = true;
+        app.sidebar_scroll = usize::MAX;
+        let now = unix_now();
+        app.runtime_agents
+            .extend((0..8).map(|index| crate::daemon::tui_bridge::RemoteAgent {
+                id: uuid::Uuid::new_v4(),
+                parent_id: None,
+                label: Some(format!("agent-{index}")),
+                background: true,
+                profile: Some("scout".to_owned()),
+                model: None,
+                status: RuntimeStatus::Done,
+                current_turn: 1,
+                current_tool: None,
+                total_tokens: None,
+                max_turns: None,
+                token_budget: None,
+                timeout_seconds: None,
+                report: None,
+                workspace: PathBuf::from("/workspace"),
+                worktree_branch: None,
+                dedicated_worktree: false,
+                created_at: now - 5,
+                completed_at: Some(now - 1),
+            }));
+        let backend = ratatui::backend::TestBackend::new(24, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| sidebar::render_sidebar(frame, &mut app, frame.area()))
+            .unwrap();
+
+        assert_ne!(app.sidebar_scroll, usize::MAX);
+        assert!(app.sidebar_hits.iter().all(|(row, _)| *row < 6));
+    }
+
     #[test]
     fn sidebar_renders_runtime_agent_lifecycle_summary() {
         let mut app = App::new(Vec::new(), Language::En);
+        let now = unix_now();
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
                 id: "abe596f8-940d-4629-9a82-339796029947".parse().unwrap(),
@@ -218,10 +477,20 @@ mod tests {
                 label: Some("root".to_owned()),
                 background: false,
                 profile: Some("editor".to_owned()),
+                model: Some("root-model".to_owned()),
                 status: RuntimeStatus::Done,
                 current_turn: 3,
                 current_tool: None,
                 total_tokens: Some(42),
+                max_turns: None,
+                token_budget: None,
+                timeout_seconds: None,
+                report: None,
+                workspace: PathBuf::from("/workspace"),
+                worktree_branch: None,
+                dedicated_worktree: false,
+                created_at: now - 1,
+                completed_at: Some(now),
             });
         app.runtime_agents
             .push(crate::daemon::tui_bridge::RemoteAgent {
@@ -230,12 +499,47 @@ mod tests {
                 label: Some("inspect".to_owned()),
                 background: true,
                 profile: Some("scout".to_owned()),
+                model: Some("scout-model".to_owned()),
                 status: RuntimeStatus::Working,
                 current_turn: 1,
                 current_tool: Some("read_file".to_owned()),
                 total_tokens: Some(9),
+                max_turns: Some(8),
+                token_budget: Some(32_000),
+                timeout_seconds: Some(300),
+                report: Some("found src/main.rs".to_owned()),
+                workspace: PathBuf::from("/worktrees/agent"),
+                worktree_branch: Some("willdeep/agent-test".to_owned()),
+                dedicated_worktree: true,
+                created_at: now - 5,
+                completed_at: None,
             });
-        let backend = ratatui::backend::TestBackend::new(48, 32);
+        app.runtime_tools
+            .push(willdeep_runtime_protocol::RuntimeTool {
+                id: uuid::Uuid::new_v4(),
+                session_id: None,
+                turn_id: None,
+                task_id: uuid::Uuid::new_v4(),
+                agent_id: uuid::Uuid::new_v4(),
+                name: "read_file".to_owned(),
+                status: willdeep_runtime_protocol::ToolStatus::Running,
+                started_at_ms: 1,
+                completed_at_ms: None,
+            });
+        app.runtime_artifacts
+            .push(willdeep_runtime_protocol::RuntimeArtifact {
+                id: uuid::Uuid::new_v4(),
+                kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+                session_id: None,
+                turn_id: None,
+                task_id: uuid::Uuid::new_v4(),
+                agent_id: uuid::Uuid::new_v4(),
+                title: "edit_file workspace changes".to_owned(),
+                source_id: "diff-1".to_owned(),
+                item_count: 1,
+                created_at: 1,
+            });
+        let backend = ratatui::backend::TestBackend::new(80, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -252,9 +556,23 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Runtime agents · 2"));
         assert!(rendered.contains("abe596 · editor · done"));
-        assert!(rendered.contains("root · T3 · - · 42t"));
+        assert!(rendered.contains("root · root-model · took 1s"));
+        assert!(rendered.contains("T3/- · - · 42t/- · -s"));
+        assert!(rendered.contains("inspect · scout-model · running for"));
+        assert!(rendered.contains("T1/8 · read_file · 9t/32000t · 300s"));
         assert!(rendered.contains("↳ bd9d3d · scout bg · working"));
-        assert!(rendered.contains("inspect · T1 · read_file · 9t"));
+        assert!(rendered.contains("Tools: 1 · Running: 1 · Artifacts: 1"));
+        assert!(rendered.contains("read_file · Running"));
+        let footer = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 30)].symbol())
+            .collect::<String>();
+        let version = format!("WillDeep v{}", willdeep_core::VERSION);
+        assert!(footer.contains(&version));
+        let version_x = 1 + (80 - 2 - version.chars().count() as u16);
+        assert_eq!(
+            terminal.backend().buffer()[(version_x, 30)].fg,
+            Color::DarkGray
+        );
         assert_eq!(
             app.selected_runtime_agent().unwrap().label.as_deref(),
             Some("root")
@@ -266,6 +584,227 @@ mod tests {
         );
         app.runtime_agent_move(1);
         assert_eq!(app.runtime_agent_selected, 0);
+    }
+
+    #[test]
+    fn sidebar_drops_long_finished_agents_and_keeps_selection_on_the_visible_ones() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let now = unix_now();
+        let stale_root = crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            label: Some("stale-root".to_owned()),
+            background: false,
+            profile: None,
+            model: None,
+            status: RuntimeStatus::Done,
+            current_turn: 0,
+            current_tool: None,
+            total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
+            workspace: PathBuf::from("/workspace"),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            created_at: now - 47_148,
+            completed_at: Some(now - 43_200),
+        };
+        let live_child = crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: Some(uuid::Uuid::new_v4()),
+            label: Some("live-child".to_owned()),
+            background: true,
+            profile: Some("scout".to_owned()),
+            model: Some("scout-model".to_owned()),
+            status: RuntimeStatus::Working,
+            current_turn: 1,
+            created_at: now - 5,
+            completed_at: None,
+            ..stale_root.clone()
+        };
+        app.runtime_agents.push(stale_root);
+        app.runtime_agents.push(live_child);
+
+        let backend = ratatui::backend::TestBackend::new(80, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar::render_sidebar(frame, &mut app, frame.area()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Runtime agents · 1 (+1 finished)"));
+        assert!(rendered.contains("live-child"));
+        assert!(!rendered.contains("stale-root"));
+        assert_eq!(
+            app.selected_runtime_agent().unwrap().label.as_deref(),
+            Some("live-child")
+        );
+    }
+
+    #[test]
+    fn agent_detail_filters_tool_timeline_and_diff_by_agent() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let agent_id = uuid::Uuid::new_v4();
+        let other_id = uuid::Uuid::new_v4();
+        let agent = crate::daemon::tui_bridge::RemoteAgent {
+            id: agent_id,
+            parent_id: None,
+            label: Some("reader".to_owned()),
+            background: false,
+            profile: Some("reader".to_owned()),
+            model: Some("detail-model".to_owned()),
+            status: RuntimeStatus::Done,
+            current_turn: 2,
+            current_tool: None,
+            total_tokens: Some(55),
+            max_turns: Some(8),
+            token_budget: Some(10_000),
+            timeout_seconds: Some(120),
+            report: Some("detail report".to_owned()),
+            workspace: PathBuf::from("/workspace"),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            created_at: 1,
+            completed_at: Some(2),
+        };
+        for (owner, name) in [(agent_id, "read_file"), (other_id, "git_status")] {
+            app.runtime_tools
+                .push(willdeep_runtime_protocol::RuntimeTool {
+                    id: uuid::Uuid::new_v4(),
+                    session_id: None,
+                    turn_id: None,
+                    task_id: uuid::Uuid::new_v4(),
+                    agent_id: owner,
+                    name: name.to_owned(),
+                    status: willdeep_runtime_protocol::ToolStatus::Completed,
+                    started_at_ms: 10,
+                    completed_at_ms: Some(25),
+                });
+        }
+        for (owner, title) in [(agent_id, "reader changes"), (other_id, "other changes")] {
+            app.runtime_artifacts
+                .push(willdeep_runtime_protocol::RuntimeArtifact {
+                    id: uuid::Uuid::new_v4(),
+                    kind: willdeep_runtime_protocol::ArtifactKind::WorkspaceChange,
+                    session_id: None,
+                    turn_id: None,
+                    task_id: uuid::Uuid::new_v4(),
+                    agent_id: owner,
+                    title: title.to_owned(),
+                    source_id: uuid::Uuid::new_v4().to_string(),
+                    item_count: 2,
+                    created_at: 1,
+                });
+        }
+
+        let content = agent_worktree_ui::agent_detail_content(&app, &agent);
+        assert!(content.contains("Tool timeline (1)"));
+        assert!(content.contains("read_file · 15ms"));
+        assert!(!content.contains("git_status"));
+        assert!(content.contains("Diff summary (1)"));
+        assert!(content.contains("reader changes"));
+        assert!(!content.contains("other changes"));
+        assert!(content.contains("detail report"));
+    }
+    #[test]
+    fn agent_detail_scroll_is_bounded_to_the_wrapped_content() {
+        let content = (0..20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            agent_worktree_ui::agent_detail_scroll_offset(&content, 20, 5, usize::MAX),
+            15
+        );
+        assert_eq!(
+            agent_worktree_ui::agent_detail_scroll_offset(&content, 20, 30, usize::MAX),
+            0
+        );
+    }
+    #[test]
+    fn terminal_agent_detail_exposes_clickable_retry_model_and_diff_actions() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.agent_detail = Some(crate::daemon::tui_bridge::RemoteAgent {
+            id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            label: Some("editor".to_owned()),
+            background: true,
+            profile: Some("editor".to_owned()),
+            model: Some("old-model".to_owned()),
+            status: RuntimeStatus::Failed,
+            current_turn: 2,
+            current_tool: None,
+            total_tokens: Some(55),
+            max_turns: Some(8),
+            token_budget: Some(10_000),
+            timeout_seconds: Some(120),
+            report: Some("failed report".to_owned()),
+            workspace: PathBuf::from("/worktree"),
+            worktree_branch: Some("willdeep/editor".to_owned()),
+            dedicated_worktree: true,
+            created_at: 1,
+            completed_at: Some(2),
+        });
+        let backend = ratatui::backend::TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| agent_worktree_ui::render_agent_overlays(frame, &mut app))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("[R Retry]"));
+        assert!(rendered.contains("[M Change model]"));
+        assert!(rendered.contains("[W View Diff]"));
+        for expected in [
+            AgentDetailAction::Retry,
+            AgentDetailAction::RetryWithModel,
+            AgentDetailAction::ReviewWorktree,
+        ] {
+            let (rect, _) = app
+                .agent_detail_action_rects
+                .iter()
+                .find(|(_, action)| *action == expected)
+                .expect("action rect");
+            assert_eq!(app.agent_detail_action_at(rect.x, rect.y), Some(expected));
+        }
+    }
+
+    #[test]
+    fn agent_command_prefill_never_overwrites_an_existing_draft() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        let id = uuid::Uuid::new_v4();
+        app.input.insert("保留我的草稿");
+        prefill_agent_command(
+            &mut app,
+            id,
+            AgentDetailAction::RetryWithModel,
+            Language::ZhCn,
+        );
+        assert_eq!(app.input.text(), "保留我的草稿");
+        assert!(app.notice.as_deref().unwrap().contains("已有草稿"));
+
+        app.input.take();
+        prefill_agent_command(
+            &mut app,
+            id,
+            AgentDetailAction::RetryWithModel,
+            Language::ZhCn,
+        );
+        assert_eq!(app.input.text(), format!("/agent retry {id} --model "));
+        assert_eq!(app.focus, FocusPane::Prompt);
     }
     #[test]
     fn help_opens_globally_but_question_mark_remains_typable_in_a_prompt() {
@@ -281,6 +820,7 @@ mod tests {
     #[test]
     fn help_documents_current_focus_and_sidebar_shortcuts() {
         assert_eq!(focus_label(FocusPane::Sidebar, Language::ZhCn), "状态栏");
+        assert_eq!(focus_label(FocusPane::Activity, Language::ZhCn), "活动");
         let help = help_content(Language::ZhCn);
         assert!(help.contains("Ctrl+W"));
         assert!(help.contains("Enter 详情"));
@@ -495,6 +1035,7 @@ mod tests {
     fn runtime_attention_selects_remote_gate_and_task_actions() {
         let mut app = App::new(Vec::new(), Language::En);
         let interaction_id = uuid::Uuid::new_v4();
+        let task_id = uuid::Uuid::new_v4();
         app.runtime_attention.push(AttentionItem {
             id: format!("runtime-interaction:{interaction_id}"),
             source: AttentionSource::Approval,
@@ -505,14 +1046,13 @@ mod tests {
         });
         app.runtime_gates.push(crate::daemon::RemoteGate::Approval {
             id: interaction_id,
+            task_id,
             description: "run tests".to_owned(),
             always_allow_available: true,
         });
         assert_eq!(app.selected_remote_gate().unwrap().id(), interaction_id);
 
-        let task_id = uuid::Uuid::new_v4();
         app.runtime_attention.clear();
-        app.runtime_gates.clear();
         app.runtime_attention.push(AttentionItem {
             id: format!("runtime-task:{task_id}"),
             source: AttentionSource::BackgroundShell,
@@ -521,6 +1061,7 @@ mod tests {
             status: RuntimeStatus::Working,
             elapsed_millis: None,
         });
+        assert_eq!(app.selected_remote_gate().unwrap().id(), interaction_id);
         assert_eq!(app.selected_runtime_task_id(), Some(task_id));
     }
 
@@ -543,6 +1084,7 @@ mod tests {
             )
             .to_owned(),
             visible: true,
+            session_id: Some(session.id),
         };
         runtime_ui::apply_runtime_events(&mut app, vec![event.clone()], &mut session, &store)
             .unwrap();
@@ -560,8 +1102,36 @@ mod tests {
         assert_eq!(restored.messages.len(), 1);
         assert_eq!(
             transcript(&restored.messages),
-            vec!["WillDeep: [Runtime 12345678] restored answer"]
+            vec!["WillDeep: restored answer"]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_chat_ignores_events_owned_by_another_session() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-event-isolation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "current");
+        let mut app = App::new(Vec::new(), Language::En);
+        let event = crate::daemon::RemoteRuntimeEvent {
+            sequence: 1,
+            kind: "task.output".to_owned(),
+            message: format!(
+                "task_id={} {}",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({"type":"completed","text":"private other answer"})
+            ),
+            visible: true,
+            session_id: Some(uuid::Uuid::new_v4()),
+        };
+        runtime_ui::apply_runtime_events(&mut app, vec![event], &mut session, &store).unwrap();
+        assert!(app.transcript.is_empty());
+        assert!(session.messages.is_empty());
+        assert_eq!(app.runtime_event_cursor, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -587,6 +1157,7 @@ mod tests {
                 serde_json::json!({"type":"completed","text":"answer"})
             ),
             visible: true,
+            session_id: Some(visible.id),
         };
         let terminal = crate::daemon::RemoteRuntimeEvent {
             sequence: 2,
@@ -597,6 +1168,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ),
             visible: true,
+            session_id: Some(visible.id),
         };
 
         runtime_ui::apply_runtime_events(&mut app, vec![output], &mut visible, &store).unwrap();
@@ -640,6 +1212,7 @@ mod tests {
             kind: "task.output".to_owned(),
             message: format!("task_id={task} {payload}"),
             visible: true,
+            session_id: Some(session.id),
         };
         runtime_ui::apply_runtime_events(
             &mut app,
@@ -673,6 +1246,10 @@ mod tests {
         assert_eq!(app.tools.requested, 1);
         assert_eq!(app.tools.completed, 1);
         assert!(
+            app.transcript.is_empty(),
+            "runtime rounds, agent ids and tool activity belong in the status panel, not chat"
+        );
+        assert!(
             app.progress_log
                 .iter()
                 .any(|line| line.contains("87654321"))
@@ -682,6 +1259,50 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("completed"))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_chat_only_renders_the_assistant_answer() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-chat-content-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "clean runtime chat");
+        let mut app = App::new(Vec::new(), Language::En);
+        let task = uuid::Uuid::new_v4();
+        let event = |sequence, payload: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+            sequence,
+            kind: "task.output".to_owned(),
+            message: format!("task_id={task} {payload}"),
+            visible: true,
+            session_id: Some(session.id),
+        };
+
+        runtime_ui::apply_runtime_events(
+            &mut app,
+            vec![
+                event(1, serde_json::json!({"type":"turn_started","turn":9})),
+                event(
+                    2,
+                    serde_json::json!({"type":"tool_requested","name":"read_file"}),
+                ),
+                event(
+                    3,
+                    serde_json::json!({"type":"completed","text":"真实的 AI 回复"}),
+                ),
+            ],
+            &mut session,
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(app.transcript, vec!["WillDeep: 真实的 AI 回复"]);
+        assert!(app.transcript.iter().all(|line| {
+            !line.contains("turn") && !line.contains("task_id") && !line.contains(&task.to_string())
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -835,10 +1456,92 @@ mod tests {
         let detail = app.attention_detail.as_ref().expect("detail");
         assert_eq!(detail.id, "diff-review:abc");
         assert!(detail.detail.contains("src/a.rs"));
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar::render_attention_detail(frame, &mut app))
+            .unwrap();
+        assert_ne!(app.attention_diff_rect, Rect::default());
+        assert_ne!(app.attention_allow_rect, Rect::default());
+        assert_ne!(app.attention_deny_rect, Rect::default());
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_diff_rect.x, app.attention_diff_rect.y),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_allow_rect.x, app.attention_allow_rect.y),
+            Some(DiffAttentionAction::Accept)
+        );
+        assert_eq!(
+            app.diff_attention_action_at(app.attention_deny_rect.x, app.attention_deny_rect.y),
+            Some(DiffAttentionAction::Reject)
+        );
         app.attention_detail = None;
         assert!(app.attention_mark_read());
         assert!(app.attention_items().is_empty());
     }
+
+    #[test]
+    fn diff_attention_keyboard_shortcuts_are_captured_by_the_modal() {
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('d')),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Enter),
+            Some(DiffAttentionAction::Open)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('Y')),
+            Some(DiffAttentionAction::Accept)
+        );
+        assert_eq!(
+            diff_attention_action_for_key(KeyCode::Char('n')),
+            Some(DiffAttentionAction::Reject)
+        );
+        assert_eq!(diff_attention_action_for_key(KeyCode::Char('x')), None);
+    }
+
+    #[test]
+    fn text_selection_mode_uses_escape_or_ctrl_s_without_treating_copy_as_exit() {
+        assert!(selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!selection_mode_exit_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn diff_review_consumes_every_mouse_event_and_routes_wheel_to_the_modal() {
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::ScrollUp),
+            Some(DiffReviewMouseAction::ScrollUp)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::ScrollDown),
+            Some(DiffReviewMouseAction::ScrollDown)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::Down(MouseButton::Left)),
+            Some(DiffReviewMouseAction::Consume)
+        );
+        assert_eq!(
+            diff_review_mouse_action(true, MouseEventKind::Moved),
+            Some(DiffReviewMouseAction::Consume)
+        );
+        assert_eq!(
+            diff_review_mouse_action(false, MouseEventKind::ScrollDown),
+            None
+        );
+    }
+
     #[test]
     fn mouse_click_inserts_command_candidate() {
         let registry = BackgroundTaskRegistry::default();

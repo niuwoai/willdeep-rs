@@ -1,7 +1,7 @@
 # WillDeep CLI、TUI 与 Runtime 路线图
 
-> 最后更新：2026-08-10
-> 当前实施版本：v0.17.0-rc6
+> 最后更新：2026-08-11
+> 当前实施版本：v0.21.0-rc63
 > 状态图例：`[x]` 已完成、`[-]` 进行中、`[ ]` 待实施
 
 ## 1. 产品方向
@@ -48,6 +48,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 右栏增加“需要你处理”“正在工作”“最近完成”。
 - [x] 审批、ask_user、失败任务、阻塞子 Agent、Worktree 冲突和待审 Diff 统一进入 Inbox。
 - [x] 支持允许、拒绝、回答、重试、停止、标记已读和精确跳转。
+- [x] Workspace Diff Inbox 支持键盘与鼠标查看 Diff、整批通过或拒绝；决定绑定精确快照，冲突禁止整批通过。
 - [x] Agent → 会话 → Workspace 的状态优先级聚合。
 
 验收：用户无需轮询输出即可处理所有阻塞项，每个条目能跳回准确上下文。
@@ -65,9 +66,9 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] TUI Inbox 接入 Runtime 任务与待处理项；`/runtime` 提交的任务在关闭 TUI 后继续运行，并可重新观察、审批、回答和停止。
 - [x] TUI 聊天记录按事件游标完整 attach，重连后恢复逐轮模型与工具时间线，并按 Workspace 过滤和去重。
 - [x] 受 Token 保护的 SSE 实时事件推送；按游标分页补读、慢客户端日志追赶、断线重连去重与 TUI 轮询降级。
-- [ ] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
+- [x] Unix Socket 与 Windows Named Pipe、本地请求幂等键和跨版本能力协商。
 - [x] 单实例租约锁、健康检查、私有原子状态保存和优雅停止。
-- [ ] 无损优雅升级与版本交接。
+- [x] 无损优雅升级与版本交接；Drain 闸门保留活跃任务、拒绝新工作，任务归零后由当前二进制接管，Headless 客户端按新 Runtime 身份与原事件游标自动重附着。
 
 验收：客户端断开后任务继续运行，重连能补齐离线事件，异常退出不破坏会话。
 
@@ -76,19 +77,19 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 按 `RUNTIME_SESSION_PROTOCOL.md` 建立稳定 Session / Root Agent / Turn / Execution Task 身份与持久状态机。
 - [x] Session/Turn 受保护 API 与 CLI、`request_id` 幂等、同 Session 严格串行、排队/运行取消、终态事件和 Daemon 重启恢复。
 - [x] TUI 与 Web 改用统一 Runtime Session/Turn；普通 Prompt 与 `/runtime` 完成现有 Session 幂等收养、多轮提交和终态历史同步，`/local` 提供单轮兼容；Web 提交同一 Runtime Turn、转发持久事件、真实停止并加载历史。
-- [-] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 原地切换会话待完成。
-- [ ] 恢复 Goal、Provider、模型、Skills、Agent 树、任务、审批、Worktree、Token 和压缩点。
-- [ ] 从指定轮次 Fork，并可切换模型或 Provider。
-- [-] 受 Token CLI/TUI 已支持标题与消息内容搜索，Web 支持当前 Workspace 标题筛选；Workspace、状态、模型和时间组合筛选待完成。
-- [ ] 安全的自动标题与会话数据迁移版本。
+- [x] Web 会话选择器、CLI `sessions/resume` 以及 Runtime/CLI/TUI/Web 的 rename、完整快照 fork、archive、delete、export 已完成；TUI 支持同 Workspace 原地切换并按 Session 隔离聊天事件。
+- [-] Goal、Provider Profile、模型、配置、Agent Token 和手动压缩检查点已恢复；Skills/MCP 按当前持久 Workspace 策略重新绑定；可证明安全的活跃 Turn/Task 已自动重放，旧审批取消后重新申请。Agent 树运行资源、Worktree 及更完整任务资源恢复继续补齐。
+- [x] 已按持久消息边界支持从指定已完成 Turn 精确 Fork，并可为新 Session 覆盖 Provider Profile 和模型。
+- [x] 受 Token CLI/TUI 支持标题、消息内容、Workspace、状态、Provider Profile、模型和更新时间组合搜索；Web 保持当前 Workspace 标题筛选，不向未认证浏览器下发消息摘要。
+- [x] 安全的自动标题与会话数据迁移版本；schema 1 先私有备份再原子迁移到 schema 2，未来版本拒绝降级；首次 Turn 本地生成有界标题并对疑似凭据回退，人工/旧版/Fork 标题不被覆盖。
 
 验收：任意会话可恢复、Fork、归档和导出，安全策略与系统 Prompt 始终使用当前版本。
 
 ### 阶段 4：Agent Mission Control（v0.18.0）
 
-- [ ] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
-- [ ] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误。
-- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成后台 Child Agent 的停止与重试。
+- [x] 展示主 Agent 与子 Agent 树、父子关系、Profile、模型、状态、工具、耗时、Token 和 Worktree。
+- [-] Agent 详情页包含 Prompt、进度、工具时间线、输出、Diff 和错误；TUI 已完成受保护单项详情、进度、可滚动工具时间线、结果报告和 Diff Artifact 摘要，Web 已完成脱敏 Agent/待处理 Task 工具时间线与 Artifact 摘要；Prompt/错误原文的脱敏与授权边界待设计。
+- [-] 支持新建、补充 Prompt、停止、重试、换模型、查看日志和 Diff；当前已完成 TUI/Web 显式新建只读 Child Agent、补充 Prompt、停止、重试，以及统一 API/Rust Client 在终态重试边界真实换模型；独立日志视图待完成。
 - [ ] Profile 定义 Provider、模型、工具权限、Skills、预算和递归能力。
 - [ ] 并发、深度、轮次、Token、费用与时长限制，连续失败熔断。
 
@@ -96,31 +97,31 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 5：Diff 与 Review Center（v0.19.0）
 
-- [ ] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更。
-- [ ] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航。
-- [ ] 接受、打回、请求重改、标记已审和安全撤销单文件。
-- [ ] 测试命令、退出码、失败摘要与变更集绑定。
-- [ ] Commit Preview、敏感文件检查、Tag 和推送目标确认。
+- [x] 按轮次、Agent 和文件追踪新增、修改、删除、重命名与二进制变更；潜在写工具按主/子 Agent 分别采集前后内容指纹，持久绑定 Session、Turn、Task、Agent、Tool 和真实变化路径，并可沿快照链查询。
+- [x] TUI Unified/Side-by-side Diff、语法着色、搜索和文件导航；支持 Combined/Staged/Unstaged 范围切换和 Unicode 宽度安全双栏。
+- [x] 接受、打回、请求重改、标记已审和安全撤销单文件；撤销绑定精确快照、TUI 二次确认，未跟踪/新增内容进入可恢复回收区。
+- [x] 测试命令、退出码、失败摘要与变更集绑定；前后台测试自动绑定精确快照，摘要有界且敏感命令拒绝记录。
+- [x] Commit Preview、敏感文件检查、Tag 和推送目标确认；Runtime API、CLI 与 TUI 共用精确快照，只预览不执行 Git 写操作，Remote 凭据只显示脱敏结果。
 
 验收：用户可在 TUI 完成主要审查，撤销不会覆盖用户已有修改。
 
 ### 阶段 6：Workspace 与 Worktree（v0.20.0）
 
-- [ ] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP。
-- [ ] 切换时重新建立路径边界，旧 Workspace 的任务继续运行。
-- [ ] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批。
-- [ ] 孤儿 Worktree 检测与保守清理。
+- [x] Workspace 注册、删除、切换以及独立安全策略、Provider、Skills 和 MCP；Runtime 注册表、API/CLI、TUI 与 Web 选择器共用同一来源，Web 仍受启动路径白名单上界约束。
+- [x] 切换时重新建立路径边界，旧 Workspace 的任务继续运行；TUI 切换恢复目标 Session/游标并重启事件与状态订阅，跨路径后禁用启动时绑定旧根目录的 Local Harness，Runtime 激活不改变既有任务根目录。
+- [x] 子 Agent 专属 Worktree、Diff 回流、冲突检测和合并审批；Editor 默认使用专属分支和 Worktree，Runtime 生命周期及 Diff 归因绑定真实 Child 路径，完成报告回流 Worktree 状态；Runtime/CLI/TUI 以 Child/Root 精确快照 Review ID、`git apply --check` 和显式批准执行保守合并。
+- [x] 孤儿 Worktree 检测与保守清理；Runtime/CLI 审计已识别活动、待审、已合并、干净、已隔离、路径缺失和未知目录，精确快照与显式确认后仅将安全 Worktree 整体移动到 Recovery，不删除内容或分支。
 
 验收：多 Workspace 不突破隔离，多 Agent 能安全并行修改。
 
 ### 阶段 7：统一控制 API（v0.21.0）
 
-- [ ] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event。
-- [ ] 本地 JSON 请求响应与 NDJSON/流式事件协议。
-- [ ] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`。
-- [ ] 幂等请求 ID、事件游标、错误码、版本协商和能力列表。
-- [ ] Rust Client Library，供 TUI、Web、Swift FFI、移动端和自动化复用。
-- [ ] API Key、工具参数、Prompt 和路径按权限脱敏。
+- [x] 稳定定义 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 和 Event 公共 DTO。
+- [x] 本地 JSON 请求响应与 NDJSON/流式事件协议；统一 API 使用版本化请求/响应信封，事件流按全局序号补读并逐行输出完整信封。
+- [x] `willdeep api session.list/agent.spawn/agent.prompt/agent.wait/approval.resolve/events`；Spawn 只允许活跃 Session 中服务端绑定 Workspace 的后台只读 Profile。
+- [x] 幂等请求 ID、事件游标、错误码、版本协商和能力列表；全部统一修改操作由单一清单进入 Pending→Completed 私有日志跨重启去重，不确定崩溃窗口拒绝自动重放。
+- [x] Rust Client Library 覆盖全部公开 Runtime 操作，供 TUI、Web、Swift FFI、移动端和自动化复用；支持回环与本地传输、Token、能力、统一调用、NDJSON、Runtime 状态及所有稳定对象的类型化观察和控制。
+- [-] API Key、工具参数、Prompt 和路径按权限脱敏；公开 DTO 排除配置/队列正文/内部错误，公共事件兼容净化 Tool 参数/输出、报告、路径和错误，细粒度远程路径权限待实现。
 
 验收：所有客户端观察一致状态，TUI 不再直接持有 Harness 业务逻辑。
 
@@ -136,11 +137,11 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ### 阶段 9：Web 完整客户端（v0.22.0）
 
-- [ ] 对接 Runtime API，提供 Workspace、会话、Inbox、Agent、Diff 和任务详情。
-- [ ] Composer 保持 `/`、`$`、图片、文本附件、多行、停止和 Prompt 历史。
-- [ ] SSE/事件流按游标恢复，刷新不丢运行状态。
+- [-] 对接 Runtime API，提供 Workspace、会话、Inbox、Agent、Diff 和任务详情；Workspace、会话、Inbox、Agent 观察/控制及只读新建、Agent 与后台 Task 的结构化详情已完成，完整 Diff 浏览待接入。
+- [-] Composer 保持 `/`、`$`、图片、文本附件、多行、停止和 Prompt 历史；除 Prompt 历史外均已完成。
+- [x] SSE/事件流按游标恢复，刷新不丢运行状态；浏览器保存活动 Turn 游标与最后会话，刷新重载持久历史后自动重新附着，普通网络断开按指数退避续接且不重复提交 Prompt。
 - [ ] 桌面三栏、平板双栏、手机单栏；所有文案走 i18n。
-- [ ] 继续保持单用户，不在应用内实现认证，依赖 Nginx/VPN/SSH Tunnel。
+- [x] 继续保持单用户，不在应用内实现认证，依赖 Nginx/VPN/SSH Tunnel。
 
 验收：Web 与 TUI 语义一致，刷新和断线不会造成消息丢失或重复。
 
@@ -154,10 +155,10 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 验收：多 Agent 流程可声明式复用，每一步可观察、可停止、可审计。
 
-### 阶段 11：Herdr 互操作（v0.23.0）
+### 阶段 11：Herdr 互操作（v0.18.0 起持续交付）
 
-- [ ] `willdeep integrations herdr install/status/uninstall`。
-- [ ] 向 Herdr 上报准确的 working、blocked、approval、done 和 idle 生命周期。
+- [-] 已完成 `willdeep integrations herdr status [--json]`；Integration 配置 install/uninstall 待完成。
+- [x] Runtime Task 聚合后向 Herdr 上报准确的 working、blocked 和 idle；Herdr 将完成且未查看的 idle 投影为 done，审批/提问/失败投影为 blocked。
 - [ ] WillDeep 会话与 Herdr Pane 关联并支持精确跳转。
 - [ ] 可选通过 Herdr 启动 Claude Code、Codex、OpenCode 等外部 Agent。
 - [ ] 外部 Agent 明确标注权限边界，不把画面检测当作强一致结果。
@@ -167,7 +168,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 ### 阶段 12：可观测性、诊断与 1.0 加固
 
 - [ ] 结构化日志与 Session/Agent/Turn/Tool Trace ID。
-- [ ] `willdeep doctor` 与自动脱敏的诊断包。
+- [x] `willdeep doctor` 离线就绪检查和自动脱敏 JSON 报告。
+- [x] 可导出的自动脱敏 ZIP 诊断包，默认排除日志、Prompt、工具载荷和本地路径。
 - [ ] 首 Token、轮次、工具、重试、Token、费用、压缩和队列指标。
 - [ ] Provider 健康状态、事件背压、日志与 Scrollback 上限。
 - [ ] 崩溃恢复、协议兼容和跨平台端到端测试。
@@ -179,8 +181,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 以下能力不单独阻塞某个大版本，可随 Runtime 阶段逐批交付，但必须复用统一事件和状态模型：
 
-- [ ] Headless/CI 模式、稳定退出码、`--json`、`--ndjson` 和安静输出模式。
-- [ ] Bash、Zsh、Fish 与 PowerShell 命令补全。
+- [x] Headless/CI `willdeep run`、稳定退出码、`--output json|ndjson` 和 `--quiet`。
+- [x] Bash、Zsh、Fish 与 PowerShell 命令补全，并由同一 Clap 命令树生成 man page。
 - [ ] 跨会话 Prompt 历史、全文搜索和安全清理。
 - [ ] 长会话虚拟滚动，工具输出按活动组聚合并默认显示摘要。
 - [ ] 可展开查看工具原始参数、输出、错误和审批依据。
@@ -223,20 +225,180 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 ## 5. 当前执行批次
 
-v0.17.0-rc6（已完成）：Runtime/CLI/TUI/Web 已接入 Session Rename、完整快照 Fork、Archive/Unarchive、精确确认 Delete、安全 Export 和 Search；活跃/排队保护、Fork 隔离、导出脱敏和生命周期事件已由 Store 测试及真实 CLI/Web E2E 验证。TUI Session 命令与候选目录完成拆分，主文件低于 3000 行。
+v0.21.0-rc63（进行中）：Web Runtime 侧栏的 Agent 列表从"全量历史"改回"活动面板"——只展示运行中的 Agent 和结束不超过 5 分钟的 Agent，从未执行轮次的已结束根 Agent 不再占位，计数行以 `(+N 已结束)` 附注被折叠的历史；活动快照新增 `finished_seconds_ago`，时长按运行中/已结束分别标注"已运行"和"耗时"，不再把会话跨度显示成仍在执行。TUI 状态栏套用同一套规则，且键盘选中与可见列表对齐，避免把指令发给已结束几小时的 Agent。下一步：给 `agents.json` 增加终态记录保留策略（当前无界增长）。
+
+v0.21.0-rc62（已完成）：Web 会话列表默认只展示未归档会话，底部新增"已归档 (N)"折叠组，收起时不渲染归档行 DOM，点击展开全部归档会话并保留悬停操作；切换工作区自动收起。列表限制最大高度并启用独立细滚动条，移除仅显示前 20 条的截断。修复 Runtime 启动恢复对已删除 Session 悬空任务引用的硬失败，Daemon 在用户删除会话后可正常重启。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc60（已完成）：Web 聊天 AI 回复接入 `react-markdown` + `remark-gfm` 基础 Markdown 渲染（标题、列表、代码块、表格、引用、链接），仅作用于 assistant 消息且不引入 `dangerouslySetInnerHTML`；侧栏"新建只读子 Agent"改为纵向布局，任务描述升级为整行两行 Textarea，解决 282px 侧栏内下拉、输入、按钮挤在一行的问题。会话新增 `pinned_at` 置顶元数据（与 Xedit `pinnedAt` 语义兼容，桥接会话就地补丁 Xedit JSON），Web 提供 pin/unpin 接口；会话列表行悬停显示重命名、置顶、归档、删除图标，删除改用 Chakra Dialog 确认。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc59（已完成）：补齐 TUI 活动窗口的交互一致性。活动区保存独立布局矩形并进入鼠标命中判断，点击后显示焦点边框；`Ctrl+W` 在输入、聊天、活动和状态栏四区循环，活动区聚焦后可用 Enter/Space 展开或收起工具详情、Esc 返回输入区。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc58（已完成）：修复 TUI Diff 查看后聊天区出现残影。Diff 渲染边界按四列 Tab Stop 展开真实 Tab，并把 ESC、响铃等其余控制字符转换成可见转义，Unified 与 Side-by-side 共用同一安全文本；从文件内容返回列表或关闭 Diff 模态时强制清空终端并重建 Ratatui 双缓冲，避免物理光标与虚拟单元格失步。回归测试覆盖 Tab、ESC、响铃、并排替换与 CJK 宽度。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+同一版本收紧 Web 聊天消息、工具轨迹和 Composer 上方单行思考状态的垂直节奏，并移除外层 `focus-within` 额外轮廓与 Textarea 的 `focus-visible` 轮廓，聚焦时只保留一条外框。
+
+CLI crate 新增 `build.rs` 跟踪 `web/dist`，避免前端构建成功但 Cargo 未重新嵌入资源；本地 Debug 与 Release 构建都必须包含同一 rc58 Web 产物。
+
+v0.21.0-rc57（已完成）：Web 会话与侧栏体验收口。历史列表只返回存在真实用户消息（含仅附件输入）或仍处于活动状态的会话，空白 `New session` 不再堆积；Runtime 信息默认收起但继续轮询，历史会话保持默认展开。历史项、搜索框和空状态使用明确的暗色对比度，技能候选在 `$` 随输入过滤之外提供独立搜索框，侧栏 Footer 从服务端 `/health` 显示与响应头一致的当前版本。下一步继续 Windows Supervisor Job Object 与真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc56（已完成）：后台 Shell 执行资源恢复形成闭环。每个后台命令由同版本隐藏 Supervisor 托管，父 Harness 通过匿名 stdin 帧传递命令并持续持有存活管道；正常完成、超时、取消和父端断开均有明确终态，阻塞 stdin 监视不会再拖住 Supervisor 退出。Unix 命令进入独立进程组，且只在仍持有、确认尚未退出的 Child 句柄期间终止整组，避免孤儿子进程与 PID 复用误杀。后台 Shell 生命周期以 `background_shell:<job_id>` 作为持久 Tool 资源，精确绑定 Session、Turn、Task 与 Root Agent；命令、输出、Workspace 和内部错误不进入资源索引或恢复事件。真实子 PID、持久落盘、Runtime 首次重启收敛为 Interrupted 以及第二次重启不重复上报均有自动化证据。下一步为 Windows Supervisor 接入 Job Object kill-on-close，并继续真正强杀 Runtime 后的租约接管测试。
+
+v0.21.0-rc55（已完成）：跨重启执行资源恢复补齐第一组闭环。运行中的 Child Agent 与 Tool 持久收敛为 Interrupted；未应用 Agent 命令收敛为 Rejected；尚未真正启动的外部 Spawn 对应预留 Child 明确收敛为 Failed。恢复过程为本次启动保留一次性资源集合，补写 `agent.interrupted`、`tool.interrupted`、`agent.command_rejected` 与 `agent.spawn_rejected` 脱敏事件，重复调用不重复上报。Child 的专属 Worktree 路径、分支和待审内容原地保留，不自动删除、移动或合并。真实双 Daemon 进程测试从持久中断快照完成首次收敛，再次启动只新增正常 Daemon 生命周期事件，四类恢复事件不重复。
+
+v0.21.0-rc54（已完成）：进程内 Harness 的完整 Task 提交、长等待 Interaction、Agent 命令轮询/回执、带私有配置引用的 Session 创建和 Daemon drain/shutdown 从历史资源路由迁入 `/v1/internal` 私有传输。内部请求除 Runtime Token 外必须携带固定传输标记，缺失或错误时返回 404；公开 `willdeep-runtime-client` 删除未使用的任意 Query GET 与 JSON POST 逃生口，不提供内部生命周期方法。SSE/NDJSON 观察流订阅同一关闭状态，排空时主动结束并由客户端沿游标重附着，不再阻塞 graceful shutdown；若 Web 断线期间 Turn 已完成，则从最新持久 Turn/Core Session 直接恢复最终消息，不依赖已清除的 `active_turn_id`。rc53 升级保留一次 drain/shutdown 兼容桥，rc54 接管后全部使用新边界。单元测试锁定内部标记与 Token、空闲流关闭以及真实 Task/Session/Agent 命令和断线完成竞态；真实双 Daemon 进程测试在活动 Turn 期间保持已排空历史的 NDJSON 长连接，证明旧 Runtime 主动断流后才释放租约，任务无损完成且替换 Runtime 能继续接单。
+
+v0.21.0-rc53（已完成）：CLI 的 Task/Agent 列表与详情、Task 取消、Agent 停止/重试/补充指令、审批、问答和 Diff 命令全部迁入类型化共享 Runtime Client；TUI 的 Turn 提交、事件 Task 归属和 Diff Center 移除旧资源 URL 的 404 回退。公开客户端现在只使用统一控制 API 和显式 Request ID。进程内 Harness 的任务提交、Interaction 挂起恢复、Agent 命令队列与 Daemon drain/shutdown 仍是受 Token 的私有生命周期通道，下一批将把它们与公开 Router 明确分层。
+
+v0.21.0-rc52（已完成）：修复 Runtime 优雅排空可能被终态 Task 遗留的 cancellation 句柄永久阻塞，以及 TCP/本地 Socket 监听器漏收一次性关闭通知后留下半退出进程的问题。排空等待现在以持久 Task 状态为唯一忙碌依据，覆盖 queued、running、cancelling、waiting approval 与 waiting answer；终态 Task 即使残留句柄也能立即完成排空。监听器改用有状态广播信号，晚订阅者同样能看到关闭状态。回归测试锁定全部活动/终态枚举、遗留句柄以及并行/晚订阅监听场景。
+
+v0.21.0-rc51（已完成）：共享 Rust Runtime Client 补齐 `runtime.status`、Workspace 注册/确保/激活/移除与 Session 创建/重命名/Fork/归档/删除/导出的类型化方法；CLI/TUI Workspace、Session 和 Turn 管理不再手写统一操作名、参数 JSON 或 Workspace 旧 HTTP 路由。协议新增前向兼容的 Runtime 健康状态和对象删除/移除结果 DTO，排空时明确返回 `draining`。全部统一 API 修改操作由单一清单进入持久幂等路径；真实 Unix Socket 测试锁定 Token、操作名、Request ID、严格参数和响应解码。
+
+v0.21.0-rc50（已完成）：Web 会话列表公开安全的 `active_turn_id`，新增只按已授权 Session 恢复活动 Turn 的 SSE 端点；Turn、Task、Workspace 与最早回放序号均由服务端重新推导，查询参数严格拒绝客户端选择内部作用域，游标夹在当前 Task 起点与事件头之间。浏览器持久保存当前 Workspace 的最后会话和每个 Turn 的最后事件游标，刷新先加载持久消息再自动附着，普通断线按有界指数退避重连；SSE `id` 与 JSON `cursor` 同步，Tool/Turn 步骤按稳定 ID 去重，终态从 Session 重载正式答案。真实进程测试启动隔离 Web Server、延迟 Mock Provider 和 Runtime，主动断开初始 SSE 后恢复同一 Turn，证明 Provider 仅调用一次且 Assistant 消息不重复。
+
+v0.21.0-rc49（已完成）：Web Runtime Activity 新增当前 Workspace 的后台 Task 安全摘要，侧栏展示进行中与最近五分钟完成的任务，详情提供状态、Profile、耗时、退出码、失败域，并按 `task_id` 过滤最近 Tool 时间线与 Workspace Change Artifact。浏览器 DTO 明确排除 Workspace、Prompt、命令、参数、输出、内部错误、报告、路径、模型、配置和 PID；Rust 序列化回归测试固定边界，React 文案覆盖中英日。
+
+v0.21.0-rc48（已完成）：修复 TUI 侧栏滚动后命中行过滤使用 eager `then_some`，在不可见逻辑行先计算 `row - sidebar_scroll` 并触发整数下溢 panic 的问题。可见范围改为 `saturating_add`，命中行先显式判断再计算饱和偏移，终端坐标也使用饱和加法；极小 24×6 视口、`usize::MAX` 手动滚动和多 Agent 内容回归测试确保滚动只会夹紧，不再退出 TUI 露出原终端。
+
+v0.21.0-rc47（已完成）：Web Runtime 侧栏新增 Agent 与待处理 Task 的显式详情入口；详情按公开 `agent_id` / `task_id` 过滤最近 12 条 Tool 和 8 个 Workspace Change Artifact，展示状态、耗时、模型、Token、当前工具与 Worktree 摘要。组件独立拆分并覆盖中英日；日志边界只使用 Runtime 公开 DTO，测试锁定关联 ID 可用且工具参数、输出、报告、Workspace、路径和内部错误不会进入浏览器。
+
+v0.21.0-rc46（已完成）：TUI Diff Review 打开时优先消费全部 MouseEvent；滚轮以每次三行调整 Diff、文件列表或 Commit Preview 的独立 scroll，点击、移动和其他鼠标事件也不会继续分发给底层聊天区、Composer 或侧栏。Diff 内容标题补充 Wheel/↑↓ 提示，回归测试锁定模态打开时 ScrollUp/ScrollDown 路由和其他事件吞吐。
+
+v0.21.0-rc44（已完成）：修复 Diff Inbox 弹窗虽在最上层渲染、键盘事件却可能先被残留 Task/Agent/Diff 面板截获的问题；打开 Attention 详情时清理互斥覆盖层，D/Enter、Y、N 先于所有底层面板消费。统一 Diff 快照、文件内容、单项审查和审查列表在新控制 API 返回 404 时回退旧 Runtime 路由；弹窗操作错误改为状态提示，不再冒泡退出 TUI。Agent 详情新增可点击的补充指令、停止、重试、指定模型重试和 Worktree Diff 控件，并保护 Composer 既有草稿；`/agent` 扩展 `stop` 与 `retry [--model]`。Web Runtime Agent 侧栏同步增加指定模型重试，模型和 Workspace 请求体严格校验且全部文案覆盖中英日。测试覆盖弹窗按键捕获、按钮命中、草稿保护、命令解析和 Web 请求体。
+
+v0.21.0-rc45（已完成）：TUI 将终端原生文本选择做成状态行常驻入口；按 `Ctrl+S` 后释放鼠标捕获，可在完整输出区拖选并使用系统终端快捷键复制，按 `Esc` 或再次按 `Ctrl+S` 恢复滚动、点击，复制快捷键不会误退出模式。Runtime Agent 状态分组新增 `N`/鼠标入口，`/agent spawn scout|reader|deep <task>` 可显式创建只读子 Agent，并保护 Composer 既有草稿和附件。Web Runtime 侧栏同步提供只读 Profile 与任务输入，只允许当前 Workspace 中的活动父会话；服务端拒绝客户端指定父级、路径或写 Profile。Web 进一步拆分聊天流与控制请求的 Busy 状态，父 Harness 运行时仍能审批、回答和控制 Agent，并轮询同步会话活动状态。
+
+v0.21.0-rc43（已完成）：统一 `agent.retry` 从仅 ID 参数扩展为向后兼容的 `RetryAgentParams { id, model? }`，Rust Client 保留旧方法并新增 `retry_agent_with_model`。模型覆盖只允许终态后台 Child Agent 的重试路径；Harness 为 Chat Completions、Responses 和 Anthropic Provider 克隆原连接、鉴权与协议配置，只替换模型并创建真实 Provider 实例，随后 `SubagentStarted` 生命周期和 Agent Store 更新实际模型。运行中的 Agent 仍拒绝重试/换模，不做半轮热切。TUI 版本号移至侧栏右下角并降低对比度；Workspace Diff Inbox 详情增加键盘和鼠标可点击的查看/通过/拒绝，精确快照记录决定且冲突禁止整批通过。统一 API 404 时 Turn 提交以相同 request ID 回退旧 Session 路由，兼容旧 Daemon 且不自动重启。测试覆盖真实模型切换、协议夹具、按钮命中、版本位置和 404 状态识别。
+
+v0.21.0-rc42（已完成）：TUI Agent 详情增加独立滚动状态，方向键逐行、Page Up/Down 分页、Home/End 首尾跳转，鼠标滚轮在弹窗打开时优先滚动详情而不是底层聊天区。渲染端按终端宽度计算实际换行行数并夹紧偏移，长报告可完整浏览且不会滚入空白区；打开或关闭另一个 Agent 时重置偏移。回归测试覆盖长内容末尾定位和短内容零滚动。
+
+v0.21.0-rc41（已完成）：TUI 从 Agent 侧边栏按 Enter 时调用受 Token 保护的 `agent.get`，只在显式详情视图读取已有结果报告；弹窗按 Agent ID 过滤最近 8 条 Tool Activity 与 Workspace Change Artifact，展示工具状态、耗时和 Diff 变更数量。列表仍使用 `agent.list` 最小摘要，未新增 Prompt 原文持久化或事件下发；Prompt/内部错误只有在完成脱敏、权限与保留策略设计后才继续开放。回归测试覆盖跨 Agent 工具和 Artifact 隔离。
+
+v0.21.0-rc40（已完成）：Runtime Task 与 Agent Store 新增向后兼容的模型字段，Root Agent 创建、Session 下一 Turn 和 Daemon 重启恢复都保留实际模型；Subagent Profile 记录父模型、some.im 默认轻量模型或配置覆盖模型，并随生命周期事件进入 Child Agent。统一协议、TUI 和 Web Agent 树显示父子层级、Profile、模型、状态、当前工具、运行耗时、累计 Token 与专属 Worktree/分支；Web 文案全部通过 i18n。测试覆盖 Root/Child 模型持久化、重启恢复、事件协议和 TUI/Web 安全摘要。
+
+v0.21.0-rc39（已完成）：TUI 侧边栏开始常驻显示编译期 `willdeep_core::VERSION`，用户可直接核对正在运行的二进制是否为当前发版；rc43 后位置调整为低对比度右下角。`/webapp` 保持在 `/` 命令候选中，并加入通用斜杠命令兜底的委派白名单，避免未来分发顺序调整时被误报为未知命令。测试覆盖 `/web` 候选发现和 `/webapp` 不被兜底拦截。
+
+v0.21.0-rc38（已完成）：Core Session 新增向后兼容的压缩代次和最近一次手动压缩检查点，记录压缩前后消息数与时间；TUI 与 Runtime `/compress` 只有在消息确实缩短时才递增代次并原子保存。Runtime Turn 在领取与完成时绑定 Core 压缩代次，精确 Fork 只接受当前代次边界，旧代次不再用失效数组下标截断；Daemon 重启的安全重放也要求代次一致。测试覆盖检查点持久化、旧 Session 兼容、压缩前边界拒绝和压缩后新 Turn 正常 Fork。
+
+v0.21.0-rc37（已完成）：Agent Store 的 Usage 从“覆盖最后一次响应”改为 input/output/total 饱和累计；Provider 缺少 total 时以 input + output 补全。同一 Session Root 绑定下一 Task 时保留累计值，Child Agent 使用同一身份重试时同样保留；当前轮次、工具、报告与终态仍按新执行重置。统一控制 API 与 TUI 右栏复用现有公开字段即可显示正确总量。测试覆盖多次 Usage、Root 跨 Task、Child 重试和 Store 重开后的数值一致性。
+
+v0.21.0-rc36（已完成）：Daemon 启动时不再一律终止活跃 Turn。只有旧 Task 没有任何持久 Tool 活动，且 Core 消息数仍在 `message_start`，或只多出与私有 Turn 队列 Prompt/附件完全一致的一条用户消息，才重置 Task 绑定、保留尝试次数并重新排队；后者通过私有重放标记让 Harness 复用原消息，不修改 Core 历史，连续重启也不会重复。存在工具副作用证据、额外持久消息或任何边界歧义时，完整保留历史并维持 Interrupted。旧 Task 记录为 `task.interrupted`，可恢复 Turn 记录 `turn.requeued`；Pending Approval/Ask User 保守取消，重放再次到达人类门时必须重新申请。测试覆盖已有用户消息、连续两次重启、工具活动阻断和歧义部分输出零删除。
+
+v0.21.0-rc35（已完成）：Core Session 增加向后兼容的 `model`，与 `profile`、私有配置引用一起成为客户端恢复执行设置的来源。TUI 启动、同 Workspace Session 切换和跨 Workspace 切换都改用目标 Session 的 Provider、模型与配置，已有目标配置不再被启动参数覆盖；Fork 同步更新 Core 与 Runtime 两份模型元数据。Runtime 重启后从持久 Session 领取 Turn 的测试验证实际 `SubmitTask` 仍携带原设置。Skills/MCP 不保存可能过期的 Session 权限快照，而由 TaskManager 在每轮执行前从当前持久 Workspace 注册表重新绑定，撤销能力后旧会话也不能恢复它。
+
+v0.21.0-rc34（已完成）：TUI `/goal` 从进程内临时状态迁移为 Core Session 的向后兼容字段。设置和关闭 Goal 都立即原子保存；TUI 启动、Session 原地切换与 Workspace 切换统一从目标 Session 恢复，避免把上一个会话的目标串入新会话。旧 JSON 缺少字段时默认未设置；专门测试覆盖存储往返与会话切换清除临时状态并恢复目标 Goal。
+
+v0.21.0-rc33（已完成）：Runtime Session 元数据从 schema 1 迁移到 schema 2，新增私有 `title_source` 所有权。首次读取旧文件时先原样写入不覆盖的私有备份，再用原子替换持久化新 schema；迁移完成后不重复备份，未来 schema 明确拒绝。新建未命名 Session 在首个 Turn 入队前本地生成最多 80 字符的标题，不调用 Provider；密码、Token、API Key、私钥、常见凭据前缀和高熵字段全部回退通用标题。Rename、收养旧 Core Session 和 Fork 标题保持人工/旧版所有权。专门测试覆盖原始字节备份、单次迁移、未来版本拒绝、人工标题保护、附件标题和敏感 Prompt 不外泄。
+
+v0.21.0-rc32（已完成）：新增 `willdeep daemon upgrade` 的 Drain-and-Handoff。异步读写闸门把新 Turn、Agent Spawn/Retry/Prompt、旧任务领取与 Drain 起点严格串行；旧 Runtime 进入 `draining` 后继续运行现有任务，未领取 Turn 保留在持久队列，活跃任务归零才释放租约并由当前二进制接管。停止、审批、回答和观察仍可用于促使任务收敛。Headless 观察者仅在确认 Runtime Token 更替后重建 Client，沿原事件游标继续，普通连接错误不会伪装成交接。真实二进制 + 延迟 Provider + 两个 Daemon 的进程测试覆盖任务零丢失、新请求未触达 Provider、PID 更替和替换进程继续执行。
+
+v0.21.0-rc31（已完成）：补齐统一控制协议此前仅写入路线图、没有真实 Dispatch 的 `agent.spawn`。请求只接受活跃 Session、Prompt、标签和 `scout`/`reader`/`deep`；Runtime 从 Session → Turn → Task → Root Agent 推导父级与 Workspace，预分配稳定 Child ID，经原 Harness 的命令桥调用同一 SubagentCatalog，并可由 `agent.wait` 等待终态。Core 再次按实际 Profile 工具集合验证只读性，`editor`、未知 Profile、客户端路径和写目标均拒绝。真实二进制 + 等待中的 Root + Mock Provider 测试覆盖 Spawn/Wait 完整链路。
+
+v0.21.0-rc30（已完成）：Headless `willdeep run` 默认创建或续接同一持久 Runtime Session/Turn，按游标分页追平脱敏事件并等待真实终态；`--local` 保留显式进程内兼容入口，进程级凭据和临时 Provider/Harness 覆盖不会序列化到 Runtime。Runtime Task 公共 DTO 增加向后兼容的失败域，CLI 继续稳定区分 Provider、策略和 Harness/Tool 退出码；Ctrl+C 只停止本次精确 Turn。真实二进制 + 隔离 Daemon + 回环 Mock Provider 的进程级测试覆盖两轮续接、持久 Turn 与 Provider 失败。并行场景发现并修复 EventLog 读取未完成 NDJSON 末行的竞态。
+
+v0.21.0-rc29（已完成）：`willdeep doctor --bundle PATH` 可导出标准 ZIP 诊断包，包含稳定 Doctor 报告、仅计数的配置结构摘要和安全说明。包明确排除配置值、Provider/Profile 名称、模型、地址、API Key、Runtime Token、Prompt、工具载荷、日志和本地路径；同目录临时文件写入并同步后以硬链接原子发布，权限为 `0600`，目标存在时拒绝覆盖。ZIP 条目、CRC、EOCD、脱敏、权限和覆盖竞态边界均有回归测试。
+
+v0.21.0-rc28（已完成）：新增顶层 `willdeep doctor [--json]`。诊断完全离线，不联系 Provider；检查当前版本/平台、TOML 安全与 Provider 字段完整性、工作区、Git Worktree、内嵌 Web 资源、Runtime 存活/版本匹配和实际本地传输。报告只表达凭据是否可用，不输出 API Key、Runtime Token、环境变量名、Provider 地址或本地路径；旧 Runtime 版本会明确降级为 Warning。
+
+v0.21.0-rc27（已完成）：新增只读 `git_log` 与 `git_blame` Harness 工具。Log 使用参数化参数支持路径、数量、作者和时间过滤，最多返回 100 条；Blame 必须绑定工作区内既有文件，默认最多 200 行、显式范围最多 2000 行。两者均不经 Shell 拼接、以 `--` 隔离路径并继续受统一输出上限约束；真实临时仓库测试覆盖过滤、范围和目录逃逸。
+
+v0.21.0-rc26（已完成）：新增顶层 `willdeep session list|get|turns|stop`，复用统一 Runtime Client 和稳定公开 DTO。Stop 先读取目标 Session 的 `active_turn_id`，再用独立 Request ID 调用 `turn.stop`；空闲 Session 明确拒绝，避免猜测最近 Turn 或误停其他会话。命令解析、目标选择和隔离 Daemon 启停均已验证。
+
+v0.21.0-rc25（已完成）：新增 `willdeep completions bash|zsh|fish|powershell` 与 `willdeep man`。补全和 roff 文档均从当前 Clap 命令树生成，自动覆盖 `run`、Runtime、配置、集成和全局参数，避免静态脚本与实际 CLI 漂移；四类 Shell 与 man 内容均有生成回归测试。
+
+v0.21.0-rc24（已完成）：新增正式 `willdeep run` 非交互入口，复用同一 Harness 与 Session Store。支持参数或 stdin/`--input` Prompt、可重复文本/PNG/JPEG/WebP/GIF 附件、`--session ID|latest`、text/单对象 JSON/逐事件 NDJSON 和静默模式；全局 Provider/Workspace 参数可放在子命令后。退出码按输入、Provider、策略拒绝和 Harness/Tool 错误稳定分域，机器输出不混入工具参数或报告。
+
+v0.21.0-rc23（已完成）：Web Fetch 在每次重定向前重新做公网 DNS/IP 校验，同域自动跟随、跨域重新审批并拒绝 HTTPS 降级；新增去 Fragment 的环路即时检测。响应体改为流式分块读取，对无 `Content-Length` 的服务器也在超过 3 MiB 时立即中止；保留 8 次跳转、30 秒请求超时和 HTML 可读正文清洗。
+
+v0.21.0-rc22（已完成）：新增 `willdeep config init/check/show`。Init 以私有权限创建示例配置且拒绝覆盖；Check 复用严格 TOML、版本、Provider/Subagent/MCP 与敏感文件权限校验；Show 只输出验证后的配置并强制脱敏内联 API Key。`agent.spawn` 设计审计确认不能把调用方的 `target_file` 直接视为已批准写目标，公开创建能力须接入结构化目标授权后再开放编辑型 Profile。
+
+v0.21.0-rc21（已完成）：稳定 Worktree Review/Merge/Audit/Quarantine 请求与返回 DTO，并将四个此前只列入能力清单、尚未由统一 Dispatch 实现的操作正式接入；Merge/Quarantine 纳入持久幂等。Rust Client 增加对应类型化方法，CLI/TUI bridge 从旧专用 HTTP 端点迁移。`ApiResponse::into_result()` 与标准 `ApiError` 统一成功/错误信封解包，避免各模块复制逻辑。下一步审计阶段 7 所有宣称支持的操作是否真实 Dispatch，并补 `agent.spawn`。
+
+v0.21.0-rc20（已完成）：Rust Runtime Client 新增 Diff Snapshot/Content/Reviews/Review/Verifications/Record Verification/Attributions/Commit Preview/Revert 全套类型化方法；审查、记录验证和撤销显式要求幂等 Request ID。TUI/CLI Diff bridge 的全部统一 API 调用迁移到这些方法，不再手写操作名和返回类型。下一步稳定 Worktree Review/Merge/Audit/Quarantine 公共 DTO 和 Client，并在 Web 展示 Workspace Change Artifact 详情。
+
+v0.21.0-rc19（已完成）：Web Runtime 侧栏支持 Approval 的 Allow Once/Deny/Always Allow，Question 的候选单选、多选提交和自定义回答，以及后台 Agent 的补充 Prompt、停止和重试。服务端每个写端点先重新校验 Runtime 注册 Workspace 与 Web 启动白名单，再确认 Gate/Agent 属于该 Workspace Snapshot；请求体严格拒绝客户端夹带额外作用域。操作完成后立即刷新 Activity，轮询仍负责最终一致性。下一步加入 Web Diff/Artifact 详情和基于 Event Cursor 的 Activity 推送，减少轮询。
+
+v0.21.0-rc18（已完成）：Web Activity API 在既有 Workspace 注册表与启动白名单双重约束内增加 Agent、Approval/Question Gate 和关注项计数；Agent 摘要不下发 Workspace、报告或内部错误。React 将 Runtime 侧栏拆为独立组件，展示 Agent 状态、轮次、待审批/回答详情、工具和产物统计；所有新增文案覆盖中英日。下一步为 Web Gate 增加审批/回答交互，并补 Agent 停止/重试/补充 Prompt。
+
+v0.21.0-rc17（已完成）：Agent Prompt/Wait、Approval Resolve、Question Answer、Event List 与 Workspace Ensure 参数从 daemon 私有结构提升为严格公共 DTO；Agent Command 与 Interaction Result 也改为不含私有 message/error 的稳定返回 DTO。Rust Client 新增 Workspace、Session、Agent、Turn、Task、Approval、Question 和 Event 高频类型化方法，修改操作显式接收幂等 Request ID；TUI bridge 的对应调用以及 Tool/Artifact 查询已迁移。跨语言夹具同步加入控制请求与结果。下一步补齐 Diff/Worktree 类型化 Client，并开始 Web 的 Agent/Inbox 详情交互。
+
+v0.21.0-rc16（已完成）：修正 Rust Runtime Client 的 `tool.get` 与 `artifact.get` 返回契约：成功响应直接包含 `RuntimeTool`/`RuntimeArtifact`，不存在对象由统一 `not_found` 错误信封表达，不再错误声明为 `Option<T>`。新增 Unix Socket 真实 `tool.get` 往返测试，覆盖操作名、ID 参数与直接对象解码。下一步将 Agent、审批、提问和事件的私有参数提升为公共 DTO，并扩展类型化 Client。
+
+v0.21.0-rc15（已完成）：新增固定的 `public-api-v1.json` 跨语言兼容夹具，覆盖 Runtime、Workspace、Session、Agent、Turn、Tool、Task、Approval、Question、Artifact 与 Event 全部 11 类稳定公开对象及响应信封。协议测试逐类反序列化并检查夹具不含 API Key、认证头或 Runtime Token；Object、Capability 和 Transport 的未来新增值统一降级为 `unknown`，避免旧客户端整包解码失败。Swift、Android 与第三方客户端可复用同一文件建立 decoder contract test。下一步扩充修改请求夹具和 Swift 只读观察适配层。
+
+v0.21.0-rc14（已完成）：共享 Rust Runtime Client 新增 `tools/tool/artifacts/artifact` 类型化便捷方法；调用方不再手写 Tool/Artifact 操作名、通用 JSON 参数和返回 DTO。Unix Socket 真实往返测试验证 Token、稳定操作名、过滤参数和响应解码。下一步扩展 Session/Agent/Turn/审批等高频类型化方法，并为 Swift/移动端生成可验证的协议兼容夹具。
+
+v0.21.0-rc13（已完成）：Web 新增受 Runtime 注册表与启动 Workspace 白名单双重约束的 Activity API，React 侧栏每两秒直接消费 Tool/Artifact DTO，展示工具总数、运行数、产物数和最近工具状态；新增文案全部覆盖中英日。下一步继续 Rust Client 类型化便捷方法、Web 详情交互，以及 Swift/移动端兼容验证。
+
+v0.21.0-rc12（已完成）：新增稳定 Artifact DTO 与 `artifact.list/get`。工具窗口内经内容指纹确认的 Diff Attribution 映射为 Workspace Change Artifact，绑定 Session/Turn/Task/Agent、来源快照和变更项数量；公开元数据不泄露 Workspace、文件名或内容，具体读取继续走 Workspace 授权与精确快照保护的 Diff API。11 类 Runtime 公共对象 DTO 至此全部完成。TUI Runtime 快照和右栏已直接消费 Tool/Artifact 查询，显示工作区工具、运行项、产物与最近状态。下一步迁移 Web 展示，并继续 Rust Client 类型化便捷方法。
+
+v0.21.0-rc11（已完成）：新增稳定 `RuntimeTool`、状态和过滤 DTO，以及 `tool.list/get` 统一操作。Runtime 对主/子 Agent Tool Activity 建立有界持久索引，记录 Session/Turn/Task/Agent 归属与毫秒级起止时间，重启时将运行项收敛为 Interrupted。公开记录不保存参数、输出、Workspace 路径或内部错误。下一步稳定 Artifact DTO 与来源绑定，并让 TUI/Web 直接消费 Tool 查询结果。
+
+v0.21.0-rc10（已完成）：`daemon sessions/session/search/rename/fork/archive/export/delete` 与 Turn 提交、列表、查询、停止全部迁移到共享 Runtime Client，因此自动使用 Unix Socket/Windows Named Pipe。Core Session 新增向后兼容的私有配置引用；TUI/Web 收养只通过统一 `session.create` 发送稳定公开字段，Runtime 从 Core Session 恢复配置路径，公共 DTO 明确拒绝 `config`。下一步稳定 Tool、Artifact 公开 DTO 与操作，并继续迁移其他 CLI 兼容命令。
+
+v0.21.0-rc9（已完成）：Runtime Daemon 在 Unix 平台新增权限为 `0600` 的本地 Socket，在 Windows 平台新增拒绝远程连接的随机 Named Pipe；共享 Runtime Client、CLI、TUI 与 Web 优先使用本地传输，旧版 daemon 状态继续回退到受 Token 保护的回环 TCP。能力协商只报告当前实际传输，Unix 清理拒绝覆盖或删除普通文件。macOS 真实 Socket 往返、旧状态兼容和 Windows GNU 目标交叉编译纳入验证。下一步迁移带私有配置引用的 Session 收养和剩余 CLI 兼容命令，并继续稳定 Tool、Artifact DTO。
+
+v0.21.0-rc8（已完成）：协议 crate 新增 Session Search Result、文本/图片附件、Turn Submit/List 参数 DTO，以及 `session.search`、`turn.list` 稳定操作。统一 API 实现组合搜索、Turn 提交/列表/查询/停止；TUI Session 搜索和 TUI/Web Turn bridge 使用共享 Runtime Client。提交入口限制 Prompt、附件数量、文本长度、图片 MIME/尺寸与总载荷，并拒绝客户端夹带 Workspace/权限字段。下一步实现 Unix Socket 与 Windows Named Pipe，并继续迁移带私有配置引用的 Session 收养和 CLI 兼容命令。
+
+v0.21.0-rc7（已完成）：统一 API 实现 Session 创建、重命名、Fork、归档/恢复、删除和导出，修改操作纳入跨重启 Request ID 幂等；协议 crate 新增严格拒绝未知字段的 Session 管理参数 DTO。Web Session 列表、重命名、Fork、归档、删除和导出 bridge 改用共享 Runtime Client，浏览器 Workspace 白名单校验保持在调用前。下一步迁移 Session 创建/Turn 提交与搜索，并实现 Unix Socket 与 Windows Named Pipe。
+
+v0.21.0-rc6（已完成）：协议 crate 新增 Diff Snapshot、File、Content、Review、Verification、Attribution、Commit Preview 与 Revert 稳定 DTO；统一 API 覆盖全部 Diff 读写操作，TUI Diff Center bridge 改用共享 Runtime Client。审查、验证记录和安全撤销纳入跨重启 Request ID 幂等，服务端继续执行 Workspace 授权、精确 Snapshot、敏感命令过滤、内容上限和 Recovery 保守撤销。下一步迁移 Web Session 管理，并实现 Unix Socket 与 Windows Named Pipe。
+
+v0.21.0-rc1（已完成）：新增独立 `willdeep-runtime-protocol` crate，定义协议 `1.0`、11 类控制对象、稳定 namespaced operation、能力/传输/限制、统一成功/错误信封和错误码。Runtime 新增显式 Token 校验的 `GET /v1/capabilities`，支持 `x-willdeep-request-id` 回显；CLI 新增 `daemon capabilities`。旧 `/v1/*` 原始 DTO 保持兼容，下一步实现统一 `willdeep api` 调度并逐步迁移到共享 DTO。
+
+v0.21.0-rc2（已完成）：新增受 Token 保护的 `POST /v1/api`、`willdeep api` 与可续传 `/v1/events/stream.ndjson`；修改类调用以 Request ID 做有界幂等去重且不缓存 Prompt 明文，内部错误对客户端脱敏。新增 `willdeep-runtime-client` crate，CLI 的统一调用、能力协商和 NDJSON 消费已迁移。TUI 新增仅回环监听的 `/webapp [status|127.0.0.1:PORT]`，可从 Prompt 启动当前 Workspace 的内嵌 Web App。下一步稳定共享 DTO、迁移 TUI/Web，并补持久幂等与本地 Unix Socket/Windows Named Pipe。
+
+v0.21.0-rc3（已完成）：协议 crate 新增 Session/Turn/Agent/Event 公开 DTO，排除配置路径、队列 Prompt/附件、内部错误等存储字段；统一 API 与 Agent Wait 返回公开结构。公共事件边界兼容净化新旧 Tool 参数/输出、Agent 报告、Workspace 路径和错误。TUI 的 NDJSON 实时事件、Agent 列表/补充 Prompt/停止/重试、审批和回答迁移到共享 Client。下一步迁移 Approval/Question/Task/Diff DTO、Web Client，并实现持久幂等与 Unix Socket/Windows Named Pipe。
+
+v0.21.0-rc4（已完成）：协议新增 Task、Pending Approval/Question DTO 和统一 list/get/cancel 操作；TUI Inbox、Task 取消及 Web/TUI 事件补读迁移到共享 Client。修改类请求以只保存指纹和脱敏响应的 Pending→Completed 日志跨重启去重，Pending 落盘失败时不执行，不确定崩溃窗口不自动重放。下一步迁移 Workspace/Diff/Web 管理操作，并实现 Unix Socket 与 Windows Named Pipe。
+
+v0.21.0-rc5（已完成）：协议新增 Workspace/Access/注册参数公开 DTO，统一 API 补齐 register/ensure/activate/remove 并纳入持久幂等；TUI `/workspace` 与 Web 启动/列表 bridge 迁移到共享 Client。新 Workspace 事件只记录稳定 ID，路径继续由 Runtime 规范化，公开路径保持可选以支持未来远程裁剪。下一步迁移 Diff/Web Session 管理并实现 Unix Socket 与 Windows Named Pipe。
+
+v0.20.0-rc6（已完成）：新增受 Runtime Token 保护的 `worktrees-audit` 与 `quarantine-agent-worktree --snapshot <ID> --yes` API/CLI。审计区分 Active、Reviewable、Merged、Clean、Quarantined、Missing、Unknown；活动、未合并、冲突、未跟踪、快照变化、路径越界或无 Agent 记录全部拒绝隔离。安全对象通过 `git worktree move` 整体迁入 Recovery，文件、脏状态、Git 关联和分支完整保留，持久化失败时尝试原路回滚。验收测试证明两个专属 Worktree 可同时修改同一文件而互不影响，根工作区保持原内容；阶段 6 完成。
+
+v0.20.0-rc5（已完成）：子 Agent 完成报告附带有界 Worktree 状态；新增受 Token 保护的 Worktree Review/合并 API，以及 `agent-worktree-review`、`merge-agent-worktree --review <ID> --yes` CLI。Review ID 同时绑定 Agent、Child 快照、Root 快照和二进制补丁，TUI Agent 详情以 `W` 审查、`M` 显式批准；Root/Child 任一变化、同文件冲突、未跟踪文件、未解决冲突或超过 2 MiB 的补丁都会阻断，合并不提交、不推送、不清理 Worktree。下一步实现孤儿 Worktree 检测与保守清理。
+
+v0.20.0-rc4（已完成）：内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；已审批目标按根工作区相对路径安全映射，Runtime Child Agent 持久记录实际 Workspace、根 Workspace、分支和隔离模式，写工具 Diff 归因改在 Child Worktree 内采集。`[subagents.<profile>].worktree` 可显式选择 `shared` 或 `dedicated`；任务结束不自动删除 Worktree。下一步实现结构化 Diff 回流、冲突预检和合并审批。
+
+v0.20.0-rc3（已完成）：Web 工作区 API 与选择器改为读取 Runtime 注册表，并与 `--workspace/--web-workspace` 白名单取交集；返回稳定 ID、名称、active 和访问模式，Composer Skills 应用 Workspace 允许列表，新会话优先 Workspace Provider。自动注册采用原子 `ensure`，不会覆盖用户已有策略。按 Coding Agent 语义，允许目录默认 `workspace-write`（文件写入免审），Shell、MCP、网络和越界访问继续审批；`read-only` 仅显式启用。下一步进入子 Agent 专属 Worktree 与 Diff 回流。
+
+v0.20.0-rc2（已完成）：TUI 新增 `/workspace list|switch <id>` 并进入 `/` 候选；切换前保存当前 Session 状态，恢复或创建目标 Workspace Session，重建 Runtime 事件跟随、右栏状态、Skills 与移动会话指向。旧 Workspace 后台任务继续运行；为防止复用启动时绑定旧路径的进程内工具，跨 Workspace 后 `/local` 保守拒绝。下一步让 Web 使用 Runtime Workspace 注册表，而非仅使用启动参数白名单。
+
+v0.20.0-rc1（已完成）：新增持久 Workspace 注册表与受 Token 保护的注册、更新、列表、激活、删除 API/CLI；任务和 Session 自动收养目录，默认 Provider、Skill/MCP 允许列表进入 Harness。访问策略只能由 Runtime 注册表注入，客户端字段不参与反序列化；只读策略在审批前阻止 Shell、文件写入、Worktree、MCP 和 Editor 子 Agent。切换默认 Workspace 不修改既有 Task/Session 根目录，删除注册不删除文件或历史。下一步接入 TUI/Web Workspace 切换器与路径边界重建。
+
+v0.19.0-rc8（已完成）：TUI Inbox 的完成/取消 Runtime 任务仅保留 5 分钟；等待审批/回答的任务详情与实际 Interaction 建立 Task ID 关联，点击任务或按 Enter 会直接打开可操作的审批/回答框。下一步继续阶段 6 的 Workspace 注册表。
+
+v0.19.0-rc7（已完成）：Runtime 在主/子 Agent 的潜在写工具调用窗口前后采集内容指纹，新增持久 Diff Attribution 链和受保护 API/CLI；TUI Diff Review 在文件行展示最近责任 Agent 与工具。预先存在但窗口内未变化的脏文件不会被误归属。阶段 5 已完成，下一步进入多 Workspace/Worktree 注册、切换和权限隔离。
+
+v0.19.0-rc6（已完成）：Runtime/CLI/TUI 加入只读 Commit Preview，基于精确 Diff 快照展示提交消息、分支、暂存状态、脱敏 Remote、推送目标和可选 Tag；敏感文件/凭据、冲突、空暂存区、Detached HEAD 与无效目标会阻断确认。同时增加聊天纯净度回归测试，确保轮次和内部 ID 不进入对话区。下一步完成 Diff 的 Turn/Agent 归属绑定。
+
+v0.19.0-rc5（已完成）：常见前后台测试命令自动把命令、退出码、状态与有界摘要绑定到完成时的精确 Diff 快照；Runtime API、CLI 和 TUI 共用记录，普通或疑似含凭据命令不持久化。
+
+v0.19.0-rc4（已完成）：修复 TUI/Web 隐式启动 Runtime 时启动提示穿透 Ratatui、污染 Prompt 区域；提交确认和 Turn/Agent/Runtime ID 不再进入聊天记录，AI 完成消息只显示真实返回内容。显式 `daemon start` 仍保留控制台反馈。
+
+v0.19.0-rc3（已完成）：Runtime/CLI/TUI 加入持久审查决策和精确快照安全撤销；TUI 支持接受、打回、请求修改、标记已审及撤销二次确认，未跟踪/新增内容移入 Recovery，冲突文件拒绝自动撤销。
+
+v0.19.0-rc2（已完成）：TUI Diff Review 加入 Unified/Side-by-side 双视图、Combined/Staged/Unstaged 范围切换、当前文件搜索、高亮和前后跳转；Diff 与通用渲染逻辑拆分后主 TUI 文件降至 3000 行以内。
+
+v0.19.0-rc1（已完成）：Diff Review Center 首批加入带内容指纹的 Workspace 快照、受 Token 保护的 Runtime/CLI 文件 Diff API，以及 TUI `/diff` 文件导航、滚动和 Unified Diff 着色；路径穿越、符号链接逃逸、陈旧快照和超大输出均保守拒绝或限制。
+
+v0.18.0-rc3（已完成）：Agent Mission Control 第二批加入有界结果报告持久化、CLI/TUI 独立 Agent 详情、运行中追加指令，以及补充指令正文投递后清除的脱敏审计。
+
+v0.18.0-rc2（已完成）：Agent Mission Control 首批加入 Profile Token 总预算、执行超时、连续失败熔断，以及 Runtime/TUI 策略快照展示。
+
+v0.18.0-rc1（已完成）：完成 Herdr 官方资料研究、许可证与架构边界文档、`integrations herdr status` 诊断命令，以及 Runtime Task → Herdr Pane 的去重、非阻塞聚合状态上报。Herdr 未安装或上报失败不影响 Harness。
 
 ## 6. 建议执行顺序
 
 1. [x] 发布 `v0.17.0-rc3`：Web 与 TUI 共用 Runtime Session/Turn、持久事件、停止和历史。
 2. [x] 发布 `v0.17.0-rc4`：主 Harness 迁入 Runtime 进程内生命周期，移除每 Turn 子进程过渡层。
 3. [x] 发布 `v0.17.0-rc5`：完成异常退出、租约接管、孤儿状态收敛、恢复事件续传和 Pending Interaction 优雅停止测试。
-4. [-] 已实现完整会话 Rename、快照 Fork、归档、删除、导出和基础全文搜索；下一步完成指定 Turn Fork、TUI 原地切换与组合筛选。
-5. [ ] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
-6. [ ] 实现 Agent Mission Control、预算限制、失败熔断和结果回流。
-7. [ ] 实现 Diff Review Center、多 Workspace 与安全 Worktree 合并。
-8. [ ] 稳定统一控制 API 与 Rust Client Library，让 TUI 不再直接持有 Harness 业务逻辑。
+4. [x] 已实现完整会话 Rename、快照/指定 Turn Fork、Fork Provider/模型覆盖、TUI 原地切换、归档、删除、导出和组合搜索。
+5. [x] 实现请求幂等、能力协商以及 Unix Socket/Windows Named Pipe 跨平台本地传输。
+6. [x] 实现 Agent Mission Control、预算限制、失败熔断、独立详情、补充指令和结果回流。
+7. [x] 实现 Diff Review Center、多 Workspace、安全 Worktree 审查/合并/隔离与孤儿审计。
+8. [-] 统一控制 API 与 Rust Client Library 已稳定覆盖全部公开操作；继续迁移旧 Daemon 兼容命令和进程内 Harness 专用控制路由。
 9. [ ] 让 Web、移动端和 Swift App 逐步迁移到统一 Runtime API。
-10. [ ] 补齐 Workflow、插件、Herdr 互操作和 Computer Use。
+10. [-] Herdr 首批状态上报已完成；继续补齐 Pane 关联、跳转、Workflow、插件和 Computer Use。
 11. [ ] 完成可观测性、跨平台测试、安全审计与 Swift Harness 替换，发布 `1.0.0`。
 
 关键路径固定为：`Runtime 持久化 → 会话恢复 → Agent 生命周期 → Diff/Workspace → 统一 API → Web/移动端/Swift 共用内核`。Herdr、Computer Use 和客户端视觉增强可以穿插推进，但不能形成独立于 Runtime 的第二套任务状态机。
@@ -251,7 +413,7 @@ v0.17.0-rc6（已完成）：Runtime/CLI/TUI/Web 已接入 Session Rename、完�
 - [x] 同一 Session 严格串行、请求幂等、取消、事件持久化和重启恢复。
 - [x] TUI 普通输入使用 Runtime Session/Turn。
 - [x] Web 使用相同 Session/Turn、历史和事件；浏览器只提交与观察，不再持有独立 Harness 生命周期。
-- [ ] Headless CLI 使用相同 Runtime。
+- [x] Headless CLI 使用相同 Runtime；`--local` 为显式兼容入口，进程级敏感覆盖不进入持久任务。
 - [x] Harness 从每 Turn 子进程过渡为 Daemon 内原生 Future；异常退出明确收敛为 Interrupted。
 - [-] 已清理重启后的孤儿 Task/Interaction/PID 并补写恢复事件；Session 并发写保护、能力诊断和更细粒度资源审计待完成。
 
@@ -317,23 +479,25 @@ v0.17.0-rc6（已完成）：Runtime/CLI/TUI/Web 已接入 Session Rename、完�
 - [ ] TUI 可用树或网格查看、切换、接管、停止和重试 Agent。
 - [ ] Agent 独立提交，Review Agent 审查，合并前检测 Worktree 冲突。
 - [ ] Runtime/PTY/Agent Team 保持跨平台；Tmux 和 Herdr 仅作为可选适配器。
-- [ ] Herdr 生命周期上报、Pane 关联、精确跳转及外部 Codex/Claude/OpenCode Agent 启动。
+- [-] Herdr 生命周期上报和诊断已完成；Pane 关联、精确跳转及外部 Codex/Claude/OpenCode Agent 启动待完成。
 
 ### 7.9 Workspace、Git 与 Review Center
 
-- [ ] 注册、删除、切换和多 Workspace Session，每个 Workspace 有独立权限、Provider、Skills 和 MCP。
-- [ ] 只读/可写策略、路径边界重建、任务跨切换继续运行和并发修改保护。
-- [ ] Worktree 创建、绑定、回收、孤儿检测、冲突检测和保守合并。
-- [ ] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
-- [ ] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
-- [ ] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
+- [x] 注册、删除、切换和多 Workspace Session，每个 Workspace 有独立权限、Provider、Skills 和 MCP。
+- [x] 只读/可写策略、路径边界重建、任务跨切换继续运行和基于精确快照的并发修改保护。
+- [x] Worktree 创建、绑定、回收、孤儿检测、冲突检测、保守合并和可恢复隔离。
+- [x] 按 Turn/Agent/文件追踪 Diff，TUI Unified/Side-by-side Review。
+- [x] 接受、打回、请求重改、标记已审和不覆盖用户修改的安全撤销。
+- [x] 测试结果、Commit Preview、敏感文件检查、Tag 和推送目标确认。
 
 ### 7.10 工具与浏览器能力
 
 - [x] 文件、Git、Shell、Web Search/Fetch、MCP、Skills、后台任务和子 Agent 基础工具。
-- [ ] 符号索引、引用查找、诊断、结构化测试结果、Git Log/Blame、下载和转换工具。
+- [x] Git Log/Blame 有界只读历史工具。
+- [ ] 符号索引、引用查找、诊断、结构化测试结果、下载和转换工具。
 - [x] Web Fetch 支持常用同域重定向。
-- [ ] 跨域重定向风险控制、循环/次数/大小/超时限制、HTML 正文、PDF 和引用来源。
+- [x] 跨域重定向风险控制、循环/次数/大小/超时限制和 HTML 正文。
+- [ ] PDF 正文提取和引用来源结构化输出。
 - [ ] 浏览器截图与自动化；Cookie 和登录态必须明确授权并防止 SSRF/云元数据访问。
 - [ ] 盘点 Xedit 工具并以统一权限描述逐项迁移。
 
@@ -348,11 +512,13 @@ v0.17.0-rc6（已完成）：Runtime/CLI/TUI/Web 已接入 Session Rename、完�
 
 ### 7.12 CLI、配置、Skills 与上下文
 
-- [ ] `willdeep run`、stdin、JSON/NDJSON、quiet、稳定退出码、Session 继续/查询/停止和附件参数。
-- [ ] Bash、Zsh、Fish、PowerShell 补全和 man page。
+- [x] `willdeep run`、stdin、JSON/NDJSON、quiet、稳定退出码、Session 继续和附件参数。
+- [x] 顶层 Session 查询/停止命令。
+- [x] Bash、Zsh、Fish、PowerShell 补全和 man page。
 - [x] TOML Provider/Profile、API Base、API Key 环境变量引用和 some.im 区分。
 - [ ] 多 Provider 能力、视觉回退、审批、Workspace、Runtime、Web、移动网关和分层覆盖配置。
-- [ ] `config init/check/show`，系统 Keychain/Secret Service，严格避免密钥进入仓库或日志。
+- [x] `config init/check/show`，严格校验并脱敏输出，避免密钥进入仓库或日志。
+- [ ] 系统 Keychain/Secret Service 凭据存储。
 - [x] Skills 名称/描述发现、按需正文读取和 `$` 触发。
 - [ ] Skills 分层、版本、参数、权限、安装、更新、禁用和执行审计。
 - [x] `/compress` 手动压缩。

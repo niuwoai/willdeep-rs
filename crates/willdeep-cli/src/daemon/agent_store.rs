@@ -24,13 +24,37 @@ pub(crate) struct RuntimeAgent {
     #[serde(default)]
     pub background: bool,
     pub workspace: PathBuf,
+    #[serde(default)]
+    pub root_workspace: Option<PathBuf>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub dedicated_worktree: bool,
+    #[serde(default)]
+    pub worktree_merged_review_id: Option<String>,
+    #[serde(default)]
+    pub worktree_merged_child_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub worktree_merged_at: Option<u64>,
+    #[serde(default)]
+    pub worktree_quarantined_at: Option<u64>,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: RuntimeAgentStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_turns: Option<u64>,
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub report: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,
@@ -40,12 +64,14 @@ pub(crate) struct RuntimeAgent {
 pub(super) struct AgentStore {
     path: PathBuf,
     agents: Mutex<HashMap<uuid::Uuid, RuntimeAgent>>,
+    recovered_after_restart: Mutex<Vec<RuntimeAgent>>,
 }
 
 impl AgentStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut agents = load_agents(&path)?;
         let mut changed = false;
+        let mut recovered_after_restart = Vec::new();
         for agent in agents.values_mut() {
             if matches!(
                 agent.status,
@@ -58,6 +84,7 @@ impl AgentStore {
                 agent.completed_at = Some(now());
                 agent.updated_at = now();
                 agent.error = Some("Runtime restarted while agent was active".to_owned());
+                recovered_after_restart.push(agent.clone());
                 changed = true;
             }
         }
@@ -67,7 +94,16 @@ impl AgentStore {
         Ok(Self {
             path,
             agents: Mutex::new(agents),
+            recovered_after_restart: Mutex::new(recovered_after_restart),
         })
+    }
+
+    pub fn take_recovered_after_restart(&self) -> Result<Vec<RuntimeAgent>> {
+        let mut recovered = self
+            .recovered_after_restart
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime recovered Agent index lock poisoned"))?;
+        Ok(std::mem::take(&mut *recovered))
     }
 
     pub fn ensure_root(
@@ -75,6 +111,7 @@ impl AgentStore {
         task_id: uuid::Uuid,
         workspace: PathBuf,
         profile: Option<String>,
+        model: Option<String>,
         status: RuntimeAgentStatus,
     ) -> Result<RuntimeAgent> {
         let mut agents = self.lock()?;
@@ -89,13 +126,25 @@ impl AgentStore {
             label: Some("root".to_owned()),
             background: false,
             workspace,
+            root_workspace: None,
+            worktree_branch: None,
+            dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
             profile,
+            model,
             status,
             current_turn: 0,
             current_tool: None,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -112,19 +161,29 @@ impl AgentStore {
         task_id: uuid::Uuid,
         workspace: PathBuf,
         profile: Option<String>,
+        model: Option<String>,
         status: RuntimeAgentStatus,
     ) -> Result<RuntimeAgent> {
         let mut agents = self.lock()?;
         if let Some(agent) = agents.get_mut(&id) {
             agent.task_id = task_id;
             agent.workspace = workspace;
+            agent.root_workspace = None;
+            agent.worktree_branch = None;
+            agent.dedicated_worktree = false;
+            agent.worktree_merged_review_id = None;
+            agent.worktree_merged_child_snapshot_id = None;
+            agent.worktree_merged_at = None;
+            agent.worktree_quarantined_at = None;
             agent.profile = profile;
+            agent.model = model;
             agent.status = status;
             agent.current_turn = 0;
             agent.current_tool = None;
-            agent.input_tokens = None;
-            agent.output_tokens = None;
-            agent.total_tokens = None;
+            agent.max_turns = None;
+            agent.token_budget = None;
+            agent.timeout_seconds = None;
+            agent.report = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -140,13 +199,25 @@ impl AgentStore {
             label: Some("root".to_owned()),
             background: false,
             workspace,
+            root_workspace: None,
+            worktree_branch: None,
+            dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
             profile,
+            model,
             status,
             current_turn: 0,
             current_tool: None,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -161,6 +232,76 @@ impl AgentStore {
         let mut agents = self.lock()?.values().cloned().collect::<Vec<_>>();
         agents.sort_by_key(|agent| std::cmp::Reverse(agent.created_at));
         Ok(agents)
+    }
+
+    pub fn reserve_external_child(
+        &self,
+        id: uuid::Uuid,
+        parent_id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        profile: String,
+        label: Option<String>,
+    ) -> Result<RuntimeAgent> {
+        let mut agents = self.lock()?;
+        if agents.contains_key(&id) {
+            bail!("Runtime Agent ID already exists");
+        }
+        let parent = agents
+            .get(&parent_id)
+            .filter(|agent| agent.parent_id.is_none() && agent.task_id == task_id)
+            .context("active Runtime root agent not found")?
+            .clone();
+        let timestamp = now();
+        let agent = RuntimeAgent {
+            id,
+            parent_id: Some(parent_id),
+            task_id,
+            label,
+            background: true,
+            workspace: parent.workspace.clone(),
+            root_workspace: Some(parent.workspace),
+            worktree_branch: None,
+            dedicated_worktree: false,
+            worktree_merged_review_id: None,
+            worktree_merged_child_snapshot_id: None,
+            worktree_merged_at: None,
+            worktree_quarantined_at: None,
+            profile: Some(profile),
+            model: None,
+            status: RuntimeAgentStatus::Queued,
+            current_turn: 0,
+            current_tool: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            max_turns: None,
+            token_budget: None,
+            timeout_seconds: None,
+            report: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            completed_at: None,
+            error: None,
+        };
+        agents.insert(id, agent.clone());
+        persist_agents(&self.path, &agents)?;
+        Ok(agent)
+    }
+
+    pub fn reject_external_child(&self, id: uuid::Uuid, error: String) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime Agent not found")?;
+        if !matches!(
+            agent.status,
+            RuntimeAgentStatus::Queued | RuntimeAgentStatus::Interrupted
+        ) {
+            return Ok(());
+        }
+        agent.status = RuntimeAgentStatus::Failed;
+        agent.updated_at = now();
+        agent.completed_at = Some(now());
+        agent.error = Some(error);
+        persist_agents(&self.path, &agents)
     }
 
     pub fn get(&self, id: uuid::Uuid) -> Result<Option<RuntimeAgent>> {
@@ -190,6 +331,30 @@ impl AgentStore {
         })
     }
 
+    pub fn mark_worktree_merged(
+        &self,
+        id: uuid::Uuid,
+        review_id: String,
+        child_snapshot_id: String,
+    ) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime agent not found")?;
+        agent.worktree_merged_review_id = Some(review_id);
+        agent.worktree_merged_child_snapshot_id = Some(child_snapshot_id);
+        agent.worktree_merged_at = Some(now());
+        agent.updated_at = now();
+        persist_agents(&self.path, &agents)
+    }
+
+    pub fn mark_worktree_quarantined(&self, id: uuid::Uuid, path: PathBuf) -> Result<()> {
+        let mut agents = self.lock()?;
+        let agent = agents.get_mut(&id).context("Runtime agent not found")?;
+        agent.workspace = path;
+        agent.worktree_quarantined_at = Some(now());
+        agent.updated_at = now();
+        persist_agents(&self.path, &agents)
+    }
+
     pub fn apply_harness_event(&self, task_id: uuid::Uuid, line: &str) -> Result<()> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             return Ok(());
@@ -215,9 +380,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("usage") => self.update_task_agent(task_id, |agent| {
-                agent.input_tokens = value.get("input_tokens").and_then(|value| value.as_u64());
-                agent.output_tokens = value.get("output_tokens").and_then(|value| value.as_u64());
-                agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
+                accumulate_usage(agent, &value);
                 agent.updated_at = now();
             }),
             Some("subagent_started") => self.create_child_from_event(task_id, &value),
@@ -242,9 +405,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("subagent_usage") => self.update_child_from_event(&value, |agent| {
-                agent.input_tokens = value.get("input_tokens").and_then(|value| value.as_u64());
-                agent.output_tokens = value.get("output_tokens").and_then(|value| value.as_u64());
-                agent.total_tokens = value.get("total_tokens").and_then(|value| value.as_u64());
+                accumulate_usage(agent, &value);
                 agent.updated_at = now();
             }),
             _ => Ok(()),
@@ -268,6 +429,10 @@ impl AgentStore {
                 .get("profile")
                 .and_then(|value| value.as_str())
                 .map(ToOwned::to_owned);
+            agent.model = value
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
             agent.label = value
                 .get("label")
                 .and_then(|value| value.as_str())
@@ -276,12 +441,29 @@ impl AgentStore {
                 .get("background")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(agent.background);
+            agent.workspace = event_path(value, "workspace").unwrap_or(agent.workspace.clone());
+            agent.root_workspace = event_path(value, "root_workspace");
+            agent.worktree_branch = value
+                .get("worktree_branch")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            agent.dedicated_worktree = value
+                .get("dedicated_worktree")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            agent.worktree_merged_review_id = None;
+            agent.worktree_merged_child_snapshot_id = None;
+            agent.worktree_merged_at = None;
+            agent.worktree_quarantined_at = None;
             agent.status = RuntimeAgentStatus::Running;
             agent.current_turn = 0;
             agent.current_tool = None;
-            agent.input_tokens = None;
-            agent.output_tokens = None;
-            agent.total_tokens = None;
+            agent.max_turns = value.get("max_turns").and_then(|value| value.as_u64());
+            agent.token_budget = value.get("token_budget").and_then(|value| value.as_u64());
+            agent.timeout_seconds = value
+                .get("timeout_seconds")
+                .and_then(|value| value.as_u64());
+            agent.report = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -307,9 +489,27 @@ impl AgentStore {
                     .get("background")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
-                workspace: parent.workspace,
+                workspace: event_path(value, "workspace")
+                    .unwrap_or_else(|| parent.workspace.clone()),
+                root_workspace: event_path(value, "root_workspace").or(Some(parent.workspace)),
+                worktree_branch: value
+                    .get("worktree_branch")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                dedicated_worktree: value
+                    .get("dedicated_worktree")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                worktree_merged_review_id: None,
+                worktree_merged_child_snapshot_id: None,
+                worktree_merged_at: None,
+                worktree_quarantined_at: None,
                 profile: value
                     .get("profile")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                model: value
+                    .get("model")
                     .and_then(|value| value.as_str())
                     .map(ToOwned::to_owned),
                 status: RuntimeAgentStatus::Running,
@@ -318,6 +518,12 @@ impl AgentStore {
                 input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                max_turns: value.get("max_turns").and_then(|value| value.as_u64()),
+                token_budget: value.get("token_budget").and_then(|value| value.as_u64()),
+                timeout_seconds: value
+                    .get("timeout_seconds")
+                    .and_then(|value| value.as_u64()),
+                report: None,
                 created_at: timestamp,
                 updated_at: timestamp,
                 completed_at: None,
@@ -346,6 +552,10 @@ impl AgentStore {
         };
         agent.updated_at = now();
         agent.completed_at = Some(now());
+        agent.report = value
+            .get("report")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
         persist_agents(&self.path, &agents)
     }
 
@@ -389,6 +599,38 @@ impl AgentStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime agent store lock poisoned"))
     }
+}
+
+fn accumulate_usage(agent: &mut RuntimeAgent, value: &serde_json::Value) {
+    let input = value.get("input_tokens").and_then(|value| value.as_u64());
+    let output = value.get("output_tokens").and_then(|value| value.as_u64());
+    let total = value
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            (input.is_some() || output.is_some()).then(|| {
+                input
+                    .unwrap_or_default()
+                    .saturating_add(output.unwrap_or_default())
+            })
+        });
+    agent.input_tokens = saturating_optional_add(agent.input_tokens, input);
+    agent.output_tokens = saturating_optional_add(agent.output_tokens, output);
+    agent.total_tokens = saturating_optional_add(agent.total_tokens, total);
+}
+
+fn saturating_optional_add(current: Option<u64>, increment: Option<u64>) -> Option<u64> {
+    increment.map_or(current, |increment| {
+        Some(current.unwrap_or_default().saturating_add(increment))
+    })
+}
+
+fn event_path(value: &serde_json::Value, field: &str) -> Option<PathBuf> {
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn load_agents(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeAgent>> {

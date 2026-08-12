@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use http::header::HeaderValue;
-use qrcode::QrCode;
+use qrcode::{EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
@@ -17,6 +17,19 @@ use uuid::Uuid;
 const DEFAULT_RELAY_BASE_URL: &str = "https://j.niuwoai.com";
 const PROTOCOL_VERSION: &str = "mobile-gateway.v1";
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const ROOM_PREFIX: &str = "wd-";
+/// 128 位随机 token 的十六进制长度；配对 JSON 里出现两次，是二维码尺寸的大头。
+const TOKEN_HEX_LEN: usize = 32;
+const ROOM_ID_HEX_LEN: usize = 32;
+/// 桌面名只是给手机端展示，超长主机名会白白把二维码撑大一个版本。
+const MAX_DESKTOP_NAME_LEN: usize = 16;
+/// 配对二维码在终端里的尺寸（含 4 模块静区）：65 模块 + 静区 = 73 列，
+/// Dense1x2 一个字符格装两行模块，所以是 37 行。再大弹窗就开始吞掉整屏。
+/// 仅作为回归测试的断言基准。
+#[cfg(test)]
+const MAX_QR_WIDTH: usize = 73;
+#[cfg(test)]
+const MAX_QR_HEIGHT: usize = 37;
 
 #[derive(Clone, Debug)]
 pub struct MobilePrompt {
@@ -116,19 +129,37 @@ impl RelayCredentials {
             validate_secret_permissions(&path)?;
             let contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("read relay credentials: {}", path.display()))?;
-            return toml::from_str(&contents).context("parse mobile relay credentials");
+            let existing: Self =
+                toml::from_str(&contents).context("parse mobile relay credentials")?;
+            if existing.is_compact() {
+                return Ok(existing);
+            }
         }
         std::fs::create_dir_all(home)?;
-        let credentials = Self {
-            relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
-            room: format!("willdeep-cli-{}", Uuid::new_v4()),
-            token: random_token(),
-        };
+        let credentials = Self::generate();
         let temporary = home.join(format!(".mobile-relay-{}.tmp", Uuid::new_v4()));
         std::fs::write(&temporary, toml::to_string_pretty(&credentials)?)?;
         set_secret_permissions(&temporary)?;
         std::fs::rename(&temporary, &path)?;
         Ok(credentials)
+    }
+
+    fn generate() -> Self {
+        Self {
+            relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
+            room: format!("{ROOM_PREFIX}{}", Uuid::new_v4().simple()),
+            token: random_token(),
+        }
+    }
+
+    /// 旧版凭据用 128 位 token ×2 + 带连字符的 UUID room，配对 JSON 会撑到 437 字节，
+    /// 二维码要 81×81 模块，几乎铺满终端。命中旧格式就换成紧凑格式重新落盘（手机重新扫码即可）。
+    fn is_compact(&self) -> bool {
+        self.token.len() <= TOKEN_HEX_LEN
+            && self
+                .room
+                .strip_prefix(ROOM_PREFIX)
+                .is_some_and(|id| id.len() <= ROOM_ID_HEX_LEN && !id.contains('-'))
     }
 
     fn websocket_url(&self) -> String {
@@ -273,8 +304,11 @@ fn error_envelope(id: Option<&str>, message: &str) -> String {
         .to_string()
 }
 
+/// 终端里一个模块占一个字符格，纠错等级越高模块越多。屏幕上的二维码不会被印污或折损，
+/// L 级（7% 冗余）足够，比默认的 M 级少一到两个版本，宽度直接省掉十几列。
 fn render_qr(payload: &str) -> Result<String> {
-    let code = QrCode::new(payload.as_bytes()).context("encode mobile pairing QR")?;
+    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L)
+        .context("encode mobile pairing QR")?;
     Ok(code
         .render::<qrcode::render::unicode::Dense1x2>()
         .quiet_zone(true)
@@ -282,15 +316,19 @@ fn render_qr(payload: &str) -> Result<String> {
 }
 
 fn desktop_name() -> String {
-    std::env::var("HOSTNAME")
+    let name = std::env::var("HOSTNAME")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!("WillDeep CLI · {value}"))
-        .unwrap_or_else(|| "WillDeep CLI".to_owned())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "WillDeep CLI".to_owned());
+    match name.char_indices().nth(MAX_DESKTOP_NAME_LEN) {
+        Some((index, _)) => name[..index].to_owned(),
+        None => name,
+    }
 }
 
 fn random_token() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+    Uuid::new_v4().simple().to_string()
 }
 
 fn unix_timestamp() -> u64 {
@@ -359,6 +397,47 @@ mod tests {
         assert_eq!(payload["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(payload["relay_room"], "willdeep-cli-test");
         assert_eq!(payload["relay_token"], "secret");
+    }
+
+    #[test]
+    fn pairing_qr_fits_the_terminal_popup() {
+        let credentials = RelayCredentials::generate();
+        let payload = serde_json::to_string(&PairingPayload::new(&credentials)).unwrap();
+        let qr = render_qr(&payload).unwrap();
+        let width = qr
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default();
+        let height = qr.lines().count();
+        assert_eq!(
+            (width, height),
+            (MAX_QR_WIDTH, MAX_QR_HEIGHT),
+            "配对二维码尺寸变了（载荷 {} 字节）",
+            payload.len()
+        );
+    }
+
+    #[test]
+    fn legacy_credentials_are_recompacted_on_load() {
+        let home = std::env::temp_dir().join(format!("willdeep-relay-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = RelayCredentials {
+            relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
+            room: format!("willdeep-cli-{}", Uuid::new_v4()),
+            token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        };
+        assert!(!legacy.is_compact());
+        let path = home.join("mobile-relay.toml");
+        std::fs::write(&path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
+        set_secret_permissions(&path).unwrap();
+
+        let loaded = RelayCredentials::load_or_create(&home).unwrap();
+        assert!(loaded.is_compact());
+        assert_ne!(loaded.token, legacy.token);
+        let reloaded = RelayCredentials::load_or_create(&home).unwrap();
+        assert_eq!(reloaded.token, loaded.token, "紧凑凭据不应被反复重置");
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]

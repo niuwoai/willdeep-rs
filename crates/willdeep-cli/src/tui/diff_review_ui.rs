@@ -1,0 +1,390 @@
+use super::*;
+
+pub(super) struct DiffReviewState {
+    pub snapshot: crate::daemon::diff_review::DiffSnapshot,
+    pub selected: usize,
+    pub content: Option<(String, String)>,
+    pub scroll: usize,
+    pub area: crate::daemon::diff_review::DiffArea,
+    pub view: DiffViewMode,
+    pub search: Option<PromptEditor>,
+    pub search_matches: Vec<usize>,
+    pub search_selected: usize,
+    pub reviews: BTreeMap<String, crate::daemon::diff_review::ReviewDecision>,
+    pub confirm_revert: bool,
+    pub verifications: Vec<crate::daemon::diff_review::DiffVerificationRecord>,
+    pub attributions: Vec<crate::daemon::diff_review::DiffAttributionRecord>,
+    pub commit_preview: Option<crate::daemon::diff_review::CommitPreview>,
+    pub preview_draft: Option<CommitPreviewDraft>,
+}
+
+pub(super) struct CommitPreviewDraft {
+    pub message: PromptEditor,
+    pub remote: PromptEditor,
+    pub tag: PromptEditor,
+    pub field: usize,
+}
+
+impl Default for CommitPreviewDraft {
+    fn default() -> Self {
+        let mut remote = PromptEditor::default();
+        remote.insert("origin");
+        Self {
+            message: PromptEditor::default(),
+            remote,
+            tag: PromptEditor::default(),
+            field: 0,
+        }
+    }
+}
+
+impl CommitPreviewDraft {
+    pub fn editor_mut(&mut self) -> &mut PromptEditor {
+        match self.field {
+            1 => &mut self.remote,
+            2 => &mut self.tag,
+            _ => &mut self.message,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum DiffViewMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+pub(super) fn next_diff_area(
+    area: crate::daemon::diff_review::DiffArea,
+) -> crate::daemon::diff_review::DiffArea {
+    use crate::daemon::diff_review::DiffArea;
+    match area {
+        DiffArea::Combined => DiffArea::Staged,
+        DiffArea::Staged => DiffArea::Unstaged,
+        DiffArea::Unstaged => DiffArea::Combined,
+    }
+}
+
+pub(super) fn refresh_diff_search(review: &mut DiffReviewState) {
+    let query = review
+        .search
+        .as_ref()
+        .map(|editor| editor.text().trim().to_lowercase())
+        .unwrap_or_default();
+    let Some((_, content)) = &review.content else {
+        review.search_matches.clear();
+        review.search_selected = 0;
+        return;
+    };
+    let lines = match review.view {
+        DiffViewMode::Unified => content.lines().map(str::to_owned).collect(),
+        DiffViewMode::SideBySide => diff_side_by_side_rows(content, 120),
+    };
+    review.search_matches = if query.is_empty() {
+        Vec::new()
+    } else {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| line.to_lowercase().contains(&query).then_some(index))
+            .collect()
+    };
+    review.search_selected = 0;
+    if let Some(first) = review.search_matches.first() {
+        review.scroll = *first;
+    }
+}
+
+pub(super) fn diff_review_lines(content: &str, search_query: Option<&str>) -> Vec<Line<'static>> {
+    content
+        .lines()
+        .map(|line| {
+            let color = if line.starts_with("+++") || line.starts_with("---") {
+                Color::Cyan
+            } else if line.starts_with('+') {
+                Color::Green
+            } else if line.starts_with('-') {
+                Color::Red
+            } else if line.starts_with("@@") {
+                Color::Yellow
+            } else {
+                Color::Gray
+            };
+            let matched = search_query
+                .is_some_and(|query| line.to_lowercase().contains(&query.to_lowercase()));
+            let style = Style::default().fg(color);
+            Line::styled(
+                terminal_safe_diff_text(line),
+                if matched {
+                    style.bg(Color::DarkGray)
+                } else {
+                    style
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn terminal_safe_diff_text(value: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+
+    let mut output = String::with_capacity(value.len());
+    let mut column = 0;
+    for character in value.chars() {
+        if character == '\t' {
+            let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+            output.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else if character.is_control() {
+            for escaped in character.escape_default() {
+                output.push(escaped);
+                column += UnicodeWidthChar::width(escaped).unwrap_or(0);
+            }
+        } else {
+            output.push(character);
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    output
+}
+
+pub(super) fn diff_side_by_side_lines(
+    content: &str,
+    width: u16,
+    search_query: Option<&str>,
+) -> Vec<Line<'static>> {
+    diff_side_by_side_rows(content, width)
+        .into_iter()
+        .map(|line| {
+            let matched = search_query
+                .is_some_and(|query| line.to_lowercase().contains(&query.to_lowercase()));
+            Line::styled(
+                line,
+                if matched {
+                    Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn diff_side_by_side_rows(content: &str, width: u16) -> Vec<String> {
+    let column_width = (width.saturating_sub(3) / 2).max(8) as usize;
+    let source = content.lines().collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut index = 0;
+    while index < source.len() {
+        let line = source[index];
+        if line.starts_with('-') && !line.starts_with("---") {
+            let right = source
+                .get(index + 1)
+                .copied()
+                .filter(|next| next.starts_with('+') && !next.starts_with("+++"));
+            rows.push(format!(
+                "{} │ {}",
+                fit_diff_column(line, column_width),
+                fit_diff_column(right.unwrap_or(""), column_width)
+            ));
+            index += usize::from(right.is_some()) + 1;
+            continue;
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            rows.push(format!(
+                "{} │ {}",
+                " ".repeat(column_width),
+                fit_diff_column(line, column_width)
+            ));
+        } else {
+            let value = fit_diff_column(line, column_width);
+            rows.push(format!("{value} │ {value}"));
+        }
+        index += 1;
+    }
+    rows
+}
+
+pub(super) fn diff_snapshot_lines(review: &DiffReviewState) -> Vec<Line<'static>> {
+    let mut lines = review
+        .verifications
+        .iter()
+        .rev()
+        .take(3)
+        .map(|verification| {
+            let color = match verification.outcome {
+                crate::daemon::diff_review::VerificationOutcome::Passed => Color::Green,
+                _ => Color::Red,
+            };
+            Line::styled(
+                format!(
+                    "check {:?} · exit={} · {}",
+                    verification.outcome,
+                    verification
+                        .exit_code
+                        .map_or_else(|| "—".to_owned(), |code| code.to_string()),
+                    verification.command
+                ),
+                Style::default().fg(color),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(
+        review
+            .snapshot
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                let marker = if index == review.selected { "▶" } else { " " };
+                let stage = match (file.staged, file.unstaged) {
+                    (true, true) => "S+U",
+                    (true, false) => "S",
+                    (false, true) => "U",
+                    (false, false) => "-",
+                };
+                let style = if index == review.selected {
+                    Style::default().fg(Color::Black).bg(Color::LightCyan)
+                } else if file.binary {
+                    Style::default().fg(Color::Magenta)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                let decision =
+                    review
+                        .reviews
+                        .get(&file.path)
+                        .map_or("", |decision| match decision {
+                            crate::daemon::diff_review::ReviewDecision::Accepted => " [accepted]",
+                            crate::daemon::diff_review::ReviewDecision::Rejected => " [rejected]",
+                            crate::daemon::diff_review::ReviewDecision::ChangesRequested => {
+                                " [changes]"
+                            }
+                            crate::daemon::diff_review::ReviewDecision::Reviewed => " [reviewed]",
+                        });
+                let attribution = review
+                    .attributions
+                    .iter()
+                    .rev()
+                    .find(|record| record.paths.iter().any(|path| path == &file.path))
+                    .map_or_else(String::new, |record| {
+                        format!(
+                            " [agent:{} · {}]",
+                            record.agent_id.to_string().get(..8).unwrap_or("agent"),
+                            record.tool
+                        )
+                    });
+                Line::styled(
+                    format!(
+                        "{marker} {:?} [{stage}] +{} -{} {}{}{}{}",
+                        file.kind,
+                        file.additions,
+                        file.deletions,
+                        file.path,
+                        if file.binary { " [binary]" } else { "" },
+                        decision,
+                        attribution
+                    ),
+                    style,
+                )
+            }),
+    );
+    lines
+}
+
+pub(super) fn commit_preview_lines(
+    preview: &crate::daemon::diff_review::CommitPreview,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("Snapshot: {}", preview.snapshot_id)),
+        Line::from(format!(
+            "Branch: {}",
+            preview.branch.as_deref().unwrap_or("—")
+        )),
+        Line::from(format!("Message: {}", preview.message)),
+        Line::from(format!(
+            "Push target: {}",
+            preview.push_target.as_deref().unwrap_or("—")
+        )),
+        Line::from(format!("Tag: {}", preview.tag.as_deref().unwrap_or("—"))),
+        Line::from(format!("Staged files: {}", preview.staged_files.len())),
+        Line::from(format!("Unstaged files: {}", preview.unstaged_files.len())),
+        Line::default(),
+    ];
+    if preview.sensitive_findings.is_empty() {
+        lines.push(Line::styled(
+            "Sensitive scan: clear",
+            Style::default().fg(Color::Green),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Sensitive findings:",
+            Style::default().fg(Color::Red),
+        ));
+        lines.extend(preview.sensitive_findings.iter().map(|finding| {
+            Line::styled(
+                format!(
+                    "  {:?} {} · {}",
+                    finding.severity, finding.path, finding.code
+                ),
+                Style::default().fg(Color::Red),
+            )
+        }));
+    }
+    if !preview.blockers.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::styled("Blockers:", Style::default().fg(Color::Red)));
+        lines.extend(preview.blockers.iter().map(|blocker| {
+            Line::styled(format!("  • {blocker}"), Style::default().fg(Color::Red))
+        }));
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Preview only · no commit, tag, or push was executed",
+        Style::default().fg(Color::Yellow),
+    ));
+    lines
+}
+
+pub(super) fn commit_preview_draft_lines(draft: &CommitPreviewDraft) -> Vec<Line<'static>> {
+    [
+        ("Commit message", draft.message.text()),
+        ("Remote", draft.remote.text()),
+        ("Tag (optional)", draft.tag.text()),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (label, value))| {
+        Line::styled(
+            format!(
+                "{} {label}: {value}",
+                if index == draft.field { "▶" } else { " " }
+            ),
+            if index == draft.field {
+                Style::default().fg(Color::Black).bg(Color::LightCyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        )
+    })
+    .collect()
+}
+
+fn fit_diff_column(value: &str, width: usize) -> String {
+    let mut output = String::new();
+    let mut used = 0;
+    for character in terminal_safe_diff_text(value).chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width > width {
+            break;
+        }
+        output.push(character);
+        used += character_width;
+    }
+    output.push_str(&" ".repeat(width.saturating_sub(used)));
+    output
+}

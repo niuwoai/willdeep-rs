@@ -70,6 +70,18 @@ impl SkillCatalog {
         &self.skills
     }
 
+    pub fn allow_only(mut self, allowed: &[String]) -> Self {
+        if allowed.is_empty() {
+            return self;
+        }
+        self.skills.retain(|skill| {
+            allowed
+                .iter()
+                .any(|value| value == &skill.identifier || value == &skill.name)
+        });
+        self
+    }
+
     pub fn summary(&self) -> String {
         self.skills
             .iter()
@@ -188,6 +200,24 @@ mod tests {
                 .any(|skill| skill.identifier == "reviewer")
         );
         assert!(catalog.read("reviewer", None).unwrap().contains("# Steps"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_allowlist_filters_discovered_skills() {
+        let root = std::env::temp_dir().join(format!("willdeep-skills-{}", uuid::Uuid::new_v4()));
+        for name in ["reader", "editor"] {
+            let directory = root.join(".willdeep/skills").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: test\n---\n"),
+            )
+            .unwrap();
+        }
+        let catalog = SkillCatalog::discover(&root, &[]).allow_only(&["reader".to_owned()]);
+        assert_eq!(catalog.list().len(), 1);
+        assert_eq!(catalog.list()[0].name, "reader");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

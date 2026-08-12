@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,14 @@ use crate::types::Role;
 
 pub const SESSION_VERSION: u32 = 1;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompressionCheckpoint {
+    pub generation: u64,
+    pub previous_message_count: usize,
+    pub compressed_message_count: usize,
+    pub created_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
@@ -17,8 +26,14 @@ pub struct Session {
     pub title: String,
     pub workspace: PathBuf,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub config: Option<PathBuf>,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub pinned_at: Option<u64>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub attention_read: BTreeSet<String>,
@@ -26,6 +41,12 @@ pub struct Session {
     pub runtime_event_cursor: u64,
     #[serde(default)]
     pub runtime_managed: bool,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub compression_generation: u64,
+    #[serde(default)]
+    pub compression_checkpoint: Option<CompressionCheckpoint>,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
@@ -39,15 +60,51 @@ impl Session {
             title: title(prompt),
             workspace,
             profile,
+            model: None,
+            config: None,
             created_at: now,
             updated_at: now,
+            pinned_at: None,
             messages: Vec::new(),
             attention_read: BTreeSet::new(),
             runtime_event_cursor: 0,
             runtime_managed: false,
+            goal: None,
+            compression_generation: 0,
+            compression_checkpoint: None,
             swift_source: None,
         }
     }
+
+    pub fn replace_with_compressed_messages(&mut self, messages: Vec<Message>) -> bool {
+        let previous_message_count = self.messages.len();
+        let compressed_message_count = messages.len();
+        self.messages = messages;
+        if compressed_message_count >= previous_message_count {
+            return false;
+        }
+        self.compression_generation = self.compression_generation.saturating_add(1);
+        self.compression_checkpoint = Some(CompressionCheckpoint {
+            generation: self.compression_generation,
+            previous_message_count,
+            compressed_message_count,
+            created_at: now(),
+        });
+        true
+    }
+}
+
+/// 会话列表视图需要的元数据快照，不携带消息正文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionDigest {
+    pub id: Uuid,
+    pub title: String,
+    pub workspace: PathBuf,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub pinned_at: Option<u64>,
+    /// 是否存在非空的用户输入（正文非空或带附件）。
+    pub has_user_input: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -83,7 +140,46 @@ impl SessionStore {
         Ok(session)
     }
     pub fn latest(&self) -> Result<Option<Session>, SessionError> {
-        Ok(self.list()?.into_iter().max_by_key(|s| s.updated_at))
+        match self.digests().into_iter().max_by_key(|s| s.updated_at) {
+            Some(digest) => Ok(Some(self.load(digest.id)?)),
+            None => Ok(None),
+        }
+    }
+    /// 列出所有会话的元数据。只解析列表视图需要的字段，不物化消息正文，
+    /// 并按 (mtime, size) 缓存解析结果——会话目录动辄上百个文件、几十 MB，
+    /// 每次轮询全量反序列化会把 CPU 吃满。需要完整会话请用 [`SessionStore::load`]。
+    pub fn digests(&self) -> Vec<SessionDigest> {
+        let mut values = Vec::new();
+        let mut visited = HashSet::new();
+        let mut scanned = HashSet::from([self.directory.clone()]);
+        for path in json_files(&self.directory) {
+            if let Some(digest) = cached_digest(&path, local_digest) {
+                visited.insert(path);
+                values.push(digest);
+            }
+        }
+        if let Some(directory) = swift_session_directory() {
+            for path in json_files(&directory) {
+                let Some(digest) = cached_digest(&path, swift_digest) else {
+                    continue;
+                };
+                visited.insert(path);
+                if !values.iter().any(|existing| existing.id == digest.id) {
+                    values.push(digest);
+                }
+            }
+            scanned.insert(directory);
+        }
+        // 只清理本次扫过的目录里已消失的文件；别动其它 SessionStore 的缓存。
+        digest_cache()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|path, _| {
+                visited.contains(path)
+                    || !path.parent().is_some_and(|parent| scanned.contains(parent))
+            });
+        values.sort_by_key(|digest| std::cmp::Reverse(digest.updated_at));
+        values
     }
     pub fn list(&self) -> Result<Vec<Session>, SessionError> {
         let mut values = Vec::new();
@@ -115,8 +211,41 @@ impl SessionStore {
         Ok(values)
     }
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
-        std::fs::create_dir_all(&self.directory)?;
         session.updated_at = now();
+        self.write(session)
+    }
+    /// 置顶/取消置顶。不改动 `updated_at`，避免打乱最近使用排序；
+    /// 对 Xedit 桥接会话就地补丁其 JSON 的 `pinnedAt`（ISO8601），
+    /// 不在本地生成会覆盖 Xedit 实时内容的影子副本。
+    pub fn set_pinned(&self, id: Uuid, pinned: bool) -> Result<Session, SessionError> {
+        let mut session = self.load(id)?;
+        session.pinned_at = if pinned { Some(now()) } else { None };
+        if let Some(source) = session.swift_source.clone() {
+            let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&source)?)?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other("invalid Swift session object"))
+            })?;
+            match session.pinned_at {
+                Some(at) => {
+                    object.insert(
+                        "pinnedAt".to_owned(),
+                        serde_json::Value::String(format_iso8601(at)),
+                    );
+                }
+                None => {
+                    object.remove("pinnedAt");
+                }
+            }
+            let temporary = source.with_extension(format!("{}.tmp", Uuid::new_v4()));
+            std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+            std::fs::rename(&temporary, &source)?;
+        } else {
+            self.write(&session)?;
+        }
+        Ok(session)
+    }
+    fn write(&self, session: &Session) -> Result<(), SessionError> {
+        std::fs::create_dir_all(&self.directory)?;
         let data = serde_json::to_vec_pretty(session)?;
         let temporary = self
             .directory
@@ -136,6 +265,203 @@ impl SessionStore {
     fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
+}
+
+struct CachedDigest {
+    fingerprint: (u64, u64),
+    digest: SessionDigest,
+}
+
+fn digest_cache() -> &'static Mutex<HashMap<PathBuf, CachedDigest>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedDigest>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn json_files(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect()
+}
+
+/// 文件指纹：修改时间（纳秒）+ 字节数。任一变化都重新解析。
+fn fingerprint(metadata: &std::fs::Metadata) -> (u64, u64) {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or_default();
+    (modified, metadata.len())
+}
+
+fn cached_digest(
+    path: &Path,
+    parse: fn(&Path, &std::fs::Metadata) -> Option<SessionDigest>,
+) -> Option<SessionDigest> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let fingerprint = fingerprint(&metadata);
+    if let Some(cached) = digest_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .filter(|cached| cached.fingerprint == fingerprint)
+    {
+        return Some(cached.digest.clone());
+    }
+    let digest = parse(path, &metadata)?;
+    digest_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            path.to_path_buf(),
+            CachedDigest {
+                fingerprint,
+                digest: digest.clone(),
+            },
+        );
+    Some(digest)
+}
+
+/// 只声明列表视图用得到的字段；`messages` 用探针结构跳过正文的分配。
+#[derive(Deserialize)]
+struct LocalDigestProbe {
+    id: Uuid,
+    title: String,
+    workspace: PathBuf,
+    created_at: u64,
+    updated_at: u64,
+    #[serde(default)]
+    pinned_at: Option<u64>,
+    #[serde(default)]
+    messages: Vec<MessageProbe>,
+}
+
+#[derive(Deserialize)]
+struct MessageProbe {
+    #[serde(default)]
+    role: String,
+    #[serde(default, deserialize_with = "non_empty_text")]
+    content: bool,
+    #[serde(default)]
+    attachments: Option<Vec<serde::de::IgnoredAny>>,
+}
+
+impl MessageProbe {
+    fn is_user_input(&self) -> bool {
+        self.role == "user"
+            && (self.content
+                || self
+                    .attachments
+                    .as_ref()
+                    .is_some_and(|values| !values.is_empty()))
+    }
+}
+
+/// 把任意 JSON 值折叠成"是否为非空文本"，避免为消息正文分配 String。
+fn non_empty_text<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TextVisitor;
+    impl<'de> serde::de::Visitor<'de> for TextVisitor {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("message content")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<bool, E> {
+            Ok(!value.trim().is_empty())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<bool, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            let mut present = false;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                present = true;
+            }
+            Ok(present)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut present = false;
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {
+                present = true;
+            }
+            Ok(present)
+        }
+    }
+    deserializer.deserialize_any(TextVisitor)
+}
+
+fn local_digest(path: &Path, _metadata: &std::fs::Metadata) -> Option<SessionDigest> {
+    let probe: LocalDigestProbe = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    Some(SessionDigest {
+        id: probe.id,
+        title: probe.title,
+        workspace: probe.workspace,
+        created_at: probe.created_at,
+        updated_at: probe.updated_at,
+        pinned_at: probe.pinned_at,
+        has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+    })
+}
+
+/// Xedit（Swift）写出的会话文件：字段名是 camelCase，时间以文件 mtime 为准。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwiftDigestProbe {
+    id: Uuid,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    workspace_location: Option<SwiftWorkspaceLocation>,
+    #[serde(default)]
+    workspace_root_path: Option<String>,
+    #[serde(default)]
+    pinned_at: Option<String>,
+    #[serde(default)]
+    messages: Vec<MessageProbe>,
+}
+
+#[derive(Deserialize)]
+struct SwiftWorkspaceLocation {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn swift_digest(path: &Path, metadata: &std::fs::Metadata) -> Option<SessionDigest> {
+    let probe: SwiftDigestProbe = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let workspace = probe
+        .workspace_location
+        .and_then(|location| location.path)
+        .or(probe.workspace_root_path)
+        .unwrap_or_else(|| ".".to_owned());
+    let updated = fingerprint(metadata).0 / 1_000_000_000;
+    Some(SessionDigest {
+        id: probe.id,
+        title: probe.title.unwrap_or_else(|| "Swift session".to_owned()),
+        workspace: PathBuf::from(workspace),
+        created_at: updated,
+        updated_at: updated,
+        pinned_at: probe.pinned_at.as_deref().and_then(parse_iso8601),
+        has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+    })
 }
 
 fn swift_session_directory() -> Option<PathBuf> {
@@ -211,12 +537,21 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .to_owned(),
         workspace: PathBuf::from(workspace),
         profile: None,
+        model: None,
+        config: None,
         created_at: updated,
         updated_at: updated,
+        pinned_at: value
+            .get("pinnedAt")
+            .and_then(|value| value.as_str())
+            .and_then(parse_iso8601),
         messages,
         attention_read: BTreeSet::new(),
         runtime_event_cursor: 0,
         runtime_managed: false,
+        goal: None,
+        compression_generation: 0,
+        compression_checkpoint: None,
         swift_source: Some(path.to_path_buf()),
     })
 }
@@ -236,6 +571,73 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+/// 解析 Xedit（Swift `JSONEncoder.dateEncodingStrategy = .iso8601`）写出的
+/// UTC 时间戳，如 `2026-08-11T12:34:56Z`；容忍小数秒与 `+00:00` 形式。
+fn parse_iso8601(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (date, time) = text.split_once('T')?;
+    let mut parts = date.splitn(3, '-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let time = time
+        .trim_end_matches('Z')
+        .trim_end_matches("+00:00")
+        .trim_end_matches("+0000");
+    let time = time.split_once('.').map(|(v, _)| v).unwrap_or(time);
+    let mut parts = time.splitn(3, ':');
+    let hour: u64 = parts.next()?.parse().ok()?;
+    let minute: u64 = parts.next()?.parse().ok()?;
+    let second: u64 = parts.next().unwrap_or("0").parse().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn format_iso8601(timestamp: u64) -> String {
+    let days = (timestamp / 86_400) as i64;
+    let seconds = timestamp % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60
+    )
+}
+
+// Howard Hinnant 的 days_from_civil / civil_from_days 算法（公历、以 1970-01-01 为第 0 天）。
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = (year - era * 400) as u64;
+    let doy =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let doe = (days - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
 fn title(prompt: &str) -> String {
     prompt
         .split_whitespace()
@@ -254,6 +656,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("willdeep-session-{}", Uuid::new_v4()));
         let store = SessionStore::new(&root);
         let mut session = Session::new(root.clone(), None, "hello session");
+        session.config = Some(root.join("config.toml"));
+        session.model = Some("test-model".to_owned());
+        session.goal = Some("finish the migration".to_owned());
         session.messages.push(Message::user_with_attachments(
             "hello",
             vec![crate::MessageAttachment::Image {
@@ -266,6 +671,10 @@ mod tests {
         ));
         store.save(&mut session).unwrap();
         let loaded = store.load(session.id).unwrap();
+        assert_eq!(loaded.config, session.config);
+        assert_eq!(loaded.model, session.model);
+        assert_eq!(loaded.goal, session.goal);
+        assert_eq!(loaded.compression_generation, 0);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].attachments.len(), 1);
         assert!(loaded.attention_read.is_empty());
@@ -282,5 +691,153 @@ mod tests {
         assert!(!store.delete(session.id).unwrap());
         assert!(store.load(session.id).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn digest_reports_user_input_and_reuses_the_cache_until_the_file_changes() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-digest-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "New session");
+        store.save(&mut session).unwrap();
+        let id = session.id;
+        let digest = || {
+            store
+                .digests()
+                .into_iter()
+                .find(|digest| digest.id == id)
+                .expect("digest for the saved session")
+        };
+        assert!(!digest().has_user_input);
+
+        session
+            .messages
+            .push(Message::assistant("welcome", Vec::new()));
+        store.save(&mut session).unwrap();
+        assert!(!digest().has_user_input);
+
+        // 只有附件、没有正文，也算用户输入。
+        session.messages.push(Message::user_with_attachments(
+            "",
+            vec![crate::MessageAttachment::Text {
+                name: "notes.txt".to_owned(),
+                content: "context".to_owned(),
+            }],
+        ));
+        store.save(&mut session).unwrap();
+        assert!(digest().has_user_input);
+
+        session.messages.push(Message::user("hello"));
+        store.save(&mut session).unwrap();
+        let current = digest();
+        assert!(current.has_user_input);
+        assert_eq!(current.title, session.title);
+        assert_eq!(current.updated_at, session.updated_at);
+
+        // 文件没动时走缓存，结果必须与上一轮完全一致。
+        assert_eq!(digest(), current);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn digest_drops_cache_entries_for_deleted_sessions() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-prune-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "temporary");
+        store.save(&mut session).unwrap();
+        let path = store.path(session.id);
+        assert!(store.digests().iter().any(|digest| digest.id == session.id));
+        assert!(
+            digest_cache()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&path)
+        );
+        assert!(store.delete(session.id).unwrap());
+        assert!(!store.digests().iter().any(|digest| digest.id == session.id));
+        assert!(
+            !digest_cache()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&path)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pins_session_without_touching_updated_at() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-pin-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "pin me");
+        store.save(&mut session).unwrap();
+        let saved_updated_at = store.load(session.id).unwrap().updated_at;
+        let pinned = store.set_pinned(session.id, true).unwrap();
+        assert!(pinned.pinned_at.is_some());
+        let loaded = store.load(session.id).unwrap();
+        assert_eq!(loaded.pinned_at, pinned.pinned_at);
+        assert_eq!(loaded.updated_at, saved_updated_at);
+        let unpinned = store.set_pinned(session.id, false).unwrap();
+        assert_eq!(unpinned.pinned_at, None);
+        assert_eq!(store.load(session.id).unwrap().pinned_at, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_and_formats_iso8601_round_trip() {
+        assert_eq!(parse_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso8601("2026-08-11T00:00:00Z"), Some(1_786_406_400));
+        assert_eq!(
+            parse_iso8601("2026-08-11T12:34:56.789Z"),
+            Some(1_786_451_696)
+        );
+        assert_eq!(
+            parse_iso8601("2026-08-11T12:34:56+00:00"),
+            parse_iso8601("2026-08-11T12:34:56Z")
+        );
+        assert_eq!(parse_iso8601("not a date"), None);
+        for timestamp in [0, 951_827_696, 1_786_451_696, 4_102_444_799] {
+            assert_eq!(parse_iso8601(&format_iso8601(timestamp)), Some(timestamp));
+        }
+        assert_eq!(format_iso8601(1_786_451_696), "2026-08-11T12:34:56Z");
+    }
+
+    #[test]
+    fn legacy_session_without_config_remains_readable() {
+        let session = Session::new(PathBuf::from("/workspace"), None, "legacy");
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("config");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_generation");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_checkpoint");
+        let loaded: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.config, None);
+        assert_eq!(loaded.compression_generation, 0);
+        assert_eq!(loaded.compression_checkpoint, None);
+    }
+
+    #[test]
+    fn records_only_effective_manual_compression() {
+        let mut session = Session::new(PathBuf::from("/workspace"), None, "compression");
+        session.messages = (0..10)
+            .map(|index| Message::user(format!("message {index}")))
+            .collect();
+        assert!(session.replace_with_compressed_messages(vec![Message::user("summary")]));
+        assert_eq!(session.compression_generation, 1);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.compression_checkpoint,
+            Some(CompressionCheckpoint {
+                generation: 1,
+                previous_message_count: 10,
+                compressed_message_count: 1,
+                created_at: session.compression_checkpoint.as_ref().unwrap().created_at,
+            })
+        );
+        assert!(!session.replace_with_compressed_messages(session.messages.clone()));
+        assert_eq!(session.compression_generation, 1);
     }
 }

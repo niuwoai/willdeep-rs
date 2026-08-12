@@ -1,0 +1,321 @@
+{
+  "fixture_version": "1",
+  "protocol_version": "1.0",
+  "responses": {
+    "runtime": {
+      "status": "ok",
+      "data": {
+        "protocol_version": "1.0",
+        "min_client_protocol_version": "1.0",
+        "server_version": "0.21.0-rc15",
+        "objects": ["runtime", "workspace", "session", "agent", "turn", "tool", "task", "approval", "question", "artifact", "event"],
+        "capabilities": ["runtime_observe", "workspace_manage", "session_manage", "agent_observe", "turn_submit", "approval_resolve", "question_answer", "event_replay", "event_stream"],
+        "operations": ["runtime.capabilities", "workspace.list", "session.list", "agent.list", "agent.spawn", "turn.list", "tool.list", "task.list", "approval.list", "question.list", "artifact.list", "event.list"],
+        "transports": ["http_loopback", "ndjson", "unix_socket", "windows_named_pipe"],
+        "limits": {
+          "max_event_page": 1000,
+          "max_prompt_bytes": 1048576,
+          "max_attachment_bytes": 10485760,
+          "max_worktree_patch_bytes": 2097152
+        }
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "workspace": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "name": "example",
+        "root": null,
+        "access": "workspace_write",
+        "provider_profile": "default",
+        "skills": ["reader"],
+        "mcp_servers": ["docs"],
+        "created_at": 100,
+        "updated_at": 110,
+        "active": true
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "session": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "root_agent_id": "00000000-0000-4000-8000-000000000003",
+        "workspace": null,
+        "profile": "default",
+        "model": "example-model",
+        "status": "running",
+        "active_turn_id": "00000000-0000-4000-8000-000000000004",
+        "created_at": 120,
+        "updated_at": 130
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "agent": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "parent_id": null,
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "label": "root",
+        "background": false,
+        "workspace": null,
+        "root_workspace": null,
+        "worktree_branch": null,
+        "dedicated_worktree": false,
+        "profile": "default",
+        "status": "running",
+        "current_turn": 1,
+        "current_tool": "read_file",
+        "input_tokens": 1000,
+        "output_tokens": 200,
+        "total_tokens": 1200,
+        "max_turns": 20,
+        "token_budget": 100000,
+        "timeout_seconds": 3600,
+        "report": null,
+        "created_at": 120,
+        "updated_at": 135,
+        "completed_at": null
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "turn": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000004",
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "request_id": "00000000-0000-4000-8000-000000000006",
+        "queue_sequence": 1,
+        "status": "running",
+        "active_task_id": "00000000-0000-4000-8000-000000000005",
+        "attempts": 1,
+        "created_at": 130,
+        "started_at": 131,
+        "completed_at": null
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "tool": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000007",
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "turn_id": "00000000-0000-4000-8000-000000000004",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "agent_id": "00000000-0000-4000-8000-000000000003",
+        "name": "read_file",
+        "status": "completed",
+        "started_at_ms": 140000,
+        "completed_at_ms": 140120
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "task": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "turn_id": "00000000-0000-4000-8000-000000000004",
+        "agent_id": "00000000-0000-4000-8000-000000000003",
+        "event_start_sequence": 10,
+        "status": "running",
+        "workspace": null,
+        "profile": "default",
+        "created_at": 130,
+        "started_at": 131,
+        "completed_at": null,
+        "exit_code": null,
+        "failure_domain": null
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "approval": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "description": "Run the requested verification command",
+        "always_allow_available": true,
+        "created_at": 141
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "question": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000009",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "question": "Choose a target",
+        "options": ["A", "B"],
+        "multi_select": false,
+        "created_at": 142
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "artifact": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-00000000000a",
+        "kind": "workspace_change",
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "turn_id": "00000000-0000-4000-8000-000000000004",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "agent_id": "00000000-0000-4000-8000-000000000003",
+        "title": "Workspace changes",
+        "source_id": "snapshot-example",
+        "item_count": 2,
+        "created_at": 143
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc15" }
+    },
+    "event": {
+      "status": "ok",
+      "data": {
+        "sequence": 15,
+        "timestamp": 144,
+        "kind": "tool.completed",
+        "message": "read_file completed"
+      },
+      "meta": {
+        "protocol_version": "1.0",
+        "server_version": "0.21.0-rc15",
+        "request_id": "00000000-0000-4000-8000-000000000006"
+      }
+    }
+  },
+  "requests": {
+    "agent_spawn": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000010",
+      "operation": "agent.spawn",
+      "params": {
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "prompt": "Inspect the repository structure",
+        "profile": "scout",
+        "label": "structure scout"
+      }
+    },
+    "agent_prompt": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000011",
+      "operation": "agent.prompt",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "message": "Continue with the verification"
+      }
+    },
+    "agent_wait": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000012",
+      "operation": "agent.wait",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "timeout_ms": 10000
+      }
+    },
+    "agent_retry": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000017",
+      "operation": "agent.retry",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "model": "qwen3-coder-plus"
+      }
+    },
+    "approval_resolve": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000013",
+      "operation": "approval.resolve",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "decision": "allow_once"
+      }
+    },
+    "question_answer": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000014",
+      "operation": "question.answer",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000009",
+        "answer": "A"
+      }
+    },
+    "event_list": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000015",
+      "operation": "event.list",
+      "params": { "after": 15, "limit": 200 }
+    },
+    "workspace_register": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000018",
+      "operation": "workspace.register",
+      "params": {
+        "root": "/workspace",
+        "name": "example",
+        "access": "workspace_write",
+        "provider_profile": null,
+        "skills": [],
+        "mcp_servers": []
+      }
+    },
+    "session_delete": {
+      "protocol_version": "1.0",
+      "request_id": "00000000-0000-4000-8000-000000000019",
+      "operation": "session.delete",
+      "params": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "confirmation": "00000000-0000-4000-8000-000000000002"
+      }
+    }
+  },
+  "control_results": {
+    "agent_command": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000016",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "agent_id": "00000000-0000-4000-8000-000000000003",
+        "kind": "instruct",
+        "status": "pending",
+        "created_at": 145
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc17" }
+    },
+    "interaction": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "task_id": "00000000-0000-4000-8000-000000000005",
+        "status": "resolved",
+        "resolved_at": 146
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc17" }
+    },
+    "runtime_status": {
+      "status": "ok",
+      "data": {
+        "status": "draining",
+        "version": "0.21.0-rc62",
+        "pid": 42,
+        "uptime_seconds": 10,
+        "event_sequence": 15
+      },
+      "meta": { "protocol_version": "1.0", "server_version": "0.21.0-rc62" }
+    },
+    "object_mutation": {
+      "status": "ok",
+      "data": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "status": "deleted"
+      },
+      "meta": {
+        "protocol_version": "1.0",
+        "server_version": "0.21.0-rc62",
+        "request_id": "00000000-0000-4000-8000-000000000019"
+      }
+    }
+  }
+}

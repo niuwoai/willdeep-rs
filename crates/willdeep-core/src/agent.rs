@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -12,6 +13,33 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub system_prompt: String,
     pub context_window: u64,
+    pub token_budget: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct AgentInstructionInbox {
+    pending: Mutex<VecDeque<String>>,
+}
+
+impl AgentInstructionInbox {
+    pub fn push(&self, instruction: String) -> bool {
+        let instruction = instruction.trim();
+        if instruction.is_empty() || instruction.len() > 16 * 1024 {
+            return false;
+        }
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.push_back(instruction.to_owned());
+        true
+    }
+
+    fn drain(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .map(|mut pending| pending.drain(..).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -33,15 +61,34 @@ pub enum AgentEvent {
     CompressionCompleted {
         estimated_tokens: u64,
     },
+    BackgroundShellStarted {
+        id: String,
+    },
+    BackgroundShellCompleted {
+        id: String,
+        status: crate::BackgroundTaskStatus,
+        exit_code: Option<i32>,
+        elapsed_millis: u64,
+        output_bytes: usize,
+    },
     SubagentStarted {
         id: uuid::Uuid,
         profile: String,
+        model: Option<String>,
         label: String,
         background: bool,
+        max_turns: usize,
+        token_budget: Option<u64>,
+        timeout_seconds: Option<u64>,
+        workspace: std::path::PathBuf,
+        root_workspace: std::path::PathBuf,
+        worktree_branch: Option<String>,
+        dedicated_worktree: bool,
     },
     SubagentCompleted {
         id: uuid::Uuid,
         status: SubagentLifecycleStatus,
+        report: Option<String>,
     },
     SubagentTurnStarted {
         id: uuid::Uuid,
@@ -99,6 +146,8 @@ pub enum AgentError {
     EmptyResponse,
     #[error("agent reached the maximum of {0} turns before producing a final answer")]
     MaxTurns(usize),
+    #[error("agent exhausted its token budget of {budget} tokens (used {used})")]
+    TokenBudgetExceeded { budget: u64, used: u64 },
     #[error("subagent failed: {0}")]
     Subagent(String),
 }
@@ -110,6 +159,7 @@ pub struct Agent {
     sink: Arc<dyn EventSink>,
     image_fallback: Option<(Arc<dyn Provider>, String)>,
     subagents: Option<Arc<SubagentCatalog>>,
+    instruction_inbox: Option<Arc<AgentInstructionInbox>>,
 }
 
 impl Agent {
@@ -121,6 +171,7 @@ impl Agent {
             sink: Arc::new(NoopSink),
             image_fallback: None,
             subagents: None,
+            instruction_inbox: None,
         }
     }
 
@@ -140,6 +191,11 @@ impl Agent {
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.sink = sink;
+        self
+    }
+
+    pub fn with_instruction_inbox(mut self, inbox: Arc<AgentInstructionInbox>) -> Self {
+        self.instruction_inbox = Some(inbox);
         self
     }
 
@@ -184,7 +240,9 @@ impl Agent {
         messages.push(user_message);
         let definitions = self.tools.definitions();
         let mut compressed: Option<(usize, String)> = None;
+        let mut used_tokens = 0_u64;
         for turn in 1..=self.config.max_turns {
+            self.append_pending_instructions(&mut messages);
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
             let completion = self
@@ -192,7 +250,21 @@ impl Agent {
                 .complete(&request_messages, &definitions)
                 .await?;
             if let Some(usage) = completion.usage {
+                used_tokens = used_tokens.saturating_add(usage.total_tokens.unwrap_or_else(|| {
+                    usage
+                        .input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(usage.output_tokens.unwrap_or(0))
+                }));
                 self.sink.emit(AgentEvent::Usage(usage)).await;
+                if let Some(budget) = self.config.token_budget
+                    && used_tokens >= budget
+                {
+                    return Err(AgentError::TokenBudgetExceeded {
+                        budget,
+                        used: used_tokens,
+                    });
+                }
             }
             let content = completion.content.trim().to_owned();
             if !content.is_empty() {
@@ -205,6 +277,9 @@ impl Agent {
                     return Err(AgentError::EmptyResponse);
                 }
                 messages.push(Message::assistant(&content, Vec::new()));
+                if self.append_pending_instructions(&mut messages) {
+                    continue;
+                }
                 return Ok(AgentOutcome {
                     final_text: content,
                     turns: turn,
@@ -232,6 +307,22 @@ impl Agent {
             }
         }
         Err(AgentError::MaxTurns(self.config.max_turns))
+    }
+
+    fn append_pending_instructions(&self, messages: &mut Vec<Message>) -> bool {
+        let instructions = self
+            .instruction_inbox
+            .as_ref()
+            .map(|inbox| inbox.drain())
+            .unwrap_or_default();
+        if instructions.is_empty() {
+            return false;
+        }
+        messages.push(Message::user(format!(
+            "Additional instructions from the parent Agent:\n\n{}",
+            instructions.join("\n\n")
+        )));
+        true
     }
 
     fn execute_tool<'a>(
@@ -392,6 +483,63 @@ mod tests {
         requests: Mutex<Vec<Vec<Message>>>,
     }
 
+    struct UsageProvider;
+
+    struct InstructionProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        inbox: Arc<AgentInstructionInbox>,
+    }
+
+    #[async_trait]
+    impl Provider for InstructionProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                assert!(self.inbox.push("also inspect tests".to_owned()));
+            } else {
+                assert!(messages.iter().any(|message| {
+                    message.content.contains("also inspect tests")
+                        && message.role == crate::types::Role::User
+                }));
+            }
+            Ok(Completion {
+                content: if call == 0 {
+                    "first answer"
+                } else {
+                    "revised answer"
+                }
+                .to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Provider for UsageProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            Ok(Completion {
+                content: "would otherwise finish".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: Some(crate::types::Usage {
+                    input_tokens: Some(800),
+                    output_tokens: Some(300),
+                    total_tokens: Some(1_100),
+                }),
+            })
+        }
+    }
+
     impl RecordingProvider {
         fn new(replies: &[&str]) -> Arc<Self> {
             Arc::new(Self {
@@ -434,6 +582,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stops_before_returning_when_token_budget_is_exhausted() {
+        let agent = Agent::new(
+            Arc::new(UsageProvider),
+            registry("token-budget"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: Some(1_000),
+            },
+        );
+
+        let error = agent.run("work").await.expect_err("budget must stop run");
+        assert!(matches!(
+            error,
+            AgentError::TokenBudgetExceeded {
+                budget: 1_000,
+                used: 1_100
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn parent_instruction_prevents_early_finish_and_continues_next_turn() {
+        let inbox = Arc::new(AgentInstructionInbox::default());
+        let provider = Arc::new(InstructionProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            inbox: inbox.clone(),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            registry("instructions"),
+            AgentConfig {
+                max_turns: 3,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_instruction_inbox(inbox);
+
+        let outcome = agent.run("inspect source").await.expect("continued run");
+        assert_eq!(outcome.final_text, "revised answer");
+        assert_eq!(outcome.turns, 2);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn vision_fallback_sends_image_only_to_vision_provider() {
         let main = RecordingProvider::new(&["done"]);
         let vision = RecordingProvider::new(&["a terminal showing an error"]);
@@ -444,6 +640,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 128_000,
+                token_budget: None,
             },
         )
         .with_image_fallback(vision.clone(), "some.im / qwen3-vl-plus");
@@ -489,6 +686,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 200,
+                token_budget: None,
             },
         );
         let history = (0..18)
@@ -528,6 +726,7 @@ mod tests {
                 max_turns: 2,
                 system_prompt: "system".to_owned(),
                 context_window: 128_000,
+                token_budget: None,
             },
         );
         let history = (0..12)

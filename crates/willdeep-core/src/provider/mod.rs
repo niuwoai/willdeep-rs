@@ -119,6 +119,12 @@ pub enum ProviderError {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    fn with_model(&self, _model: &str) -> Result<Arc<dyn Provider>, ProviderError> {
+        Err(ProviderError::InvalidResponse(
+            "provider does not support model reconfiguration".to_owned(),
+        ))
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

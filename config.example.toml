@@ -39,6 +39,9 @@ provider_profile = "some-im"
 model = "glm-5"
 max_turns = 8
 context_window = 128000
+token_budget = 32000
+timeout_seconds = 300
+max_consecutive_failures = 3
 
 [subagents.reader]
 provider_profile = "some-im"
@@ -52,6 +55,8 @@ max_turns = 12
 provider_profile = "some-im"
 model = "glm-5"
 max_turns = 6
+# Writing profiles default to a dedicated, reviewable Git worktree.
+worktree = "dedicated"
 
 # MCP stdio servers are initialized once and exposed as
 # mcp__<server>__<tool>. Put credentials in inherited environment variables;

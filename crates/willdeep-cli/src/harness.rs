@@ -4,8 +4,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskRegistry, EventSink, SubagentCatalog,
-    ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
+    Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
+    BackgroundTaskStatus, EventSink, SubagentCatalog, ToolRegistry, WebToolConfig, build_provider,
+    builtin_profiles,
 };
 
 use crate::config::LoadedConfig;
@@ -20,6 +21,7 @@ use crate::{
 pub(crate) enum HarnessFrontend {
     Terminal {
         json: bool,
+        quiet: bool,
     },
     Tui {
         tx: crate::tui::TuiSender,
@@ -28,6 +30,9 @@ pub(crate) enum HarnessFrontend {
     Runtime {
         connection: RuntimeConnection,
         sink: Arc<dyn EventSink>,
+        workspace_access: Option<crate::daemon::WorkspaceAccess>,
+        allowed_skills: Vec<String>,
+        allowed_mcp_servers: Vec<String>,
     },
 }
 
@@ -52,6 +57,12 @@ pub(crate) struct RuntimeHarnessOutcome {
     pub session_id: uuid::Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ExecutionOptions {
+    pub allow_compress_command: bool,
+    pub replay_existing_user_message: bool,
+}
+
 pub(crate) async fn execute_runtime(
     home: &Path,
     request: crate::daemon::SubmitTask,
@@ -67,7 +78,7 @@ pub(crate) async fn execute_runtime(
         profile: request.profile.clone(),
         api_base: None,
         api_key: None,
-        model: None,
+        model: request.model.clone(),
         provider: None,
         api: None,
         workspace: Some(request.workspace.clone()),
@@ -97,7 +108,13 @@ pub(crate) async fn execute_runtime(
         home,
         language,
         resumed.as_ref(),
-        HarnessFrontend::Runtime { connection, sink },
+        HarnessFrontend::Runtime {
+            connection,
+            sink,
+            workspace_access: request.workspace_access,
+            allowed_skills: request.workspace_skills.unwrap_or_default(),
+            allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
+        },
     )
     .await?;
     let mut session = resumed.unwrap_or_else(|| {
@@ -107,6 +124,9 @@ pub(crate) async fn execute_runtime(
             &request.prompt,
         )
     });
+    if session.config.is_none() {
+        session.config = request.config.clone();
+    }
     let outcome = execute_noninteractive(
         &built,
         &store,
@@ -114,7 +134,10 @@ pub(crate) async fn execute_runtime(
         request.prompt,
         request.attachments,
         language,
-        true,
+        ExecutionOptions {
+            allow_compress_command: true,
+            replay_existing_user_message: request.replay_existing_user_message,
+        },
     )
     .await?;
     Ok(RuntimeHarnessOutcome {
@@ -131,15 +154,14 @@ pub(crate) async fn execute_noninteractive(
     prompt: String,
     attachments: Vec<willdeep_core::MessageAttachment>,
     language: Language,
-    allow_compress_command: bool,
+    options: ExecutionOptions,
 ) -> Result<HarnessOutcome> {
-    if allow_compress_command && prompt.trim() == "/compress" {
+    if options.allow_compress_command && prompt.trim() == "/compress" {
         let messages = built
             .agent
             .compress_history(session.messages.clone())
             .await?;
-        let changed = messages.len() < session.messages.len();
-        session.messages = messages;
+        let changed = session.replace_with_compressed_messages(messages);
         store.save(session)?;
         return Ok(HarnessOutcome {
             final_text: language
@@ -165,10 +187,23 @@ pub(crate) async fn execute_noninteractive(
             compressed: true,
         });
     }
-    let history = session.messages.clone();
-    let user_message = willdeep_core::Message::user_with_attachments(&prompt, attachments);
-    session.messages.push(user_message.clone());
-    store.save(session)?;
+    let (history, user_message) = if options.replay_existing_user_message {
+        let user_message = session
+            .messages
+            .last()
+            .cloned()
+            .context("recovered Turn is missing its persisted user message")?;
+        (
+            session.messages[..session.messages.len() - 1].to_vec(),
+            user_message,
+        )
+    } else {
+        let history = session.messages.clone();
+        let user_message = willdeep_core::Message::user_with_attachments(&prompt, attachments);
+        session.messages.push(user_message.clone());
+        store.save(session)?;
+        (history, user_message)
+    };
     let mut outcome = built
         .agent
         .run_with_history_message(history, user_message)
@@ -235,16 +270,7 @@ pub(crate) async fn build(
     if !(1..=100).contains(&max_turns) {
         bail!("--max-turns must be between 1 and 100");
     }
-    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
-    let requested_workspace = cli
-        .workspace
-        .clone()
-        .or(project_workspace)
-        .or_else(|| resumed.map(|session| session.workspace.clone()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let workspace = requested_workspace
-        .canonicalize()
-        .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))?;
+    let workspace = resolve_workspace(cli, resumed)?;
     let api_key = resolve_api_key(cli, profile, kind)?;
     let model = cli
         .model
@@ -278,7 +304,19 @@ pub(crate) async fn build(
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
-    let approval_mode = if cli.full_auto {
+    let runtime_access = match &frontend {
+        HarnessFrontend::Runtime {
+            workspace_access, ..
+        } => *workspace_access,
+        _ => None,
+    };
+    let approval_mode = if let Some(access) = runtime_access {
+        match access {
+            crate::daemon::WorkspaceAccess::ReadOnly => ApprovalMode::ReadOnly,
+            crate::daemon::WorkspaceAccess::Smart => ApprovalMode::Smart,
+            crate::daemon::WorkspaceAccess::WorkspaceWrite => ApprovalMode::WorkspaceAccess,
+        }
+    } else if cli.full_auto {
         ApprovalMode::WorkspaceAccess
     } else {
         match configured_approval {
@@ -288,12 +326,24 @@ pub(crate) async fn build(
             _ => bail!("agent.approval must be `strict`, `smart`, or `workspace-write`"),
         }
     };
-    let skills = Arc::new(willdeep_core::SkillCatalog::discover(
-        &workspace,
-        &loaded.file.skills.roots,
-    ));
+    let (allowed_skills, allowed_mcp_servers) = match &frontend {
+        HarnessFrontend::Runtime {
+            allowed_skills,
+            allowed_mcp_servers,
+            ..
+        } => (allowed_skills.as_slice(), allowed_mcp_servers.as_slice()),
+        _ => (&[][..], &[][..]),
+    };
+    let skills = Arc::new(
+        willdeep_core::SkillCatalog::discover(&workspace, &loaded.file.skills.roots)
+            .allow_only(allowed_skills),
+    );
+    let mut mcp_servers = loaded.file.mcp_servers.clone();
+    if !allowed_mcp_servers.is_empty() {
+        mcp_servers.retain(|name, _| allowed_mcp_servers.contains(name));
+    }
     let mcp = Arc::new(
-        willdeep_core::McpRegistry::connect(&loaded.file.mcp_servers)
+        willdeep_core::McpRegistry::connect(&mcp_servers)
             .await
             .context("initialize MCP servers")?,
     );
@@ -302,9 +352,9 @@ pub(crate) async fn build(
         Arc<dyn EventSink>,
         Option<RuntimeConnection>,
     ) = match frontend {
-        HarnessFrontend::Terminal { json } => (
+        HarnessFrontend::Terminal { json, quiet } => (
             Arc::new(TerminalApprover(language)),
-            Arc::new(TerminalSink { json }),
+            Arc::new(TerminalSink { json, quiet }),
             None,
         ),
         HarnessFrontend::Tui { tx, relay } => (
@@ -312,20 +362,63 @@ pub(crate) async fn build(
             Arc::new(crate::tui::TuiSink { ui: tx, relay }),
             None,
         ),
-        HarnessFrontend::Runtime { connection, sink } => (
+        HarnessFrontend::Runtime {
+            connection, sink, ..
+        } => (
             daemon::runtime_approver(Some(&connection))?.context("initialize Runtime approver")?,
             sink,
             Some(connection),
         ),
     };
-    let background_tasks = Arc::new(BackgroundTaskRegistry::default());
-    let command_watcher =
-        daemon::start_agent_command_watcher(runtime_connection.as_ref(), background_tasks.clone())?;
+    let background_lifecycle_sink = sink.clone();
+    let background_tasks = Arc::new(BackgroundTaskRegistry::default().with_lifecycle_observer(
+        move |snapshot| {
+            let sink = background_lifecycle_sink.clone();
+            async move {
+                if snapshot.kind != BackgroundTaskKind::Shell {
+                    return;
+                }
+                if snapshot.status == BackgroundTaskStatus::Running {
+                    sink.emit(willdeep_core::AgentEvent::BackgroundShellStarted {
+                        id: snapshot.id,
+                    })
+                    .await;
+                } else {
+                    sink.emit(willdeep_core::AgentEvent::BackgroundShellCompleted {
+                        id: snapshot.id,
+                        status: snapshot.status,
+                        exit_code: snapshot.exit_code,
+                        elapsed_millis: snapshot.elapsed_millis,
+                        output_bytes: snapshot.output_bytes,
+                    })
+                    .await;
+                }
+            }
+        },
+    ));
+    let verification_home = home.to_path_buf();
+    let verification_workspace = workspace.clone();
     let tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
         .with_skills(skills.clone())
         .with_mcp(mcp)
         .with_background_tasks(background_tasks.clone())
+        .with_verification_reporter(move |verification| {
+            let home = verification_home.clone();
+            let workspace = verification_workspace.clone();
+            let Ok(snapshot) = daemon::diff_review::snapshot(&workspace) else {
+                return;
+            };
+            tokio::spawn(async move {
+                let _ = daemon::diff_review::remote_record_verification(
+                    &home,
+                    &workspace,
+                    snapshot.id,
+                    verification,
+                )
+                .await;
+            });
+        })
         .with_web_tools(web_tools)
         .with_always_allow_store(home.join("always-allow.json"))?;
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
@@ -338,26 +431,38 @@ pub(crate) async fn build(
     let context_window = profile
         .and_then(|value| value.context_window)
         .unwrap_or(128_000);
+    let cheap_model = if kind == ProviderKind::SomeIm {
+        "glm-5".to_owned()
+    } else {
+        model.clone()
+    };
     let cheap_provider = if kind == ProviderKind::SomeIm {
         let mut cheap = parent_provider_config.clone();
-        cheap.model = "glm-5".to_owned();
+        cheap.model = cheap_model.clone();
         build_provider(cheap).context("initialize default subagent provider")?
     } else {
         provider.clone()
     };
     let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
     for subagent in &mut subagent_profiles {
+        subagent.model = Some(if subagent.id == "deep" {
+            model.clone()
+        } else {
+            cheap_model.clone()
+        });
         if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
             if let Some(provider_name) = settings.provider_profile.as_deref() {
                 let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
                 if let Some(model) = &settings.model {
                     configured.model = model.clone();
                 }
+                subagent.model = Some(configured.model.clone());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             } else if let Some(model) = &settings.model {
                 let mut configured = parent_provider_config.clone();
                 configured.model = model.clone();
+                subagent.model = Some(model.clone());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             }
@@ -367,12 +472,33 @@ pub(crate) async fn build(
             if let Some(window) = settings.context_window {
                 subagent.context_window = window;
             }
+            if let Some(token_budget) = settings.token_budget {
+                subagent.token_budget = Some(token_budget);
+            }
+            if let Some(timeout_seconds) = settings.timeout_seconds {
+                subagent.timeout_seconds = Some(timeout_seconds);
+            }
+            if let Some(max_failures) = settings.max_consecutive_failures {
+                subagent.max_consecutive_failures = max_failures;
+            }
+            if let Some(worktree) = settings.worktree.as_deref() {
+                subagent.worktree = match worktree {
+                    "dedicated" => willdeep_core::SubagentWorktreePolicy::Dedicated,
+                    _ => willdeep_core::SubagentWorktreePolicy::Shared,
+                };
+            }
         }
     }
     let subagents = Arc::new(
         SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
+            .with_worktree_root(home.join("worktrees").join("subagents"))
             .with_event_sink(sink.clone()),
     );
+    let command_watcher = daemon::start_agent_command_watcher(
+        runtime_connection.as_ref(),
+        background_tasks.clone(),
+        subagents.clone(),
+    )?;
     let mut agent = Agent::new(
         provider,
         tools,
@@ -380,6 +506,7 @@ pub(crate) async fn build(
             max_turns,
             system_prompt,
             context_window,
+            token_budget: None,
         },
     )
     .with_event_sink(sink)
@@ -395,4 +522,20 @@ pub(crate) async fn build(
         context_window,
         _command_watcher: command_watcher,
     })
+}
+
+pub(crate) fn resolve_workspace(
+    cli: &Cli,
+    resumed: Option<&willdeep_core::Session>,
+) -> Result<PathBuf> {
+    let project_workspace = cli.project.as_deref().map(projects::resolve).transpose()?;
+    let requested_workspace = cli
+        .workspace
+        .clone()
+        .or(project_workspace)
+        .or_else(|| resumed.map(|session| session.workspace.clone()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    requested_workspace
+        .canonicalize()
+        .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))
 }

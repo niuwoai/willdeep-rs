@@ -9,17 +9,17 @@ use async_trait::async_trait;
 use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -35,18 +35,32 @@ use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
 use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
 
+mod activity;
+mod agent_commands;
+mod agent_worktree_ui;
 mod command_catalog;
+mod diff_review_ui;
 mod dispatch;
+mod rendering;
 mod runtime_ui;
 mod session_commands;
 mod sidebar;
+mod webapp_commands;
 mod workspace_attention;
+mod workspace_commands;
+use activity::ToolActivity;
+use agent_commands::handle_agent_command;
+use agent_worktree_ui::render_agent_overlays;
 use command_catalog::command_candidates;
+use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use rendering::*;
 use runtime_ui::open_remote_gate;
+use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::handle_session_command;
-use sidebar::render_sidebar;
+use sidebar::{render_attention_detail, render_sidebar};
 use workspace_attention::workspace_attention;
+use workspace_commands::handle_workspace_command;
 
 pub enum UiMessage {
     Agent(AgentEvent),
@@ -110,6 +124,7 @@ struct App {
     viewport_height: usize,
     tools: ToolActivity,
     tools_expanded: bool,
+    activity_rect: Rect,
     attachments: Vec<DraftAttachment>,
     selected_attachment: usize,
     prompt_rect: Rect,
@@ -130,7 +145,14 @@ struct App {
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
+    runtime_tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
+    runtime_artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
     runtime_agent_selected: usize,
+    agent_detail: Option<crate::daemon::tui_bridge::RemoteAgent>,
+    agent_detail_scroll: usize,
+    agent_detail_action_rects: Vec<(Rect, AgentDetailAction)>,
+    worktree_review: Option<crate::daemon::WorktreeReview>,
+    diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
     background_notices: VecDeque<String>,
     workspace_status: String,
@@ -157,6 +179,9 @@ struct App {
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
     attention_detail: Option<AttentionItem>,
+    attention_diff_rect: Rect,
+    attention_allow_rect: Rect,
+    attention_deny_rect: Rect,
     search: Option<SearchState>,
     workspace: Option<PathBuf>,
     palette: Option<PaletteState>,
@@ -177,42 +202,15 @@ struct App {
 enum FocusPane {
     Prompt,
     Chat,
+    Activity,
     Sidebar,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum PromptExecution {
-    Runtime(String),
-    Local(String),
-}
-
-fn prompt_execution(prompt: &str) -> PromptExecution {
-    let value = prompt.trim();
-    if value == "/local" || value.starts_with("/local ") {
-        return PromptExecution::Local(
-            value
-                .strip_prefix("/local")
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        );
-    }
-    if value == "/runtime" || value.starts_with("/runtime ") {
-        return PromptExecution::Runtime(
-            value
-                .strip_prefix("/runtime")
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        );
-    }
-    PromptExecution::Runtime(prompt.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarHit {
     Section(usize),
     Attention(usize),
+    NewAgent,
 }
 
 struct TaskDetail {
@@ -256,68 +254,6 @@ struct AskDialog {
     sender: oneshot::Sender<Option<String>>,
 }
 
-#[derive(Default)]
-struct ToolActivity {
-    requested: usize,
-    completed: usize,
-    failed: usize,
-    counts: BTreeMap<String, usize>,
-    details: Vec<String>,
-}
-impl ToolActivity {
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-    fn requested(&mut self, name: &str) {
-        self.requested += 1;
-        *self.counts.entry(name.to_owned()).or_default() += 1;
-        self.details.push(format!("… {name}"));
-    }
-    fn completed(&mut self, name: &str, is_error: bool) {
-        self.completed += 1;
-        self.failed += usize::from(is_error);
-        let pending = format!("… {name}");
-        if let Some(v) = self.details.iter_mut().rev().find(|v| **v == pending) {
-            *v = format!("{} {name}", if is_error { "✗" } else { "✓" });
-        }
-    }
-    fn summary(&self, language: Language) -> String {
-        let calls = self
-            .counts
-            .iter()
-            .map(|(n, c)| format!("{n}×{c}"))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let progress = if self.completed < self.requested {
-            format!(
-                "{}/{} {}",
-                self.completed,
-                self.requested,
-                language.text("完成", "complete", "完了")
-            )
-        } else {
-            format!(
-                "{} {}",
-                self.requested,
-                language.text("次调用", "calls", "回呼び出し")
-            )
-        };
-        let failed = if self.failed > 0 {
-            format!(
-                " · {} {}",
-                self.failed,
-                language.text("失败", "failed", "失敗")
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{}: {progress}{failed} · {calls}",
-            language.text("工具", "Tools", "ツール")
-        )
-    }
-}
-
 pub async fn run(
     agent: Arc<Agent>,
     mut session: Session,
@@ -350,6 +286,7 @@ pub async fn run(
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
+        local_workspace: session.workspace.clone(),
         tx: ui.0,
         rx: ui.1,
     };
@@ -372,8 +309,288 @@ struct TuiRuntime {
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
+    local_workspace: PathBuf,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffAttentionAction {
+    Open,
+    Accept,
+    Reject,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentDetailAction {
+    Instruct,
+    Stop,
+    Retry,
+    RetryWithModel,
+    ReviewWorktree,
+}
+
+fn diff_attention_action_for_key(code: KeyCode) -> Option<DiffAttentionAction> {
+    match code {
+        KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => Some(DiffAttentionAction::Open),
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(DiffAttentionAction::Accept),
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(DiffAttentionAction::Reject),
+        _ => None,
+    }
+}
+
+fn selection_mode_exit_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffReviewMouseAction {
+    ScrollUp,
+    ScrollDown,
+    Consume,
+}
+
+fn diff_review_mouse_action(
+    diff_review_open: bool,
+    kind: MouseEventKind,
+) -> Option<DiffReviewMouseAction> {
+    if !diff_review_open {
+        return None;
+    }
+    Some(match kind {
+        MouseEventKind::ScrollUp => DiffReviewMouseAction::ScrollUp,
+        MouseEventKind::ScrollDown => DiffReviewMouseAction::ScrollDown,
+        _ => DiffReviewMouseAction::Consume,
+    })
+}
+
+fn prefill_agent_command(
+    app: &mut App,
+    agent_id: uuid::Uuid,
+    action: AgentDetailAction,
+    language: Language,
+) {
+    if !app.input.is_empty() || !app.attachments.is_empty() {
+        app.notice = Some(
+            language
+                .text(
+                    "输入区已有草稿或附件，请先发送或清空后再操作 Agent",
+                    "The composer has a draft or attachments; send or clear it before controlling the Agent",
+                    "入力欄に下書きまたは添付があります。送信または消去してから Agent を操作してください",
+                )
+                .to_owned(),
+        );
+        return;
+    }
+    let command = match action {
+        AgentDetailAction::Instruct => format!("/agent instruct {agent_id} "),
+        AgentDetailAction::RetryWithModel => format!("/agent retry {agent_id} --model "),
+        _ => return,
+    };
+    app.input.insert(&command);
+    app.focus = FocusPane::Prompt;
+    app.agent_detail = None;
+    app.agent_detail_scroll = 0;
+}
+
+async fn handle_agent_detail_action(
+    action: AgentDetailAction,
+    app: &mut App,
+    runtime: &TuiRuntime,
+    language: Language,
+) {
+    let Some(agent) = app.agent_detail.clone() else {
+        return;
+    };
+    match action {
+        AgentDetailAction::Instruct | AgentDetailAction::RetryWithModel => {
+            prefill_agent_command(app, agent.id, action, language);
+        }
+        AgentDetailAction::Stop => {
+            match crate::daemon::stop_remote_agent(&runtime.home, agent.id).await {
+                Ok(()) => {
+                    app.agent_detail = None;
+                    app.notice = Some(
+                        language
+                            .text(
+                                "已请求停止子 Agent",
+                                "Child Agent stop requested",
+                                "子 Agent の停止を要求しました",
+                            )
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text("停止失败", "Stop failed", "停止に失敗")
+                    ))
+                }
+            }
+        }
+        AgentDetailAction::Retry => {
+            match crate::daemon::retry_remote_agent(&runtime.home, agent.id).await {
+                Ok(()) => {
+                    app.agent_detail = None;
+                    app.notice = Some(
+                        language
+                            .text(
+                                "已请求重试子 Agent",
+                                "Child Agent retry requested",
+                                "子 Agent の再試行を要求しました",
+                            )
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text("重试失败", "Retry failed", "再試行に失敗")
+                    ))
+                }
+            }
+        }
+        AgentDetailAction::ReviewWorktree => {
+            match crate::daemon::remote_review(&runtime.home, agent.id).await {
+                Ok(review) => app.worktree_review = Some(review),
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text(
+                            "Worktree 审查失败",
+                            "Worktree review failed",
+                            "Worktree レビュー失敗"
+                        )
+                    ))
+                }
+            }
+        }
+    }
+}
+
+async fn load_diff_review_state(
+    home: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<DiffReviewState> {
+    let snapshot = crate::daemon::diff_review::remote_snapshot(home, workspace).await?;
+    let reviews = crate::daemon::diff_review::remote_reviews(home, workspace, &snapshot.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| (record.path, record.decision))
+        .collect();
+    let verifications =
+        crate::daemon::diff_review::remote_verifications(home, workspace, &snapshot.id)
+            .await
+            .unwrap_or_default();
+    let attributions =
+        crate::daemon::diff_review::remote_attributions(home, workspace, &snapshot.id)
+            .await
+            .unwrap_or_default();
+    Ok(DiffReviewState {
+        snapshot,
+        selected: 0,
+        content: None,
+        scroll: 0,
+        area: crate::daemon::diff_review::DiffArea::Combined,
+        view: DiffViewMode::Unified,
+        search: None,
+        search_matches: Vec::new(),
+        search_selected: 0,
+        reviews,
+        confirm_revert: false,
+        verifications,
+        attributions,
+        commit_preview: None,
+        preview_draft: None,
+    })
+}
+
+async fn handle_diff_attention_action(
+    action: DiffAttentionAction,
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &TuiRuntime,
+    language: Language,
+) -> Result<()> {
+    if matches!(action, DiffAttentionAction::Open) {
+        match load_diff_review_state(&runtime.home, &session.workspace).await {
+            Ok(review) => {
+                app.diff_review = Some(review);
+                app.attention_detail = None;
+            }
+            Err(error) => {
+                app.notice = Some(format!(
+                    "{}: {error}",
+                    language.text(
+                        "打开 Diff Review 失败",
+                        "Open Diff Review failed",
+                        "Diff Review を開けませんでした"
+                    )
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let decision = if matches!(action, DiffAttentionAction::Accept) {
+        crate::daemon::diff_review::ReviewDecision::Accepted
+    } else {
+        crate::daemon::diff_review::ReviewDecision::Rejected
+    };
+    let snapshot =
+        crate::daemon::diff_review::remote_snapshot(&runtime.home, &session.workspace).await?;
+    if snapshot.has_conflicts && matches!(action, DiffAttentionAction::Accept) {
+        app.notice = Some(
+            language
+                .text(
+                    "存在未解决冲突，不能整批通过；请先查看 Diff",
+                    "Unresolved conflicts prevent bulk acceptance; inspect the Diff first",
+                    "未解決の競合があるため一括承認できません。Diff を確認してください",
+                )
+                .to_owned(),
+        );
+        return Ok(());
+    }
+    for file in &snapshot.files {
+        crate::daemon::diff_review::remote_review(
+            &runtime.home,
+            &snapshot.id,
+            &crate::daemon::diff_review::ReviewRequest {
+                workspace: session.workspace.clone(),
+                path: file.path.clone(),
+                decision,
+                note: None,
+            },
+        )
+        .await?;
+    }
+    if let Some(detail) = app.attention_detail.take() {
+        app.attention_read.insert(detail.id);
+        session.attention_read = app.attention_read.clone();
+        store.save(session)?;
+    }
+    app.workspace_attention = workspace_attention(&session.workspace);
+    app.notice = Some(format!(
+        "{}: {}",
+        if matches!(action, DiffAttentionAction::Accept) {
+            language.text(
+                "已通过当前 Diff",
+                "Current Diff accepted",
+                "現在の Diff を承認しました",
+            )
+        } else {
+            language.text(
+                "已拒绝当前 Diff",
+                "Current Diff rejected",
+                "現在の Diff を拒否しました",
+            )
+        },
+        snapshot.files.len()
+    ));
+    Ok(())
 }
 
 async fn event_loop(
@@ -389,6 +606,7 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    app.goal = session.goal.clone();
     if session.runtime_event_cursor == 0 {
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
             .await
@@ -409,11 +627,11 @@ async fn event_loop(
         mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
     let (runtime_event_tx, mut runtime_event_rx) =
         mpsc::unbounded_channel::<Vec<crate::daemon::RemoteRuntimeEvent>>();
-    let _runtime_event_follower = crate::daemon::start_runtime_event_follower(
+    let mut _runtime_event_follower = crate::daemon::start_runtime_event_follower(
         runtime.home.clone(),
         app.runtime_event_cursor,
         runtime.runtime_submit.workspace.clone(),
-        runtime_event_tx,
+        runtime_event_tx.clone(),
     );
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
@@ -430,12 +648,57 @@ async fn event_loop(
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
                 app.runtime_agents=snapshot.agents;
+                app.runtime_tools=snapshot.tools;
+                app.runtime_artifacts=snapshot.artifacts;
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>app.handle_paste(value),
-                Event::Mouse(mouse)=>match mouse.kind {
-                    MouseEventKind::Down(_)=>app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills),
+                Event::Mouse(mouse)=>{
+                    if app.question.is_some()||app.approval.is_some() {
+                        if matches!(mouse.kind,MouseEventKind::Down(_)) {
+                            app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        }
+                        continue;
+                    }
+                    if let Some(action)=diff_review_mouse_action(app.diff_review.is_some(),mouse.kind) {
+                        if let Some(review)=app.diff_review.as_mut()
+                            && review.preview_draft.is_none()
+                        {
+                            match action {
+                                DiffReviewMouseAction::ScrollUp=>review.scroll=review.scroll.saturating_sub(3),
+                                DiffReviewMouseAction::ScrollDown=>review.scroll=review.scroll.saturating_add(3),
+                                DiffReviewMouseAction::Consume=>{},
+                            }
+                        }
+                        continue;
+                    }
+                    if mouse.kind==MouseEventKind::Down(MouseButton::Left)
+                        && let Some(action)=app.diff_attention_action_at(mouse.column,mouse.row)
+                    {
+                        if let Err(error)=handle_diff_attention_action(action,&mut app,session,store,runtime,language).await {
+                            app.notice=Some(format!("{}: {error}",language.text("Diff 操作失败","Diff action failed","Diff 操作に失敗")));
+                        }
+                        continue;
+                    }
+                    if mouse.kind==MouseEventKind::Down(MouseButton::Left)
+                        && let Some(action)=app.agent_detail_action_at(mouse.column,mouse.row)
+                    {
+                        handle_agent_detail_action(action,&mut app,runtime,language).await;
+                        continue;
+                    }
+                    match mouse.kind {
+                    MouseEventKind::Down(_)=>{
+                        app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        if app.attention_detail.is_some()
+                            && let Some(gate)=app.selected_remote_gate()
+                        {
+                            app.attention_detail=None;
+                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                        }
+                    },
+                    MouseEventKind::ScrollUp if app.agent_detail.is_some()=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown if app.agent_detail.is_some()=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_sub(3),
                     MouseEventKind::ScrollDown if app.task_detail.is_some()=>app.task_detail_scroll=app.task_detail_scroll.saturating_add(3),
                     MouseEventKind::ScrollUp if app.sidebar_rect.contains((mouse.column,mouse.row).into())=>app.sidebar_scroll_by(-3),
@@ -445,24 +708,212 @@ async fn event_loop(
                     MouseEventKind::ScrollUp=>app.scroll_up(3),
                     MouseEventKind::ScrollDown=>app.scroll_down(3),
                     _=>{}
-                },
+                }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
-                        app.selection_mode = !app.selection_mode;
-                        if app.selection_mode {execute!(term.backend_mut(),DisableMouseCapture)?;} else {execute!(term.backend_mut(),EnableMouseCapture)?;}
-                        let notice=if app.selection_mode {language.text("文本选择模式 · 拖动选择，Ctrl+S 恢复交互","Text selection · drag to select, Ctrl+S restores interaction","テキスト選択 · ドラッグで選択、Ctrl+S で戻る")} else {language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました")};
-                        app.notice=Some(notice.to_owned());
+                    if app.selection_mode {
+                        if selection_mode_exit_key(key) {
+                            app.selection_mode=false;
+                            execute!(term.backend_mut(),EnableMouseCapture)?;
+                            app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
+                        }
                         continue;
                     }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
+                        app.selection_mode = true;
+                        execute!(term.backend_mut(),DisableMouseCapture)?;
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if let Some((_,always,sender))=app.approval.take(){
                         let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
                         let _=sender.send(decision);continue;
                     }
+                    if let Some(detail)=app.attention_detail.clone(){
+                        if detail.source==AttentionSource::DiffReview {
+                            let action=diff_attention_action_for_key(key.code);
+                            if let Some(action)=action {
+                                if let Err(error)=handle_diff_attention_action(action,&mut app,session,store,runtime,language).await {
+                                    app.notice=Some(format!("{}: {error}",language.text("Diff 操作失败","Diff action failed","Diff 操作に失敗")));
+                                }
+                            } else if key.code==KeyCode::Esc {
+                                app.attention_detail=None;
+                            }
+                        } else if key.code==KeyCode::Esc{app.attention_detail=None;}
+                        else if key.code==KeyCode::Enter
+                            && let Some(gate)=app.selected_remote_gate()
+                        {
+                            app.attention_detail=None;
+                            open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                        }
+                        continue;
+                    }
                     if app.task_detail.is_some(){app.handle_task_detail_key(key,&runtime.background_tasks);continue;}
-                    if app.attention_detail.is_some(){if key.code==KeyCode::Esc{app.attention_detail=None;}continue;}
+                    if let Some(review)=app.worktree_review.clone(){
+                        match key.code {
+                            KeyCode::Esc=>app.worktree_review=None,
+                            KeyCode::Char('m')|KeyCode::Char('M') if review.can_merge=>{
+                                match crate::daemon::remote_merge(&runtime.home,review.agent_id,review.id).await {
+                                    Ok(result)=>{app.notice=Some(format!("{} · {}",language.text("Worktree 已合并","Worktree merged","Worktree をマージしました"),result.root_snapshot_id));app.worktree_review=None;app.agent_detail=None;},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("合并失败","Merge failed","マージ失敗"))),
+                                }
+                            }
+                            _=>{}
+                        }
+                        continue;
+                    }
+                    if let Some(agent)=app.agent_detail.clone(){
+                        match key.code {
+                            KeyCode::Esc=>{app.agent_detail=None;app.agent_detail_scroll=0;},
+                            KeyCode::Up=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(1),
+                            KeyCode::Down=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(1),
+                            KeyCode::PageUp=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_sub(8),
+                            KeyCode::PageDown=>app.agent_detail_scroll=app.agent_detail_scroll.saturating_add(8),
+                            KeyCode::Home=>app.agent_detail_scroll=0,
+                            KeyCode::End=>app.agent_detail_scroll=usize::MAX,
+                            KeyCode::Char('i')|KeyCode::Char('I') if agent.background&&agent.status==willdeep_core::RuntimeStatus::Working=>handle_agent_detail_action(AgentDetailAction::Instruct,&mut app,runtime,language).await,
+                            KeyCode::Char('k')|KeyCode::Char('K') if agent.background&&agent.status==willdeep_core::RuntimeStatus::Working=>handle_agent_detail_action(AgentDetailAction::Stop,&mut app,runtime,language).await,
+                            KeyCode::Char('r')|KeyCode::Char('R') if agent.background&&matches!(agent.status,willdeep_core::RuntimeStatus::Blocked|willdeep_core::RuntimeStatus::Failed|willdeep_core::RuntimeStatus::Done|willdeep_core::RuntimeStatus::Cancelled)=>handle_agent_detail_action(AgentDetailAction::Retry,&mut app,runtime,language).await,
+                            KeyCode::Char('m')|KeyCode::Char('M') if agent.background&&matches!(agent.status,willdeep_core::RuntimeStatus::Blocked|willdeep_core::RuntimeStatus::Failed|willdeep_core::RuntimeStatus::Done|willdeep_core::RuntimeStatus::Cancelled)=>handle_agent_detail_action(AgentDetailAction::RetryWithModel,&mut app,runtime,language).await,
+                            KeyCode::Char('w')|KeyCode::Char('W') if agent.dedicated_worktree=>handle_agent_detail_action(AgentDetailAction::ReviewWorktree,&mut app,runtime,language).await,
+                            _=>{}
+                        }
+                        continue;
+                    }
+                    if app.diff_review.is_some(){
+                        let mut close=false;
+                        let mut force_full_redraw=false;
+                        let mut open_file=None;
+                        let mut review_action=None;
+                        let mut revert_action=None;
+                        let mut commit_preview_action=None;
+                        let mut preview_draft_handled=false;
+                        if let Some(review)=app.diff_review.as_mut(){
+                            if review.commit_preview.is_some() {
+                                if key.code==KeyCode::Esc{review.commit_preview=None;}
+                                continue;
+                            } else if let Some(draft)=review.preview_draft.as_mut() {
+                                preview_draft_handled=true;
+                                match key.code {
+                                    KeyCode::Esc=>review.preview_draft=None,
+                                    KeyCode::Tab=>draft.field=(draft.field+1)%3,
+                                    KeyCode::BackTab=>draft.field=draft.field.checked_sub(1).unwrap_or(2),
+                                    KeyCode::Enter if !draft.message.text().trim().is_empty()=>{
+                                        commit_preview_action=Some((review.snapshot.id.clone(),draft.message.text().to_owned(),draft.remote.text().to_owned(),draft.tag.text().to_owned()));
+                                        review.preview_draft=None;
+                                    },
+                                    KeyCode::Left=>draft.editor_mut().left(),
+                                    KeyCode::Right=>draft.editor_mut().right(),
+                                    KeyCode::Home=>draft.editor_mut().home(),
+                                    KeyCode::End=>draft.editor_mut().end(),
+                                    KeyCode::Backspace=>draft.editor_mut().backspace(),
+                                    KeyCode::Delete=>draft.editor_mut().delete(),
+                                    KeyCode::Char(value) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER)=>draft.editor_mut().insert(&value.to_string()),
+                                    _=>{},
+                                }
+                            } else if review.confirm_revert {
+                                if matches!(key.code,KeyCode::Char('y')|KeyCode::Char('Y')) {
+                                    revert_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),review.area));
+                                }
+                                review.confirm_revert=false;
+                                if revert_action.is_none(){app.notice=Some(language.text("已取消撤销","Revert cancelled","取り消しをキャンセルしました").to_owned());}
+                            } else if review.search.is_some() {
+                                match key.code {
+                                    KeyCode::Esc => review.search = None,
+                                    KeyCode::Enter if !review.search_matches.is_empty() => {
+                                        review.search_selected = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                            review.search_selected.checked_sub(1).unwrap_or(review.search_matches.len() - 1)
+                                        } else {
+                                            (review.search_selected + 1) % review.search_matches.len()
+                                        };
+                                        review.scroll = review.search_matches[review.search_selected];
+                                    }
+                                    KeyCode::Left => review.search.as_mut().unwrap().left(),
+                                    KeyCode::Right => review.search.as_mut().unwrap().right(),
+                                    KeyCode::Home => review.search.as_mut().unwrap().home(),
+                                    KeyCode::End => review.search.as_mut().unwrap().end(),
+                                    KeyCode::Backspace => { review.search.as_mut().unwrap().backspace(); refresh_diff_search(review); }
+                                    KeyCode::Delete => { review.search.as_mut().unwrap().delete(); refresh_diff_search(review); }
+                                    KeyCode::Char(value) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER) => {
+                                        review.search.as_mut().unwrap().insert(&value.to_string());
+                                        refresh_diff_search(review);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            } else {match key.code {
+                                KeyCode::Esc if review.content.is_some()=>{review.content=None;review.scroll=0;force_full_redraw=true;},
+                                KeyCode::Esc=>{close=true;force_full_redraw=true;},
+                                KeyCode::Up if review.content.is_none()=>review.selected=review.selected.checked_sub(1).unwrap_or(review.snapshot.files.len().saturating_sub(1)),
+                                KeyCode::Down if review.content.is_none()&&!review.snapshot.files.is_empty()=>review.selected=(review.selected+1)%review.snapshot.files.len(),
+                                KeyCode::Enter if review.content.is_none()=>open_file=review.snapshot.files.get(review.selected).map(|file|(review.snapshot.id.clone(),file.path.clone(),review.area)),
+                                KeyCode::Char('v')|KeyCode::Char('V') if review.content.is_some()=>{
+                                    review.view=match review.view {DiffViewMode::Unified=>DiffViewMode::SideBySide,DiffViewMode::SideBySide=>DiffViewMode::Unified};
+                                    refresh_diff_search(review);
+                                },
+                                KeyCode::Char('s')|KeyCode::Char('S') if review.content.is_some()=>{
+                                    review.area=next_diff_area(review.area);
+                                    open_file=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),review.area));
+                                },
+                                KeyCode::Char('/') if review.content.is_some()=>review.search=Some(PromptEditor::default()),
+                                KeyCode::Char('n') if !review.search_matches.is_empty()=>{
+                                    review.search_selected=(review.search_selected+1)%review.search_matches.len();
+                                    review.scroll=review.search_matches[review.search_selected];
+                                },
+                                KeyCode::Char('N') if !review.search_matches.is_empty()=>{
+                                    review.search_selected=review.search_selected.checked_sub(1).unwrap_or(review.search_matches.len()-1);
+                                    review.scroll=review.search_matches[review.search_selected];
+                                },
+                                KeyCode::Char('a')|KeyCode::Char('A') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Accepted)),
+                                KeyCode::Char('d')|KeyCode::Char('D') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Rejected)),
+                                KeyCode::Char('c')|KeyCode::Char('C') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::ChangesRequested)),
+                                KeyCode::Char('m')|KeyCode::Char('M') if review.content.is_some()=>review_action=review.content.as_ref().map(|(path,_)|(review.snapshot.id.clone(),path.clone(),crate::daemon::diff_review::ReviewDecision::Reviewed)),
+                                KeyCode::Char('r')|KeyCode::Char('R') if review.content.is_some()=>review.confirm_revert=true,
+                                KeyCode::Char('p')|KeyCode::Char('P')=>review.preview_draft=Some(CommitPreviewDraft::default()),
+                                KeyCode::Up=>review.scroll=review.scroll.saturating_sub(1),
+                                KeyCode::Down=>review.scroll=review.scroll.saturating_add(1),
+                                KeyCode::PageUp=>review.scroll=review.scroll.saturating_sub(10),
+                                KeyCode::PageDown=>review.scroll=review.scroll.saturating_add(10),
+                                KeyCode::Home=>review.scroll=0,
+                                _=>{}
+                            }}
+                        }
+                        if preview_draft_handled&&commit_preview_action.is_none(){continue;}
+                        if force_full_redraw{term.clear()?;}
+                        if close{app.diff_review=None;continue;}
+                        if let Some((snapshot_id,path,area))=open_file{
+                            match crate::daemon::diff_review::remote_content(&runtime.home,&session.workspace,&snapshot_id,&path,area).await{
+                                Ok(content)=>if let Some(review)=app.diff_review.as_mut(){review.content=Some((path,content));review.scroll=0;review.search_matches.clear();review.search_selected=0;},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("打开 Diff 失败","Open Diff failed","Diff を開けませんでした"))),
+                            }
+                        }
+                        if let Some((snapshot_id,path,decision))=review_action{
+                            let request=crate::daemon::diff_review::ReviewRequest{workspace:session.workspace.clone(),path:path.clone(),decision,note:None};
+                            match crate::daemon::diff_review::remote_review(&runtime.home,&snapshot_id,&request).await{
+                                Ok(record)=>{if let Some(review)=app.diff_review.as_mut(){review.reviews.insert(path,record.decision);}app.notice=Some(language.text("审查决定已保存","Review decision saved","レビュー結果を保存しました").to_owned());},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("保存审查决定失败","Save review decision failed","レビュー結果を保存できませんでした"))),
+                            }
+                        }
+                        if let Some((snapshot_id,path,area))=revert_action{
+                            let request=crate::daemon::diff_review::RevertRequest{workspace:session.workspace.clone(),path,area};
+                            match crate::daemon::diff_review::remote_revert(&runtime.home,&snapshot_id,&request).await{
+                                Ok(result)=>match crate::daemon::diff_review::remote_snapshot(&runtime.home,&session.workspace).await{
+                                    Ok(snapshot)=>{if let Some(review)=app.diff_review.as_mut(){review.snapshot=snapshot;review.content=None;review.scroll=0;review.search_matches.clear();review.reviews.clear();review.verifications.clear();review.attributions.clear();}app.notice=Some(if let Some(path)=result.recovery_path{format!("{}: {}",language.text("已安全撤销，可从回收区恢复","Safely reverted; recovery copy","安全に戻しました。復元先"),path.display())}else{language.text("已安全撤销文件变更","File changes safely reverted","ファイル変更を安全に戻しました").to_owned()});},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("撤销成功，但刷新 Diff 失败","Reverted, but refresh failed","取り消しましたが更新に失敗しました"))),
+                                },
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("安全撤销失败","Safe revert failed","安全な取り消しに失敗しました"))),
+                            }
+                        }
+                        if let Some((snapshot_id,message,remote,tag))=commit_preview_action{
+                            let tag=(!tag.trim().is_empty()).then_some(tag);
+                            match crate::daemon::diff_review::remote_commit_preview(&runtime.home,&session.workspace,&snapshot_id,&message,&remote,tag.as_deref()).await{
+                                Ok(preview)=>if let Some(review)=app.diff_review.as_mut(){review.commit_preview=Some(preview);},
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("生成 Commit Preview 失败","Commit Preview failed","Commit Preview に失敗しました"))),
+                            }
+                        }
+                        continue;
+                    }
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
@@ -502,6 +953,15 @@ async fn event_loop(
                         }
                         continue;
                     }
+                    if app.focus==FocusPane::Activity {
+                        match key.code {
+                            KeyCode::Esc=>app.focus=FocusPane::Prompt,
+                            KeyCode::Enter|KeyCode::Char(' ')=>app.tools_expanded = !app.tools_expanded,
+                            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.tools_expanded = !app.tools_expanded,
+                            _=>{}
+                        }
+                        continue;
+                    }
                     if app.focus==FocusPane::Sidebar {
                         match key.code {
                             KeyCode::Esc=>app.focus=FocusPane::Prompt,
@@ -516,9 +976,18 @@ async fn event_loop(
                             KeyCode::Enter=>{
                                 if let Some(gate)=app.selected_remote_gate(){
                                     open_remote_gate(&mut app,gate,runtime.home.clone(),runtime.tx.clone());
+                                }else if app.sidebar_selected==2 {
+                                    if let Some(agent)=app.selected_runtime_agent(){
+                                        match crate::daemon::remote_agent_detail(&runtime.home,agent.id).await {
+                                            Ok(detail)=>app.agent_detail=Some(detail),
+                                            Err(error)=>app.notice=Some(format!("{}: {error}",language.text("加载 Agent 详情失败","Failed to load Agent details","Agent 詳細の読み込みに失敗"))),
+                                        }
+                                        app.agent_detail_scroll=0;
+                                    }
                                 }else{app.sidebar_activate(&runtime.background_tasks);}
                             },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
+                            KeyCode::Char('n')|KeyCode::Char('N') if app.sidebar_selected==2=>app.prefill_new_agent(),
                             KeyCode::Char('k')|KeyCode::Char('K') if app.sidebar_selected==1=>{
                                 if let Some(id)=app.selected_runtime_task_id(){
                                     match crate::daemon::cancel_remote_task(&runtime.home,id).await {
@@ -572,22 +1041,63 @@ async fn event_loop(
                         KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            match handle_agent_command(&prompt,&mut app,runtime,session.id).await {
+                                Ok(true)=>continue,
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("Agent 操作失败","Agent action failed","Agent 操作に失敗しました")));continue;},
+                            }
                             match handle_session_command(&prompt,&mut app,session,store,runtime).await {
                                 Ok(true)=>continue,
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("会话操作失败","Session action failed","セッション操作に失敗しました")));continue;},
                             }
+                            let previous_workspace=runtime.runtime_submit.workspace.clone();
+                            match handle_workspace_command(&prompt,&mut app,session,store,runtime).await {
+                                Ok(true)=>{
+                                    if runtime.runtime_submit.workspace!=previous_workspace {
+                                        while runtime_event_rx.try_recv().is_ok() {}
+                                        _runtime_event_follower=crate::daemon::start_runtime_event_follower(
+                                            runtime.home.clone(),
+                                            app.runtime_event_cursor,
+                                            runtime.runtime_submit.workspace.clone(),
+                                            runtime_event_tx.clone(),
+                                        );
+                                    }
+                                    continue;
+                                },
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
+                            match webapp_commands::handle_webapp_command(&prompt,&runtime.home,&runtime.runtime_submit.workspace,runtime.runtime_submit.config.as_deref(),runtime.runtime_submit.profile.as_deref(),language).await {
+                                Ok(Some(message))=>{app.append_transcript(message);continue;},
+                                Ok(None)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("启动 Web App 失败","Start Web App failed","Web App の起動に失敗しました")));continue;},
+                            }
+                            if prompt.trim()=="/diff" {
+                                match load_diff_review_state(&runtime.home,&session.workspace).await {
+                                    Ok(review)=>app.diff_review=Some(review),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
+                                }
+                                continue;
+                            }
                             if let PromptExecution::Local(local_prompt)=prompt_execution(&prompt) {
                                 if local_prompt.is_empty(){app.append_transcript(format!("System: {}",language.text("用法：/local <任务>","Usage: /local <task>","使用法: /local <タスク>")));continue;}
+                                if session.workspace.canonicalize()?!=runtime.local_workspace.canonicalize()?{app.append_transcript(format!("System: {}",language.text("切换工作区后 /local 已禁用；请使用 Runtime，或从目标目录重新启动 TUI","/local is disabled after switching Workspace; use Runtime or restart the TUI from the target directory","ワークスペース切替後は /local を使用できません。Runtime を使うか対象ディレクトリから TUI を再起動してください")));continue;}
                                 dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,local_prompt)?;
                                 continue;
                             }
                             let runtime_alias=prompt.trim()=="/runtime"||prompt.trim().starts_with("/runtime ");
-                            if !runtime_alias&&app.handle_slash_command(&prompt,&runtime.skills){continue;}
+                            if !runtime_alias {
+                                let previous_goal=app.goal.clone();
+                                if app.handle_slash_command(&prompt,&runtime.skills){
+                                    if app.goal!=previous_goal{session.goal=app.goal.clone();store.save(session)?;}
+                                    continue;
+                                }
+                            }
                             let PromptExecution::Runtime(remote_prompt)=prompt_execution(&prompt) else {unreachable!("local prompts were handled above")};
                             match runtime_ui::submit_turn(&mut app,session,store,runtime,remote_prompt).await {
-                                Ok(submitted)=>app.append_transcript(format!("System: {} {} · Agent {}",language.text("已提交 Runtime 轮次","Runtime turn submitted","Runtime ターンを送信しました"),submitted.turn_id,submitted.root_agent_id)),
+                                Ok(())=>app.notice=Some(language.text("AI 正在处理…","AI is working…","AI が処理しています…").to_owned()),
                                 Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
                             }
                         }
@@ -608,8 +1118,10 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
+                UiMessage::Agent(AgentEvent::BackgroundShellStarted{id})=>app.record_progress(format!("{} {id}",language.text("后台命令已启动","Background command started","バックグラウンドコマンド開始"))),
+                UiMessage::Agent(AgentEvent::BackgroundShellCompleted{id,status,..})=>app.record_progress(format!("{} {id} · {status:?}",language.text("后台命令已结束","Background command finished","バックグラウンドコマンド完了"))),
                 UiMessage::Agent(AgentEvent::SubagentStarted{id,profile,background,..})=>app.record_progress(format!("{} {} · {profile} · {}",language.text("子 Agent 已启动","Subagent started","サブエージェント開始"),id.to_string().get(..8).unwrap_or("agent"),if background{language.text("后台","background","バックグラウンド")}else{language.text("前台","foreground","フォアグラウンド")})),
-                UiMessage::Agent(AgentEvent::SubagentCompleted{id,status})=>app.record_progress(format!("{} {} · {status:?}",language.text("子 Agent 已结束","Subagent finished","サブエージェント完了"),id.to_string().get(..8).unwrap_or("agent"))),
+                UiMessage::Agent(AgentEvent::SubagentCompleted{id,status,..})=>app.record_progress(format!("{} {} · {status:?}",language.text("子 Agent 已结束","Subagent finished","サブエージェント完了"),id.to_string().get(..8).unwrap_or("agent"))),
                 UiMessage::Agent(AgentEvent::SubagentTurnStarted{id,turn})=>app.record_progress(format!("{} {} · {} {turn}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("轮次","turn","ターン"))),
                 UiMessage::Agent(AgentEvent::SubagentToolRequested{id,name})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("正在使用","using","使用中"))),
                 UiMessage::Agent(AgentEvent::SubagentToolCompleted{id,name,is_error})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),if is_error{language.text("失败","failed","失敗")}else{language.text("已完成","finished","完了")})),
@@ -618,7 +1130,7 @@ async fn event_loop(
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
                 UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
-                UiMessage::Compressed(Ok(messages))=>{let changed=messages.len()<session.messages.len();session.messages=messages;store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
+                UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
             },
@@ -654,6 +1166,7 @@ impl App {
             viewport_height: 10,
             tools: ToolActivity::default(),
             tools_expanded: false,
+            activity_rect: Rect::default(),
             attachments: Vec::new(),
             selected_attachment: 0,
             prompt_rect: Rect::default(),
@@ -674,7 +1187,14 @@ impl App {
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
             runtime_agents: Vec::new(),
+            runtime_tools: Vec::new(),
+            runtime_artifacts: Vec::new(),
             runtime_agent_selected: 0,
+            agent_detail: None,
+            agent_detail_scroll: 0,
+            agent_detail_action_rects: Vec::new(),
+            worktree_review: None,
+            diff_review: None,
             runtime_event_cursor: 0,
             background_notices: VecDeque::new(),
             workspace_status: String::new(),
@@ -701,6 +1221,9 @@ impl App {
             task_detail: None,
             task_detail_scroll: 0,
             attention_detail: None,
+            attention_diff_rect: Rect::default(),
+            attention_allow_rect: Rect::default(),
+            attention_deny_rect: Rect::default(),
             search: None,
             workspace: None,
             palette: None,
@@ -717,6 +1240,34 @@ impl App {
             search_rect: Rect::default(),
         }
     }
+    fn load_session(&mut self, session: &Session) {
+        self.transcript = transcript(&session.messages);
+        if self.transcript.is_empty() {
+            self.transcript
+                .push(welcome_message(&session.workspace, self.language));
+        }
+        self.input = PromptEditor::default();
+        self.running = false;
+        self.approval = None;
+        self.question = None;
+        self.scroll_from_bottom = 0;
+        self.follow_bottom = true;
+        self.tools = ToolActivity::default();
+        self.tools_expanded = false;
+        self.attachments.clear();
+        self.selected_attachment = 0;
+        self.notice = None;
+        self.goal = session.goal.clone();
+        self.transient_thought = None;
+        self.progress_log.clear();
+        self.search = None;
+        self.palette = None;
+        self.attention_read = session.attention_read.clone();
+        self.workspace = Some(session.workspace.clone());
+        self.workspace_status = workspace_status(&session.workspace, self.language);
+        self.workspace_attention = workspace_attention(&session.workspace);
+        self.focus = FocusPane::Prompt;
+    }
     fn sidebar_move(&mut self, delta: isize) {
         self.focus = FocusPane::Sidebar;
         self.sidebar_manual_scroll = false;
@@ -729,7 +1280,8 @@ impl App {
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             FocusPane::Prompt => FocusPane::Chat,
-            FocusPane::Chat => FocusPane::Sidebar,
+            FocusPane::Chat => FocusPane::Activity,
+            FocusPane::Activity => FocusPane::Sidebar,
             FocusPane::Sidebar => FocusPane::Prompt,
         };
     }
@@ -737,15 +1289,26 @@ impl App {
         self.attention_items().get(self.attention_selected).cloned()
     }
     fn selected_remote_gate(&self) -> Option<crate::daemon::RemoteGate> {
-        let id = self
-            .selected_attention()?
+        let item = self.selected_attention()?;
+        if let Some(id) = item
             .id
-            .strip_prefix("runtime-interaction:")?
+            .strip_prefix("runtime-interaction:")
+            .and_then(|value| value.parse::<uuid::Uuid>().ok())
+        {
+            return self
+                .runtime_gates
+                .iter()
+                .find(|gate| gate.id() == id)
+                .cloned();
+        }
+        let task_id = item
+            .id
+            .strip_prefix("runtime-task:")?
             .parse::<uuid::Uuid>()
             .ok()?;
         self.runtime_gates
             .iter()
-            .find(|gate| gate.id() == id)
+            .find(|gate| gate.task_id() == task_id)
             .cloned()
     }
     fn selected_runtime_task_id(&self) -> Option<uuid::Uuid> {
@@ -767,6 +1330,10 @@ impl App {
         {
             self.open_task_detail(index, registry);
         } else {
+            self.task_detail = None;
+            self.agent_detail = None;
+            self.worktree_review = None;
+            self.diff_review = None;
             self.attention_detail = Some(item);
         }
     }
@@ -849,6 +1416,22 @@ impl App {
             self.sidebar_toggle();
         }
     }
+    fn prefill_new_agent(&mut self) {
+        if !self.input.is_empty() || !self.attachments.is_empty() {
+            self.notice = Some(
+                self.language
+                    .text(
+                        "输入区已有草稿或附件，请先发送或清空后再新建 Agent",
+                        "The composer has a draft or attachments; send or clear it before creating an Agent",
+                        "入力欄に下書きまたは添付があります。送信または消去してから Agent を作成してください",
+                    )
+                    .to_owned(),
+            );
+            return;
+        }
+        self.input.insert("/agent spawn scout ");
+        self.focus = FocusPane::Prompt;
+    }
     fn open_task_detail(&mut self, index: usize, registry: &BackgroundTaskRegistry) {
         let Some(snapshot) = self.background_tasks.get(index).cloned() else {
             return;
@@ -858,6 +1441,10 @@ impl App {
                 .text("暂无输出", "No output", "出力なし")
                 .to_owned()
         });
+        self.attention_detail = None;
+        self.agent_detail = None;
+        self.worktree_review = None;
+        self.diff_review = None;
         self.task_detail = Some(TaskDetail { snapshot, output });
         self.task_detail_scroll = 0;
     }
@@ -979,9 +1566,10 @@ impl App {
             ),
             action: PaletteAction::Session(session.id.to_string()),
         });
-        if let Ok(sessions) = store.list() {
+        {
             items.extend(
-                sessions
+                store
+                    .digests()
                     .into_iter()
                     .filter(|candidate| candidate.id != session.id)
                     .take(30)
@@ -1120,7 +1708,13 @@ impl App {
             PaletteAction::Command(command) => {
                 let suffix = if matches!(
                     command.as_str(),
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
+                    "/goal"
+                        | "/mobile"
+                        | "/runtime"
+                        | "/local"
+                        | "/session"
+                        | "/workspace"
+                        | "/agent"
                 ) {
                     " "
                 } else {
@@ -1224,7 +1818,13 @@ impl App {
                 let command = matches[self.command_selected.min(matches.len() - 1)].0;
                 let suffix = if matches!(
                     command,
-                    "/goal" | "/mobile" | "/runtime" | "/local" | "/session"
+                    "/goal"
+                        | "/mobile"
+                        | "/runtime"
+                        | "/local"
+                        | "/session"
+                        | "/workspace"
+                        | "/agent"
                 ) {
                     " "
                 } else {
@@ -1547,10 +2147,13 @@ impl App {
                         self.attention_selected = index;
                         self.attention_activate(registry);
                     }
+                    SidebarHit::NewAgent => self.prefill_new_agent(),
                 }
             }
         } else if self.transcript_rect.contains((x, y).into()) {
             self.focus = FocusPane::Chat;
+        } else if self.activity_rect.contains((x, y).into()) {
+            self.focus = FocusPane::Activity;
         } else if self.prompt_rect.contains((x, y).into()) {
             self.focus = FocusPane::Prompt;
             let row = y.saturating_sub(self.prompt_rect.y + 1) as usize + self.prompt_scroll;
@@ -1568,9 +2171,23 @@ impl App {
             return false;
         }
         let (command, args) = value.split_once(' ').unwrap_or((value, ""));
+        if matches!(
+            command,
+            "/agent"
+                | "/compress"
+                | "/diff"
+                | "/local"
+                | "/mobile"
+                | "/runtime"
+                | "/session"
+                | "/webapp"
+                | "/workspace"
+        ) {
+            return false;
+        }
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /runtime <task> · /session <action> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /webapp [status|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -1793,9 +2410,9 @@ fn draw(
         let title = if app.selection_mode {
             app.language
                 .text(
-                    "WillDeep · 文本选择模式 · Ctrl+S 退出",
-                    "WillDeep · text selection · Ctrl+S exits",
-                    "WillDeep · テキスト選択 · Ctrl+S で終了",
+                    "WillDeep · 拖动选择文字 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
+                    "WillDeep · drag to select · Cmd+C / Ctrl+Shift+C copy · Esc exits",
+                    "WillDeep · ドラッグ選択 · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
                 )
                 .to_owned()
         } else if app.follow_bottom {
@@ -1840,6 +2457,7 @@ fn draw(
             areas[0],
         );
         if activity > 0 {
+            app.activity_rect = areas[1];
             let text = if app.tools_expanded {
                 format!(
                     "{} · {}\n{}",
@@ -1877,11 +2495,30 @@ fn draw(
                 Paragraph::new(text).block(
                     Block::default()
                         .title(app.language.text(
-                            "活动 · Ctrl+O 查看详情",
-                            "Activity · Ctrl+O details",
-                            "アクティビティ · Ctrl+O で詳細",
+                            if app.focus == FocusPane::Activity {
+                                "活动 [焦点] · Enter 展开/收起"
+                            } else {
+                                "活动 · Ctrl+O 查看详情"
+                            },
+                            if app.focus == FocusPane::Activity {
+                                "Activity [focused] · Enter expand/collapse"
+                            } else {
+                                "Activity · Ctrl+O details"
+                            },
+                            if app.focus == FocusPane::Activity {
+                                "アクティビティ [フォーカス] · Enter で開閉"
+                            } else {
+                                "アクティビティ · Ctrl+O で詳細"
+                            },
                         ))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(
+                            if app.focus == FocusPane::Activity {
+                                Color::Cyan
+                            } else {
+                                Color::DarkGray
+                            },
+                        )),
                 ),
                 areas[1],
             );
@@ -1951,7 +2588,16 @@ fn draw(
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
-        let status = app.notice.take().unwrap_or_else(|| {
+        let status = if app.selection_mode {
+            app.language
+                .text(
+                    "文本选择模式 · 鼠标拖选 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
+                    "Text selection · drag · Cmd+C / Ctrl+Shift+C copy · Esc exits",
+                    "テキスト選択 · ドラッグ · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
+                )
+                .to_owned()
+        } else {
+            app.notice.take().unwrap_or_else(|| {
             let input = app.latest_usage.input_tokens.unwrap_or(0);
             let output = app.latest_usage.output_tokens.unwrap_or(0);
             let context_tokens = app.context_tokens.max(input);
@@ -1964,26 +2610,28 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+S {} · F1",
                     app.language.text("运行中", "Running", "実行中"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
-                    app.language.text("最近", "latest", "直近")
+                    app.language.text("最近", "latest", "直近"),
+                    app.language.text("选择", "select", "選択")
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
                     app.language.text("最近", "latest", "直近"),
                     app.language
-                        .text("Enter 发送", "Enter send", "Enter で送信")
+                        .text("Enter 发送", "Enter send", "Enter で送信"),
+                    app.language.text("选择", "select", "選択")
                 )
             }
-        });
+        })};
         f.render_widget(Paragraph::new(status), areas[4]);
         app.sidebar_rect = Rect::default();
         if app.sidebar_visible && (wide_sidebar || app.focus == FocusPane::Sidebar) {
@@ -2317,38 +2965,102 @@ fn draw(
                 popup,
             );
         }
-        if let Some(detail) = &app.attention_detail {
-            let content = format!(
-                "{} · {}\n\n{}\n\n{}",
-                attention_source_label(detail.source, app.language),
-                runtime_status_label(detail.status, app.language),
-                detail.title,
-                detail.detail
-            );
+        if let Some(review) = &mut app.diff_review {
             let popup = centered_rect(
-                f.area().width.min(82),
-                (visual_lines(&content, f.area().width.min(80) as usize) as u16 + 2)
-                    .min(f.area().height)
-                    .max(1),
+                f.area().width.saturating_sub(4).min(120),
+                f.area().height.saturating_sub(4).min(40),
                 f.area(),
             );
+            let title = if review.commit_preview.is_some() {
+                app.language.text(
+                    "Commit Preview · Esc 返回 · 仅预览，未执行",
+                    "Commit Preview · Esc back · preview only",
+                    "Commit Preview · Esc 戻る · プレビューのみ",
+                ).to_owned()
+            } else if review.preview_draft.is_some() {
+                app.language.text(
+                    "Commit Preview 参数 · Tab 切换 · Enter 生成 · Esc 取消",
+                    "Commit Preview fields · Tab switch · Enter generate · Esc cancel",
+                    "Commit Preview 入力 · Tab 切替 · Enter 生成 · Esc 取消",
+                ).to_owned()
+            } else if let Some((path, _)) = &review.content {
+                let path = terminal_safe_diff_text(path);
+                if review.confirm_revert {
+                    format!("⚠ Revert {path} ({:?})? Y confirm · any key cancel",review.area)
+                } else {
+                let area = match review.area {
+                    crate::daemon::diff_review::DiffArea::Combined => "Combined",
+                    crate::daemon::diff_review::DiffArea::Staged => "Staged",
+                    crate::daemon::diff_review::DiffArea::Unstaged => "Unstaged",
+                };
+                let view = match review.view {
+                    DiffViewMode::Unified => "Unified",
+                    DiffViewMode::SideBySide => "Side-by-side",
+                };
+                let search = review.search.as_ref().map_or_else(String::new, |editor| {
+                    format!(
+                        " · /{} · {}/{}",
+                        editor.text(),
+                        review.search_selected.saturating_add(1).min(review.search_matches.len()),
+                        review.search_matches.len()
+                    )
+                });
+                format!("Diff · {path} · {area} · {view}{search} · Wheel/↑↓ scroll · A accept · D reject · C changes · M reviewed · R revert · V/S/ search · Esc")
+                }
+            } else {
+                format!(
+                    "Diff Review · {} files · +{} -{} · {} checks · {} agents · ↑/↓ Enter · P Commit Preview · Esc",
+                    review.snapshot.files.len(),
+                    review.snapshot.additions,
+                    review.snapshot.deletions,
+                    review.verifications.len(),
+                    review.attributions.iter().map(|record|record.agent_id).collect::<BTreeSet<_>>().len()
+                )
+            };
+            let lines = if let Some(preview) = &review.commit_preview {
+                commit_preview_lines(preview)
+            } else if let Some(draft) = &review.preview_draft {
+                commit_preview_draft_lines(draft)
+            } else if let Some((_, content)) = &review.content {
+                let query = review
+                    .search
+                    .as_ref()
+                    .map(|editor| editor.text().trim())
+                    .filter(|query| !query.is_empty());
+                let lines = match review.view {
+                    DiffViewMode::Unified => diff_review_lines(content, query),
+                    DiffViewMode::SideBySide => {
+                        diff_side_by_side_lines(content, popup.width.saturating_sub(2), query)
+                    }
+                };
+                let viewport = popup.height.saturating_sub(2) as usize;
+                review.scroll = review
+                    .scroll
+                    .min(lines.len().saturating_sub(viewport.max(1)));
+                lines
+            } else {
+                diff_snapshot_lines(review)
+            };
             f.render_widget(Clear, popup);
             f.render_widget(
-                Paragraph::new(content)
+                Paragraph::new(lines)
                     .block(
                         Block::default()
-                            .title(app.language.text(
-                                "Inbox 详情 · Esc 关闭",
-                                "Inbox detail · Esc closes",
-                                "Inbox 詳細 · Esc で閉じる",
-                            ))
+                            .title(title)
                             .borders(Borders::ALL)
-                            .border_style(attention_style(detail.status)),
+                            .border_style(Style::default().fg(if review.snapshot.has_conflicts {
+                                Color::Red
+                            } else {
+                                Color::LightCyan
+                            })),
                     )
+                    .scroll((review.scroll.min(u16::MAX as usize) as u16, 0))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
         }
+        render_agent_overlays(f, app);
+        render_attention_detail(f, app);
         app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {
             let content = approval_content(description, *always, app.language);
@@ -2606,6 +3318,7 @@ fn focus_label(focus: FocusPane, language: Language) -> &'static str {
     match focus {
         FocusPane::Prompt => language.text("输入", "Prompt", "入力"),
         FocusPane::Chat => language.text("聊天", "Chat", "チャット"),
+        FocusPane::Activity => language.text("活动", "Activity", "アクティビティ"),
         FocusPane::Sidebar => language.text("状态栏", "Status", "ステータス"),
     }
 }
@@ -2652,23 +3365,14 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
-    }
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width: width.min(area.width),
-        height: height.min(area.height),
     }
 }
 
@@ -2678,294 +3382,5 @@ pub fn channel() -> (
 ) {
     mpsc::unbounded_channel()
 }
-fn colored_transcript(entries: &[String], search_query: Option<&str>) -> Text<'static> {
-    let mut lines = Vec::new();
-    for value in entries {
-        if let Some(content) = value.strip_prefix("WillDeep: ") {
-            lines.extend(render_assistant_markdown(content));
-            continue;
-        }
-        let style = if value.starts_with("You:") {
-            Style::default().fg(Color::Cyan)
-        } else if value.starts_with("Error:") {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Yellow)
-        };
-        lines.extend(
-            value
-                .lines()
-                .map(|line| Line::styled(line.to_owned(), style)),
-        );
-    }
-    let mut text = Text::from(lines);
-    if let Some(query) = search_query {
-        highlight_matches(&mut text, query);
-    }
-    text
-}
-
-fn highlight_matches(text: &mut Text<'static>, query: &str) {
-    let Ok(pattern) = RegexBuilder::new(&regex::escape(query))
-        .case_insensitive(true)
-        .build()
-    else {
-        return;
-    };
-    let highlight = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    for line in &mut text.lines {
-        let spans = std::mem::take(&mut line.spans);
-        line.spans = spans
-            .into_iter()
-            .flat_map(|span| {
-                let value = span.content.into_owned();
-                let mut output = Vec::new();
-                let mut offset = 0;
-                for found in pattern.find_iter(&value) {
-                    if found.start() > offset {
-                        output.push(Span::styled(
-                            value[offset..found.start()].to_owned(),
-                            span.style,
-                        ));
-                    }
-                    output.push(Span::styled(
-                        value[found.start()..found.end()].to_owned(),
-                        span.style.patch(highlight),
-                    ));
-                    offset = found.end();
-                }
-                if offset < value.len() {
-                    output.push(Span::styled(value[offset..].to_owned(), span.style));
-                }
-                if output.is_empty() {
-                    output.push(Span::styled(value, span.style));
-                }
-                output
-            })
-            .collect();
-    }
-}
-
-fn rendered_transcript_height(entries: &[String], width: usize) -> usize {
-    Paragraph::new(colored_transcript(entries, None))
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1).min(u16::MAX as usize) as u16)
-}
-
-fn render_assistant_markdown(content: &str) -> Vec<Line<'static>> {
-    let mut output = Vec::new();
-    let mut code_block = false;
-    for (index, raw) in content.lines().enumerate() {
-        if raw.trim_start().starts_with("```") {
-            code_block = !code_block;
-            continue;
-        }
-        let prefix = (index == 0).then(|| {
-            Span::styled(
-                "WillDeep: ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
-        let mut spans = Vec::new();
-        if let Some(prefix) = prefix {
-            spans.push(prefix);
-        }
-        if code_block {
-            spans.push(Span::styled(
-                raw.to_owned(),
-                Style::default().fg(Color::White).bg(Color::DarkGray),
-            ));
-        } else {
-            let trimmed = raw.trim_start();
-            let (marker, body, base) = if let Some(body) = trimmed.strip_prefix("### ") {
-                (
-                    "▸ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("## ") {
-                (
-                    "◆ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("# ") {
-                (
-                    "■ ",
-                    body,
-                    Style::default()
-                        .fg(Color::LightYellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("> ") {
-                (
-                    "│ ",
-                    body,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )
-            } else if let Some(body) = trimmed
-                .strip_prefix("- ")
-                .or_else(|| trimmed.strip_prefix("* "))
-            {
-                ("• ", body, Style::default().fg(Color::Green))
-            } else {
-                ("", raw, Style::default().fg(Color::Green))
-            };
-            if !marker.is_empty() {
-                spans.push(Span::styled(marker, base));
-            }
-            spans.extend(render_inline_markdown(body, base));
-        }
-        output.push(Line::from(spans));
-    }
-    if output.is_empty() {
-        output.push(Line::styled("WillDeep:", Style::default().fg(Color::Green)));
-    }
-    output
-}
-
-fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut rest = value;
-    while !rest.is_empty() {
-        let bold = rest.find("**").map(|index| (index, "bold"));
-        let code = rest.find('`').map(|index| (index, "code"));
-        let link = rest.find('[').map(|index| (index, "link"));
-        let Some((index, kind)) = [bold, code, link]
-            .into_iter()
-            .flatten()
-            .min_by_key(|item| item.0)
-        else {
-            spans.push(Span::styled(rest.to_owned(), base));
-            break;
-        };
-        if index > 0 {
-            spans.push(Span::styled(rest[..index].to_owned(), base));
-            rest = &rest[index..];
-        }
-        match kind {
-            "bold" if rest[2..].find("**").is_some() => {
-                let end = rest[2..].find("**").unwrap() + 2;
-                spans.push(Span::styled(
-                    rest[2..end].to_owned(),
-                    base.add_modifier(Modifier::BOLD),
-                ));
-                rest = &rest[end + 2..];
-            }
-            "code" if rest[1..].find('`').is_some() => {
-                let end = rest[1..].find('`').unwrap() + 1;
-                spans.push(Span::styled(
-                    rest[1..end].to_owned(),
-                    Style::default().fg(Color::LightCyan).bg(Color::DarkGray),
-                ));
-                rest = &rest[end + 1..];
-            }
-            "link" if rest.find("](").is_some() => {
-                let label_end = rest.find("](").unwrap();
-                if let Some(url_end) = rest[label_end + 2..].find(')') {
-                    let url_end = label_end + 2 + url_end;
-                    spans.push(Span::styled(
-                        rest[1..label_end].to_owned(),
-                        Style::default()
-                            .fg(Color::LightBlue)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ));
-                    spans.push(Span::styled(
-                        format!(" ({})", &rest[label_end + 2..url_end]),
-                        base,
-                    ));
-                    rest = &rest[url_end + 1..];
-                } else {
-                    spans.push(Span::styled(rest[..1].to_owned(), base));
-                    rest = &rest[1..];
-                }
-            }
-            _ => {
-                spans.push(Span::styled(rest[..1].to_owned(), base));
-                rest = &rest[1..];
-            }
-        }
-    }
-    spans
-}
-fn compact_thought(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut compact = normalized.chars().take(180).collect::<String>();
-    if normalized.chars().count() > 180 {
-        compact.push('…');
-    }
-    compact
-}
-fn visual_lines(text: &str, width: usize) -> usize {
-    let width = width.max(1);
-    text.split('\n')
-        .map(|line| {
-            line.chars()
-                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-                .sum::<usize>()
-                .max(1)
-                .div_ceil(width)
-        })
-        .sum()
-}
-
-fn question_option_row(popup_y: u16, question: &str, width: usize, index: usize) -> u16 {
-    popup_y
-        .saturating_add(2)
-        .saturating_add(visual_lines(question, width).min(u16::MAX as usize) as u16)
-        .saturating_add(index.min(u16::MAX as usize) as u16)
-}
-
-fn transcript(messages: &[Message]) -> Vec<String> {
-    messages
-        .iter()
-        .filter_map(|message| match message.role {
-            willdeep_core::Role::User => Some(format!(
-                "You: {}{}",
-                message.content,
-                if message.attachments.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{} attachment(s)]", message.attachments.len())
-                }
-            )),
-            willdeep_core::Role::Assistant if !message.content.trim().is_empty() => {
-                Some(format!("WillDeep: {}", message.content))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn welcome_message(workspace: &std::path::Path, language: Language) -> String {
-    let project = workspace
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(language.text("当前工作区", "current workspace", "現在のワークスペース"));
-    match language {
-        Language::ZhCn => format!(
-            "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
-        ),
-        Language::En => format!(
-            "WillDeep: Hello, I’m in {project}. Tell me what you want to build, fix, or investigate; I’ll inspect the project before making changes."
-        ),
-        Language::Ja => format!(
-            "WillDeep: こんにちは。{project} を開きました。実装、修正、調査したいことを教えてください。まずプロジェクトを確認してから作業します。"
-        ),
-    }
-}
-
 #[cfg(test)]
 mod test_suite;

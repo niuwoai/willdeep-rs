@@ -1,8 +1,32 @@
 use super::*;
 
-pub(super) struct SubmittedRuntimeTurn {
-    pub turn_id: uuid::Uuid,
-    pub root_agent_id: uuid::Uuid,
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PromptExecution {
+    Runtime(String),
+    Local(String),
+}
+
+pub(super) fn prompt_execution(prompt: &str) -> PromptExecution {
+    let value = prompt.trim();
+    if value == "/local" || value.starts_with("/local ") {
+        return PromptExecution::Local(
+            value
+                .strip_prefix("/local")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    if value == "/runtime" || value.starts_with("/runtime ") {
+        return PromptExecution::Runtime(
+            value
+                .strip_prefix("/runtime")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        );
+    }
+    PromptExecution::Runtime(prompt.to_owned())
 }
 
 pub(super) async fn submit_turn(
@@ -11,7 +35,7 @@ pub(super) async fn submit_turn(
     store: &SessionStore,
     runtime: &TuiRuntime,
     prompt: String,
-) -> Result<SubmittedRuntimeTurn> {
+) -> Result<()> {
     let attachments: Vec<MessageAttachment> = std::mem::take(&mut app.attachments)
         .into_iter()
         .map(|value| value.message)
@@ -25,7 +49,7 @@ pub(super) async fn submit_turn(
         session.id,
         &session.workspace,
         session.profile.clone(),
-        runtime.runtime_submit.config.clone(),
+        session.model.clone(),
         session.title.clone(),
     )
     .await?;
@@ -37,13 +61,9 @@ pub(super) async fn submit_turn(
     // Persist ownership before scheduling the Turn. A very fast Harness must
     // never be overwritten by this client's stale history.
     store.save(session)?;
-    let turn =
-        crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
-            .await?;
-    Ok(SubmittedRuntimeTurn {
-        turn_id: turn.id,
-        root_agent_id: remote_session.root_agent_id,
-    })
+    crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
+        .await?;
+    Ok(())
 }
 
 pub(super) fn apply_runtime_events(
@@ -59,6 +79,7 @@ pub(super) fn apply_runtime_events(
             continue;
         }
         if event.visible
+            && event.session_id == Some(session.id)
             && let Some(message) = apply_runtime_event(app, &event)
             && !session.runtime_managed
         {
@@ -133,8 +154,7 @@ fn apply_runtime_event(
 }
 
 fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
-    let (task, payload) = message.split_once(' ')?;
-    let task = task.strip_prefix("task_id=").unwrap_or(task);
+    let (_task, payload) = message.split_once(' ')?;
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return None;
     };
@@ -248,12 +268,8 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         }
         Some("completed") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
-                let short = task.get(..8).unwrap_or(task);
-                app.append_transcript(format!("WillDeep [Runtime {short}]: {text}"));
-                return Some(Message::assistant(
-                    format!("[Runtime {short}] {text}"),
-                    Vec::new(),
-                ));
+                app.append_transcript(format!("WillDeep: {text}"));
+                return Some(Message::assistant(text, Vec::new()));
             }
         }
         _ => {}
@@ -278,6 +294,7 @@ pub(super) fn open_remote_gate(
     match gate {
         crate::daemon::RemoteGate::Approval {
             id,
+            task_id: _,
             description,
             always_allow_available,
         } => {
@@ -309,6 +326,7 @@ pub(super) fn open_remote_gate(
         }
         crate::daemon::RemoteGate::Question {
             id,
+            task_id: _,
             question,
             options,
             multi_select,

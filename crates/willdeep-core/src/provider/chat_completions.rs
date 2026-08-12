@@ -24,6 +24,12 @@ impl ChatCompletionsProvider {
 
 #[async_trait]
 impl Provider for ChatCompletionsProvider {
+    fn with_model(&self, model: &str) -> Result<std::sync::Arc<dyn Provider>, ProviderError> {
+        let mut config = self.config.clone();
+        config.model = model.to_owned();
+        super::build_provider(config)
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

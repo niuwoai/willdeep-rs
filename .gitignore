@@ -6,3 +6,4 @@
 /config.toml
 .env
 *.log
+/.claude/

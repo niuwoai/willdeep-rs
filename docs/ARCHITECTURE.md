@@ -2,7 +2,7 @@
 
 ## 边界
 
-当前实现以同一个 Agent Runtime 支撑一次性 CLI、TUI 与内嵌 Web 模式。子 Agent 和后台任务已接入；Computer Use、Browser Use 与常驻 daemon 仍在后续范围内。
+当前实现以同一个 Agent Runtime 支撑一次性 CLI、TUI 与内嵌 Web 模式。子 Agent、后台任务与常驻 Runtime Daemon 均已接入，任务在 Daemon 进程内执行并可跨客户端断连恢复（见 [Runtime Daemon 与工作区](RUNTIME_DAEMON.md)）；Computer Use 与 Browser Use 仍在后续范围内。
 
 ## 调用链
 

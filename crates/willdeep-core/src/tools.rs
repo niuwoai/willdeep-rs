@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use globset::Glob;
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::background::{
@@ -27,13 +28,35 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_SUPERVISOR_REQUEST_BYTES: usize = 256 * 1024;
+const BACKGROUND_SUPERVISOR_ENV: &str = "WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR";
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandVerification {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub status: VerificationStatus,
+    pub summary: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationStatus {
+    Passed,
+    Failed,
+    TimedOut,
+    LaunchFailed,
+}
+
+type VerificationReporter = Arc<dyn Fn(CommandVerification) + Send + Sync>;
 const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
 const MAX_WEB_MAX_CHARS: usize = 100_000;
 const MAX_WEB_REDIRECTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalMode {
+    ReadOnly,
     Strict,
     Smart,
     WorkspaceAccess,
@@ -89,6 +112,8 @@ pub enum ToolError {
     OutsideWorkspace(String),
     #[error("approval denied: {0}")]
     ApprovalDenied(String),
+    #[error("read-only Workspace policy blocks tool: {0}")]
+    ReadOnlyPolicy(String),
     #[error("file already exists: {0}")]
     FileAlreadyExists(String),
     #[error("exact edit text was not found in {0}")]
@@ -127,6 +152,7 @@ pub struct ToolRegistry {
     write_target: Option<PathBuf>,
     always_allowed: Arc<Mutex<HashSet<String>>>,
     always_allow_path: Option<PathBuf>,
+    verification_reporter: Option<VerificationReporter>,
 }
 
 impl ToolRegistry {
@@ -153,6 +179,7 @@ impl ToolRegistry {
             write_target: None,
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
             always_allow_path: None,
+            verification_reporter: None,
         })
     }
 
@@ -175,6 +202,13 @@ impl ToolRegistry {
     }
     pub fn with_background_tasks(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
         self.background = registry;
+        self
+    }
+    pub fn with_verification_reporter<F>(mut self, reporter: F) -> Self
+    where
+        F: Fn(CommandVerification) + Send + Sync + 'static,
+    {
+        self.verification_reporter = Some(Arc::new(reporter));
         self
     }
     pub fn with_always_allow_store(mut self, path: PathBuf) -> Result<Self, ToolError> {
@@ -209,6 +243,9 @@ impl ToolRegistry {
     }
 
     pub async fn approve_subagent_editor(&self, requested: &str) -> Result<PathBuf, ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly {
+            return Err(ToolError::ReadOnlyPolicy("editor subagent".to_owned()));
+        }
         let target = self.resolve_existing(requested)?;
         if !target.is_file() {
             return Err(ToolError::Io(std::io::Error::new(
@@ -304,6 +341,16 @@ impl ToolRegistry {
                 json!({"type":"object","properties":{"path":{"type":"string"},"staged":{"type":"boolean"},"stat_only":{"type":"boolean"}},"additionalProperties":false}),
             ),
             definition(
+                "git_log",
+                "Return bounded commit history, optionally restricted to one workspace path. Read-only.",
+                json!({"type":"object","properties":{"path":{"type":"string"},"max_count":{"type":"integer","minimum":1,"maximum":100},"author":{"type":"string"},"since":{"type":"string","description":"Git date expression such as 2 weeks ago or 2026-01-01."}},"additionalProperties":false}),
+            ),
+            definition(
+                "git_blame",
+                "Return bounded line attribution for one workspace file. Read-only.",
+                json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}),
+            ),
+            definition(
                 "list_worktrees",
                 "List Git worktrees with path, HEAD, branch, detached and prunable state. Read-only.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -392,6 +439,14 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly
+            && (matches!(
+                call.name.as_str(),
+                "run_command" | "create_file" | "edit_file" | "create_worktree"
+            ) || self.mcp.handles(&call.name))
+        {
+            return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
+        }
         match call.name.as_str() {
             "list_skills" => self.list_skills(parse(call)?),
             "read_skill" => self.read_skill(parse(call)?),
@@ -401,6 +456,8 @@ impl ToolRegistry {
             "list_directory" => self.list_directory(parse(call)?).await,
             "git_status" => self.git_status().await,
             "git_diff" => self.git_diff(parse(call)?).await,
+            "git_log" => self.git_log(parse(call)?).await,
+            "git_blame" => self.git_blame(parse(call)?).await,
             "list_worktrees" => self.list_worktrees().await,
             "create_worktree" => self.create_worktree(parse(call)?).await,
             "get_job_output" => self.get_job_output(parse(call)?),
@@ -693,6 +750,69 @@ impl ToolRegistry {
         ))
     }
 
+    async fn git_log(&self, args: GitLogArgs) -> Result<String, ToolError> {
+        let mut command = Command::new("git");
+        command.args([
+            "log",
+            "--no-color",
+            "--date=iso-strict",
+            "--format=%H%x09%an%x09%aI%x09%s",
+        ]);
+        command.arg(format!(
+            "--max-count={}",
+            args.max_count.unwrap_or(20).clamp(1, 100)
+        ));
+        if let Some(author) = args
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            command.arg(format!("--author={author}"));
+        }
+        if let Some(since) = args
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            command.arg(format!("--since={since}"));
+        }
+        if let Some(path) = args.path.as_deref() {
+            self.resolve_existing(path)?;
+            command.args(["--", path]);
+        }
+        let output = command.current_dir(&self.workspace).output().await?;
+        git_output(output)
+    }
+
+    async fn git_blame(&self, args: GitBlameArgs) -> Result<String, ToolError> {
+        self.resolve_existing(&args.path)?;
+        let start = args.start_line.unwrap_or(1);
+        let end = args.end_line;
+        if start == 0 || end.is_some_and(|end| end < start || end.saturating_sub(start) >= 2_000) {
+            return Err(ToolError::Io(std::io::Error::other(
+                "git_blame lines must be a 1-based ordered range of at most 2000 lines",
+            )));
+        }
+        let range = end.map_or_else(|| format!("{start},+200"), |end| format!("{start},{end}"));
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "color.ui=false",
+                "blame",
+                "--date=iso-strict",
+                "-L",
+                &range,
+                "--",
+                &args.path,
+            ])
+            .current_dir(&self.workspace)
+            .output()
+            .await?;
+        git_output(output)
+    }
+
     async fn list_worktrees(&self) -> Result<String, ToolError> {
         let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -804,7 +924,11 @@ impl ToolRegistry {
             .await?;
         let client = web_client()?;
         let mut redirects = 0;
+        let mut visited = HashSet::new();
         let response = loop {
+            if !visited.insert(redirect_key(&url)) {
+                return Err(ToolError::Network("redirect loop detected".to_owned()));
+            }
             let response = client
                 .get(url.clone())
                 .send()
@@ -863,15 +987,7 @@ impl ToolRegistry {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ToolError::Network(error.to_string()))?;
-        if bytes.len() > MAX_WEB_RESPONSE_BYTES {
-            return Err(ToolError::Network(
-                "response exceeds the 3 MiB limit".to_owned(),
-            ));
-        }
+        let bytes = read_web_response(response).await?;
         let raw = String::from_utf8_lossy(&bytes);
         let text = if is_html {
             html_to_text(&raw)
@@ -908,53 +1024,25 @@ impl ToolRegistry {
         if args.run_in_background.unwrap_or(false) {
             let command = args.command;
             let workspace = self.workspace.clone();
+            let verification_reporter = self.verification_reporter.clone();
             let id = self.background.start_retriable(
                 BackgroundTaskKind::Shell,
                 description,
                 move || {
                     let command = command.clone();
                     let workspace = workspace.clone();
+                    let verification_reporter = verification_reporter.clone();
                     async move {
-                        let mut process = platform_shell(&command);
-                        process
-                            .current_dir(workspace)
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped())
-                            .kill_on_drop(true);
-                        let output = match tokio::time::timeout(
-                            std::time::Duration::from_secs(timeout),
-                            async { process.spawn()?.wait_with_output().await },
-                        )
-                        .await
-                        {
-                            Ok(Ok(output)) => output,
-                            Ok(Err(error)) => {
-                                return TaskResult {
-                                    status: BackgroundTaskStatus::LaunchFailed,
-                                    exit_code: Some(-1),
-                                    output: error.to_string(),
-                                };
-                            }
-                            Err(_) => {
-                                return TaskResult {
-                                    status: BackgroundTaskStatus::TimedOut,
-                                    exit_code: None,
-                                    output: format!("command timed out after {timeout} seconds"),
-                                };
-                            }
-                        };
-                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                        text.push_str(&String::from_utf8_lossy(&output.stderr));
-                        TaskResult {
-                            status: if output.status.success() {
-                                BackgroundTaskStatus::Completed
-                            } else {
-                                BackgroundTaskStatus::Failed
-                            },
-                            exit_code: output.status.code(),
-                            output: text,
-                        }
+                        let result =
+                            run_background_shell(command.clone(), workspace, timeout).await;
+                        report_verification(
+                            verification_reporter.as_ref(),
+                            &command,
+                            result.exit_code,
+                            verification_status(&result.status),
+                            &result.output,
+                        );
+                        result
                     }
                 },
             );
@@ -970,18 +1058,42 @@ impl ToolRegistry {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let child = command.spawn()?;
-        let output = tokio::time::timeout(
+        let output = match tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
             child.wait_with_output(),
         )
         .await
-        .map_err(|_| ToolError::CommandTimeout(timeout))??;
-        Ok(truncate_bytes(format!(
+        {
+            Ok(output) => output?,
+            Err(_) => {
+                report_verification(
+                    self.verification_reporter.as_ref(),
+                    &args.command,
+                    None,
+                    VerificationStatus::TimedOut,
+                    &format!("command timed out after {timeout} seconds"),
+                );
+                return Err(ToolError::CommandTimeout(timeout));
+            }
+        };
+        let text = format!(
             "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        )))
+        );
+        report_verification(
+            self.verification_reporter.as_ref(),
+            &args.command,
+            output.status.code(),
+            if output.status.success() {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            },
+            &text,
+        );
+        Ok(truncate_bytes(text))
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
@@ -1209,6 +1321,298 @@ impl ToolRegistry {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BackgroundSupervisorRequest {
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackgroundSupervisorResult {
+    status: BackgroundTaskStatus,
+    exit_code: Option<i32>,
+    output: String,
+}
+
+#[cfg(not(test))]
+async fn run_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> TaskResult {
+    match run_supervised_background_shell(command, workspace, timeout_seconds).await {
+        Ok(result) => TaskResult {
+            status: result.status,
+            exit_code: result.exit_code,
+            output: result.output,
+        },
+        Err(error) => TaskResult {
+            status: BackgroundTaskStatus::LaunchFailed,
+            exit_code: Some(-1),
+            output: format!("background supervisor failed: {error}"),
+        },
+    }
+}
+
+#[cfg(test)]
+async fn run_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> TaskResult {
+    let mut process = platform_shell(&command);
+    process
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), async {
+        process.spawn()?.wait_with_output().await
+    })
+    .await
+    {
+        Ok(Ok(output)) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            TaskResult {
+                status: if output.status.success() {
+                    BackgroundTaskStatus::Completed
+                } else {
+                    BackgroundTaskStatus::Failed
+                },
+                exit_code: output.status.code(),
+                output: text,
+            }
+        }
+        Ok(Err(error)) => TaskResult {
+            status: BackgroundTaskStatus::LaunchFailed,
+            exit_code: Some(-1),
+            output: error.to_string(),
+        },
+        Err(_) => TaskResult {
+            status: BackgroundTaskStatus::TimedOut,
+            exit_code: None,
+            output: format!("command timed out after {timeout_seconds} seconds"),
+        },
+    }
+}
+
+#[cfg(not(test))]
+async fn run_supervised_background_shell(
+    command: String,
+    workspace: PathBuf,
+    timeout_seconds: u64,
+) -> anyhow::Result<BackgroundSupervisorResult> {
+    let request = BackgroundSupervisorRequest {
+        command,
+        workspace,
+        timeout_seconds,
+    };
+    let payload = serde_json::to_vec(&request)?;
+    anyhow::ensure!(
+        payload.len() <= MAX_SUPERVISOR_REQUEST_BYTES,
+        "background supervisor request is too large"
+    );
+    let executable = std::env::current_exe()?;
+    let mut process = Command::new(executable);
+    process
+        .args(["daemon", "background-supervisor"])
+        .env(BACKGROUND_SUPERVISOR_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    let mut child = process.spawn()?;
+    let mut liveness = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stdin is unavailable"))?;
+    let length = u32::try_from(payload.len())?.to_be_bytes();
+    liveness.write_all(&length).await?;
+    liveness.write_all(&payload).await?;
+    liveness.flush().await?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background supervisor stderr is unavailable"))?;
+    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES));
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_seconds.saturating_add(10)),
+        child.wait(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("background supervisor did not stop after its deadline"))??;
+    drop(liveness);
+    let stdout = stdout_task.await??;
+    let stderr = stderr_task.await??;
+    anyhow::ensure!(
+        status.success(),
+        "background supervisor exited with {:?}: {}",
+        status.code(),
+        String::from_utf8_lossy(&stderr).trim()
+    );
+    serde_json::from_slice(&stdout)
+        .map_err(|error| anyhow::anyhow!("decode background supervisor result: {error}"))
+}
+
+pub async fn run_background_supervisor() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::env::var(BACKGROUND_SUPERVISOR_ENV).as_deref() == Ok("1"),
+        "background supervisor is an internal command"
+    );
+    let mut input = tokio::io::stdin();
+    let mut length = [0_u8; 4];
+    input.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    anyhow::ensure!(
+        length <= MAX_SUPERVISOR_REQUEST_BYTES,
+        "background supervisor request is too large"
+    );
+    let mut payload = vec![0_u8; length];
+    input.read_exact(&mut payload).await?;
+    let request: BackgroundSupervisorRequest = serde_json::from_slice(&payload)?;
+    anyhow::ensure!(
+        !request.command.trim().is_empty(),
+        "background command is empty"
+    );
+    anyhow::ensure!(
+        request.timeout_seconds > 0 && request.timeout_seconds <= MAX_COMMAND_TIMEOUT_SECS,
+        "background command timeout is invalid"
+    );
+    let workspace = request.workspace.canonicalize()?;
+    anyhow::ensure!(
+        workspace.is_dir(),
+        "background Workspace is not a directory"
+    );
+
+    let mut shell = platform_shell(&request.command);
+    configure_background_process(&mut shell);
+    shell
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut shell = shell.spawn()?;
+    let shell_stdout = shell
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background shell stdout is unavailable"))?;
+    let shell_stderr = shell
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("background shell stderr is unavailable"))?;
+    let stdout_task = tokio::spawn(read_bounded(shell_stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr_task = tokio::spawn(read_bounded(shell_stderr, MAX_COMMAND_OUTPUT_BYTES));
+    drop(input);
+    let mut parent_disconnect = watch_parent_disconnect()?;
+    let (status, exit_code) = tokio::select! {
+        status = shell.wait() => {
+            let status = status?;
+            let kind = if status.success() {
+                BackgroundTaskStatus::Completed
+            } else {
+                BackgroundTaskStatus::Failed
+            };
+            (kind, status.code())
+        }
+        parent = &mut parent_disconnect => {
+            parent.map_err(|_| anyhow::anyhow!("background parent watcher stopped"))??;
+            terminate_background_process(&mut shell).await;
+            (BackgroundTaskStatus::Killed, None)
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout_seconds)) => {
+            terminate_background_process(&mut shell).await;
+            (BackgroundTaskStatus::TimedOut, None)
+        }
+    };
+    let mut output = String::from_utf8_lossy(&stdout_task.await??).into_owned();
+    output.push_str(&String::from_utf8_lossy(&stderr_task.await??));
+    let output = truncate_bytes(output);
+    let result = BackgroundSupervisorResult {
+        status,
+        exit_code,
+        output,
+    };
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(&serde_json::to_vec(&result)?).await?;
+    stdout.flush().await?;
+    Ok(())
+}
+
+fn watch_parent_disconnect() -> anyhow::Result<tokio::sync::oneshot::Receiver<std::io::Result<()>>>
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("willdeep-parent-watch".to_owned())
+        .spawn(move || {
+            let mut input = std::io::stdin();
+            let mut buffer = [0_u8; 64];
+            let result = loop {
+                match std::io::Read::read(&mut input, &mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(_) => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = sender.send(result);
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(unix)]
+fn configure_background_process(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_background_process(_command: &mut Command) {}
+
+async fn terminate_background_process(process: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        // `try_wait == None` means the group leader is still an unreaped live
+        // child, so its PID cannot be reused between this check and killpg.
+        if process.try_wait().ok().flatten().is_none()
+            && let Some(pid) = process.id()
+            && let Ok(group) = i32::try_from(pid)
+        {
+            // SAFETY: the child was placed in a fresh process group before
+            // spawn and remains unreaped above; a negative PID targets only
+            // that owned group rather than an unrelated process.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = process.kill().await;
+    let _ = process.wait().await;
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(limit.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+}
+
 fn validate_workspace_relative(requested: &str) -> Result<(), ToolError> {
     let path = Path::new(requested);
     if path.is_absolute()
@@ -1294,6 +1698,103 @@ fn command_signature(command: &str) -> Option<String> {
     }
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty()).then(|| format!("command-exact:{normalized}"))
+}
+
+fn verification_status(status: &BackgroundTaskStatus) -> VerificationStatus {
+    match status {
+        BackgroundTaskStatus::Completed => VerificationStatus::Passed,
+        BackgroundTaskStatus::TimedOut => VerificationStatus::TimedOut,
+        BackgroundTaskStatus::LaunchFailed => VerificationStatus::LaunchFailed,
+        BackgroundTaskStatus::Failed
+        | BackgroundTaskStatus::Killed
+        | BackgroundTaskStatus::Blocked
+        | BackgroundTaskStatus::Running => VerificationStatus::Failed,
+    }
+}
+
+fn report_verification(
+    reporter: Option<&VerificationReporter>,
+    command: &str,
+    exit_code: Option<i32>,
+    status: VerificationStatus,
+    output: &str,
+) {
+    let Some(reporter) = reporter else {
+        return;
+    };
+    if !is_verification_command(command) || contains_sensitive_command(command) {
+        return;
+    }
+    let summary = output
+        .lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    reporter(CommandVerification {
+        command: command.trim().to_owned(),
+        exit_code,
+        status,
+        summary: truncate_utf8_bytes(summary, MAX_VERIFICATION_SUMMARY_BYTES),
+    });
+}
+
+fn is_verification_command(command: &str) -> bool {
+    let normalized = command.trim_start().to_ascii_lowercase();
+    [
+        "cargo test",
+        "cargo nextest",
+        "go test",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "ruby test",
+        "bundle exec rspec",
+        "bundle exec rake test",
+        "swift test",
+        "xcodebuild test",
+        "yarn test",
+        "yarn run test",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "pnpm run test",
+        "dotnet test",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "make test",
+    ]
+    .iter()
+    .any(|prefix| {
+        normalized == *prefix
+            || normalized
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    })
+}
+
+fn contains_sensitive_command(command: &str) -> bool {
+    let uppercase = command.to_ascii_uppercase();
+    ["API_KEY", "TOKEN=", "SECRET=", "PASSWORD=", "AUTHORIZATION"]
+        .iter()
+        .any(|marker| uppercase.contains(marker))
+}
+
+fn truncate_utf8_bytes(mut value: String, limit: usize) -> String {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 fn is_test_inspection_pipeline(command: &str) -> bool {
@@ -1401,6 +1902,32 @@ fn same_hostname(left: &reqwest::Url, right: &reqwest::Url) -> bool {
     left.host_str()
         .zip(right.host_str())
         .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+fn redirect_key(url: &reqwest::Url) -> String {
+    let mut normalized = url.clone();
+    normalized.set_fragment(None);
+    normalized.to_string()
+}
+
+async fn read_web_response(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
+    let mut output = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ToolError::Network(error.to_string()))?;
+        append_web_chunk(&mut output, &chunk)?;
+    }
+    Ok(output)
+}
+
+fn append_web_chunk(output: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ToolError> {
+    if output.len().saturating_add(chunk.len()) > MAX_WEB_RESPONSE_BYTES {
+        return Err(ToolError::Network(
+            "response exceeds the 3 MiB limit".to_owned(),
+        ));
+    }
+    output.extend_from_slice(chunk);
+    Ok(())
 }
 
 async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
@@ -1571,6 +2098,17 @@ fn truncate_bytes(value: String) -> String {
     format!("{}\n[output truncated]", &value[..boundary])
 }
 
+fn git_output(output: std::process::Output) -> Result<String, ToolError> {
+    if !output.status.success() {
+        return Err(ToolError::Io(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )));
+    }
+    Ok(truncate_bytes(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
 #[cfg(windows)]
 fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("powershell.exe");
@@ -1654,6 +2192,21 @@ struct GitDiffArgs {
     path: Option<String>,
     staged: Option<bool>,
     stat_only: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitLogArgs {
+    path: Option<String>,
+    max_count: Option<usize>,
+    author: Option<String>,
+    since: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitBlameArgs {
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1751,6 +2304,19 @@ mod tests {
         path
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn read_file_matches_swift_line_number_contract() {
         let root = workspace("read");
@@ -1766,6 +2332,64 @@ mod tests {
             .await
             .expect("read");
         assert_eq!(output, "     2  two\n     3  three\n");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn git_history_tools_are_bounded_read_only_and_path_scoped() {
+        let root = workspace("git-history");
+        git(&root, &["init"]);
+        git(&root, &["config", "user.name", "WillDeep Test"]);
+        git(&root, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(root.join("history.txt"), "first\nsecond\n").expect("first fixture");
+        git(&root, &["add", "history.txt"]);
+        git(&root, &["commit", "-m", "initial history"]);
+        std::fs::write(root.join("history.txt"), "first\nchanged\n").expect("second fixture");
+        git(&root, &["add", "history.txt"]);
+        git(&root, &["commit", "-m", "update history"]);
+
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
+        let log = registry
+            .git_log(GitLogArgs {
+                path: Some("history.txt".to_owned()),
+                max_count: Some(1),
+                author: Some("WillDeep Test".to_owned()),
+                since: None,
+            })
+            .await
+            .expect("git log");
+        assert!(log.contains("update history"));
+        assert!(!log.contains("initial history"));
+        assert_eq!(log.lines().count(), 1);
+
+        let blame = registry
+            .git_blame(GitBlameArgs {
+                path: "history.txt".to_owned(),
+                start_line: None,
+                end_line: None,
+            })
+            .await
+            .expect("git blame");
+        assert!(blame.contains("WillDeep Test"));
+        assert!(blame.contains("first"));
+        assert!(blame.contains("changed"));
+
+        let invalid_range = registry
+            .git_blame(GitBlameArgs {
+                path: "history.txt".to_owned(),
+                start_line: Some(3),
+                end_line: Some(2),
+            })
+            .await;
+        assert!(invalid_range.is_err());
+        let escape = registry
+            .git_blame(GitBlameArgs {
+                path: "../../etc/passwd".to_owned(),
+                start_line: None,
+                end_line: None,
+            })
+            .await;
+        assert!(matches!(escape, Err(ToolError::OutsideWorkspace(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -1796,6 +2420,35 @@ mod tests {
             std::fs::read_to_string(root.join("file.txt")).expect("read"),
             "alpha gamma"
         );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_blocks_write_capable_tools_before_approval() {
+        let root = workspace("read-only");
+        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::ReadOnly).expect("registry");
+        let result = registry
+            .execute(&ToolCall {
+                id: "write".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments: serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "unchanged",
+                    "new_string": "changed"
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(matches!(result, Err(ToolError::ReadOnlyPolicy(_))));
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).expect("read"),
+            "unchanged"
+        );
+        assert!(matches!(
+            registry.approve_subagent_editor("file.txt").await,
+            Err(ToolError::ReadOnlyPolicy(_))
+        ));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -1865,6 +2518,23 @@ mod tests {
         let other = reqwest::Url::parse("https://cdn.example.com/new").expect("other URL");
         assert!(same_hostname(&http, &https));
         assert!(!same_hostname(&https, &other));
+    }
+
+    #[test]
+    fn redirect_loop_key_ignores_client_side_fragments() {
+        let first = reqwest::Url::parse("https://example.com/page#first").unwrap();
+        let second = reqwest::Url::parse("https://example.com/page#second").unwrap();
+        assert_eq!(redirect_key(&first), redirect_key(&second));
+    }
+
+    #[test]
+    fn chunked_web_response_stops_at_the_hard_byte_limit() {
+        let mut output = vec![0; MAX_WEB_RESPONSE_BYTES - 2];
+        append_web_chunk(&mut output, &[1, 2]).unwrap();
+        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
+        let error = append_web_chunk(&mut output, &[3]).unwrap_err();
+        assert!(error.to_string().contains("3 MiB"));
+        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -2021,5 +2691,42 @@ mod tests {
         assert!(!is_test_inspection_pipeline("cargo test > result.txt"));
         assert!(!is_test_inspection_pipeline("cargo test && touch owned"));
         assert!(!is_test_inspection_pipeline("cargo test $(danger)"));
+    }
+
+    #[test]
+    fn verification_reporting_is_bounded_and_rejects_sensitive_commands() {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        let reporter: VerificationReporter = Arc::new(move |value| {
+            sink.lock().unwrap().push(value);
+        });
+        report_verification(
+            Some(&reporter),
+            "cargo test --workspace",
+            Some(1),
+            VerificationStatus::Failed,
+            &"失败".repeat(10_000),
+        );
+        report_verification(
+            Some(&reporter),
+            "API_KEY=secret cargo test",
+            Some(0),
+            VerificationStatus::Passed,
+            "ok",
+        );
+        report_verification(
+            Some(&reporter),
+            "cargo build",
+            Some(0),
+            VerificationStatus::Passed,
+            "ok",
+        );
+
+        let values = reported.lock().unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].command, "cargo test --workspace");
+        assert_eq!(values[0].exit_code, Some(1));
+        assert!(values[0].summary.len() <= MAX_VERIFICATION_SUMMARY_BYTES);
+        assert!(std::str::from_utf8(values[0].summary.as_bytes()).is_ok());
     }
 }
