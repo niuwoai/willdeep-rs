@@ -402,6 +402,7 @@ mod tests {
             label: "Run tests".to_owned(),
             status: BackgroundTaskStatus::Completed,
             elapsed_millis: 1200,
+            settled_millis: Some(0),
             exit_code: Some(0),
             output_bytes: 12,
         });
@@ -1374,6 +1375,7 @@ mod tests {
                 label: "Tests".to_owned(),
                 status: BackgroundTaskStatus::Failed,
                 elapsed_millis: 50,
+                settled_millis: Some(0),
                 exit_code: Some(1),
                 output_bytes: 10,
             },
@@ -1384,6 +1386,7 @@ mod tests {
                 label: "Scout".to_owned(),
                 status: BackgroundTaskStatus::Running,
                 elapsed_millis: 20,
+                settled_millis: None,
                 exit_code: None,
                 output_bytes: 0,
             },
@@ -1400,6 +1403,40 @@ mod tests {
             ]
         );
     }
+
+    /// Inbox 是活动面板：顺利收尾的任务过一会儿自己走，
+    /// 失败的赖着不走——那是还等着人处理的。
+    #[test]
+    fn attention_inbox_recycles_settled_tasks_but_keeps_failures() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let task =
+            |id: &str, status: BackgroundTaskStatus, settled_millis: u64| BackgroundTaskSnapshot {
+                id: id.to_owned(),
+                agent_id: None,
+                kind: willdeep_core::BackgroundTaskKind::Shell,
+                label: id.to_owned(),
+                status,
+                elapsed_millis: 50,
+                settled_millis: Some(settled_millis),
+                exit_code: Some(0),
+                output_bytes: 0,
+            };
+        app.background_tasks.extend([
+            task("job_fresh", BackgroundTaskStatus::Completed, 5_000),
+            task("job_stale", BackgroundTaskStatus::Completed, 600_000),
+            task("job_failed", BackgroundTaskStatus::Failed, 600_000),
+        ]);
+
+        let ids = app
+            .attention_items()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"job_fresh".to_owned()));
+        assert!(ids.contains(&"job_failed".to_owned()));
+        assert!(!ids.contains(&"job_stale".to_owned()));
+    }
+
     #[test]
     fn attention_inbox_navigates_opens_details_and_marks_terminal_items_read() {
         let registry = BackgroundTaskRegistry::default();
@@ -1413,6 +1450,7 @@ mod tests {
                 label: "Failed tests".to_owned(),
                 status: BackgroundTaskStatus::Failed,
                 elapsed_millis: 100,
+                settled_millis: Some(0),
                 exit_code: Some(1),
                 output_bytes: 10,
             },
@@ -1423,6 +1461,7 @@ mod tests {
                 label: "Finished build".to_owned(),
                 status: BackgroundTaskStatus::Completed,
                 elapsed_millis: 50,
+                settled_millis: Some(0),
                 exit_code: Some(0),
                 output_bytes: 10,
             },

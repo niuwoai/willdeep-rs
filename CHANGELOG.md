@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.21.0-rc66] - 2026-08-12
+## [0.21.0-rc67] - 2026-08-12
+
+### Fixed
+- 侧栏「需要关注 · 最近完成」不再无限堆积后台任务。此前 `attention_items()` 把 `background_tasks` 全量塞进 Inbox，只有用户手动标记已读才会消失，一条 26 秒前就结束的 `后台命令 · 已完成` 能挂到会话结束。现在 `BackgroundTaskSnapshot` 带上 `settled_millis`（终态时间戳，运行中为 `None`），顺利完成的任务在 Inbox 停留 60 秒后自动回收；失败、超时、被杀的任务保持原样——那些还等着人处理。侧栏每秒刷新一次快照，回收无需额外触发。
+
+### Tests
+- 新增 `attention_inbox_recycles_settled_tasks_but_keeps_failures`，锁定「已完成过期即走、失败常驻」这条规则。
 
 汇总合并三条并行开发分支。
 
