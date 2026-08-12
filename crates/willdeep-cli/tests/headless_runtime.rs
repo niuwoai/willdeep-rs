@@ -267,6 +267,175 @@ fn web_sse_disconnect_resumes_the_same_runtime_turn_without_resubmission() {
 }
 
 #[test]
+fn web_compress_command_is_served_by_the_harness_instead_of_the_provider() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config_with_language(&config, provider.api_base(), Some("en"));
+    let listen = free_loopback_address();
+    let canonical_workspace = workspace.canonicalize().expect("canonical test Workspace");
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+    let web = willdeep(&home)
+        .args([
+            "--web",
+            "--listen",
+            &listen,
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+        ])
+        .spawn()
+        .expect("start isolated Web server");
+    let mut web = ChildGuard(Some(web));
+    let base = format!("http://{listen}");
+    let runtime = tokio::runtime::Runtime::new().expect("create async test Runtime");
+
+    runtime.block_on(async {
+        let client = reqwest::Client::new();
+        await_web_health(&client, &base).await;
+
+        let first = web_chat_turn(&client, &base, &canonical_workspace, None, "first web turn").await;
+        assert_eq!(first["text"], MOCK_REPLY);
+        let session_id = first["session_id"]
+            .as_str()
+            .expect("completed Session ID")
+            .to_owned();
+        assert_eq!(
+            provider.requests(),
+            1,
+            "an ordinary Web prompt must reach the Provider"
+        );
+
+        let compressed = web_chat_turn(
+            &client,
+            &base,
+            &canonical_workspace,
+            Some(&session_id),
+            "/compress",
+        )
+        .await;
+        assert_eq!(compressed["session_id"], session_id);
+        let compressed_text = compressed["text"].as_str().expect("completed text");
+        assert!(
+            matches!(
+                compressed_text,
+                "Context compressed" | "Context is too short to compress"
+            ),
+            "Web /compress must be answered by the harness compression branch, got {compressed_text:?}"
+        );
+        assert_eq!(
+            provider.requests(),
+            1,
+            "Web /compress must never reach the Provider as an ordinary prompt"
+        );
+
+        let detail = client
+            .get(format!("{base}/api/sessions/{session_id}"))
+            .send()
+            .await
+            .expect("load compressed Web Session")
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode compressed Web Session");
+        let messages = detail["messages"].as_array().expect("Session messages");
+        assert_eq!(
+            messages.len(),
+            2,
+            "Web /compress must not append a Turn to the Session history"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "/compress"),
+            "Web /compress must never be persisted as a user message"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != compressed_text),
+            "the compression confirmation is a Harness reply, not Session history"
+        );
+    });
+
+    web.stop();
+    guard.stop_daemon();
+}
+
+async fn await_web_health(client: &reqwest::Client, base: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("Web server becomes healthy");
+}
+
+async fn web_chat_turn(
+    client: &reqwest::Client,
+    base: &str,
+    workspace: &Path,
+    session_id: Option<&str>,
+    prompt: &str,
+) -> serde_json::Value {
+    let response = client
+        .post(format!("{base}/api/chat/stream"))
+        .header("accept", "text/event-stream")
+        .json(&serde_json::json!({
+            "prompt": prompt,
+            "session_id": session_id,
+            "workspace": workspace,
+            "language": "en",
+            "attachments": []
+        }))
+        .send()
+        .await
+        .expect("submit Web chat Turn");
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        panic!("Web chat Turn '{prompt}' failed with {status}: {body}");
+    }
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(value) = pop_sse_json(&mut buffer) {
+                if value["type"] == "error" {
+                    panic!("Web chat Turn '{prompt}' reported {}", value["message"]);
+                }
+                if value["type"] == "completed" {
+                    break value;
+                }
+                continue;
+            }
+            let chunk = stream
+                .next()
+                .await
+                .expect("Web chat SSE remains open")
+                .expect("read Web chat SSE chunk");
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Web chat Turn '{prompt}' reaches completion"))
+}
+
+#[test]
 fn runtime_provider_failure_preserves_the_documented_exit_code() {
     let _serial = process_test_guard();
     let root = temporary_root();
@@ -980,6 +1149,13 @@ fn assert_success(output: &Output, operation: &str) {
 }
 
 fn write_private_config(path: &Path, api_base: String) {
+    write_private_config_with_language(path, api_base, None);
+}
+
+fn write_private_config_with_language(path: &Path, api_base: String, language: Option<&str>) {
+    let language_line = language
+        .map(|value| format!("language = \"{value}\"\n"))
+        .unwrap_or_default();
     let contents = format!(
         r#"version = 1
 default_provider = "mock"
@@ -987,7 +1163,7 @@ default_provider = "mock"
 [agent]
 max_turns = 4
 approval = "smart"
-
+{language_line}
 [providers.mock]
 provider = "openai-compatible"
 api = "chat-completions"

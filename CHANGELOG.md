@@ -1,6 +1,10 @@
 # Changelog
 
-## [0.21.0-rc61] - 2026-08-12
+## [0.21.0-rc62] - 2026-08-12
+
+### Tests
+- 新增 `web_compress_command_is_served_by_the_harness_instead_of_the_provider`：经由 `POST /api/chat/stream` 提交 `/compress`，断言回复来自 Harness 压缩分支、Provider 请求数不增加、`/compress` 不落入会话历史。此前 Web 侧 `/compress` 依赖 `execute_runtime` 中硬编码的 `allow_compress_command: true`，链路上没有任何断言保护——把该开关改为 `false` 时全工作区测试仍全绿。
+- 测试配置写入器支持可选 `[agent] language`，便于对多语言 Harness 文案做确定性断言。
 
 ### Docs
 - `README.md` 重新定位为面向读者的项目介绍：价值主张、30 秒上手、能力一览、安全须知与文档索引，不再承载完整参考内容，篇幅从 546 行降到约 130 行。
