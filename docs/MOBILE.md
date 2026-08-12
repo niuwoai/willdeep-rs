@@ -21,7 +21,7 @@
 |---|---|
 | 中继地址 | `wss://j.niuwoai.com/ws/broadcast/<room>` |
 | 协议版本 | `mobile-gateway.v1` |
-| 房间 | `willdeep-cli-<uuid>` |
+| 房间 | `wd-<32 位十六进制>` |
 | 认证 | `Authorization: Bearer <token>` |
 | 断线重连 | 2 秒间隔自动重试 |
 
@@ -41,11 +41,25 @@ Unix 权限为 `0600`。首次生成时先写临时文件并设好权限再 rena
 
 旧版凭据（`willdeep-cli-<uuid>` room + 64 位 token）会在下次加载时自动重新生成为紧凑格式并覆盖原文件——手机重新扫一次码即可，无需其它操作。
 
-## 二维码尺寸
+## 配对二维码
 
-二维码在终端里每个模块占一个字符格，尺寸完全由配对 JSON 的字节数和纠错等级决定。当前配置下配对载荷不超过 337 字节，纠错取 L 级（屏幕显示不存在印刷污损，7% 冗余足够），二维码稳定在 65×65 模块，加静区即 73 列宽、37 行高（Dense1x2 渲染，一个字符格装两行模块）。`mobile.rs` 的 `pairing_qr_fits_the_terminal_popup` 测试把这个宽度钉在 `MAX_QR_WIDTH`，任何加长配对字段的改动都会先撞到它。
+二维码里装的是 `mobile-gateway.v1` 的**紧凑配对 URL**，不是完整配对 JSON：
 
-再往下压需要改动 `mobile-gateway.v1` 契约本身（`base_url`/`relay_base_url` 和 `pairing_token`/`relay_token` 目前各重复一份，约占 100 字节），必须与 Android 端同步，暂未做。
+```text
+https://j.niuwoai.com/pair?r=<room>&t=<token>&d=<桌面名>
+```
+
+| 参数 | 含义 | 缺省行为 |
+|---|---|---|
+| `r` | relay room | 必填 |
+| `t` | relay token | 必填 |
+| `d` | 桌面名（≤16 字符） | 手机端显示为 `WillDeep Mac` |
+| `u` | relay base url | 缺省即 `https://j.niuwoai.com`，自建中继才下发 |
+| `v` | 协议版本 | 缺省即 `mobile-gateway.v1` |
+
+手机端把这几个参数补全成完整配对 JSON：`base_url` 由 `u` 推出，`pairing_token` 等于 `t`，`expires_at` 取远期常量。所以 `base_url`/`pairing_token`/`expires_at` 不进二维码——它们要么是中继字段的副本，要么是常量，每重复一份都要多烧几十个模块。
+
+尺寸：二维码在终端里每个模块占一个字符格，只由载荷字节数和纠错等级决定。当前载荷 114 字节、纠错 L 级（屏幕显示不存在印刷污损，7% 冗余足够），二维码 41×41 模块，加静区即 **49 列 × 25 行**（Dense1x2 渲染，一个字符格装两行模块）。`mobile.rs` 的 `pairing_qr_fits_the_terminal_popup` 把尺寸钉死为 `MAX_QR_WIDTH` × `MAX_QR_HEIGHT`，任何加长配对内容的改动都会先撞到它。
 
 该文件不会写入仓库。
 
