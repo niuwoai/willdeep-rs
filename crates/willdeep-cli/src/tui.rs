@@ -115,8 +115,16 @@ struct App {
     input: PromptEditor,
     transcript: Vec<String>,
     running: bool,
-    approval: Option<(String, bool, oneshot::Sender<ApprovalDecision>)>,
+    approval: Option<ApprovalRequest>,
+    /// Approvals that arrived while another one was on screen. Without this
+    /// queue the newer request overwrote the older one, dropping its oneshot
+    /// sender — which the harness reads as a silent Deny the user never saw.
+    approval_queue: VecDeque<ApprovalRequest>,
     question: Option<AskDialog>,
+    /// Questions waiting behind the one on screen. Same reasoning as
+    /// `approval_queue`: overwriting dropped the sender, which the harness
+    /// reads as "no answer".
+    question_queue: VecDeque<AskDialog>,
     scroll_from_bottom: usize,
     follow_bottom: bool,
     transcript_width: usize,
@@ -144,6 +152,9 @@ struct App {
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
+    /// Runtime interactions already turned into a dialog, so a snapshot that
+    /// still lists them does not reopen the same card every second.
+    surfaced_gates: BTreeSet<uuid::Uuid>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     runtime_artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
@@ -245,6 +256,10 @@ enum PaletteAction {
     Task(usize),
     File(String),
 }
+
+/// A pending approval: what is being asked, whether Always Allow applies,
+/// and the channel the waiting harness is parked on.
+type ApprovalRequest = (String, bool, oneshot::Sender<ApprovalDecision>);
 
 struct AskDialog {
     request: UserQuestion,
@@ -650,6 +665,9 @@ async fn event_loop(
                 app.runtime_agents=snapshot.agents;
                 app.runtime_tools=snapshot.tools;
                 app.runtime_artifacts=snapshot.artifacts;
+                if runtime_ui::surface_pending_gates(&mut app,&runtime.home,&runtime.tx){
+                    execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
+                }
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
@@ -726,9 +744,9 @@ async fn event_loop(
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if app.question.is_some(){app.handle_question_key(key);continue;}
-                    if let Some((_,always,sender))=app.approval.take(){
-                        let decision=match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny};
-                        let _=sender.send(decision);continue;
+                    if app.approval.is_some(){
+                        app.resolve_approval(|always|match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny});
+                        continue;
                     }
                     if let Some(detail)=app.attention_detail.clone(){
                         if detail.source==AttentionSource::DiffReview {
@@ -1126,8 +1144,8 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::SubagentToolRequested{id,name})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),language.text("正在使用","using","使用中"))),
                 UiMessage::Agent(AgentEvent::SubagentToolCompleted{id,name,is_error})=>app.record_progress(format!("{} {} · {} {name}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),if is_error{language.text("失败","failed","失敗")}else{language.text("已完成","finished","完了")})),
                 UiMessage::Agent(AgentEvent::SubagentUsage{..})=>{},
-                UiMessage::Approval(v,a,s)=>app.approval=Some((v,a,s)),
-                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];app.question=Some(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender});},
+                UiMessage::Approval(v,a,s)=>if app.enqueue_approval((v,a,s)){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;},
+                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
@@ -1158,7 +1176,9 @@ impl App {
             transcript,
             running: false,
             approval: None,
+            approval_queue: VecDeque::new(),
             question: None,
+            question_queue: VecDeque::new(),
             scroll_from_bottom: 0,
             follow_bottom: true,
             transcript_width: 78,
@@ -1186,6 +1206,7 @@ impl App {
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
+            surfaced_gates: BTreeSet::new(),
             runtime_agents: Vec::new(),
             runtime_tools: Vec::new(),
             runtime_artifacts: Vec::new(),
@@ -1248,8 +1269,8 @@ impl App {
         }
         self.input = PromptEditor::default();
         self.running = false;
-        self.approval = None;
-        self.question = None;
+        self.discard_pending_approvals();
+        self.discard_pending_questions();
         self.scroll_from_bottom = 0;
         self.follow_bottom = true;
         self.tools = ToolActivity::default();
@@ -1902,6 +1923,112 @@ impl App {
         self.transient_thought = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
+    /// Show an approval immediately, or queue it behind the one on screen.
+    /// Returns true when the request became visible right now — the caller
+    /// rings the terminal bell for that case, so a user looking elsewhere
+    /// learns the turn is parked instead of watching it appear to hang.
+    fn enqueue_approval(&mut self, request: ApprovalRequest) -> bool {
+        let waiting = self
+            .language
+            .text("等待你确认", "Waiting for you", "確認待ち");
+        self.record_progress(format!("{waiting} · {}", first_line(&request.0)));
+        if self.approval.is_some() {
+            self.approval_queue.push_back(request);
+            return false;
+        }
+        self.approval = Some(request);
+        true
+    }
+
+    /// Answer the visible approval and immediately promote the next queued
+    /// one, so a turn that needs three confirmations asks three times in a
+    /// row instead of stalling after the first.
+    fn resolve_approval(&mut self, decide: impl FnOnce(bool) -> ApprovalDecision) {
+        let Some((_, always, sender)) = self.approval.take() else {
+            return;
+        };
+        let _ = sender.send(decide(always));
+        self.approval = self.approval_queue.pop_front();
+    }
+
+    /// Show a question immediately, or queue it behind the visible one.
+    /// Returns true when it became visible right now.
+    ///
+    /// A question pops even while the user is typing: the draft prompt in
+    /// `self.input` is untouched (the dialog carries its own editor), so
+    /// nothing already typed is lost — keystrokes are only redirected from
+    /// the moment it appears.
+    fn enqueue_question(&mut self, dialog: AskDialog) -> bool {
+        let waiting = self
+            .language
+            .text("等待你回答", "Waiting for you", "回答待ち");
+        self.record_progress(format!(
+            "{waiting} · {}",
+            first_line(&dialog.request.question)
+        ));
+        if self.question.is_some() {
+            self.question_queue.push_back(dialog);
+            return false;
+        }
+        self.question = Some(dialog);
+        true
+    }
+
+    /// Promote the next queued question after the visible one is answered.
+    fn promote_next_question(&mut self) {
+        self.question = self.question_queue.pop_front();
+    }
+
+    /// Answer every parked question with "no answer", visibly.
+    fn discard_pending_questions(&mut self) {
+        let mut pending = Vec::new();
+        if let Some(dialog) = self.question.take() {
+            pending.push(dialog);
+        }
+        pending.extend(self.question_queue.drain(..));
+        if pending.is_empty() {
+            return;
+        }
+        for dialog in pending {
+            let _ = dialog.sender.send(None);
+        }
+        self.notice = Some(
+            self.language
+                .text(
+                    "切换会话已放弃待回答的提问",
+                    "Pending questions dropped by session switch",
+                    "セッション切り替えにより保留中の質問を破棄しました",
+                )
+                .to_owned(),
+        );
+    }
+
+    /// Deny everything still parked, with a visible reason. Used when the
+    /// user switches away from the session that raised them: dropping the
+    /// senders would also deny, but silently.
+    fn discard_pending_approvals(&mut self) {
+        let mut pending = Vec::new();
+        if let Some(request) = self.approval.take() {
+            pending.push(request);
+        }
+        pending.extend(self.approval_queue.drain(..));
+        if pending.is_empty() {
+            return;
+        }
+        for (_, _, sender) in pending {
+            let _ = sender.send(ApprovalDecision::Deny);
+        }
+        self.notice = Some(
+            self.language
+                .text(
+                    "切换会话已拒绝待处理的审批",
+                    "Pending approvals denied by session switch",
+                    "セッション切り替えにより保留中の承認を拒否しました",
+                )
+                .to_owned(),
+        );
+    }
+
     fn record_progress(&mut self, value: String) {
         self.activity_line = value.clone();
         let elapsed = self
@@ -1922,6 +2049,7 @@ impl App {
             KeyCode::Esc => {
                 if let Some(dialog) = self.question.take() {
                     let _ = dialog.sender.send(None);
+                    self.promote_next_question();
                 }
             }
             KeyCode::Up | KeyCode::BackTab => dialog.selected = dialog.selected.saturating_sub(1),
@@ -1960,6 +2088,7 @@ impl App {
                         .unwrap_or_default()
                 };
                 let _ = dialog.sender.send(Some(answer));
+                self.promote_next_question();
             }
             KeyCode::Left => dialog.answer.left(),
             KeyCode::Right => dialog.answer.right(),
@@ -2067,23 +2196,21 @@ impl App {
             && self.approval_rect.contains((x, y).into())
             && y >= self.approval_rect.bottom().saturating_sub(2)
         {
-            let Some((_, always, sender)) = self.approval.take() else {
-                return;
-            };
             let relative = x.saturating_sub(self.approval_rect.x) as usize;
             let width = self.approval_rect.width.max(1) as usize;
-            let decision = if always {
-                match relative.saturating_mul(3) / width {
-                    0 => ApprovalDecision::AllowOnce,
-                    1 => ApprovalDecision::AlwaysAllow,
-                    _ => ApprovalDecision::Deny,
+            self.resolve_approval(|always| {
+                if always {
+                    match relative.saturating_mul(3) / width {
+                        0 => ApprovalDecision::AllowOnce,
+                        1 => ApprovalDecision::AlwaysAllow,
+                        _ => ApprovalDecision::Deny,
+                    }
+                } else if relative < width / 2 {
+                    ApprovalDecision::AllowOnce
+                } else {
+                    ApprovalDecision::Deny
                 }
-            } else if relative < width / 2 {
-                ApprovalDecision::AllowOnce
-            } else {
-                ApprovalDecision::Deny
-            };
-            let _ = sender.send(decision);
+            });
         } else if self.question.is_some() && self.question_rect.contains((x, y).into()) {
             if let Some((_, selected)) = self
                 .question_hits
@@ -2103,6 +2230,7 @@ impl App {
                 } else if let Some(dialog) = self.question.take() {
                     let answer = dialog.request.options.get(selected).cloned();
                     let _ = dialog.sender.send(answer);
+                    self.promote_next_question();
                 }
             } else if y >= self.question_rect.bottom().saturating_sub(2) {
                 let code = if x < self.question_rect.x + self.question_rect.width / 2 {
@@ -3071,10 +3199,7 @@ fn draw(
                 Paragraph::new(content)
                     .block(
                         Block::default()
-                            .title(
-                                app.language
-                                    .text("需要确认", "Approval required", "承認が必要"),
-                            )
+                            .title(approval_title(app.language, app.approval_queue.len()))
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::Yellow)),
                     )
@@ -3154,10 +3279,14 @@ fn draw(
                 Paragraph::new(content)
                     .block(
                         Block::default()
-                            .title(app.language.text(
-                                "智能体提问",
-                                "Question from Agent",
-                                "エージェントからの質問",
+                            .title(queued_title(
+                                app.language.text(
+                                    "智能体提问",
+                                    "Question from Agent",
+                                    "エージェントからの質問",
+                                ),
+                                app.language,
+                                app.question_queue.len(),
                             ))
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::Cyan)),
@@ -3212,6 +3341,38 @@ fn workspace_status(workspace: &std::path::Path, language: Language) -> String {
         language.text("变更文件", "Diff files", "変更ファイル"),
         language.text("工作树", "Worktrees", "ワークツリー")
     )
+}
+
+/// Dialog title carrying how many more are queued behind this one, so the
+/// user knows the turn is not done asking.
+fn queued_title(base: &str, language: Language, queued: usize) -> String {
+    if queued == 0 {
+        return base.to_owned();
+    }
+    let more = language.text("还有", "more", "残り");
+    format!("{base} · {more} {queued}")
+}
+
+fn approval_title(language: Language, queued: usize) -> String {
+    queued_title(
+        language.text("需要确认", "Approval required", "承認が必要"),
+        language,
+        queued,
+    )
+}
+
+/// First non-empty line of an approval description, for one-line activity
+/// reporting. Approval descriptions carry an optional label line plus the
+/// full command; the log only needs the head.
+fn first_line(description: &str) -> String {
+    description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(description)
+        .chars()
+        .take(96)
+        .collect()
 }
 
 fn approval_content(description: &str, always: bool, language: Language) -> Vec<Line<'static>> {

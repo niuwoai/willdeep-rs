@@ -1594,6 +1594,154 @@ mod tests {
         assert_eq!(app.input.text(), "/compress");
     }
 
+    /// A second approval arriving mid-dialog used to overwrite the first,
+    /// dropping its oneshot sender — the harness read that as a Deny the
+    /// user never saw, and the turn died without explanation.
+    #[test]
+    fn a_second_approval_queues_instead_of_silently_denying_the_first() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let (first_tx, mut first_rx) = oneshot::channel();
+        let (second_tx, mut second_rx) = oneshot::channel();
+
+        assert!(
+            app.enqueue_approval(("run command: cargo build".to_owned(), true, first_tx)),
+            "the first approval is shown immediately"
+        );
+        assert!(
+            !app.enqueue_approval(("run command: git push".to_owned(), false, second_tx)),
+            "the second approval waits its turn"
+        );
+        assert_eq!(app.approval_queue.len(), 1);
+        // Neither sender has been resolved yet.
+        assert!(first_rx.try_recv().is_err());
+        assert!(second_rx.try_recv().is_err());
+
+        app.resolve_approval(|_| ApprovalDecision::AllowOnce);
+        assert_eq!(first_rx.try_recv(), Ok(ApprovalDecision::AllowOnce));
+        // The queued one is promoted right away, not after the next event.
+        assert!(app.approval.is_some());
+        assert!(app.approval_queue.is_empty());
+        assert_eq!(
+            app.approval.as_ref().map(|(text, _, _)| text.as_str()),
+            Some("run command: git push")
+        );
+
+        app.resolve_approval(|_| ApprovalDecision::Deny);
+        assert_eq!(second_rx.try_recv(), Ok(ApprovalDecision::Deny));
+        assert!(app.approval.is_none());
+    }
+
+    /// Switching sessions must not leave a harness parked forever, and must
+    /// say so rather than dropping the channel on the floor.
+    #[test]
+    fn switching_sessions_denies_pending_approvals_visibly() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let (tx, mut rx) = oneshot::channel();
+        app.enqueue_approval(("run command: rm -rf build".to_owned(), false, tx));
+
+        app.discard_pending_approvals();
+
+        assert_eq!(rx.try_recv(), Ok(ApprovalDecision::Deny));
+        assert!(app.approval.is_none());
+        assert!(app.notice.is_some(), "the denial must be reported");
+    }
+
+    /// An arriving approval writes an activity line, so a user watching the
+    /// progress column sees why the turn stopped moving.
+    #[test]
+    fn an_arriving_approval_reports_itself_in_the_activity_log() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let (tx, _rx) = oneshot::channel();
+        app.enqueue_approval((
+            "call hub API\ncommand: curl https://example.com".to_owned(),
+            false,
+            tx,
+        ));
+        assert!(
+            app.progress_log
+                .iter()
+                .any(|line| line.contains("Waiting for you") && line.contains("call hub API")),
+            "progress log missing the approval line: {:?}",
+            app.progress_log
+        );
+    }
+
+    #[test]
+    fn approval_title_reports_the_queue_depth() {
+        assert_eq!(approval_title(Language::En, 0), "Approval required");
+        assert_eq!(
+            approval_title(Language::En, 2),
+            "Approval required · more 2"
+        );
+    }
+
+    /// Questions pop on arrival too, queue the same way, and must never
+    /// clobber the draft the user was typing in the main input.
+    #[test]
+    fn questions_queue_and_preserve_the_draft_prompt() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("half-written prompt");
+
+        let (first_tx, mut first_rx) = oneshot::channel();
+        let (second_tx, mut second_rx) = oneshot::channel();
+        let dialog = |question: &str, sender| AskDialog {
+            request: UserQuestion {
+                question: question.to_owned(),
+                options: vec!["a".to_owned(), "b".to_owned()],
+                multi_select: false,
+            },
+            selected: 0,
+            checked: vec![false, false],
+            answer: PromptEditor::default(),
+            sender,
+        };
+
+        assert!(app.enqueue_question(dialog("which branch?", first_tx)));
+        assert!(!app.enqueue_question(dialog("which remote?", second_tx)));
+        assert_eq!(
+            app.input.text(),
+            "half-written prompt",
+            "a popping question must not eat the draft"
+        );
+        assert!(first_rx.try_recv().is_err());
+        assert!(second_rx.try_recv().is_err());
+
+        app.handle_question_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(first_rx.try_recv(), Ok(Some("a".to_owned())));
+        assert_eq!(
+            app.question.as_ref().map(|d| d.request.question.as_str()),
+            Some("which remote?"),
+            "the queued question is promoted immediately"
+        );
+
+        app.handle_question_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(second_rx.try_recv(), Ok(None));
+        assert!(app.question.is_none());
+    }
+
+    #[test]
+    fn switching_sessions_drops_pending_questions_visibly() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let (tx, mut rx) = oneshot::channel();
+        app.enqueue_question(AskDialog {
+            request: UserQuestion {
+                question: "which branch?".to_owned(),
+                options: Vec::new(),
+                multi_select: false,
+            },
+            selected: 0,
+            checked: Vec::new(),
+            answer: PromptEditor::default(),
+            sender: tx,
+        });
+
+        app.discard_pending_questions();
+
+        assert_eq!(rx.try_recv(), Ok(None));
+        assert!(app.question.is_none());
+        assert!(app.notice.is_some(), "the drop must be reported");
+    }
+
     #[test]
     fn ordinary_prompts_default_to_runtime_with_explicit_local_escape() {
         assert_eq!(
