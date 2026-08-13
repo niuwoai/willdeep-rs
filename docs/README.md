@@ -51,6 +51,7 @@
 |---|---|
 | [CLI / TUI / Runtime 路线图](CLI_TUI_RUNTIME_ROADMAP.md) | 分阶段实施记录与验收 |
 | [Goal Teams 引用与落地映射](GOAL_TEAMS.md) | 执行期角色 / 版本锚定里程碑 / 归档规范（canonical 在 Xedit 仓库） |
+| [长程自主执行引用与落地映射](LONG_HORIZON_AUTONOMY.md) | 续推契约 / 预算与软停 / 计划工具化 / 重启可续（canonical 在 Xedit 仓库） |
 | [Xedit 工具能力对照](XEDIT_TOOL_PARITY.md) | 工具覆盖度与 Computer Use 路线 |
 | [Herdr 研究与集成方案](HERDR_RESEARCH_AND_INTEGRATION.md) | 终端复用器集成的取舍与边界 |
 
