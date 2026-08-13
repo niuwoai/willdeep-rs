@@ -15,7 +15,7 @@ willdeep --web --workspace /path/to/project
 |---|---|
 | `--web` | 启动 Web UI 与 JSON API，取代 TUI |
 | `--listen <IP:PORT>` | 监听地址，默认 `127.0.0.1:9847`。必须写成完整的 `IP:PORT` |
-| `--workspace <PATH>` | 首选工作区（排在候选列表第一位） |
+| `-w`, `--workspace <PATH>` | 首选工作区（排在候选列表第一位） |
 | `--web-workspace <PATH>` | 额外允许的工作区，可重复。只能写在顶层，不能跟在子命令后 |
 | `--project <名称或UUID>` | macOS 上一次载入某个 Swift Project 的全部文件夹 |
 | `--language <L>` | 服务端默认语言 |

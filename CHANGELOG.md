@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.22.0-rc5] - 2026-08-13
+
+### Added
+- 高频参数补齐短选项：`-c`（`--config`）、`-p`（`--profile`）、`-m`（`--model`）、`-r`（`--resume`），与 rc4 的 `-w` 一起构成常用五个。前四个继承各自的 `global = true`，子命令前后都能写；`-r` 与 `--resume` 一样只在顶层。长选项写法全部不变。
+
+### Tests
+- 新增 `high_frequency_arguments_have_short_forms`：五个短选项与对应长选项解析到同一字段、可组合使用。
+- 新增 `workspace_defaults_to_the_current_directory`：不带 `--workspace` 时 `resolve_workspace` 落在**当前工作目录**（canonicalize 后）。此前这条只是实现细节（`resolve_workspace` 兜底 `PathBuf::from(".")`、Web 模式兜底 `std::env::current_dir()`），没有任何断言保护，改动别处很容易悄悄改掉它。
+
+### Docs
+- `docs/CLI_REFERENCE.md` 参数表补上 `-c` / `-p` / `-m` / `-r`，加一行短选项一览，并写明 `--workspace` 缺省即当前目录。
+
+## [0.22.0-rc4] - 2026-08-13
+
+### Added
+- `--workspace` 新增短选项 `-w`（`willdeep -w ~/Sites/project`）。它继承原有的 `global = true`，子命令前后都能写。此前整个 CLI 没有定义过任何短选项，`-w` 不与现存参数冲突，长选项写法完全不变。
+
+### Tests
+- 新增 `workspace_accepts_the_short_flag_everywhere`：锁定 `-w` 在裸 TUI、子命令前、子命令后三种位置都解析成同一路径，且长选项行为不变。
+
+### Docs
+- `docs/CLI_REFERENCE.md`、`docs/WEB_GUIDE.md` 的参数表补上 `-w`。
+
+## [0.22.0-rc3] - 2026-08-13
+
+### Fixed
+- `ask_user` 提问也改为到达即弹（rc2 曾按「会抢输入行」保留手动打开，实测下来同样是让人干等，遂改）。本地和 Runtime 两条路径一致：一到就开弹窗、响铃、在活动流写一行 `等待你回答 · <问题>`。弹窗自带输入框，主输入框里已经打了一半的草稿**原样保留**，只是从弹出那刻起按键改由弹窗接管。
+- 提问同样改为队列，修掉与审批相同的静默失败：此前第二个提问直接覆盖 `app.question`，被覆盖的 sender 一 drop，`ask_user` 收到 `None` 当作「用户没回答」，而用户根本没见过那个问题。现在先到先弹，回答完立刻顶上下一个，标题显示「还有 N」。三处回答出口（Esc、Enter、鼠标点选）都会接上队列。
+- 切换会话时待回答提问显式作废并提示（`切换会话已放弃待回答的提问`），不再静默丢 channel。
+
+### Tests
+- 新增 2 项：提问排队且不吞主输入框草稿（并断言回答后立刻顶上下一个、Esc 出口同样接队列）、切换会话显式作废并提示。
+
+## [0.22.0-rc2] - 2026-08-13
+
+### Fixed
+- 当前回合需要审批时立刻弹窗，不再只在侧栏留一条「等待审批」让人自己发现。Runtime 快照一旦带出待处理审批就自动打开确认框并响铃；此前只弹一条转瞬即逝的通知，任务在那儿干等，用户以为是卡死。
+- 审批不再互相覆盖。此前 `UiMessage::Approval` 直接赋值给 `app.approval`，同一回合的第二个审批会挤掉第一个——被挤掉的 oneshot sender 一 drop，Harness 那边 `rx.await` 失败按 **Deny** 处理，于是用户没看见的那次审批被静默拒绝，回合莫名其妙失败。现在改成队列：先到先弹，解决一个立刻顶上下一个，弹窗标题显示「还有 N」。
+- 切换会话时待处理审批改为显式拒绝并给出提示（`切换会话已拒绝待处理的审批`）。此前 `load_session` 把 `approval` 置空，效果同样是 Deny，但没有任何提示。
+- 审批到达时写入活动流一行 `等待你确认 · <描述首行>` 并响铃，进度列能直接看出回合为什么不动了。
+
+说明：`ask_user` 提问不做自动弹出——它会在用户正打字时抢走输入行，且已有 `task.waiting_answer` 通知；这条是有意保留的差异。
+
+### Tests
+- `tui/test_suite.rs` 新增 4 项：第二个审批入队而非静默拒绝首个（并断言解决后立刻顶上）、切换会话显式拒绝且有提示、到达时写活动流、标题显示队列深度。
+
+## [0.22.0-rc1] - 2026-08-13
+
+### Added
+- Shell 命令改为**两级审批**，对齐 macOS Xedit 的 `SafeCommand` + 安全判官结构。此前 `smart` 模式只有一条硬编码白名单（`cargo test` 加 `grep/head/tail` 管道），`ls`、`cat`、`git status`、`rg` 这类纯只读命令统统要人点一次，一条会话下来审批卡比结论还多。现在：
+  - 新增 `willdeep-core::safety` 静态分类器，按 Shell 语义（分段、引号、`$()`、重定向）给出 `AlwaysSafe` / `AlwaysDangerous` / `NeedsJudgment`。只读检查与受限工作区操作（`ls`/`cat`/`rg`/`git status`/`git log`/`cargo test`/`cargo clippy`/`find`/`mkdir -p` 等）直接执行；`rm -rf`/`sudo`/`chmod -R`/`git push --force`/`git reset --hard`/`mv`/`kill`/`dd if=`/fork 炸弹/`xargs rm` 判为破坏性，**绕过 AI 直接交用户**。
+  - 新增 `willdeep-core::judge` AI 判官，处理中间地带（`curl`、`npm install`、`git commit`、`sed -i`、重定向写文件、任意脚本）。一次非流式调用，只认 `<verdict>YES</verdict>`；NO、回复畸形、网络失败一律回落到用户审批卡——判官只能减少打扰，不能扩大权限。默认开启，`[agent] safety_judge = false` 可关，`judge_model` 可指定模型（默认取 profile 的廉价模型）。
+  - 注入防御三层：命令中的 `KEY=…` / `--password …` / `Bearer …` / `sk-…` 在出网前本地替换成 `[REDACTED]`；命令、工具名、任务意图分别封进 XML 标签并用零宽空格打断内部闭合标签与 `<verdict>`；裁决只接受唯一一个格式完整的标签，命令回声无法伪造 YES。
+  - 同一「工具 + 命令 + 任务意图」的 YES 缓存 30 分钟，NO 从不缓存。
+- 新增审批审计日志 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），逐条记录放行来源 `static` / `judge` / `always-allow` / `user` 及原因，回答「这条命令为什么没问我」。
+
+### Changed
+- 删除 `tools.rs` 中的 `is_test_inspection_pipeline` / `split_inspection_pipeline`：新分类器覆盖它允许的全部形状，且不再把 `cargo test | tee result.txt`、`cargo test > result.txt` 误判为同类。原有断言以新分类器等价重写。
+- 用户每轮输入通过 `ToolRegistry::set_task_context` 作为**惰性上下文**传给判官，只用于判断某个受限操作是否与当前目标相关；它不授予权限，也不会让破坏性操作变安全。
+
+### Tests
+- `safety.rs` 10 项：只读放行、破坏性拒绝、引号内危险词仍是数据、`$()` 有界展开、单段污染整链、Heredoc/引号不闭合降级、MCP 只读名识别。
+- `judge.rs` 5 项：裁决标签解析（含双标签伪造）、凭据脱敏、注入字段中和、任务意图缺省、缓存键归一化。
+- `tools.rs` 3 项：`smart` 放只读 Shell 但仍拦 `curl`/`rm -rf`/重定向；只有中间地带命令会送到判官（`ls` 与 `rm -rf build` 都不送）；判官说 NO 时回落用户。
+- `config.rs` 1 项：`safety_judge` 未配置即为开启，且可显式关闭与指定 `judge_model`。
+
+### Docs
+- `docs/APPROVALS.md` 重写「三档审批模式」并新增「两级审批」一节：三类结论的处理与例子、Shell 语义规则、判官的三层防御与回落语义、配置项、审计日志位置。
+- `docs/ARCHITECTURE.md` 安全边界同步为两级审批描述。
+- `config.example.toml` 补 `safety_judge` / `judge_model` 示例。
+
 ## [0.21.0-rc67] - 2026-08-12
 
 ### Fixed

@@ -28,14 +28,14 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 
 | 选项 | 说明 |
 |---|---|
-| `--config <PATH>` | TOML 配置路径，默认 `$WILLDEEP_HOME/config.toml` 或 `~/.willdeep/config.toml` |
-| `--profile <NAME>` | 使用 TOML 中的某个 Provider Profile |
+| `-c`, `--config <PATH>` | TOML 配置路径，默认 `$WILLDEEP_HOME/config.toml` 或 `~/.willdeep/config.toml` |
+| `-p`, `--profile <NAME>` | 使用 TOML 中的某个 Provider Profile |
 | `--api-base <URL>` | Provider API Base |
 | `--api-key <KEY>` | Provider API Key，建议改用环境变量以免进入命令历史 |
-| `--model <ID>` | 模型标识 |
+| `-m`, `--model <ID>` | 模型标识 |
 | `--provider <P>` | `auto` / `openai-compatible` / `some-im` / `anthropic` |
 | `--api <A>` | `auto` / `chat-completions` / `responses` / `anthropic-messages` |
-| `--workspace <PATH>` | 工具可访问的工作区根目录 |
+| `-w`, `--workspace <PATH>` | 工具可访问的工作区根目录。**缺省为当前目录** |
 | `--full-auto` | 工作区内创建/编辑免审批；Shell 与 MCP 仍逐次确认 |
 | `--max-turns <N>` | 模型/工具轮次上限 |
 | `--max-output-tokens <N>` | Anthropic Messages 的输出 Token 上限 |
@@ -65,12 +65,15 @@ willdeep --profile some-im --workspace .
 | `--web-workspace <PATH>` | Web 模式额外允许的工作区，可重复 |
 | `--onboarding` | 重新运行交互式首次设置 |
 | `--json` | 在 stdout 输出 NDJSON 事件 |
+| `-r`, `--resume <ID\|latest>` | 恢复已保存的会话 |
+
+短选项一览：`-c` 配置、`-p` Profile、`-m` 模型、`-w` 工作区、`-r` 恢复会话。前四个是全局选项，子命令前后都能写。
 
 ## 会话与项目
 
 ```bash
 willdeep --list-sessions
-willdeep --resume latest "继续检查刚才的问题"
+willdeep -r latest "继续检查刚才的问题"          # -r 即 --resume
 willdeep --resume 550e8400-e29b-41d4-a716-446655440000 "继续"
 ```
 
