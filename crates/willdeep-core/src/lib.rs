@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod attention;
 pub mod background;
+pub mod judge;
 pub mod mcp;
 pub mod prompt;
 pub mod provider;
+pub mod safety;
 pub mod session;
 pub mod skills;
 pub mod subagent;
@@ -23,8 +25,10 @@ pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,
     BackgroundTaskStatus,
 };
+pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
+pub use safety::{CommandSafety, classify_with_workspace_write};
 pub use session::{Session, SessionDigest, SessionStore};
 pub use skills::SkillCatalog;
 pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};

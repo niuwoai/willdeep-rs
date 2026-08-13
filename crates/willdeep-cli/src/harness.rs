@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
+use willdeep_core::tools::{ApprovalSource, ApprovalTrace};
 use willdeep_core::{
     Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
-    BackgroundTaskStatus, EventSink, SubagentCatalog, ToolRegistry, WebToolConfig, build_provider,
-    builtin_profiles,
+    BackgroundTaskStatus, EventSink, ProviderSafetyJudge, SafetyJudge, SubagentCatalog,
+    ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
 };
 
 use crate::config::LoadedConfig;
@@ -17,6 +18,55 @@ use crate::{
     parse_api, parse_provider, projects, provider_config_from_profile, resolve_api_key,
     resolve_base, resolve_dialect, resolve_provider,
 };
+
+/// Judge model per provider family. some.im bills the cheap tier far lower
+/// and answers a one-token verdict in well under a second; everything else
+/// reuses the session model so no extra deployment is required.
+fn default_judge_model(kind: ProviderKind, session_model: &str) -> String {
+    match kind {
+        ProviderKind::SomeIm => "glm-5".to_owned(),
+        _ => session_model.to_owned(),
+    }
+}
+
+/// Append one approval decision to `~/.willdeep/approvals.jsonl`. This is the
+/// audit trail for "why did that command run without asking me" — and the
+/// raw material for tuning the static rules. Best-effort: a logging failure
+/// must never block a tool call.
+fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let source = match trace.source {
+        ApprovalSource::StaticAllowlist => "static",
+        ApprovalSource::Judge => "judge",
+        ApprovalSource::AlwaysAllowList => "always-allow",
+        ApprovalSource::User => "user",
+    };
+    let entry = serde_json::json!({
+        "at": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default(),
+        "source": source,
+        "detail": trace.detail,
+        // The command is stored redacted: this file outlives the session.
+        "command": willdeep_core::judge::redact_credentials(&trace.command),
+    });
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        let _ = writeln!(file, "{entry}");
+    }
+}
 
 pub(crate) enum HarnessFrontend {
     Terminal {
@@ -398,8 +448,30 @@ pub(crate) async fn build(
     ));
     let verification_home = home.to_path_buf();
     let verification_workspace = workspace.clone();
-    let tools = ToolRegistry::new(&workspace, approval_mode)?
+    // The judge runs on the cheapest model of the active profile: it answers
+    // one YES/NO per ambiguous command, and a slow judge is worse than an
+    // approval card.
+    let safety_judge = if loaded.file.agent.safety_judge.unwrap_or(true) {
+        let judge_model = loaded
+            .file
+            .agent
+            .judge_model
+            .clone()
+            .unwrap_or_else(|| default_judge_model(kind, &model));
+        let mut judge_config = parent_provider_config.clone();
+        judge_config.model = judge_model;
+        Some(Arc::new(ProviderSafetyJudge::new(
+            build_provider(judge_config).context("initialize safety judge provider")?,
+        )) as Arc<dyn SafetyJudge>)
+    } else {
+        None
+    };
+    let approval_log = home.join("approvals.jsonl");
+    let mut tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_approver(approver)
+        .with_approval_reporter(move |trace| {
+            record_approval_trace(&approval_log, &trace);
+        })
         .with_skills(skills.clone())
         .with_mcp(mcp)
         .with_background_tasks(background_tasks.clone())
@@ -421,6 +493,10 @@ pub(crate) async fn build(
         })
         .with_web_tools(web_tools)
         .with_always_allow_store(home.join("always-allow.json"))?;
+    if let Some(judge) = safety_judge {
+        tools = tools.with_safety_judge(judge);
+    }
+    let tools = tools;
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
     if !skills.list().is_empty() {
         system_prompt.push_str(

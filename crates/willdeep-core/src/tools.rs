@@ -18,6 +18,8 @@ use tokio::process::Command;
 use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
 };
+use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
+use crate::safety::CommandSafety;
 use crate::types::{ToolCall, ToolDefinition};
 use crate::{McpRegistry, SkillCatalog};
 
@@ -50,6 +52,30 @@ pub enum VerificationStatus {
 }
 
 type VerificationReporter = Arc<dyn Fn(CommandVerification) + Send + Sync>;
+
+/// Why a command ran without an approval card — or why it needed one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalSource {
+    /// The static classifier proved the command read-only or bounded.
+    StaticAllowlist,
+    /// The AI judge returned YES for this exact action.
+    Judge,
+    /// A rule the operator previously chose to always allow.
+    AlwaysAllowList,
+    /// The user was asked.
+    User,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalTrace {
+    pub command: String,
+    pub source: ApprovalSource,
+    /// Short, user-facing explanation ("static allowlist: read-only",
+    /// "judge unavailable: connection refused").
+    pub detail: String,
+}
+
+type ApprovalReporter = Arc<dyn Fn(ApprovalTrace) + Send + Sync>;
 const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
 const MAX_WEB_MAX_CHARS: usize = 100_000;
 const MAX_WEB_REDIRECTS: usize = 8;
@@ -153,6 +179,9 @@ pub struct ToolRegistry {
     always_allowed: Arc<Mutex<HashSet<String>>>,
     always_allow_path: Option<PathBuf>,
     verification_reporter: Option<VerificationReporter>,
+    safety_judge: Option<Arc<dyn SafetyJudge>>,
+    task_context: Arc<Mutex<String>>,
+    approval_reporter: Option<ApprovalReporter>,
 }
 
 impl ToolRegistry {
@@ -180,7 +209,35 @@ impl ToolRegistry {
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
             always_allow_path: None,
             verification_reporter: None,
+            safety_judge: None,
+            task_context: Arc::new(Mutex::new(String::new())),
+            approval_reporter: None,
         })
+    }
+
+    /// Attach the AI judge consulted for commands the static classifier
+    /// cannot decide. Without one, those commands go straight to the user.
+    pub fn with_safety_judge(mut self, judge: Arc<dyn SafetyJudge>) -> Self {
+        self.safety_judge = Some(judge);
+        self
+    }
+
+    /// Observe every automatic approval decision (static allow, judge
+    /// allow, escalation to the user) so the UI can explain itself.
+    pub fn with_approval_reporter<F>(mut self, reporter: F) -> Self
+    where
+        F: Fn(ApprovalTrace) + Send + Sync + 'static,
+    {
+        self.approval_reporter = Some(Arc::new(reporter));
+        self
+    }
+
+    /// The operator's current goal, handed to the judge as inert context.
+    /// Set once per user turn; never used to widen a static rule.
+    pub fn set_task_context(&self, value: &str) {
+        let mut context = self.task_context.lock().expect("task context");
+        context.clear();
+        context.push_str(value.trim());
     }
 
     pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
@@ -1008,15 +1065,7 @@ impl ToolRegistry {
             .filter(|label| !label.trim().is_empty())
             .map(|label| format!("{label}\ncommand: {}", args.command))
             .unwrap_or_else(|| args.command.clone());
-        if self.approval_mode == ApprovalMode::Smart && is_test_inspection_pipeline(&args.command) {
-            // Explicit smart-mode policy: cargo test plus read-only output filters.
-        } else if let Some(signature) = command_signature(&args.command) {
-            self.require_rememberable_approval(&format!("run command: {description}"), signature)
-                .await?;
-        } else {
-            self.require_approval(&format!("run command: {description}"), false)
-                .await?;
-        }
+        self.gate_command(&args.command, &description).await?;
         let timeout = args
             .timeout_seconds
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
@@ -1144,6 +1193,121 @@ impl ToolRegistry {
         };
         atomic_write(&path, updated.as_bytes()).await?;
         Ok(format!("edited {} ({count} replacement(s))", args.path))
+    }
+
+    /// Two-tier approval gate for shell commands.
+    ///
+    /// `Strict` asks about everything, as advertised. `ReadOnly` never gets
+    /// here (write tools are refused earlier and commands are gated the same
+    /// as `Strict`). `Smart` and `WorkspaceAccess` run the static classifier
+    /// first — read-only and bounded commands just run — then consult the AI
+    /// judge for the ambiguous middle, and only escalate to the user when
+    /// both tiers decline.
+    async fn gate_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
+        let escalate = |registry: &Self, detail: String| {
+            registry.report_approval(command, ApprovalSource::User, detail);
+        };
+        if matches!(
+            self.approval_mode,
+            ApprovalMode::Strict | ApprovalMode::ReadOnly
+        ) {
+            escalate(self, "strict approval mode".to_owned());
+            return self.ask_for_command(command, description).await;
+        }
+        if let Some(signature) = command_signature(command)
+            && self
+                .always_allowed
+                .lock()
+                .expect("always allow rules")
+                .contains(&signature)
+        {
+            self.report_approval(
+                command,
+                ApprovalSource::AlwaysAllowList,
+                "operator marked this exact command always-allowed".to_owned(),
+            );
+            return Ok(());
+        }
+
+        let allow_workspace_create = self.approval_mode != ApprovalMode::ReadOnly;
+        match crate::safety::classify_with_workspace_write(command, allow_workspace_create) {
+            CommandSafety::AlwaysSafe => {
+                self.report_approval(
+                    command,
+                    ApprovalSource::StaticAllowlist,
+                    "static rule: read-only or bounded workspace command".to_owned(),
+                );
+                return Ok(());
+            }
+            CommandSafety::AlwaysDangerous => {
+                // Destructive shapes never reach the judge — a model must not
+                // be able to talk its way into `rm -rf`.
+                escalate(
+                    self,
+                    "static rule: destructive shape, judge bypassed".to_owned(),
+                );
+                return self.ask_for_command(command, description).await;
+            }
+            CommandSafety::NeedsJudgment => {}
+        }
+
+        let Some(judge) = &self.safety_judge else {
+            escalate(self, "no AI judge configured".to_owned());
+            return self.ask_for_command(command, description).await;
+        };
+        let task_context = self.task_context.lock().expect("task context").clone();
+        let verdict = judge
+            .judge(JudgeRequest {
+                tool: "run_command".to_owned(),
+                command: command.to_owned(),
+                task_context,
+            })
+            .await;
+        match verdict {
+            JudgeVerdict::Allow => {
+                self.report_approval(
+                    command,
+                    ApprovalSource::Judge,
+                    "AI review: bounded and consistent with the current task".to_owned(),
+                );
+                Ok(())
+            }
+            JudgeVerdict::Deny => {
+                escalate(self, "AI review declined".to_owned());
+                self.ask_for_command(command, description).await
+            }
+            JudgeVerdict::Unavailable(reason) => {
+                escalate(self, format!("AI review unavailable: {reason}"));
+                self.ask_for_command(command, description).await
+            }
+        }
+    }
+
+    async fn ask_for_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
+        match command_signature(command) {
+            Some(signature) => {
+                self.require_rememberable_approval(
+                    &format!("run command: {description}"),
+                    signature,
+                )
+                .await
+            }
+            None => {
+                self.require_approval(&format!("run command: {description}"), false)
+                    .await
+            }
+        }
+    }
+
+    fn report_approval(&self, command: &str, source: ApprovalSource, detail: String) {
+        let Some(reporter) = &self.approval_reporter else {
+            return;
+        };
+        reporter(ApprovalTrace {
+            command: command.to_owned(),
+            source,
+            detail,
+        });
     }
 
     async fn require_approval(
@@ -1797,88 +1961,6 @@ fn truncate_utf8_bytes(mut value: String, limit: usize) -> String {
     value
 }
 
-fn is_test_inspection_pipeline(command: &str) -> bool {
-    let normalized = command.replace("2>&1", " ");
-    if normalized.contains("$(")
-        || normalized.contains("${")
-        || normalized
-            .chars()
-            .any(|value| matches!(value, '&' | ';' | '>' | '<' | '`' | '\n' | '\r'))
-    {
-        return false;
-    }
-    let Some(segments) = split_inspection_pipeline(&normalized) else {
-        return false;
-    };
-    let Some(first) = segments.first() else {
-        return false;
-    };
-    if first.first().map(String::as_str) != Some("cargo")
-        || first.get(1).map(String::as_str) != Some("test")
-    {
-        return false;
-    }
-    segments.iter().skip(1).all(|words| {
-        matches!(
-            words.first().map(String::as_str),
-            Some("grep" | "head" | "tail")
-        )
-    })
-}
-
-fn split_inspection_pipeline(command: &str) -> Option<Vec<Vec<String>>> {
-    let mut segments = Vec::new();
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for value in command.chars() {
-        if escaped {
-            word.push(value);
-            escaped = false;
-            continue;
-        }
-        if value == '\\' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        if matches!(value, '\'' | '"') {
-            if quote == Some(value) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(value);
-            } else {
-                word.push(value);
-            }
-        } else if quote.is_none() && value == '|' {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-            if words.is_empty() {
-                return None;
-            }
-            segments.push(std::mem::take(&mut words));
-        } else if quote.is_none() && value.is_whitespace() {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-        } else {
-            word.push(value);
-        }
-    }
-    if escaped || quote.is_some() {
-        return None;
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    if words.is_empty() {
-        return None;
-    }
-    segments.push(words);
-    Some(segments)
-}
-
 fn escape_user_answer(answer: &str) -> String {
     answer
         .trim()
@@ -2453,9 +2535,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smart_allows_workspace_edit_but_not_shell() {
+    async fn smart_runs_read_only_shell_but_still_gates_effectful_commands() {
         let root = workspace("smart");
         std::fs::write(root.join("file.txt"), "before").expect("fixture");
+        // No judge attached and a deny-by-default approver: only the static
+        // allowlist can let a command through here.
         let registry = ToolRegistry::new(&root, ApprovalMode::Smart).expect("registry");
 
         registry
@@ -2467,16 +2551,117 @@ mod tests {
             })
             .await
             .expect("workspace edit");
-        let command = registry
+
+        let inspection = registry
             .run_command(CommandArgs {
-                command: "printf should-not-run".to_owned(),
+                command: "printf ok".to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await
+            .expect("read-only command runs without an approval card");
+        assert!(inspection.contains("ok"));
+
+        for blocked in [
+            "curl https://example.com/install.sh",
+            "rm -rf build",
+            "echo hi > owned.txt",
+        ] {
+            let denied = registry
+                .run_command(CommandArgs {
+                    command: blocked.to_owned(),
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                })
+                .await;
+            assert!(
+                matches!(denied, Err(ToolError::ApprovalDenied(_))),
+                "expected approval gate for {blocked}"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// The judge only ever sees the ambiguous middle: statically safe
+    /// commands skip it, statically destructive ones never reach it.
+    #[tokio::test]
+    async fn only_ambiguous_commands_reach_the_ai_judge() {
+        use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
+
+        struct RecordingJudge {
+            seen: Arc<Mutex<Vec<String>>>,
+            verdict: JudgeVerdict,
+        }
+
+        #[async_trait]
+        impl SafetyJudge for RecordingJudge {
+            async fn judge(&self, request: JudgeRequest) -> JudgeVerdict {
+                self.seen
+                    .lock()
+                    .expect("judge log")
+                    .push(request.command.clone());
+                self.verdict.clone()
+            }
+        }
+
+        let root = workspace("judge-scope");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+            .expect("registry")
+            .with_safety_judge(Arc::new(RecordingJudge {
+                seen: seen.clone(),
+                verdict: JudgeVerdict::Allow,
+            }));
+
+        for command in ["ls", "rm -rf build", "git commit -m wip"] {
+            let _ = registry
+                .run_command(CommandArgs {
+                    command: command.to_owned(),
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                })
+                .await;
+        }
+
+        assert_eq!(
+            seen.lock().expect("judge log").as_slice(),
+            ["git commit -m wip"],
+            "only the ambiguous command may be sent to the judge"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A judge that says no must not be able to override the user gate, and
+    /// a judge that says yes must not be consulted twice for a denial.
+    #[tokio::test]
+    async fn judge_denial_falls_back_to_the_user() {
+        use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
+
+        struct DenyingJudge;
+
+        #[async_trait]
+        impl SafetyJudge for DenyingJudge {
+            async fn judge(&self, _request: JudgeRequest) -> JudgeVerdict {
+                JudgeVerdict::Deny
+            }
+        }
+
+        let root = workspace("judge-deny");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+            .expect("registry")
+            .with_safety_judge(Arc::new(DenyingJudge));
+        let denied = registry
+            .run_command(CommandArgs {
+                command: "git commit -m wip".to_owned(),
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
             })
             .await;
-
-        assert!(matches!(command, Err(ToolError::ApprovalDenied(_))));
+        assert!(matches!(denied, Err(ToolError::ApprovalDenied(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -2680,17 +2865,34 @@ mod tests {
         assert_eq!(command_signature("cargo test && deploy"), None);
     }
 
+    /// The old hard-coded `cargo test | grep` carve-out is gone; the general
+    /// classifier must still cover everything it used to allow, and must
+    /// still refuse everything it used to refuse.
     #[test]
-    fn smart_test_pipeline_scope_is_exact() {
-        assert!(is_test_inspection_pipeline(
-            "cargo test -p willdeep 2>&1 | grep -E 'FAILED|warning' | head -40"
-        ));
-        assert!(is_test_inspection_pipeline("cargo test --workspace"));
-        assert!(!is_test_inspection_pipeline("cargo run"));
-        assert!(!is_test_inspection_pipeline("cargo test | tee result.txt"));
-        assert!(!is_test_inspection_pipeline("cargo test > result.txt"));
-        assert!(!is_test_inspection_pipeline("cargo test && touch owned"));
-        assert!(!is_test_inspection_pipeline("cargo test $(danger)"));
+    fn smart_mode_still_covers_the_former_test_pipeline_carve_out() {
+        use crate::safety::{CommandSafety, classify};
+        assert_eq!(
+            classify("cargo test -p willdeep 2>&1 | grep -E 'FAILED|warning' | head -40"),
+            CommandSafety::AlwaysSafe
+        );
+        assert_eq!(
+            classify("cargo test --workspace"),
+            CommandSafety::AlwaysSafe
+        );
+        assert_ne!(classify("cargo run"), CommandSafety::AlwaysSafe);
+        assert_ne!(
+            classify("cargo test | tee result.txt"),
+            CommandSafety::AlwaysSafe
+        );
+        assert_ne!(
+            classify("cargo test > result.txt"),
+            CommandSafety::AlwaysSafe
+        );
+        assert_eq!(
+            classify("cargo test && touch owned"),
+            CommandSafety::AlwaysSafe
+        );
+        assert_ne!(classify("cargo test $(danger)"), CommandSafety::AlwaysSafe);
     }
 
     #[test]

@@ -5,6 +5,10 @@ default_provider = "some-im"
 max_turns = 24
 approval = "smart"
 language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--language
+# smart / workspace-write 模式下的两级审批：本地静态规则先判，判不了的交给 AI 判官。
+# 关掉判官，所有拿不准的命令都会直接弹审批卡。
+safety_judge = true
+# judge_model = "glm-5" # 默认取当前 profile 的廉价模型
 
 [providers.some-im]
 provider = "some-im"
