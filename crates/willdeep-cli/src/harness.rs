@@ -499,6 +499,7 @@ pub(crate) async fn build(
         background_tasks.clone(),
         subagents.clone(),
     )?;
+    let goal_continuation = Arc::new(willdeep_core::GoalContinuation::new());
     let mut agent = Agent::new(
         provider,
         tools,
@@ -510,7 +511,9 @@ pub(crate) async fn build(
         },
     )
     .with_event_sink(sink)
-    .with_subagents(subagents);
+    .with_subagents(subagents)
+    .with_goal_continuation(goal_continuation.clone())
+    .with_background_tasks(background_tasks.clone());
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }

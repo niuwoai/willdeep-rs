@@ -9,7 +9,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::{
-    AgentEvent, ApprovalDecision, Approver, EventSink, SubagentLifecycleStatus, UserQuestion,
+    AgentEvent, ApprovalDecision, Approver, ContinuationRung, EventSink, SoftStopReason,
+    SubagentLifecycleStatus, UserQuestion,
 };
 
 mod config;
@@ -1339,6 +1340,12 @@ impl EventSink for TerminalSink {
                     eprintln!("[subagent] id={id} usage={total}");
                 }
             }
+            AgentEvent::GoalContinuationInjected { rung } => {
+                eprintln!("[goal] not met · continuing · {rung:?}")
+            }
+            AgentEvent::GoalBudgetLimited { reason } => {
+                eprintln!("[goal] budget exhausted · wrapping up · {reason:?}")
+            }
             AgentEvent::AssistantText(_) | AgentEvent::TurnStarted { .. } => {}
         }
     }
@@ -1437,6 +1444,21 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
                 SubagentLifecycleStatus::Blocked => "blocked",
                 SubagentLifecycleStatus::Cancelled => "cancelled",
                 SubagentLifecycleStatus::Failed => "failed",
+            }
+        }),
+        AgentEvent::GoalContinuationInjected { rung } => serde_json::json!({
+            "type": "goal_continuation_injected",
+            "rung": match rung {
+                ContinuationRung::Guidance => "guidance",
+                ContinuationRung::Reconcile => "reconcile",
+                ContinuationRung::Backoff => "backoff",
+            }
+        }),
+        AgentEvent::GoalBudgetLimited { reason } => serde_json::json!({
+            "type": "goal_budget_limited",
+            "reason": match reason {
+                SoftStopReason::WallClock => "wall_clock",
+                SoftStopReason::Continuations => "continuations",
             }
         }),
         AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({

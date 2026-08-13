@@ -9,6 +9,15 @@ pub(super) fn dispatch_prompt(
     tx: &mpsc::UnboundedSender<UiMessage>,
     prompt: String,
 ) -> Result<()> {
+    // `/goal` 是长程续推的开关：目标在场时，宿主会拒绝模型的隐式收口（long-horizon.v1 RA1）。
+    if let Some(continuation) = agent.goal_continuation() {
+        match app.goal.as_deref() {
+            Some(goal) => {
+                continuation.activate(goal, willdeep_core::GoalBudget::default());
+            }
+            None => continuation.clear(),
+        }
+    }
     app.running = true;
     app.turn_started = Some(Instant::now());
     app.tools.reset();
