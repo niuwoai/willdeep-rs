@@ -3,6 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use crate::background::BackgroundTaskRegistry;
+use crate::goal::{
+    ContinuationDecision, ContinuationRung, GoalContinuation, RoundObservation, SoftStopReason,
+};
 use crate::provider::{Provider, ProviderError};
 use crate::subagent::{SpawnAgentArgs, SubagentCatalog};
 use crate::tools::{ToolError, ToolRegistry};
@@ -107,6 +111,14 @@ pub enum AgentEvent {
         id: uuid::Uuid,
         usage: Usage,
     },
+    /// 目标未达，宿主拒绝了一次隐式收口并注入续推引导。
+    GoalContinuationInjected {
+        rung: ContinuationRung,
+    },
+    /// 预算耗尽，转入有序收尾。
+    GoalBudgetLimited {
+        reason: SoftStopReason,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,11 +141,24 @@ impl EventSink for NoopSink {
     async fn emit(&self, _event: AgentEvent) {}
 }
 
+/// 一次 run 为什么停下来。长程模式下「停下来」有多种含义，调用方需要能区分。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentStopReason {
+    /// 模型给出终稿且没有激活的目标——原有语义。
+    #[default]
+    Finished,
+    /// 目标激活期间，模型显式声明目标达成。
+    GoalComplete,
+    /// 目标未达但预算耗尽，已按收尾引导产出交接快照。
+    BudgetLimited,
+}
+
 #[derive(Debug)]
 pub struct AgentOutcome {
     pub final_text: String,
     pub turns: usize,
     pub messages: Vec<Message>,
+    pub stop_reason: AgentStopReason,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,6 +185,8 @@ pub struct Agent {
     image_fallback: Option<(Arc<dyn Provider>, String)>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
+    goal_continuation: Option<Arc<GoalContinuation>>,
+    background_tasks: Option<Arc<BackgroundTaskRegistry>>,
 }
 
 impl Agent {
@@ -172,6 +199,8 @@ impl Agent {
             image_fallback: None,
             subagents: None,
             instruction_inbox: None,
+            goal_continuation: None,
+            background_tasks: None,
         }
     }
 
@@ -197,6 +226,37 @@ impl Agent {
     pub fn with_instruction_inbox(mut self, inbox: Arc<AgentInstructionInbox>) -> Self {
         self.instruction_inbox = Some(inbox);
         self
+    }
+
+    /// 挂上跨 turn 共享的 Goal 续推句柄（long-horizon.v1 RA1）。
+    ///
+    /// 不挂等于关闭长程续推，`run_*` 的行为与本改动前完全一致。
+    pub fn with_goal_continuation(mut self, continuation: Arc<GoalContinuation>) -> Self {
+        self.goal_continuation = Some(continuation);
+        self
+    }
+
+    /// 前端据此在 `/goal` 变更时同步激活状态，无需额外穿参。
+    pub fn goal_continuation(&self) -> Option<&Arc<GoalContinuation>> {
+        self.goal_continuation.as_ref()
+    }
+
+    /// 让续推判定能看见后台任务：仍有后台任务在跑时，「本轮没调工具」不算卡死。
+    pub fn with_background_tasks(mut self, tasks: Arc<BackgroundTaskRegistry>) -> Self {
+        self.background_tasks = Some(tasks);
+        self
+    }
+
+    fn background_active(&self) -> bool {
+        self.background_tasks
+            .as_ref()
+            .map(|tasks| {
+                tasks
+                    .snapshots()
+                    .iter()
+                    .any(|task| task.status == crate::BackgroundTaskStatus::Running)
+            })
+            .unwrap_or(false)
     }
 
     pub async fn run(&self, prompt: impl Into<String>) -> Result<AgentOutcome, AgentError> {
@@ -241,6 +301,8 @@ impl Agent {
         let definitions = self.tools.definitions();
         let mut compressed: Option<(usize, String)> = None;
         let mut used_tokens = 0_u64;
+        // 自上次续推判定以来成功发起的工具调用数——续推判定的「进展证据」。
+        let mut tools_since_check = 0_usize;
         for turn in 1..=self.config.max_turns {
             self.append_pending_instructions(&mut messages);
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
@@ -280,12 +342,53 @@ impl Agent {
                 if self.append_pending_instructions(&mut messages) {
                     continue;
                 }
+                // 长程续推：目标未达且预算未尽时，这里不是终点。
+                if let Some(continuation) = self.goal_continuation.clone() {
+                    let observation = RoundObservation {
+                        tools_executed: tools_since_check,
+                        background_active: self.background_active(),
+                    };
+                    let was_wrapping_up = continuation.wrap_up_pending();
+                    match continuation.evaluate(&content, observation) {
+                        Some(ContinuationDecision::Continue { steering, rung }) => {
+                            self.sink
+                                .emit(AgentEvent::GoalContinuationInjected { rung })
+                                .await;
+                            messages.push(Message::user(steering));
+                            tools_since_check = 0;
+                            continue;
+                        }
+                        Some(ContinuationDecision::SoftStop { steering, reason }) => {
+                            self.sink
+                                .emit(AgentEvent::GoalBudgetLimited { reason })
+                                .await;
+                            messages.push(Message::user(steering));
+                            tools_since_check = 0;
+                            continue;
+                        }
+                        Some(ContinuationDecision::Complete) => {
+                            return Ok(AgentOutcome {
+                                final_text: content,
+                                turns: turn,
+                                messages,
+                                stop_reason: if was_wrapping_up {
+                                    AgentStopReason::BudgetLimited
+                                } else {
+                                    AgentStopReason::GoalComplete
+                                },
+                            });
+                        }
+                        None => {}
+                    }
+                }
                 return Ok(AgentOutcome {
                     final_text: content,
                     turns: turn,
                     messages,
+                    stop_reason: AgentStopReason::Finished,
                 });
             }
+            tools_since_check = tools_since_check.saturating_add(completion.tool_calls.len());
             messages.push(Message::assistant(content, completion.tool_calls.clone()));
             for call in completion.tool_calls {
                 self.sink
@@ -627,6 +730,107 @@ mod tests {
         assert_eq!(outcome.final_text, "revised answer");
         assert_eq!(outcome.turns, 2);
         assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn goal_agent(provider: Arc<RecordingProvider>, budget: crate::goal::GoalBudget) -> Agent {
+        let continuation = Arc::new(GoalContinuation::new());
+        continuation.activate("ship rc7", budget);
+        Agent::new(
+            provider,
+            registry("goal"),
+            AgentConfig {
+                max_turns: 12,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_goal_continuation(continuation)
+    }
+
+    #[tokio::test]
+    async fn without_a_goal_a_plain_reply_still_finishes_immediately() {
+        let provider = RecordingProvider::new(&["done", "should never be requested"]);
+        let agent = Agent::new(
+            provider.clone(),
+            registry("no-goal"),
+            AgentConfig {
+                max_turns: 4,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        );
+
+        let outcome = agent.run("do the thing").await.expect("run");
+
+        assert_eq!(outcome.final_text, "done");
+        assert_eq!(outcome.stop_reason, AgentStopReason::Finished);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn active_goal_refuses_implicit_stop_until_the_marker_appears() {
+        let provider = RecordingProvider::new(&[
+            "I finished the first part.",
+            "Here is a summary of what I did.",
+            "<goal-status>complete</goal-status> rc7 shipped and verified.",
+        ]);
+        let agent = goal_agent(provider.clone(), crate::goal::GoalBudget::default());
+
+        let outcome = agent.run("ship it").await.expect("run");
+
+        assert_eq!(outcome.stop_reason, AgentStopReason::GoalComplete);
+        assert!(outcome.final_text.contains("rc7 shipped"));
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests.len(),
+            3,
+            "harness should refuse the first two stops"
+        );
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains("[goal-continuation]")),
+            "the second request must carry the injected steering"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_wraps_up_instead_of_looping_forever() {
+        let provider = RecordingProvider::new(&[
+            "still working",
+            "another round without finishing",
+            "STATE: branch feat/x · REMAINING: finish tests · BLOCKERS: none",
+            "should never be requested",
+        ]);
+        let agent = goal_agent(
+            provider.clone(),
+            crate::goal::GoalBudget {
+                wall_clock: None,
+                max_continuations: 1,
+            },
+        );
+
+        let outcome = agent.run("ship it").await.expect("run");
+
+        // 一次续推 → 预算耗尽转收尾 → 收尾快照单独占一轮，然后才停。
+        assert_eq!(outcome.stop_reason, AgentStopReason::BudgetLimited);
+        assert!(outcome.final_text.contains("REMAINING"));
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3, "budget must not silently loop forever");
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains("[goal-continuation]")),
+            "the first refusal is a normal continuation"
+        );
+        assert!(
+            requests[2]
+                .iter()
+                .any(|message| message.content.contains("[goal-budget-limited]")),
+            "the wrap-up turn must carry the handover steering"
+        );
     }
 
     #[tokio::test]

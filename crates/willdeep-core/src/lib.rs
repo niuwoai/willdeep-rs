@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod attention;
 pub mod background;
+pub mod goal;
 pub mod mcp;
 pub mod prompt;
 pub mod provider;
@@ -12,8 +13,8 @@ pub mod tools;
 pub mod types;
 
 pub use agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentInstructionInbox, AgentOutcome, EventSink,
-    SubagentLifecycleStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInstructionInbox, AgentOutcome,
+    AgentStopReason, EventSink, SubagentLifecycleStatus,
 };
 pub use attention::{
     AttentionItem, AttentionSection, AttentionSource, RuntimeScopeKind, RuntimeStatus,
@@ -22,6 +23,10 @@ pub use attention::{
 pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,
     BackgroundTaskStatus,
+};
+pub use goal::{
+    ContinuationDecision, ContinuationRung, GOAL_COMPLETE_MARKER, GoalBudget, GoalContinuation,
+    RoundObservation, SoftStopReason,
 };
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
