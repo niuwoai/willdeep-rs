@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.23.0-rc2] - 2026-08-14
+
+### Fixed
+- Diff 批量审批不再冻住界面。此前按 `Y` 后 `handle_diff_attention_action` 在按键处理里逐文件 `await`，每个文件一次独立 HTTP 且每次都重新 `ensure_running` 探活——实测 15 个文件耗时 **27 秒**，全程 `draw()` 无机会执行，屏幕彻底静止，看着就像按键被吞了（`diff-reviews.json` 里那批记录时间戳从 +0s 排到 +27s，是完整证据；审批其实每次都生效了）。两处改：新增 `remote_review_many` 一次探活、复用同一个客户端跑完所有路径；批量提交整体挪进后台任务，弹窗立刻关闭并先给「正在提交 Diff 审批 · N」，完成后再报结果。鼠标点击 `[Y 通过]` / `[N 拒绝]` 走的是同一函数，同一修复覆盖。
+
+- Inbox 详情弹窗支持 `M` 忽略条目，标题也写明这个键。此前 `M`（标记已读）只在焦点落在侧栏且选中「需要关注」分组时才生效，而弹窗里只认 `Esc`——于是一条几天前被中断的 Runtime 任务顶着「需要你处理」常驻，用户打开详情却发现无事可做、也无路可走。忽略按 Session 持久保存；运行中的条目拒绝忽略并给出说明，那是用户对它的唯一抓手。
+
+### Changed
+- 失败的后台任务保留 24 小时后也从 Attention Inbox 回收。此前只有「顺利完成」的会在 60 秒后回收，失败/超时/被杀的永久留存——一天前失败的命令早已不是待办，只是把真正需要关注的条目挤出视野。运行中的任务永不回收；要复盘去任务详情与历史里找。
+- 右侧状态栏改为**默认隐藏**，新增 `/sidebar [on|off]` 显示/隐藏（`Ctrl+B` 等效）。隐藏时焦点自动回到输入框，不会卡在看不见的面板上。`/help`、F1 帮助面板与命令补全同步。
+
+### Tests
+- 新增 `sidebar_starts_hidden_and_the_command_toggles_it`：默认隐藏、切换、`on`/`off` 显式、隐藏后焦点回落、坏参数报用法而非静默切换。
+- 新增 `inbox_items_can_be_dismissed_but_running_ones_cannot`：已结束条目可忽略且详情弹窗随之关闭；运行中的条目拒绝忽略。
+- 新增 `background_tasks_are_recycled_by_status_and_age`：运行中永不过期；完成 60 秒后消失；失败/超时/被杀六小时仍在、一天后回收。
+
+### Docs
+- `docs/TUI_GUIDE.md`：布局表标注状态栏默认隐藏，新增 Inbox 回收规则说明，命令表补 `/sidebar`，快捷键表标注 `Ctrl+B` 等价关系。
+
+## [0.23.0-rc1] - 2026-08-13
+
+### Added
+- TUI 新增 `/daemon [status|start|stop|upgrade]`，在界面内管理真正执行命令的 Runtime，不必另开终端。`upgrade` 会排空在途工作再交接，可能耗时数分钟，因此在后台任务里跑并把进度逐条送回对话，**不阻塞界面**。
+- `/webapp` 补上 `stop`（并给 `start` 一个显式别名）。此前只能启动和看状态，停不掉——「启停」缺了一半。`stop` 只对本 TUI 启动并记录在案的 pid 发 `SIGTERM`，且先确认其记录地址仍在应答；状态文件过期时只清理文件，不会误杀继承同一 pid 的无关进程。
+- **Runtime 版本不一致告警**。TUI 只是前端，命令由 Runtime Daemon 执行；一个几天前启动的 Daemon 会继续按它自己那版的审批策略跑，而 `willdeep --version` 显示的是客户端版本，说明不了实际执行方——本次开发中就因此白测了一轮（客户端 0.22.0-rc5，Daemon 仍是 0.21.0-rc62）。现在 `RuntimeSnapshot` 带上 `runtime_version`（`probe` 本就返回 `health.version`，此前被丢弃），侧栏「运行状态」在不一致时置顶黄色警告并常驻，首次发现时在对话里写一行说明。重复快照不刷屏；换到同版本后消失；换到另一个旧版本重新告警。
+
+### Changed
+- `daemon.rs` 的 `status` / `stop` / `upgrade` 改为返回消息字符串，`start` / `upgrade` 接受进度回调；CLI 传打印回调，TUI 传送信回调。这样 TUI 复用与 CLI **完全相同**的排空与交接逻辑，不必复制一份会腐化的实现，也避免 `println!` 冲掉 TUI 画面。
+
+### Tests
+- `daemon_commands` 2 项：五种 `/daemon` 写法解析正确；未知参数报用法，且 `/daemonize the thing`、`restart the daemon` 这类不被误吞。
+- `tui/test_suite.rs` 3 项：`/daemon`、`/webapp` 各形态都走主循环而非兜底（不误报未知命令）；两者都在补全目录里；Runtime 版本不一致只告警一次、状态常驻、同版本后清除、换旧版本再次告警。
+
+### Docs
+- `docs/TUI_GUIDE.md` 命令表补 `/daemon`、细化 `/webapp`，新增「Runtime 版本不一致」一节。
+- `docs/WEB_GUIDE.md` 补 `/webapp stop|start` 与其误杀防护说明。
+
 ## [0.22.0-rc5] - 2026-08-13
 
 ### Added

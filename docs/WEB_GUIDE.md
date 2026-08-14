@@ -39,11 +39,15 @@ TUI 中可以用 `/webapp` 拉起一个 Web 子进程：
 
 ```text
 /webapp               # 默认 127.0.0.1:9847
+/webapp start         # 同上
 /webapp 127.0.0.1:9900
 /webapp status
+/webapp stop          # 停止本 TUI 启动的 Web App
 ```
 
 `/webapp` **只接受回环地址**，比 `--listen` 更严格。日志写入 `~/.willdeep/webapp.log`。
+
+`/webapp stop` 只对**本 TUI 启动并记录在案**的进程发 `SIGTERM`，且先确认它记录的地址仍在应答——状态文件过期时只清理文件，不会误杀继承了同一 pid 的无关进程。
 
 ## 界面使用
 

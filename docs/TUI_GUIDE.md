@@ -15,11 +15,15 @@ willdeep --profile some-im --workspace .
 | Prompt（输入区） | 多行输入、`/` 命令候选、`$` 技能候选、附件行 |
 | 聊天区 | 用户消息与 AI 最终回复 |
 | 活动区 | 最近三条可验证进度：当前轮次、工具调用/完成、上下文压缩、后台结果 |
-| 状态栏（右栏） | 项目/分支/变更、Attention Inbox、Agent 状态、Runtime 任务、版本号 |
+| 状态栏（右栏，**默认隐藏**） | 项目/分支/变更、Attention Inbox、Agent 状态、Runtime 任务、版本号 |
 
 聊天区只显示用户消息和 AI 最终回复。轮次、Task/Agent ID、工具活动和提交状态只进入活动状态层，不污染对话记录。活动区不展示也不伪造模型的私有思维链。
 
-宽终端会在右侧额外显示 Agent、Mobile Relay、手机队列和工具完成情况；`Ctrl+B` 可显示或隐藏状态栏，窄终端下改为打开覆盖层。
+状态栏**默认隐藏**——它是查阅面板而非常驻面板，聊天区才是主体。`/sidebar` 或 `Ctrl+B` 随时调出；宽终端会在右侧额外显示 Agent、Mobile Relay、手机队列和工具完成情况，窄终端下改为打开覆盖层。隐藏时焦点自动回到输入框。
+
+Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 60 秒，失败/超时/被杀的保留 24 小时——那些需要人处理，但一天前失败的命令只是噪音，会把真正待办的挤出视野。运行中的任务永不回收。要复盘去任务详情与历史里找。
+
+不想等自动回收，可以手动忽略：在 Inbox 上按 `M`，或打开详情弹窗后按 `M`。忽略按 Session 持久保存，重启后不再出现。运行中的条目不能忽略——那是你对它的唯一抓手。
 
 状态栏的「Runtime 智能体」是活动面板，不是归档：只列出仍在运行的 Agent 和结束不超过 5 分钟的 Agent，从未执行过轮次的已结束根 Agent 不再占位，被折叠的历史以 `(+N 已结束)` 附注；`J`/`K`/`R` 等 Agent 操作只作用于这份可见列表。时长按状态区分——运行中标「已运行」，已结束标「耗时」。规则与 Web 侧栏一致。
 
@@ -34,7 +38,7 @@ willdeep --profile some-im --workspace .
 | `F1`（空 Prompt 时也可按 `?`） | 打开全局快捷键帮助；`F1`、`?` 或 `Esc` 关闭 |
 | `Ctrl+P` | 全局命令面板：模糊搜索命令、Skills、会话、Agent/任务和工作区文件 |
 | `Ctrl+W` | 在 Prompt、聊天区、活动区与状态栏之间循环焦点 |
-| `Ctrl+B` | 显示或隐藏右侧状态栏 |
+| `Ctrl+B` | 显示或隐藏右侧状态栏（默认隐藏，等价于 `/sidebar`） |
 | `Ctrl+S` | 进入终端原生文本选择模式（详见下文「鼠标」） |
 | `Ctrl+C` | 退出并恢复终端 |
 
@@ -141,7 +145,8 @@ tmux set -g mouse on
 | `/goal <目标>` | 为后续消息持续注入目标约束；`/goal off` 关闭。目标按 Core Session 持久保存，重启及切换会话/工作区后恢复 |
 | `/compress` | 立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存会话。历史不足八条时不消耗模型请求 |
 | `/mobile` | 管理手机中继，详见 [手机中继](MOBILE.md) |
-| `/webapp` | 启动或查看本地 Web App |
+| `/webapp` | `start`（缺省）/ `stop` / `status` / `127.0.0.1:PORT`，启停或查看本地 Web App |
+| `/daemon` | `status`（缺省）/ `start` / `stop` / `upgrade`，管理真正执行命令的 Runtime。`upgrade` 会排空在途工作再交接，耗时较长但不阻塞界面 |
 | `/runtime <任务>` | 提交可分离的 Runtime 任务 |
 | `/local <任务>` | 仅本轮使用进程内 Harness |
 | `/session` | 管理、搜索、切换、Fork 或导出会话 |
@@ -149,7 +154,21 @@ tmux set -g mouse on
 | `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|deep <task>` |
 | `/diff` | 打开 Diff Review Center |
 | `/skills` | 查看当前目录发现的技能 |
+| `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |
 | `/clear` | 清空聊天显示 |
+
+### Runtime 版本不一致
+
+TUI 只是前端，命令实际由 Runtime Daemon 执行。一个几天前启动的 Daemon 会继续按**它自己那版**的审批策略跑，此时 `willdeep --version` 显示的是客户端版本，说明不了实际执行方。
+
+侧栏「运行状态」会在版本不一致时置顶一条黄色警告，对话里也会写一行说明：
+
+```text
+⚠ 运行时 0.21.0-rc62 ≠ 客户端 0.22.0-rc5
+工具按旧版策略执行 · 请运行 willdeep daemon upgrade
+```
+
+在 TUI 里直接 `/daemon upgrade` 即可，无需另开终端。若有任务正等待人工审批，Runtime 不会退出——先把待审批处理掉，交接才能完成。
 
 Prompt 中的 `$skill-name` 会显式读取并附加对应 `SKILL.md`。详见 [Skills 与 MCP](SKILLS_AND_MCP.md)。
 
