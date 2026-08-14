@@ -38,6 +38,10 @@ pub(crate) struct RuntimeSnapshot {
     pub tasks: Vec<RemoteTask>,
     pub tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     pub artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
+    /// Version reported by the Runtime that actually executes tools. The TUI
+    /// is only a front end: a long-lived daemon can be several releases
+    /// behind this binary, and every policy change lives in the daemon.
+    pub runtime_version: Option<String>,
 }
 
 #[derive(Clone)]
@@ -556,9 +560,22 @@ fn event_task_id(message: &str) -> Option<uuid::Uuid> {
 
 pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<RuntimeSnapshot> {
     let paths = DaemonPaths::new(home);
-    let state = match load_state(&paths.state) {
-        Ok(state) if probe(&state).await.is_ok() => state,
-        _ => {
+    let (state, runtime_version) = match load_state(&paths.state) {
+        Ok(state) => match probe(&state).await {
+            Ok(health) => (state, Some(health.version)),
+            Err(_) => {
+                return Ok(RuntimeSnapshot {
+                    attention: Vec::new(),
+                    gates: Vec::new(),
+                    agents: Vec::new(),
+                    tasks: Vec::new(),
+                    tools: Vec::new(),
+                    artifacts: Vec::new(),
+                    runtime_version: None,
+                });
+            }
+        },
+        Err(_) => {
             return Ok(RuntimeSnapshot {
                 attention: Vec::new(),
                 gates: Vec::new(),
@@ -566,6 +583,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
                 tasks: Vec::new(),
                 tools: Vec::new(),
                 artifacts: Vec::new(),
+                runtime_version: None,
             });
         }
     };
@@ -691,6 +709,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         tasks: remote_tasks,
         tools,
         artifacts,
+        runtime_version,
     })
 }
 

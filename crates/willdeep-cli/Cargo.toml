@@ -24,6 +24,7 @@ crc32fast.workspace = true
 futures-util.workspace = true
 image.workspace = true
 http.workspace = true
+libc.workspace = true
 qrcode.workspace = true
 reqwest.workspace = true
 regex.workspace = true

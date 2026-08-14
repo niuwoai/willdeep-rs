@@ -705,11 +705,13 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
     }
     let home = crate::config::willdeep_home()?;
     match action {
-        DaemonAction::Start => start(&home, true).await,
-        DaemonAction::Status => status(&home).await,
+        DaemonAction::Start => start(&home, true, &print_progress).await,
+        DaemonAction::Status => status(&home).await.map(print_progress),
         DaemonAction::Capabilities => capabilities_cli(&home).await,
-        DaemonAction::Stop => stop(&home).await,
-        DaemonAction::Upgrade { timeout, force } => upgrade(&home, timeout, force).await,
+        DaemonAction::Stop => stop(&home).await.map(print_progress),
+        DaemonAction::Upgrade { timeout, force } => upgrade(&home, timeout, force, &print_progress)
+            .await
+            .map(print_progress),
         DaemonAction::Logs { lines, follow } => logs(&home, lines, follow).await,
         DaemonAction::Submit {
             workspace,
@@ -1133,7 +1135,7 @@ async fn ensure_running(home: &Path) -> Result<DaemonState> {
     {
         return Ok(state);
     }
-    start(home, false).await?;
+    start(home, false, &print_progress).await?;
     load_state(&path)
 }
 
@@ -1314,17 +1316,50 @@ impl willdeep_core::Approver for RuntimeApprover {
     }
 }
 
-async fn start(home: &Path, announce: bool) -> Result<()> {
+/// Progress sink for daemon lifecycle work. The CLI prints; the TUI routes
+/// lines into the transcript, where a stray `println!` would corrupt the
+/// screen.
+pub(crate) type DaemonProgress<'a> = &'a (dyn Fn(String) + Send + Sync);
+
+fn print_progress(line: String) {
+    println!("{line}");
+}
+
+/// TUI-facing wrappers. They perform exactly the same work as the CLI
+/// subcommands — same drain, same handoff — and return the message instead
+/// of writing to stdout.
+pub(crate) async fn runtime_status_message(home: &Path) -> Result<String> {
+    status(home).await
+}
+
+pub(crate) async fn runtime_start(home: &Path, report: DaemonProgress<'_>) -> Result<String> {
+    start(home, true, report).await?;
+    status(home).await
+}
+
+pub(crate) async fn runtime_stop(home: &Path) -> Result<String> {
+    stop(home).await
+}
+
+pub(crate) async fn runtime_upgrade(
+    home: &Path,
+    timeout_seconds: u64,
+    report: DaemonProgress<'_>,
+) -> Result<String> {
+    upgrade(home, timeout_seconds, false, report).await
+}
+
+async fn start(home: &Path, announce: bool, report: DaemonProgress<'_>) -> Result<()> {
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.directory)?;
     if let Ok(state) = load_state(&paths.state)
         && probe(&state).await.is_ok()
     {
         if announce {
-            println!(
+            report(format!(
                 "WillDeep Runtime Daemon is already running (pid {}).",
                 state.pid
-            );
+            ));
         }
         return Ok(());
     }
@@ -1338,10 +1373,10 @@ async fn start(home: &Path, announce: bool) -> Result<()> {
                     && probe(&state).await.is_ok()
                 {
                     if announce {
-                        println!(
+                        report(format!(
                             "WillDeep Runtime Daemon is already running (pid {}).",
                             state.pid
-                        );
+                        ));
                     }
                     return Ok(());
                 }
@@ -1379,10 +1414,10 @@ async fn start(home: &Path, announce: bool) -> Result<()> {
             && probe(&state).await.is_ok()
         {
             if announce {
-                println!(
+                report(format!(
                     "WillDeep Runtime Daemon started (pid {}, {}).",
                     state.pid, state.address
-                );
+                ));
             }
             lock_cleanup.disarm();
             return Ok(());
@@ -1395,13 +1430,12 @@ async fn start(home: &Path, announce: bool) -> Result<()> {
     )
 }
 
-async fn status(home: &Path) -> Result<()> {
+async fn status(home: &Path) -> Result<String> {
     let paths = DaemonPaths::new(home);
     let state = match load_state(&paths.state) {
         Ok(state) => state,
         Err(_) => {
-            println!("WillDeep Runtime Daemon is stopped.");
-            return Ok(());
+            return Ok("WillDeep Runtime Daemon is stopped.".to_owned());
         }
     };
     match probe(&state).await {
@@ -1411,11 +1445,10 @@ async fn status(home: &Path) -> Result<()> {
             } else {
                 "running"
             };
-            println!(
+            Ok(format!(
                 "{}\tpid={}\taddress={}\tversion={}\tuptime={}s",
                 display_status, state.pid, state.address, health.version, health.uptime_seconds
-            );
-            Ok(())
+            ))
         }
         Err(error) => bail!("Runtime Daemon state is stale (pid {}): {error}", state.pid),
     }
@@ -1451,13 +1484,12 @@ fn runtime_client(state: &DaemonState) -> Result<willdeep_runtime_client::Runtim
     )?)
 }
 
-async fn stop(home: &Path) -> Result<()> {
+async fn stop(home: &Path) -> Result<String> {
     let paths = DaemonPaths::new(home);
     let state = match load_state(&paths.state) {
         Ok(state) => state,
         Err(_) => {
-            println!("WillDeep Runtime Daemon is already stopped.");
-            return Ok(());
+            return Ok("WillDeep Runtime Daemon is already stopped.".to_owned());
         }
     };
     match internal_transport::InternalRuntimeClient::from_state(&state)?
@@ -1474,29 +1506,32 @@ async fn stop(home: &Path) -> Result<()> {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !paths.state.exists() {
-            println!("WillDeep Runtime Daemon stopped.");
-            return Ok(());
+            return Ok("WillDeep Runtime Daemon stopped.".to_owned());
         }
     }
     bail!("Runtime Daemon acknowledged shutdown but did not exit")
 }
 
-async fn upgrade(home: &Path, timeout_seconds: u64, force: bool) -> Result<()> {
+async fn upgrade(
+    home: &Path,
+    timeout_seconds: u64,
+    force: bool,
+    report: DaemonProgress<'_>,
+) -> Result<String> {
     let paths = DaemonPaths::new(home);
     let state = match load_state(&paths.state) {
         Ok(state) => state,
         Err(_) => {
-            start(home, true).await?;
-            return Ok(());
+            start(home, true, report).await?;
+            return status(home).await;
         }
     };
     let health = probe(&state).await.context("contact Runtime Daemon")?;
     if !force && health.version == willdeep_core::VERSION {
-        println!(
+        return Ok(format!(
             "WillDeep Runtime Daemon already runs version {} (pid {}).",
             health.version, state.pid
-        );
-        return Ok(());
+        ));
     }
     let internal_drain = internal_transport::InternalRuntimeClient::from_state(&state)?
         .post_empty("/v1/internal/drain")
@@ -1517,10 +1552,10 @@ async fn upgrade(home: &Path, timeout_seconds: u64, force: bool) -> Result<()> {
         }
         Err(error) => return Err(error).context("request Runtime Daemon drain"),
     }
-    println!(
+    report(format!(
         "Draining Runtime {} (pid {}); active work will continue before handoff.",
         health.version, state.pid
-    );
+    ));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
     let mut replacement = None;
     loop {
@@ -1545,16 +1580,15 @@ async fn upgrade(home: &Path, timeout_seconds: u64, force: bool) -> Result<()> {
     let replacement = match replacement {
         Some(replacement) => replacement,
         None => {
-            start(home, false).await?;
+            start(home, false, report).await?;
             load_state(&paths.state)?
         }
     };
     let replacement_health = probe(&replacement).await?;
-    println!(
+    Ok(format!(
         "WillDeep Runtime handoff complete: {} -> {} (pid {}).",
         health.version, replacement_health.version, replacement.pid
-    );
-    Ok(())
+    ))
 }
 
 async fn logs(home: &Path, lines: usize, follow: bool) -> Result<()> {

@@ -34,6 +34,9 @@ pub(super) async fn handle_webapp_command(
     if argument.eq_ignore_ascii_case("status") {
         return Ok(Some(status_message(&state_path, language).await));
     }
+    if argument.eq_ignore_ascii_case("stop") {
+        return Ok(Some(stop_webapp(&state_path, language).await));
+    }
     let listen = if argument.is_empty() || argument.eq_ignore_ascii_case("start") {
         DEFAULT_WEBAPP_LISTEN
             .parse()
@@ -125,6 +128,83 @@ fn start_webapp(
         listen,
         workspace,
     })
+}
+
+/// Stop the Web App this TUI started. Only the recorded pid is signalled,
+/// and only after its recorded address answers — a stale state file must
+/// never make us kill an unrelated process that inherited the pid.
+async fn stop_webapp(path: &Path, language: Language) -> String {
+    let Some(state) = read_state(path) else {
+        return language
+            .text(
+                "System: Web App 未启动",
+                "System: Web App is not running",
+                "System: Web App は起動していません",
+            )
+            .to_owned();
+    };
+    if !endpoint_is_live(state.listen).await {
+        let _ = std::fs::remove_file(path);
+        return language
+            .text(
+                "System: Web App 已退出，状态文件已清理",
+                "System: Web App had already exited; stale state removed",
+                "System: Web App はすでに終了しています。状態ファイルを削除しました",
+            )
+            .to_owned();
+    }
+    if !terminate(state.pid) {
+        return format!(
+            "{} · pid {}",
+            language.text(
+                "Error: 无法结束 Web App 进程",
+                "Error: could not terminate the Web App process",
+                "Error: Web App プロセスを終了できませんでした",
+            ),
+            state.pid
+        );
+    }
+    for _ in 0..30 {
+        if !endpoint_is_live(state.listen).await {
+            let _ = std::fs::remove_file(path);
+            return format!(
+                "{} · http://{}",
+                language.text(
+                    "System: Web App 已停止",
+                    "System: Web App stopped",
+                    "System: Web App を停止しました",
+                ),
+                state.listen
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    format!(
+        "{} · pid {}",
+        language.text(
+            "Error: Web App 收到停止信号但仍在监听",
+            "Error: Web App was signalled but is still listening",
+            "Error: Web App に停止信号を送りましたが、まだ待ち受けています",
+        ),
+        state.pid
+    )
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) -> bool {
+    // SIGTERM lets the server close listeners and flush its log.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+}
+
+#[cfg(not(unix))]
+fn terminate(pid: u32) -> bool {
+    Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 async fn status_message(path: &Path, language: Language) -> String {
