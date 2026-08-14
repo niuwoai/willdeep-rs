@@ -297,6 +297,10 @@ impl Agent {
         }
         messages.retain(|message| message.role != crate::types::Role::System);
         messages.insert(0, Message::system(&self.config.system_prompt));
+        // The approval judge reads this as inert context: it decides whether
+        // a bounded action is relevant to the current goal, never whether a
+        // destructive one is permitted.
+        self.tools.set_task_context(&user_message.content);
         messages.push(user_message);
         let definitions = self.tools.definitions();
         let mut compressed: Option<(usize, String)> = None;

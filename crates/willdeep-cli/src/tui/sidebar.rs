@@ -43,15 +43,17 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App)
         )
     } else if actionable {
         app.language.text(
-            "Inbox 详情 · Enter 审批 · Esc 关闭",
-            "Inbox detail · Enter approve · Esc closes",
-            "Inbox 詳細 · Enter 承認 · Esc 閉じる",
+            "Inbox 详情 · Enter 审批 · M 忽略 · Esc 关闭",
+            "Inbox detail · Enter approve · M dismiss · Esc closes",
+            "Inbox 詳細 · Enter 承認 · M 削除 · Esc 閉じる",
         )
     } else {
+        // Many Inbox entries have no action left but "stop showing me this" —
+        // a task that failed days ago, for instance. Advertise the key.
         app.language.text(
-            "Inbox 详情 · Esc 关闭",
-            "Inbox detail · Esc closes",
-            "Inbox 詳細 · Esc で閉じる",
+            "Inbox 详情 · M 忽略 · Esc 关闭",
+            "Inbox detail · M dismiss · Esc closes",
+            "Inbox 詳細 · M 削除 · Esc 閉じる",
         )
     };
     f.render_widget(
@@ -330,6 +332,35 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                 }
             }
             2 => {
+                // A stale Runtime executes tools with old policy while this
+                // binary reports its own version everywhere else. Keep the
+                // mismatch on screen until it is fixed.
+                if let Some(stale) = app.stale_runtime_version() {
+                    lines.push(Line::styled(
+                        format!(
+                            "  ⚠ {} {} ≠ {} {}",
+                            app.language.text("运行时", "Runtime", "ランタイム"),
+                            stale,
+                            app.language.text("客户端", "client", "クライアント"),
+                            willdeep_core::VERSION
+                        ),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    lines.push(Line::styled(
+                        format!(
+                            "  {}",
+                            app.language.text(
+                                "工具按旧版策略执行 · 请运行 willdeep daemon upgrade",
+                                "Tools run old policy · run willdeep daemon upgrade",
+                                "ツールは旧ポリシーで実行 · willdeep daemon upgrade を実行",
+                            )
+                        ),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
                 lines.push(Line::raw(format!(
                     "  {}: {}",
                     app.language.text("智能体", "Agent", "エージェント"),
@@ -551,16 +582,23 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
 /// 已结束超过这个时长的 Agent 退出侧栏，去详情/历史里找。
 const RECENTLY_FINISHED_SECONDS: u64 = 300;
 
-/// 顺利收尾的后台任务在 Inbox 里停留这么久就自动回收；
-/// 失败/超时/被杀的留着，那些还需要人处理。
+/// 顺利收尾的后台任务在 Inbox 里停留这么久就自动回收。
 const SETTLED_TASK_RETENTION_MILLIS: u64 = 60_000;
 
-fn background_task_visible(task: &willdeep_core::BackgroundTaskSnapshot) -> bool {
-    if task.status != willdeep_core::BackgroundTaskStatus::Completed {
-        return true;
-    }
+/// 失败/超时/被杀的任务留得久得多——那些还需要人处理——但也不是永远。
+/// 一天前失败的后台命令早已不是"待处理"，只是噪音：它会把真正需要
+/// 关注的条目挤出视野。要复盘去任务详情和历史里找。
+const FAILED_TASK_RETENTION_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+
+pub(super) fn background_task_visible(task: &willdeep_core::BackgroundTaskSnapshot) -> bool {
+    let retention = match task.status {
+        // 运行中的任务没有终态时间戳，永远可见。
+        willdeep_core::BackgroundTaskStatus::Running => return true,
+        willdeep_core::BackgroundTaskStatus::Completed => SETTLED_TASK_RETENTION_MILLIS,
+        _ => FAILED_TASK_RETENTION_MILLIS,
+    };
     task.settled_millis
-        .is_none_or(|settled| settled < SETTLED_TASK_RETENTION_MILLIS)
+        .is_none_or(|settled| settled < retention)
 }
 
 fn now_seconds() -> u64 {

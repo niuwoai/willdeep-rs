@@ -1,6 +1,6 @@
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 13] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 15] {
     [
         (
             "/help",
@@ -29,9 +29,25 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         (
             "/webapp",
             language.text(
-                "启动或查看本地 Web App",
-                "Start or inspect the local Web App",
-                "ローカル Web App を起動・確認",
+                "启动、停止或查看本地 Web App",
+                "Start, stop, or inspect the local Web App",
+                "ローカル Web App の起動・停止・確認",
+            ),
+        ),
+        (
+            "/sidebar",
+            language.text(
+                "显示或隐藏右侧状态栏",
+                "Show or hide the status sidebar",
+                "状態サイドバーの表示・非表示",
+            ),
+        ),
+        (
+            "/daemon",
+            language.text(
+                "查看或升级执行命令的 Runtime",
+                "Inspect or upgrade the Runtime that runs commands",
+                "コマンドを実行する Runtime の確認・アップグレード",
             ),
         ),
         (

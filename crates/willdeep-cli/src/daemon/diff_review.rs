@@ -700,6 +700,43 @@ pub(crate) async fn remote_review(
     local_review(runtime_api_data(response)?)
 }
 
+/// Review several paths of one snapshot in a single pass.
+///
+/// `remote_review` probes the Runtime and builds a fresh client on every
+/// call, which is invisible for one file and painful for fifteen: bulk
+/// acceptance measured ~1.8s per file, so a routine 15-file review spent
+/// almost half a minute doing setup. Hoisting both out of the loop keeps
+/// the per-file work to the request itself.
+pub(crate) async fn remote_review_many(
+    home: &Path,
+    snapshot_id: &str,
+    workspace: &Path,
+    paths: &[String],
+    decision: ReviewDecision,
+) -> Result<usize> {
+    let state = ensure_running(home).await?;
+    let client = runtime_client(&state)?;
+    let workspace = workspace.to_string_lossy().into_owned();
+    let mut reviewed = 0;
+    for path in paths {
+        let response = client
+            .review_diff(
+                &willdeep_runtime_protocol::DiffReviewParams {
+                    workspace: workspace.clone(),
+                    snapshot_id: snapshot_id.to_owned(),
+                    path: path.clone(),
+                    decision: public_decision(decision),
+                    note: None,
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .await?;
+        local_review(runtime_api_data(response)?)?;
+        reviewed += 1;
+    }
+    Ok(reviewed)
+}
+
 pub(crate) async fn remote_reviews(
     home: &Path,
     workspace: &Path,

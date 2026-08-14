@@ -43,11 +43,11 @@ struct Cli {
     prompt: Vec<String>,
 
     /// TOML configuration path. Defaults to $WILLDEEP_HOME/config.toml or ~/.willdeep/config.toml.
-    #[arg(long, env = "WILLDEEP_CONFIG", global = true)]
+    #[arg(short = 'c', long, env = "WILLDEEP_CONFIG", global = true)]
     config: Option<PathBuf>,
 
     /// Provider profile name from the TOML configuration.
-    #[arg(long, global = true)]
+    #[arg(short = 'p', long, global = true)]
     profile: Option<String>,
 
     /// Provider API base, for example https://some.im/v1.
@@ -59,7 +59,7 @@ struct Cli {
     api_key: Option<String>,
 
     /// Model identifier sent to the provider.
-    #[arg(long, env = "WILLDEEP_MODEL", global = true)]
+    #[arg(short = 'm', long, env = "WILLDEEP_MODEL", global = true)]
     model: Option<String>,
 
     /// Provider identity controls authentication and some.im context headers.
@@ -71,7 +71,7 @@ struct Cli {
     api: Option<ApiArg>,
 
     /// Workspace root available to tools.
-    #[arg(long, global = true)]
+    #[arg(short = 'w', long, global = true)]
     workspace: Option<PathBuf>,
 
     /// Additional workspace allowed in Web mode. May be repeated.
@@ -95,7 +95,7 @@ struct Cli {
     json: bool,
 
     /// Resume a saved session by UUID, or use `latest`.
-    #[arg(long, value_name = "ID|latest")]
+    #[arg(short = 'r', long, value_name = "ID|latest")]
     resume: Option<String>,
 
     /// List saved sessions and exit.
@@ -1499,6 +1499,83 @@ fn compact_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `-w` is the short form of `--workspace`, and stays global: it must
+    /// work before a subcommand, after one, and in the bare TUI form.
+    #[test]
+    fn workspace_accepts_the_short_flag_everywhere() {
+        let expected = Some(std::path::Path::new("/tmp"));
+        for argv in [
+            vec!["willdeep", "-w", "/tmp"],
+            vec!["willdeep", "-w", "/tmp", "run", "inspect"],
+            vec!["willdeep", "run", "-w", "/tmp", "inspect"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone())
+                .unwrap_or_else(|error| panic!("parse {argv:?}: {error}"));
+            assert_eq!(cli.workspace.as_deref(), expected, "for {argv:?}");
+        }
+        // The long form keeps working unchanged.
+        let cli = Cli::try_parse_from(["willdeep", "--workspace", "/tmp"]).expect("long form");
+        assert_eq!(cli.workspace.as_deref(), expected);
+    }
+
+    /// Short forms for the arguments typed most often. Each must resolve to
+    /// the same field as its long form, and they must combine.
+    #[test]
+    fn high_frequency_arguments_have_short_forms() {
+        let short = Cli::try_parse_from([
+            "willdeep",
+            "-c",
+            "/tmp/x.toml",
+            "-p",
+            "some-im",
+            "-m",
+            "glm-5",
+            "-w",
+            "/tmp",
+            "-r",
+            "latest",
+        ])
+        .expect("short forms");
+        let long = Cli::try_parse_from([
+            "willdeep",
+            "--config",
+            "/tmp/x.toml",
+            "--profile",
+            "some-im",
+            "--model",
+            "glm-5",
+            "--workspace",
+            "/tmp",
+            "--resume",
+            "latest",
+        ])
+        .expect("long forms");
+
+        assert_eq!(short.config, long.config);
+        assert_eq!(short.profile, long.profile);
+        assert_eq!(short.model, long.model);
+        assert_eq!(short.workspace, long.workspace);
+        assert_eq!(short.resume, long.resume);
+        assert_eq!(short.profile.as_deref(), Some("some-im"));
+        assert_eq!(short.model.as_deref(), Some("glm-5"));
+        assert_eq!(short.resume.as_deref(), Some("latest"));
+    }
+
+    /// Without `--workspace`, tools operate on the directory the user ran
+    /// the command in — not the home directory, not the config's location.
+    #[test]
+    fn workspace_defaults_to_the_current_directory() {
+        let cli = Cli::try_parse_from(["willdeep"]).expect("bare invocation");
+        assert!(cli.workspace.is_none());
+
+        let resolved = harness::resolve_workspace(&cli, None).expect("resolve workspace");
+        let cwd = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        assert_eq!(resolved, cwd);
+    }
 
     #[test]
     fn run_subcommand_accepts_global_options_and_explicit_output() {

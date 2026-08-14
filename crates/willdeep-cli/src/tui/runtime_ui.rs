@@ -285,12 +285,45 @@ fn short_event_agent(value: &serde_json::Value) -> &str {
         .unwrap_or("agent")
 }
 
+/// Auto-open Runtime approvals and questions as soon as a snapshot reveals
+/// them, instead of leaving a parked task discoverable only as an inbox row.
+/// Returns true when a dialog became visible right now, so the caller can
+/// ring the bell.
+pub(super) fn surface_pending_gates(
+    app: &mut App,
+    home: &std::path::Path,
+    ui: &mpsc::UnboundedSender<UiMessage>,
+) -> bool {
+    let live = app
+        .runtime_gates
+        .iter()
+        .map(crate::daemon::RemoteGate::id)
+        .collect::<std::collections::BTreeSet<_>>();
+    // Forget gates the Runtime resolved elsewhere, so a re-raised
+    // interaction can surface again.
+    app.surfaced_gates.retain(|id| live.contains(id));
+    let fresh = app
+        .runtime_gates
+        .iter()
+        .filter(|gate| !app.surfaced_gates.contains(&gate.id()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut shown = false;
+    for gate in fresh {
+        shown |= open_remote_gate(app, gate, home.to_path_buf(), ui.clone());
+    }
+    shown
+}
+
+/// Returns true when the gate became visible immediately (rather than being
+/// queued behind another approval).
 pub(super) fn open_remote_gate(
     app: &mut App,
     gate: crate::daemon::RemoteGate,
     home: PathBuf,
     ui: mpsc::UnboundedSender<UiMessage>,
-) {
+) -> bool {
+    app.surfaced_gates.insert(gate.id());
     match gate {
         crate::daemon::RemoteGate::Approval {
             id,
@@ -300,7 +333,7 @@ pub(super) fn open_remote_gate(
         } => {
             let language = app.language;
             let (sender, receiver) = oneshot::channel();
-            app.approval = Some((description, always_allow_available, sender));
+            let visible = app.enqueue_approval((description, always_allow_available, sender));
             tokio::spawn(async move {
                 let decision = receiver.await.unwrap_or(ApprovalDecision::Deny);
                 let result = crate::daemon::resolve_remote_approval(&home, id, decision).await;
@@ -323,6 +356,7 @@ pub(super) fn open_remote_gate(
                 };
                 let _ = ui.send(UiMessage::RuntimeNotice(notice));
             });
+            visible
         }
         crate::daemon::RemoteGate::Question {
             id,
@@ -339,7 +373,7 @@ pub(super) fn open_remote_gate(
             };
             let checked = vec![false; request.options.len()];
             let (sender, receiver) = oneshot::channel();
-            app.question = Some(AskDialog {
+            let visible = app.enqueue_question(AskDialog {
                 request,
                 selected: 0,
                 checked,
@@ -368,6 +402,7 @@ pub(super) fn open_remote_gate(
                 };
                 let _ = ui.send(UiMessage::RuntimeNotice(notice));
             });
+            visible
         }
     }
 }

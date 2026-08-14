@@ -119,6 +119,12 @@ pub struct AgentSettings {
     pub max_turns: Option<usize>,
     pub approval: Option<String>,
     pub language: Option<String>,
+    /// Consult the AI judge for commands the static classifier cannot
+    /// decide. Defaults to on; turning it off means every ambiguous command
+    /// goes straight to an approval card.
+    pub safety_judge: Option<bool>,
+    /// Model used for the judge. Defaults to the profile's cheap model.
+    pub judge_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -376,6 +382,23 @@ base_url = "https://example.com/v1"
 "#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn safety_judge_defaults_to_on_and_stays_configurable() {
+        let default: ConfigFile = toml::from_str("version = 1\n[agent]\napproval = \"smart\"\n")
+            .expect("parse minimal config");
+        assert_eq!(default.agent.safety_judge, None);
+        assert!(
+            default.agent.safety_judge.unwrap_or(true),
+            "an unset safety_judge must mean the judge is active"
+        );
+
+        let configured: ConfigFile =
+            toml::from_str("version = 1\n[agent]\nsafety_judge = false\njudge_model = \"glm-5\"\n")
+                .expect("parse configured judge");
+        assert_eq!(configured.agent.safety_judge, Some(false));
+        assert_eq!(configured.agent.judge_model.as_deref(), Some("glm-5"));
     }
 
     #[test]

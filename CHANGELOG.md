@@ -1,5 +1,113 @@
 # Changelog
 
+## [0.23.0-rc2] - 2026-08-14
+
+### Fixed
+- Diff 批量审批不再冻住界面。此前按 `Y` 后 `handle_diff_attention_action` 在按键处理里逐文件 `await`，每个文件一次独立 HTTP 且每次都重新 `ensure_running` 探活——实测 15 个文件耗时 **27 秒**，全程 `draw()` 无机会执行，屏幕彻底静止，看着就像按键被吞了（`diff-reviews.json` 里那批记录时间戳从 +0s 排到 +27s，是完整证据；审批其实每次都生效了）。两处改：新增 `remote_review_many` 一次探活、复用同一个客户端跑完所有路径；批量提交整体挪进后台任务，弹窗立刻关闭并先给「正在提交 Diff 审批 · N」，完成后再报结果。鼠标点击 `[Y 通过]` / `[N 拒绝]` 走的是同一函数，同一修复覆盖。
+
+- Inbox 详情弹窗支持 `M` 忽略条目，标题也写明这个键。此前 `M`（标记已读）只在焦点落在侧栏且选中「需要关注」分组时才生效，而弹窗里只认 `Esc`——于是一条几天前被中断的 Runtime 任务顶着「需要你处理」常驻，用户打开详情却发现无事可做、也无路可走。忽略按 Session 持久保存；运行中的条目拒绝忽略并给出说明，那是用户对它的唯一抓手。
+
+### Changed
+- 失败的后台任务保留 24 小时后也从 Attention Inbox 回收。此前只有「顺利完成」的会在 60 秒后回收，失败/超时/被杀的永久留存——一天前失败的命令早已不是待办，只是把真正需要关注的条目挤出视野。运行中的任务永不回收；要复盘去任务详情与历史里找。
+- 右侧状态栏改为**默认隐藏**，新增 `/sidebar [on|off]` 显示/隐藏（`Ctrl+B` 等效）。隐藏时焦点自动回到输入框，不会卡在看不见的面板上。`/help`、F1 帮助面板与命令补全同步。
+
+### Tests
+- 新增 `sidebar_starts_hidden_and_the_command_toggles_it`：默认隐藏、切换、`on`/`off` 显式、隐藏后焦点回落、坏参数报用法而非静默切换。
+- 新增 `inbox_items_can_be_dismissed_but_running_ones_cannot`：已结束条目可忽略且详情弹窗随之关闭；运行中的条目拒绝忽略。
+- 新增 `background_tasks_are_recycled_by_status_and_age`：运行中永不过期；完成 60 秒后消失；失败/超时/被杀六小时仍在、一天后回收。
+
+### Docs
+- `docs/TUI_GUIDE.md`：布局表标注状态栏默认隐藏，新增 Inbox 回收规则说明，命令表补 `/sidebar`，快捷键表标注 `Ctrl+B` 等价关系。
+
+## [0.23.0-rc1] - 2026-08-13
+
+### Added
+- TUI 新增 `/daemon [status|start|stop|upgrade]`，在界面内管理真正执行命令的 Runtime，不必另开终端。`upgrade` 会排空在途工作再交接，可能耗时数分钟，因此在后台任务里跑并把进度逐条送回对话，**不阻塞界面**。
+- `/webapp` 补上 `stop`（并给 `start` 一个显式别名）。此前只能启动和看状态，停不掉——「启停」缺了一半。`stop` 只对本 TUI 启动并记录在案的 pid 发 `SIGTERM`，且先确认其记录地址仍在应答；状态文件过期时只清理文件，不会误杀继承同一 pid 的无关进程。
+- **Runtime 版本不一致告警**。TUI 只是前端，命令由 Runtime Daemon 执行；一个几天前启动的 Daemon 会继续按它自己那版的审批策略跑，而 `willdeep --version` 显示的是客户端版本，说明不了实际执行方——本次开发中就因此白测了一轮（客户端 0.22.0-rc5，Daemon 仍是 0.21.0-rc62）。现在 `RuntimeSnapshot` 带上 `runtime_version`（`probe` 本就返回 `health.version`，此前被丢弃），侧栏「运行状态」在不一致时置顶黄色警告并常驻，首次发现时在对话里写一行说明。重复快照不刷屏；换到同版本后消失；换到另一个旧版本重新告警。
+
+### Changed
+- `daemon.rs` 的 `status` / `stop` / `upgrade` 改为返回消息字符串，`start` / `upgrade` 接受进度回调；CLI 传打印回调，TUI 传送信回调。这样 TUI 复用与 CLI **完全相同**的排空与交接逻辑，不必复制一份会腐化的实现，也避免 `println!` 冲掉 TUI 画面。
+
+### Tests
+- `daemon_commands` 2 项：五种 `/daemon` 写法解析正确；未知参数报用法，且 `/daemonize the thing`、`restart the daemon` 这类不被误吞。
+- `tui/test_suite.rs` 3 项：`/daemon`、`/webapp` 各形态都走主循环而非兜底（不误报未知命令）；两者都在补全目录里；Runtime 版本不一致只告警一次、状态常驻、同版本后清除、换旧版本再次告警。
+
+### Docs
+- `docs/TUI_GUIDE.md` 命令表补 `/daemon`、细化 `/webapp`，新增「Runtime 版本不一致」一节。
+- `docs/WEB_GUIDE.md` 补 `/webapp stop|start` 与其误杀防护说明。
+
+## [0.22.0-rc5] - 2026-08-13
+
+### Added
+- 高频参数补齐短选项：`-c`（`--config`）、`-p`（`--profile`）、`-m`（`--model`）、`-r`（`--resume`），与 rc4 的 `-w` 一起构成常用五个。前四个继承各自的 `global = true`，子命令前后都能写；`-r` 与 `--resume` 一样只在顶层。长选项写法全部不变。
+
+### Tests
+- 新增 `high_frequency_arguments_have_short_forms`：五个短选项与对应长选项解析到同一字段、可组合使用。
+- 新增 `workspace_defaults_to_the_current_directory`：不带 `--workspace` 时 `resolve_workspace` 落在**当前工作目录**（canonicalize 后）。此前这条只是实现细节（`resolve_workspace` 兜底 `PathBuf::from(".")`、Web 模式兜底 `std::env::current_dir()`），没有任何断言保护，改动别处很容易悄悄改掉它。
+
+### Docs
+- `docs/CLI_REFERENCE.md` 参数表补上 `-c` / `-p` / `-m` / `-r`，加一行短选项一览，并写明 `--workspace` 缺省即当前目录。
+
+## [0.22.0-rc4] - 2026-08-13
+
+### Added
+- `--workspace` 新增短选项 `-w`（`willdeep -w ~/Sites/project`）。它继承原有的 `global = true`，子命令前后都能写。此前整个 CLI 没有定义过任何短选项，`-w` 不与现存参数冲突，长选项写法完全不变。
+
+### Tests
+- 新增 `workspace_accepts_the_short_flag_everywhere`：锁定 `-w` 在裸 TUI、子命令前、子命令后三种位置都解析成同一路径，且长选项行为不变。
+
+### Docs
+- `docs/CLI_REFERENCE.md`、`docs/WEB_GUIDE.md` 的参数表补上 `-w`。
+
+## [0.22.0-rc3] - 2026-08-13
+
+### Fixed
+- `ask_user` 提问也改为到达即弹（rc2 曾按「会抢输入行」保留手动打开，实测下来同样是让人干等，遂改）。本地和 Runtime 两条路径一致：一到就开弹窗、响铃、在活动流写一行 `等待你回答 · <问题>`。弹窗自带输入框，主输入框里已经打了一半的草稿**原样保留**，只是从弹出那刻起按键改由弹窗接管。
+- 提问同样改为队列，修掉与审批相同的静默失败：此前第二个提问直接覆盖 `app.question`，被覆盖的 sender 一 drop，`ask_user` 收到 `None` 当作「用户没回答」，而用户根本没见过那个问题。现在先到先弹，回答完立刻顶上下一个，标题显示「还有 N」。三处回答出口（Esc、Enter、鼠标点选）都会接上队列。
+- 切换会话时待回答提问显式作废并提示（`切换会话已放弃待回答的提问`），不再静默丢 channel。
+
+### Tests
+- 新增 2 项：提问排队且不吞主输入框草稿（并断言回答后立刻顶上下一个、Esc 出口同样接队列）、切换会话显式作废并提示。
+
+## [0.22.0-rc2] - 2026-08-13
+
+### Fixed
+- 当前回合需要审批时立刻弹窗，不再只在侧栏留一条「等待审批」让人自己发现。Runtime 快照一旦带出待处理审批就自动打开确认框并响铃；此前只弹一条转瞬即逝的通知，任务在那儿干等，用户以为是卡死。
+- 审批不再互相覆盖。此前 `UiMessage::Approval` 直接赋值给 `app.approval`，同一回合的第二个审批会挤掉第一个——被挤掉的 oneshot sender 一 drop，Harness 那边 `rx.await` 失败按 **Deny** 处理，于是用户没看见的那次审批被静默拒绝，回合莫名其妙失败。现在改成队列：先到先弹，解决一个立刻顶上下一个，弹窗标题显示「还有 N」。
+- 切换会话时待处理审批改为显式拒绝并给出提示（`切换会话已拒绝待处理的审批`）。此前 `load_session` 把 `approval` 置空，效果同样是 Deny，但没有任何提示。
+- 审批到达时写入活动流一行 `等待你确认 · <描述首行>` 并响铃，进度列能直接看出回合为什么不动了。
+
+说明：`ask_user` 提问不做自动弹出——它会在用户正打字时抢走输入行，且已有 `task.waiting_answer` 通知；这条是有意保留的差异。
+
+### Tests
+- `tui/test_suite.rs` 新增 4 项：第二个审批入队而非静默拒绝首个（并断言解决后立刻顶上）、切换会话显式拒绝且有提示、到达时写活动流、标题显示队列深度。
+
+## [0.22.0-rc1] - 2026-08-13
+
+### Added
+- Shell 命令改为**两级审批**，对齐 macOS Xedit 的 `SafeCommand` + 安全判官结构。此前 `smart` 模式只有一条硬编码白名单（`cargo test` 加 `grep/head/tail` 管道），`ls`、`cat`、`git status`、`rg` 这类纯只读命令统统要人点一次，一条会话下来审批卡比结论还多。现在：
+  - 新增 `willdeep-core::safety` 静态分类器，按 Shell 语义（分段、引号、`$()`、重定向）给出 `AlwaysSafe` / `AlwaysDangerous` / `NeedsJudgment`。只读检查与受限工作区操作（`ls`/`cat`/`rg`/`git status`/`git log`/`cargo test`/`cargo clippy`/`find`/`mkdir -p` 等）直接执行；`rm -rf`/`sudo`/`chmod -R`/`git push --force`/`git reset --hard`/`mv`/`kill`/`dd if=`/fork 炸弹/`xargs rm` 判为破坏性，**绕过 AI 直接交用户**。
+  - 新增 `willdeep-core::judge` AI 判官，处理中间地带（`curl`、`npm install`、`git commit`、`sed -i`、重定向写文件、任意脚本）。一次非流式调用，只认 `<verdict>YES</verdict>`；NO、回复畸形、网络失败一律回落到用户审批卡——判官只能减少打扰，不能扩大权限。默认开启，`[agent] safety_judge = false` 可关，`judge_model` 可指定模型（默认取 profile 的廉价模型）。
+  - 注入防御三层：命令中的 `KEY=…` / `--password …` / `Bearer …` / `sk-…` 在出网前本地替换成 `[REDACTED]`；命令、工具名、任务意图分别封进 XML 标签并用零宽空格打断内部闭合标签与 `<verdict>`；裁决只接受唯一一个格式完整的标签，命令回声无法伪造 YES。
+  - 同一「工具 + 命令 + 任务意图」的 YES 缓存 30 分钟，NO 从不缓存。
+- 新增审批审计日志 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），逐条记录放行来源 `static` / `judge` / `always-allow` / `user` 及原因，回答「这条命令为什么没问我」。
+
+### Changed
+- 删除 `tools.rs` 中的 `is_test_inspection_pipeline` / `split_inspection_pipeline`：新分类器覆盖它允许的全部形状，且不再把 `cargo test | tee result.txt`、`cargo test > result.txt` 误判为同类。原有断言以新分类器等价重写。
+- 用户每轮输入通过 `ToolRegistry::set_task_context` 作为**惰性上下文**传给判官，只用于判断某个受限操作是否与当前目标相关；它不授予权限，也不会让破坏性操作变安全。
+
+### Tests
+- `safety.rs` 10 项：只读放行、破坏性拒绝、引号内危险词仍是数据、`$()` 有界展开、单段污染整链、Heredoc/引号不闭合降级、MCP 只读名识别。
+- `judge.rs` 5 项：裁决标签解析（含双标签伪造）、凭据脱敏、注入字段中和、任务意图缺省、缓存键归一化。
+- `tools.rs` 3 项：`smart` 放只读 Shell 但仍拦 `curl`/`rm -rf`/重定向；只有中间地带命令会送到判官（`ls` 与 `rm -rf build` 都不送）；判官说 NO 时回落用户。
+- `config.rs` 1 项：`safety_judge` 未配置即为开启，且可显式关闭与指定 `judge_model`。
+
+### Docs
+- `docs/APPROVALS.md` 重写「三档审批模式」并新增「两级审批」一节：三类结论的处理与例子、Shell 语义规则、判官的三层防御与回落语义、配置项、审计日志位置。
+- `docs/ARCHITECTURE.md` 安全边界同步为两级审批描述。
+- `config.example.toml` 补 `safety_judge` / `judge_model` 示例。
+
 ## [0.21.0-rc67] - 2026-08-12
 
 ### Fixed
