@@ -42,16 +42,27 @@
 
 同一「工具 + 命令 + 任务意图」的 YES 缓存 30 分钟，避免一轮工作里重复问同一个 `git commit`；**NO 从不缓存**。
 
+### 判官用哪个模型
+
+| Provider | 默认判官模型 | 说明 |
+| --- | --- | --- |
+| some.im | `someim-security-guard` | 网关托管的安全策略，服务端可随时收紧，无需发客户端；与 macOS 版 Xedit 同一套判决 |
+| 其它（OpenAI 兼容 / Anthropic） | 当前会话模型 | 没有第二个端点可用，换模型等于换一套凭据；判官拿不到凭据就等于没有判官 |
+
+`[agent] judge_model` 可覆盖两者。
+
+`someim-security-guard` 是**推理模型**：出裁决前会先写一段私有推理，命令越复杂推理越长。因此判官请求**不设紧的输出上限**——上限太小会把回复截断在 `<verdict>YES` 这种没有闭合标签的半截上，解析失败后回落人工审批。这个失败模式的方向最坏：越是需要判官的复杂命令越容易掉线。判官因此被截断时，审计里会写明 `finish_reason=length`，而不是笼统的「回复畸形」。
+
 配置：
 
 ```toml
 [agent]
 approval = "smart"
-safety_judge = true      # 默认开启；关掉后拿不准的命令直接弹卡
-# judge_model = "glm-5"  # 默认取当前 profile 的廉价模型
+safety_judge = true                      # 默认开启；关掉后拿不准的命令直接弹卡
+# judge_model = "someim-security-guard"  # some.im 默认值；其它 provider 默认取会话模型
 ```
 
-每次自动放行/升级都追加一行到 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），记录 `static` / `judge` / `always-allow` / `user` 四种来源和原因——这是「为什么这条命令没问我」的审计入口。
+每次自动放行/升级都追加一行到 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），记录 `static` / `judge` / `always-allow` / `user` 四种来源和原因——这是「为什么这条命令没问我」的审计入口。判官来源的记录里带上实际使用的模型（如 `AI review (someim-security-guard): …`），模型被换掉或判官掉线都能在日志里直接看出来。
 
 ## 交互式审批
 

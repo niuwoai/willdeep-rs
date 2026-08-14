@@ -19,12 +19,24 @@ use crate::{
     resolve_base, resolve_dialect, resolve_provider,
 };
 
-/// Judge model per provider family. some.im bills the cheap tier far lower
-/// and answers a one-token verdict in well under a second; everything else
-/// reuses the session model so no extra deployment is required.
+/// The some.im alias whose safety policy is managed on the gateway. It is a
+/// reasoning model: it emits a long private rationale before the verdict tag,
+/// which is why the judge must never cap its output tightly (see
+/// [`willdeep_core::judge`]).
+const SOMEIM_SECURITY_GUARD_MODEL: &str = "someim-security-guard";
+
+/// The judge's model when `[agent] judge_model` is unset.
+///
+/// On some.im that is the dedicated `someim-security-guard` alias, whose
+/// safety policy lives on the gateway and can be tightened server-side
+/// without shipping a client. This matches the macOS app, so one operator
+/// gets the same verdicts from the CLI and from Xedit. Every other provider
+/// reuses the session's own model — there is no second endpoint to reach for,
+/// and a judge that needs credentials the session does not have is a judge
+/// that silently degrades into an approval card.
 fn default_judge_model(kind: ProviderKind, session_model: &str) -> String {
     match kind {
-        ProviderKind::SomeIm => "glm-5".to_owned(),
+        ProviderKind::SomeIm => SOMEIM_SECURITY_GUARD_MODEL.to_owned(),
         _ => session_model.to_owned(),
     }
 }
@@ -448,9 +460,9 @@ pub(crate) async fn build(
     ));
     let verification_home = home.to_path_buf();
     let verification_workspace = workspace.clone();
-    // The judge runs on the cheapest model of the active profile: it answers
-    // one YES/NO per ambiguous command, and a slow judge is worse than an
-    // approval card.
+    // The judge answers one YES/NO per ambiguous command: on some.im that is
+    // the gateway's managed `someim-security-guard` policy, elsewhere the
+    // session's own model. `[agent] judge_model` overrides both.
     let safety_judge = if loaded.file.agent.safety_judge.unwrap_or(true) {
         let judge_model = loaded
             .file
@@ -459,9 +471,10 @@ pub(crate) async fn build(
             .clone()
             .unwrap_or_else(|| default_judge_model(kind, &model));
         let mut judge_config = parent_provider_config.clone();
-        judge_config.model = judge_model;
+        judge_config.model = judge_model.clone();
         Some(Arc::new(ProviderSafetyJudge::new(
             build_provider(judge_config).context("initialize safety judge provider")?,
+            judge_model,
         )) as Arc<dyn SafetyJudge>)
     } else {
         None
@@ -617,4 +630,33 @@ pub(crate) fn resolve_workspace(
     requested_workspace
         .canonicalize()
         .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn someim_sessions_judge_with_the_managed_security_guard() {
+        assert_eq!(
+            default_judge_model(ProviderKind::SomeIm, "someim-auto-flash"),
+            "someim-security-guard",
+            "a some.im session must reach the gateway's managed safety policy, \
+             matching the macOS app"
+        );
+    }
+
+    #[test]
+    fn every_other_provider_reuses_the_session_model() {
+        // No second endpoint, no second credential: a judge the session cannot
+        // authenticate is a judge that degrades into an approval card.
+        assert_eq!(
+            default_judge_model(ProviderKind::OpenAiCompatible, "deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            default_judge_model(ProviderKind::Anthropic, "claude-opus-5"),
+            "claude-opus-5"
+        );
+    }
 }

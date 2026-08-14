@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.23.0-rc3] - 2026-08-14
+
+### Changed
+- **some.im 会话的 AI 判官改用网关托管的 `someim-security-guard`**，与 macOS 版 Xedit 对齐：同一个操作者从 CLI 和从 App 得到同一套判决，安全策略在服务端收紧即可生效，不必发客户端。此前 rs 侧固定用 `glm-5`（那是子 Agent 的廉价模型约定，从来不是安全模型），整个仓库连 `someim-security-guard` 这个字符串都不存在。其它 provider 维持不变：仍沿用当前会话模型——没有第二个端点可用，换模型等于换一套凭据，而拿不到凭据的判官等于没有判官。`[agent] judge_model` 仍可覆盖两者。
+
+### Fixed
+- 判官回复被截断时不再报成笼统的「没有 `<verdict>` 标签」。`someim-security-guard` 是推理模型（实测后端 `Qwen/Qwen3.6-27B`），出裁决前先写 1800–3100 字符的私有推理，命令越复杂推理越长；输出上限太小就会把回复截断在 `<verdict>YES` 这种没有闭合标签的半截上，甚至只剩空串。现在按 `finish_reason=length` 单独识别并写明「回复被截断，请调高输出预算」——**这个失败模式的方向最坏：越是需要判官的复杂命令越容易掉线**，笼统的错误原因会把预算问题伪装成模型不听话。rs 侧的 chat-completions 请求本就不下发 `max_tokens`，实测五类命令全部拿到完整裁决，故本次无需改预算，只补可诊断性。
+
+### Added
+- `approvals.jsonl` 的判官记录带上实际使用的模型（`AI review (someim-security-guard): …`、`AI review (…) unavailable: …`）。此前只记 `judge` 这个来源，判官换了模型或悄悄掉线在审计里完全看不出来，也无法与 Xedit 的 `judge.jsonl` 做同口径对比。新增 `SafetyJudge::model()`，非模型驱动的判官（测试桩）用默认值。
+
+### Tests
+- 新增 `someim_sessions_judge_with_the_managed_security_guard` 与 `every_other_provider_reuses_the_session_model`：锁住两分支的模型选择契约。
+- 新增 `a_truncated_reasoning_reply_is_reported_as_a_budget_problem`：截断、空回复、无标签三种不可解析回复各自给出可区分的原因。
+
+### Docs
+- `docs/APPROVALS.md` 新增「判官用哪个模型」小节（两分支对照表 + 推理模型为什么不能设紧输出上限），审计说明补模型字段；`config.example.toml` 的 `judge_model` 示例同步。
+
 ## [0.23.0-rc2] - 2026-08-14
 
 ### Fixed

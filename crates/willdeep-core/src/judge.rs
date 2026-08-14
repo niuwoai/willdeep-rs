@@ -62,6 +62,13 @@ pub enum JudgeVerdict {
 #[async_trait]
 pub trait SafetyJudge: Send + Sync {
     async fn judge(&self, request: JudgeRequest) -> JudgeVerdict;
+
+    /// Model id backing this judge, recorded in the approval audit trail so
+    /// "which judge decided this" is answerable after the fact. Judges that
+    /// are not model-backed (tests, stubs) keep the default.
+    fn model(&self) -> &str {
+        "unknown"
+    }
 }
 
 /// System prompt for the one-shot verdict. Ported from the macOS
@@ -114,13 +121,15 @@ abusive. When in doubt, output NO.";
 /// A [`SafetyJudge`] backed by a model provider.
 pub struct ProviderSafetyJudge {
     provider: Arc<dyn Provider>,
+    model: String,
     cache: Mutex<HashMap<String, Instant>>,
 }
 
 impl ProviderSafetyJudge {
-    pub fn new(provider: Arc<dyn Provider>) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
         Self {
             provider,
+            model: model.into(),
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -168,9 +177,36 @@ impl SafetyJudge for ProviderSafetyJudge {
                 JudgeVerdict::Allow
             }
             Some(false) => JudgeVerdict::Deny,
-            None => JudgeVerdict::Unavailable("judge reply had no <verdict> tag".to_owned()),
+            None => JudgeVerdict::Unavailable(unparseable_reason(
+                &completion.content,
+                completion.finish_reason.as_deref(),
+            )),
         }
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Why a reply carried no usable verdict. Reasoning judges such as
+/// `someim-security-guard` spend most of their output budget on a private
+/// rationale, so a too-small cap truncates the reply mid-tag — the answer
+/// arrives as `<verdict>YES` with no closing tag, or as nothing at all. That
+/// is a budget problem, not a malformed model, and the audit trail has to say
+/// so: the failure gets worse exactly as commands get more complex, which is
+/// when the judge matters most.
+fn unparseable_reason(content: &str, finish_reason: Option<&str>) -> String {
+    let truncated = finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("length"));
+    if truncated {
+        return "judge reply truncated before the closing </verdict> tag \
+                (finish_reason=length; raise the model's output budget)"
+            .to_owned();
+    }
+    if content.trim().is_empty() {
+        return "judge returned an empty reply".to_owned();
+    }
+    "judge reply had no <verdict> tag".to_owned()
 }
 
 fn verdict_cache_key(tool: &str, command: &str, task_context: &str) -> String {
@@ -365,6 +401,21 @@ mod tests {
     fn missing_task_context_is_explicit() {
         let payload = judge_user_payload("run_command", "ls", "   ");
         assert!(payload.contains("<task_context>not_provided</task_context>"));
+    }
+
+    #[test]
+    fn a_truncated_reasoning_reply_is_reported_as_a_budget_problem() {
+        // What `someim-security-guard` actually returns when its private
+        // rationale exhausts the output budget: the tag never closes.
+        let reason = unparseable_reason("<verdict>YES", Some("length"));
+        assert!(
+            reason.contains("truncated") && reason.contains("output budget"),
+            "a truncated verdict must be diagnosable as a budget problem, got: {reason}"
+        );
+        assert!(unparseable_reason("", Some("stop")).contains("empty"));
+        assert!(
+            unparseable_reason("I think it is fine", Some("stop")).contains("no <verdict> tag")
+        );
     }
 
     #[test]

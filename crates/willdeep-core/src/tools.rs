@@ -1263,21 +1263,26 @@ impl ToolRegistry {
                 task_context,
             })
             .await;
+        // The judge model goes into every trace, not just the failures: an
+        // operator comparing "why does the CLI ask more than the app" needs to
+        // see which model answered, and a silent model swap is otherwise
+        // invisible in the audit trail.
+        let model = judge.model();
         match verdict {
             JudgeVerdict::Allow => {
                 self.report_approval(
                     command,
                     ApprovalSource::Judge,
-                    "AI review: bounded and consistent with the current task".to_owned(),
+                    format!("AI review ({model}): bounded and consistent with the current task"),
                 );
                 Ok(())
             }
             JudgeVerdict::Deny => {
-                escalate(self, "AI review declined".to_owned());
+                escalate(self, format!("AI review ({model}) declined"));
                 self.ask_for_command(command, description).await
             }
             JudgeVerdict::Unavailable(reason) => {
-                escalate(self, format!("AI review unavailable: {reason}"));
+                escalate(self, format!("AI review ({model}) unavailable: {reason}"));
                 self.ask_for_command(command, description).await
             }
         }
