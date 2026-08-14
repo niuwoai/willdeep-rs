@@ -39,6 +39,7 @@ mod activity;
 mod agent_commands;
 mod agent_worktree_ui;
 mod command_catalog;
+mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
 mod rendering;
@@ -152,6 +153,12 @@ struct App {
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
+    /// Version of the Runtime that actually executes tools, when one is
+    /// reachable. `None` means no Runtime (everything runs in-process).
+    runtime_version: Option<String>,
+    /// A version mismatch is announced once in the transcript; the sidebar
+    /// warning then stays up on its own.
+    runtime_version_warned: bool,
     /// Runtime interactions already turned into a dialog, so a snapshot that
     /// still lists them does not reopen the same card every second.
     surfaced_gates: BTreeSet<uuid::Uuid>,
@@ -569,42 +576,68 @@ async fn handle_diff_attention_action(
         );
         return Ok(());
     }
-    for file in &snapshot.files {
-        crate::daemon::diff_review::remote_review(
-            &runtime.home,
-            &snapshot.id,
-            &crate::daemon::diff_review::ReviewRequest {
-                workspace: session.workspace.clone(),
-                path: file.path.clone(),
-                decision,
-                note: None,
-            },
-        )
-        .await?;
-    }
+    // Reviewing every file is one request per path against the Runtime. On a
+    // fifteen-file change that is tens of seconds, and awaiting it here would
+    // freeze the UI for the whole time — the popup would sit there looking
+    // like the key press was ignored. Close the popup now, submit in the
+    // background, and report the outcome through the notice channel.
+    let paths = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     if let Some(detail) = app.attention_detail.take() {
         app.attention_read.insert(detail.id);
         session.attention_read = app.attention_read.clone();
         store.save(session)?;
     }
-    app.workspace_attention = workspace_attention(&session.workspace);
     app.notice = Some(format!(
-        "{}: {}",
-        if matches!(action, DiffAttentionAction::Accept) {
-            language.text(
-                "已通过当前 Diff",
-                "Current Diff accepted",
-                "現在の Diff を承認しました",
-            )
-        } else {
-            language.text(
-                "已拒绝当前 Diff",
-                "Current Diff rejected",
-                "現在の Diff を拒否しました",
-            )
-        },
-        snapshot.files.len()
+        "{} · {}",
+        language.text(
+            "正在提交 Diff 审批",
+            "Submitting Diff review",
+            "Diff レビューを送信中",
+        ),
+        paths.len()
     ));
+    let home = runtime.home.clone();
+    let workspace = session.workspace.clone();
+    let ui = runtime.tx.clone();
+    let snapshot_id = snapshot.id.clone();
+    let accepted = matches!(action, DiffAttentionAction::Accept);
+    tokio::spawn(async move {
+        let result = crate::daemon::diff_review::remote_review_many(
+            &home,
+            &snapshot_id,
+            &workspace,
+            &paths,
+            decision,
+        )
+        .await;
+        let notice = match result {
+            Ok(reviewed) => format!(
+                "{} · {reviewed}",
+                if accepted {
+                    language.text(
+                        "已通过当前 Diff",
+                        "Current Diff accepted",
+                        "現在の Diff を承認しました",
+                    )
+                } else {
+                    language.text(
+                        "已拒绝当前 Diff",
+                        "Current Diff rejected",
+                        "現在の Diff を拒否しました",
+                    )
+                }
+            ),
+            Err(error) => format!(
+                "{}: {error}",
+                language.text("Diff 操作失败", "Diff action failed", "Diff 操作に失敗")
+            ),
+        };
+        let _ = ui.send(UiMessage::RuntimeNotice(notice));
+    });
     Ok(())
 }
 
@@ -665,6 +698,7 @@ async fn event_loop(
                 app.runtime_agents=snapshot.agents;
                 app.runtime_tools=snapshot.tools;
                 app.runtime_artifacts=snapshot.artifacts;
+                app.observe_runtime_version(snapshot.runtime_version);
                 if runtime_ui::surface_pending_gates(&mut app,&runtime.home,&runtime.tx){
                     execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
                 }
@@ -759,6 +793,19 @@ async fn event_loop(
                                 app.attention_detail=None;
                             }
                         } else if key.code==KeyCode::Esc{app.attention_detail=None;}
+                        else if matches!(key.code,KeyCode::Char('m')|KeyCode::Char('M')) {
+                            // Dismiss from the detail popup itself. Until now
+                            // `M` only worked with the sidebar focused on the
+                            // Inbox section, so an item whose only sane action
+                            // was "stop showing me this" had no exit here.
+                            if app.attention_dismiss(&detail.id) {
+                                session.attention_read=app.attention_read.clone();
+                                store.save(session)?;
+                                app.notice=Some(language.text("已从 Inbox 移除该条目","Item dismissed from the Inbox","この項目を Inbox から削除しました").to_owned());
+                            } else {
+                                app.notice=Some(language.text("运行中的条目不能忽略","A running item cannot be dismissed","実行中の項目は削除できません").to_owned());
+                            }
+                        }
                         else if key.code==KeyCode::Enter
                             && let Some(gate)=app.selected_remote_gate()
                         {
@@ -1087,6 +1134,16 @@ async fn event_loop(
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
                             }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
+                            if let Some(parsed)=daemon_commands::parse(&prompt) {
+                                match parsed {
+                                    Ok(command)=>{
+                                        app.append_transcript(format!("System: {} · {}",language.text("Runtime 操作已提交","Runtime action submitted","Runtime 操作を送信しました"),prompt.trim()));
+                                        daemon_commands::dispatch(command,runtime.home.clone(),language,runtime.tx.clone());
+                                    },
+                                    Err(usage)=>app.append_transcript(format!("Error: {usage}")),
+                                }
+                                continue;
+                            }
                             match webapp_commands::handle_webapp_command(&prompt,&runtime.home,&runtime.runtime_submit.workspace,runtime.runtime_submit.config.as_deref(),runtime.runtime_submit.profile.as_deref(),language).await {
                                 Ok(Some(message))=>{app.append_transcript(message);continue;},
                                 Ok(None)=>{},
@@ -1206,6 +1263,8 @@ impl App {
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
             runtime_gates: Vec::new(),
+            runtime_version: None,
+            runtime_version_warned: false,
             surfaced_gates: BTreeSet::new(),
             runtime_agents: Vec::new(),
             runtime_tools: Vec::new(),
@@ -1228,7 +1287,10 @@ impl App {
             command_selected: 0,
             command_menu_dismissed: false,
             focus: FocusPane::Prompt,
-            sidebar_visible: true,
+            // Hidden by default: the transcript is what the user came for,
+            // and the status column is a lookup surface, not a permanent
+            // one. `/sidebar` or Ctrl+B brings it back.
+            sidebar_visible: false,
             sidebar_selected: 0,
             sidebar_expanded: [true, true, true, true],
             sidebar_scroll: 0,
@@ -1404,6 +1466,25 @@ impl App {
         ));
         true
     }
+    /// Dismiss one Inbox item by id and close the detail popup. Running
+    /// items are refused: they are still doing something, and hiding them
+    /// would lose the only handle the user has on them.
+    fn attention_dismiss(&mut self, id: &str) -> bool {
+        let running = self
+            .attention_items()
+            .into_iter()
+            .find(|item| item.id == id)
+            .is_some_and(|item| item.status == RuntimeStatus::Working);
+        if running {
+            return false;
+        }
+        self.attention_read.insert(id.to_owned());
+        self.attention_detail = None;
+        let remaining = self.attention_items().len();
+        self.attention_selected = self.attention_selected.min(remaining.saturating_sub(1));
+        true
+    }
+
     fn attention_mark_read(&mut self) -> bool {
         let Some(item) = self.selected_attention() else {
             return false;
@@ -1923,6 +2004,43 @@ impl App {
         self.transient_thought = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
+    /// The Runtime's version when it differs from this binary's. The TUI is
+    /// only a front end — a daemon started days ago keeps executing tools
+    /// with its own (old) approval policy, so `willdeep --version` saying
+    /// 0.22 proves nothing about what actually runs commands.
+    pub(crate) fn stale_runtime_version(&self) -> Option<&str> {
+        self.runtime_version
+            .as_deref()
+            .filter(|version| *version != willdeep_core::VERSION)
+    }
+
+    /// Record the Runtime version from a snapshot, announcing a mismatch in
+    /// the transcript the first time it is seen.
+    fn observe_runtime_version(&mut self, version: Option<String>) {
+        if self.runtime_version.as_deref() != version.as_deref() {
+            // A handoff to a different Runtime deserves a fresh warning.
+            self.runtime_version_warned = false;
+        }
+        self.runtime_version = version;
+        let Some(stale) = self.stale_runtime_version().map(str::to_owned) else {
+            return;
+        };
+        if self.runtime_version_warned {
+            return;
+        }
+        self.runtime_version_warned = true;
+        let message = self
+            .language
+            .text(
+                "⚠ Runtime {runtime} 与客户端 {client} 版本不一致。命令实际由 Runtime 执行，当前仍按旧版审批策略运行。请运行 `willdeep daemon upgrade` 后重试。",
+                "⚠ Runtime {runtime} does not match client {client}. Commands execute inside the Runtime, which still applies its older approval policy. Run `willdeep daemon upgrade`, then retry.",
+                "⚠ Runtime {runtime} とクライアント {client} のバージョンが不一致です。コマンドは Runtime 側で実行され、古い承認ポリシーが適用されます。`willdeep daemon upgrade` を実行してください。",
+            )
+            .replace("{runtime}", &stale)
+            .replace("{client}", willdeep_core::VERSION);
+        self.append_transcript(format!("System: {message}"));
+    }
+
     /// Show an approval immediately, or queue it behind the one on screen.
     /// Returns true when the request became visible right now — the caller
     /// rings the terminal bell for that case, so a user looking elsewhere
@@ -2303,6 +2421,7 @@ impl App {
             command,
             "/agent"
                 | "/compress"
+                | "/daemon"
                 | "/diff"
                 | "/local"
                 | "/mobile"
@@ -2315,7 +2434,7 @@ impl App {
         }
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /webapp [status|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /sidebar [on|off] (status sidebar, hidden by default; Ctrl+B too) · /daemon [status|start|stop|upgrade] · /webapp [status|start|stop|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -2330,6 +2449,40 @@ impl App {
                 "System: Goal · {}",
                 self.goal.as_deref().unwrap_or("not set")
             )),
+            "/sidebar" => {
+                let argument = args.trim().to_ascii_lowercase();
+                let visible = match argument.as_str() {
+                    "" | "toggle" => !self.sidebar_visible,
+                    "on" | "show" | "open" => true,
+                    "off" | "hide" | "close" => false,
+                    other => {
+                        self.append_transcript(format!(
+                            "Error: usage: {command} [on|off] (got `{other}`)"
+                        ));
+                        return true;
+                    }
+                };
+                self.sidebar_visible = visible;
+                if !visible {
+                    self.focus = FocusPane::Prompt;
+                }
+                self.append_transcript(format!(
+                    "System: {}",
+                    if visible {
+                        self.language.text(
+                            "状态栏已显示（Ctrl+B 隐藏）",
+                            "Status sidebar shown (Ctrl+B hides it)",
+                            "状態サイドバーを表示しました（Ctrl+B で非表示）",
+                        )
+                    } else {
+                        self.language.text(
+                            "状态栏已隐藏（/sidebar 或 Ctrl+B 显示）",
+                            "Status sidebar hidden (/sidebar or Ctrl+B shows it)",
+                            "状態サイドバーを非表示にしました（/sidebar または Ctrl+B で表示）",
+                        )
+                    }
+                ));
+            }
             "/skills" => {
                 self.append_transcript(format!("System: Available skills\n{}", skills.summary()))
             }
@@ -3526,13 +3679,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 显示或隐藏状态栏       Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B Show or hide Status            Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B 状態欄を表示/非表示     Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }

@@ -1719,6 +1719,213 @@ mod tests {
         assert!(app.question.is_none());
     }
 
+    /// The status sidebar is a lookup surface, not a permanent one: it
+    /// starts hidden and `/sidebar` brings it back.
+    #[test]
+    fn sidebar_starts_hidden_and_the_command_toggles_it() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+        assert!(!app.sidebar_visible, "the sidebar must start hidden");
+
+        assert!(app.handle_slash_command("/sidebar", &skills));
+        assert!(app.sidebar_visible);
+        assert!(app.handle_slash_command("/sidebar", &skills));
+        assert!(!app.sidebar_visible, "a second /sidebar hides it again");
+
+        // Explicit forms.
+        assert!(app.handle_slash_command("/sidebar on", &skills));
+        assert!(app.sidebar_visible);
+        assert!(app.handle_slash_command("/sidebar off", &skills));
+        assert!(!app.sidebar_visible);
+        assert_eq!(
+            app.focus,
+            FocusPane::Prompt,
+            "hiding the sidebar must not leave focus stranded on it"
+        );
+
+        // A bad argument reports usage instead of silently toggling.
+        app.sidebar_visible = false;
+        assert!(app.handle_slash_command("/sidebar sideways", &skills));
+        assert!(!app.sidebar_visible);
+        assert!(app.transcript.iter().any(|line| line.contains("usage:")));
+    }
+
+    /// Many Inbox rows have no action left except "stop showing me this" —
+    /// a Runtime task that was interrupted days ago, for instance. Dismiss
+    /// must work, must persist, and must refuse running items.
+    #[test]
+    fn inbox_items_can_be_dismissed_but_running_ones_cannot() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.runtime_attention.push(AttentionItem {
+            id: "runtime-task:dead".to_owned(),
+            source: AttentionSource::BackgroundShell,
+            title: "Runtime task".to_owned(),
+            detail: "Status: Interrupted".to_owned(),
+            status: RuntimeStatus::Failed,
+            elapsed_millis: Some(319_129_000),
+        });
+        app.runtime_attention.push(AttentionItem {
+            id: "runtime-task:live".to_owned(),
+            source: AttentionSource::BackgroundShell,
+            title: "Runtime task".to_owned(),
+            detail: String::new(),
+            status: RuntimeStatus::Working,
+            elapsed_millis: Some(1_000),
+        });
+        assert_eq!(app.attention_items().len(), 2);
+
+        assert!(
+            app.attention_dismiss("runtime-task:dead"),
+            "a settled item must be dismissible"
+        );
+        let remaining = app.attention_items();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "runtime-task:live");
+        assert!(
+            app.attention_detail.is_none(),
+            "dismissing closes the detail popup"
+        );
+
+        assert!(
+            !app.attention_dismiss("runtime-task:live"),
+            "a running item must not be hidden — it is the only handle on it"
+        );
+        assert_eq!(app.attention_items().len(), 1);
+    }
+
+    /// Failed background tasks are worth keeping around — but not forever.
+    /// A command that failed yesterday is noise crowding out what actually
+    /// needs attention today.
+    #[test]
+    fn background_tasks_are_recycled_by_status_and_age() {
+        use crate::tui::sidebar::background_task_visible;
+        use willdeep_core::{BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskStatus};
+
+        let task = |status, settled_millis| BackgroundTaskSnapshot {
+            id: "task".to_owned(),
+            agent_id: None,
+            kind: BackgroundTaskKind::Shell,
+            label: "job".to_owned(),
+            status,
+            elapsed_millis: 10,
+            settled_millis,
+            exit_code: None,
+            output_bytes: 0,
+        };
+
+        const MINUTE: u64 = 60_000;
+        const HOUR: u64 = 60 * MINUTE;
+
+        // Running tasks never expire.
+        assert!(background_task_visible(&task(
+            BackgroundTaskStatus::Running,
+            None
+        )));
+        // Success: gone after a minute.
+        assert!(background_task_visible(&task(
+            BackgroundTaskStatus::Completed,
+            Some(30_000)
+        )));
+        assert!(!background_task_visible(&task(
+            BackgroundTaskStatus::Completed,
+            Some(2 * MINUTE)
+        )));
+        // Failure: still visible hours later, gone after a day.
+        for status in [
+            BackgroundTaskStatus::Failed,
+            BackgroundTaskStatus::TimedOut,
+            BackgroundTaskStatus::Killed,
+        ] {
+            assert!(
+                background_task_visible(&task(status.clone(), Some(6 * HOUR))),
+                "{status:?} must survive six hours"
+            );
+            assert!(
+                !background_task_visible(&task(status.clone(), Some(25 * HOUR))),
+                "{status:?} must be recycled after a day"
+            );
+        }
+    }
+
+    /// `/daemon` and `/webapp` are handled by the main loop, not by
+    /// `handle_slash_command`, so they must be declared as pass-through —
+    /// otherwise they would be reported as unknown commands.
+    #[test]
+    fn runtime_and_webapp_commands_pass_through_to_the_main_loop() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+        for command in [
+            "/daemon",
+            "/daemon upgrade",
+            "/webapp",
+            "/webapp stop",
+            "/webapp status",
+        ] {
+            assert!(
+                !app.handle_slash_command(command, &skills),
+                "{command} must be handled by the main loop"
+            );
+        }
+        assert!(
+            app.transcript.is_empty(),
+            "pass-through commands must not write an error line: {:?}",
+            app.transcript
+        );
+        // A genuinely unknown command still reports itself.
+        assert!(app.handle_slash_command("/nope", &skills));
+        assert!(
+            app.transcript
+                .iter()
+                .any(|line| line.contains("unknown command"))
+        );
+    }
+
+    #[test]
+    fn command_completion_offers_the_runtime_controls() {
+        let matches = command_catalog::command_candidates(Language::En);
+        for command in ["/daemon", "/webapp"] {
+            assert!(
+                matches.iter().any(|(name, _)| *name == command),
+                "{command} missing from the completion catalog"
+            );
+        }
+    }
+
+    /// The TUI is only a front end. A Runtime started days ago keeps
+    /// executing tools with its own approval policy, so a version mismatch
+    /// must be visible — `willdeep --version` alone proves nothing about
+    /// what actually runs commands.
+    #[test]
+    fn a_stale_runtime_version_is_announced_once_and_stays_flagged() {
+        let mut app = App::new(Vec::new(), Language::En);
+        assert_eq!(app.stale_runtime_version(), None, "no Runtime, no warning");
+
+        app.observe_runtime_version(Some("0.21.0-rc62".to_owned()));
+        assert_eq!(app.stale_runtime_version(), Some("0.21.0-rc62"));
+        let warnings = |app: &App| {
+            app.transcript
+                .iter()
+                .filter(|line| line.contains("does not match client"))
+                .count()
+        };
+        assert_eq!(warnings(&app), 1);
+
+        // Repeated snapshots keep the flag but must not spam the transcript.
+        app.observe_runtime_version(Some("0.21.0-rc62".to_owned()));
+        app.observe_runtime_version(Some("0.21.0-rc62".to_owned()));
+        assert_eq!(warnings(&app), 1);
+        assert!(app.stale_runtime_version().is_some());
+
+        // A matching Runtime clears the warning entirely.
+        app.observe_runtime_version(Some(willdeep_core::VERSION.to_owned()));
+        assert_eq!(app.stale_runtime_version(), None);
+        assert_eq!(warnings(&app), 1, "no new line for a healthy Runtime");
+
+        // Handing off to another stale Runtime warns again.
+        app.observe_runtime_version(Some("0.21.0-rc65".to_owned()));
+        assert_eq!(warnings(&app), 2);
+    }
+
     #[test]
     fn switching_sessions_drops_pending_questions_visibly() {
         let mut app = App::new(Vec::new(), Language::En);
