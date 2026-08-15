@@ -159,6 +159,11 @@ pub struct SubagentProfileSettings {
     pub timeout_seconds: Option<u64>,
     pub max_consecutive_failures: Option<usize>,
     pub worktree: Option<String>,
+    /// Byte cap on this worker's tool payloads. Keep it proportional to the
+    /// window: a payload cap larger than the window is not a cap.
+    pub tool_output_limit: Option<usize>,
+    /// Attempts a verified run makes before it reports failure and escalates.
+    pub max_attempts: Option<usize>,
 }
 
 pub struct LoadedConfig {
@@ -252,8 +257,38 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         }
     }
     for (name, subagent) in &file.subagents {
-        if !matches!(name.as_str(), "scout" | "reader" | "deep" | "editor") {
+        if !matches!(
+            name.as_str(),
+            "scout"
+                | "reader"
+                | "deep"
+                | "editor"
+                | "test_fixer"
+                | "build_fixer"
+                | "log_inspector"
+                | "git_detective"
+        ) {
             bail!("unknown subagent profile: {name}");
+        }
+        // 4K is below any usable worker budget once the system prompt and
+        // tool schemas are paid for; past 1M nothing real is being described.
+        if subagent
+            .context_window
+            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
+        {
+            bail!("subagents.{name}.context_window must be between 4000 and 1000000");
+        }
+        if subagent
+            .max_attempts
+            .is_some_and(|value| !(1..=6).contains(&value))
+        {
+            bail!("subagents.{name}.max_attempts must be between 1 and 6");
+        }
+        if subagent
+            .tool_output_limit
+            .is_some_and(|value| !(1_024..=131_072).contains(&value))
+        {
+            bail!("subagents.{name}.tool_output_limit must be between 1024 and 131072");
         }
         if subagent
             .max_turns

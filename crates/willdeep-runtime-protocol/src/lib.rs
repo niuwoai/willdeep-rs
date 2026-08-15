@@ -468,6 +468,19 @@ pub struct RuntimeAgent {
     pub token_budget: Option<u64>,
     pub timeout_seconds: Option<u64>,
     pub report: Option<String>,
+    /// What the run proved. `Some(true)` passed its verifier, `Some(false)`
+    /// failed it, `None` never had one — unverified is its own answer, not a
+    /// quiet success. The verifier command itself stays in the Runtime's
+    /// private state: a command line can carry paths and arguments, and the
+    /// metrics do not need it.
+    #[serde(default)]
+    pub verifier_passed: Option<bool>,
+    /// Attempts the run took before its verdict.
+    #[serde(default)]
+    pub attempts: Option<u64>,
+    /// Commit the run started from.
+    #[serde(default)]
+    pub repo_commit: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,

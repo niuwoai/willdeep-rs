@@ -98,7 +98,13 @@ Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。
 
 `BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
 
-`SubagentCatalog` 内置 scout、reader、deep、editor。每个工种绑定 Provider、模型、工具白名单、上下文窗口和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。editor 的目标先由父 ToolRegistry canonicalize 并单独审批，子 ToolRegistry 再以 canonical 绝对路径执行单文件匹配，符号链接或路径别名不能扩大授权范围。
+`SubagentCatalog` 内置 scout、reader、log_inspector、git_detective、deep、editor、test_fixer、build_fixer。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。
+
+除 `deep` 外的工种运行在自己的小上下文档位（16K / 32K / 64K）并各自限制工具输出字节数——**窗口纪律由客户端执行**，不依赖模型自觉。`deep` 是刻意的例外，它跑父模型并继承会话窗口。
+
+`spawn_agent` 的可选 `task` 参数是 Task Packet：目标、已知事实、约束、相关文件与 verifier 命令。Runtime 按窗口档位把相关文件内联进 Worker 首条消息，并在每次尝试后**由 Runtime 自己执行** verifier 命令来判定成败——退出码是唯一裁决，模型的自述不是。失败输出经纯 Rust 的确定性消化（失败聚焦段 + 尾部，断言原文逐字保留）后回灌下一次尝试；尝试打满即判运行失败并要求升档。verifier 命令过与 `run_command` 同一条门禁链：静态只读放行、破坏性形状直接拒绝、其余交 AI 判官；判官缺席时拒绝，因为子 Agent 没有审批 UI 可回退。
+
+写通道是一条通路的两种规模：写入型工种的目标文件先由父 ToolRegistry canonicalize 并作为**一个集合**整体审批，子 ToolRegistry 再以 canonical 绝对路径做集合成员匹配，符号链接或路径别名不能扩大授权范围；editor 是集合大小为 1 的特例。同一 Catalog 内运行中 Worker 的文件集互斥，冲突时后来者被拒绝并点名冲突文件，锁在运行结束、超时、取消或 panic 时随 `Drop` 释放。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 ### 用户交互与持久授权
 

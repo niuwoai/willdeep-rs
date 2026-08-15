@@ -196,7 +196,7 @@ Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage
 
 ## 其他配置段
 
-- `[subagents.*]` — 子 Agent 的模型绑定、Token 预算、超时与熔断，见 [子 Agent 与后台任务](SUBAGENTS.md)；
+- `[subagents.*]` — 子 Agent 的模型绑定、上下文窗口、工具输出上限（`tool_output_limit`）、验证重试次数（`max_attempts`）、Token 预算、超时与熔断，见 [子 Agent 与后台任务](SUBAGENTS.md) 与 [小上下文 Skill Worker](SKILL_WORKERS.md)；
 - `[mcp_servers.*]` — MCP stdio server，见 [Skills 与 MCP](SKILLS_AND_MCP.md)；
 - `[skills]` 的 `roots` — 额外的 Skill 搜索根目录，见 [Skills 与 MCP](SKILLS_AND_MCP.md)。
 

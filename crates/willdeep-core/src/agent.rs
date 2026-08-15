@@ -111,6 +111,22 @@ pub enum AgentEvent {
         id: uuid::Uuid,
         usage: Usage,
     },
+    /// What a delegated run actually proved, emitted once per run whether it
+    /// passed, failed or had no verifier at all.
+    ///
+    /// This is the only place `verified` is a fact rather than a claim: the
+    /// verdict comes from the verifier's exit code, so a report that reads
+    /// like success but never passed a check cannot be counted as one. With
+    /// `repo_commit` for the tree the run started from, one record is a
+    /// complete replay case — initial state, task, verdict.
+    SubagentVerdict {
+        id: uuid::Uuid,
+        repo_commit: Option<String>,
+        verifier_command: Option<String>,
+        /// `None` when the run had no verifier: unverified, not failed.
+        verifier_passed: Option<bool>,
+        attempts: usize,
+    },
     /// 目标未达，宿主拒绝了一次隐式收口并注入续推引导。
     GoalContinuationInjected {
         rung: ContinuationRung,
@@ -456,16 +472,20 @@ impl Agent {
                     tool: call.name.clone(),
                     source,
                 })?;
-            let approved_target = if catalog.needs_write_approval(args.profile.as_deref()) {
-                let requested = args.target_file.as_deref().ok_or_else(|| {
-                    ToolError::OutsideWorkspace("editor profile requires target_file".to_owned())
-                })?;
-                Some(self.tools.approve_subagent_editor(requested).await?)
+            let scope = catalog.write_scope(args.profile.as_deref());
+            let approved_targets = if scope.writes() {
+                let requested = args.requested_write_targets(scope);
+                if requested.is_empty() {
+                    return Err(ToolError::OutsideWorkspace(
+                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for test_fixer or build_fixer".to_owned(),
+                    ));
+                }
+                Some(self.tools.approve_subagent_write_set(&requested).await?)
             } else {
                 None
             };
             catalog
-                .run(args, approved_target)
+                .run(args, approved_targets)
                 .await
                 .map_err(|error| ToolError::Network(error.to_string()))
         })

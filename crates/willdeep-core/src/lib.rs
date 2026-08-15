@@ -36,7 +36,10 @@ pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use safety::{CommandSafety, classify_with_workspace_write};
 pub use session::{Session, SessionDigest, SessionStore};
 pub use skills::SkillCatalog;
-pub use subagent::{SubagentCatalog, SubagentProfile, builtin_profiles};
+pub use subagent::{
+    SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket, TaskVerifier,
+    builtin_profiles,
+};
 pub use subagent_worktree::SubagentWorktreePolicy;
 pub use tools::{
     ApprovalDecision, ApprovalMode, Approver, CommandVerification, ToolRegistry, UserQuestion,

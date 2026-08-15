@@ -505,8 +505,12 @@ pub(crate) async fn build(
             });
         })
         .with_web_tools(web_tools)
+        // Only the main agent is told a failure is delegable: a subagent
+        // cannot spawn anything, so the hint would be an instruction it has
+        // no way to act on.
+        .with_delegation_hints(true)
         .with_always_allow_store(home.join("always-allow.json"))?;
-    if let Some(judge) = safety_judge {
+    if let Some(judge) = safety_judge.clone() {
         tools = tools.with_safety_judge(judge);
     }
     let tools = tools;
@@ -570,6 +574,12 @@ pub(crate) async fn build(
             if let Some(max_failures) = settings.max_consecutive_failures {
                 subagent.max_consecutive_failures = max_failures;
             }
+            if let Some(limit) = settings.tool_output_limit {
+                subagent.tool_output_limit = Some(limit);
+            }
+            if let Some(max_attempts) = settings.max_attempts {
+                subagent.max_attempts = max_attempts;
+            }
             if let Some(worktree) = settings.worktree.as_deref() {
                 subagent.worktree = match worktree {
                     "dedicated" => willdeep_core::SubagentWorktreePolicy::Dedicated,
@@ -578,11 +588,15 @@ pub(crate) async fn build(
             }
         }
     }
-    let subagents = Arc::new(
-        SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
-            .with_worktree_root(home.join("worktrees").join("subagents"))
-            .with_event_sink(sink.clone()),
-    );
+    let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
+        .with_worktree_root(home.join("worktrees").join("subagents"))
+        .with_event_sink(sink.clone());
+    // Verifier commands run unattended, with no approval card to fall back
+    // on. They go through the same judge the main agent's shell does.
+    if let Some(judge) = safety_judge {
+        catalog = catalog.with_safety_judge(judge);
+    }
+    let subagents = Arc::new(catalog);
     let command_watcher = daemon::start_agent_command_watcher(
         runtime_connection.as_ref(),
         background_tasks.clone(),

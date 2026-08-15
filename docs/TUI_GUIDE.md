@@ -151,7 +151,7 @@ tmux set -g mouse on
 | `/local <任务>` | 仅本轮使用进程内 Harness |
 | `/session` | 管理、搜索、切换、Fork 或导出会话 |
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
-| `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|deep <task>` |
+| `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|deep\|log_inspector\|git_detective <task>` |
 | `/diff` | 打开 Diff Review Center |
 | `/skills` | 查看当前目录发现的技能 |
 | `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |

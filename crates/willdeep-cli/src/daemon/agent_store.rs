@@ -55,6 +55,22 @@ pub(crate) struct RuntimeAgent {
     pub timeout_seconds: Option<u64>,
     #[serde(default)]
     pub report: Option<String>,
+    /// Verifier command this run was judged by. Kept in the Runtime's own
+    /// state file rather than the public agent record: with the commit anchor
+    /// it makes the run replayable, and a command line can carry paths and
+    /// arguments that the public record deliberately does not expose.
+    #[serde(default)]
+    pub verifier_command: Option<String>,
+    /// `Some(false)` is a run that failed its verifier; `None` is a run that
+    /// never had one. Collapsing the two would turn every unverified report
+    /// into either a success or a failure it never earned.
+    #[serde(default)]
+    pub verifier_passed: Option<bool>,
+    #[serde(default)]
+    pub attempts: Option<u64>,
+    /// Commit the run started from, so one record is a complete replay case.
+    #[serde(default)]
+    pub repo_commit: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,
@@ -145,6 +161,10 @@ impl AgentStore {
             token_budget: None,
             timeout_seconds: None,
             report: None,
+            verifier_command: None,
+            verifier_passed: None,
+            attempts: None,
+            repo_commit: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -184,6 +204,10 @@ impl AgentStore {
             agent.token_budget = None;
             agent.timeout_seconds = None;
             agent.report = None;
+            agent.verifier_command = None;
+            agent.verifier_passed = None;
+            agent.attempts = None;
+            agent.repo_commit = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -218,6 +242,10 @@ impl AgentStore {
             token_budget: None,
             timeout_seconds: None,
             report: None,
+            verifier_command: None,
+            verifier_passed: None,
+            attempts: None,
+            repo_commit: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -278,6 +306,10 @@ impl AgentStore {
             token_budget: None,
             timeout_seconds: None,
             report: None,
+            verifier_command: None,
+            verifier_passed: None,
+            attempts: None,
+            repo_commit: None,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
@@ -385,6 +417,24 @@ impl AgentStore {
             }),
             Some("subagent_started") => self.create_child_from_event(task_id, &value),
             Some("subagent_completed") => self.complete_child_from_event(&value),
+            // The verdict arrives before the completion event, so the record
+            // that gets persisted as finished already carries what the run
+            // actually proved.
+            Some("subagent_verdict") => self.update_child_from_event(&value, |agent| {
+                agent.repo_commit = value
+                    .get("repo_commit")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned);
+                agent.verifier_command = value
+                    .get("verifier_command")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned);
+                agent.verifier_passed = value
+                    .get("verifier_passed")
+                    .and_then(|value| value.as_bool());
+                agent.attempts = value.get("attempts").and_then(|value| value.as_u64());
+                agent.updated_at = now();
+            }),
             Some("subagent_turn_started") => self.update_child_from_event(&value, |agent| {
                 agent.status = RuntimeAgentStatus::Running;
                 agent.current_turn = value
@@ -464,6 +514,10 @@ impl AgentStore {
                 .get("timeout_seconds")
                 .and_then(|value| value.as_u64());
             agent.report = None;
+            agent.verifier_command = None;
+            agent.verifier_passed = None;
+            agent.attempts = None;
+            agent.repo_commit = None;
             agent.updated_at = now();
             agent.completed_at = None;
             agent.error = None;
@@ -524,6 +578,10 @@ impl AgentStore {
                     .get("timeout_seconds")
                     .and_then(|value| value.as_u64()),
                 report: None,
+                verifier_command: None,
+                verifier_passed: None,
+                attempts: None,
+                repo_commit: None,
                 created_at: timestamp,
                 updated_at: timestamp,
                 completed_at: None,

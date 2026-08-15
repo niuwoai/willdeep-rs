@@ -656,9 +656,12 @@ fn validate_agent_spawn(
     action: WebAgentSpawnAction,
 ) -> Result<(String, String, Option<String>), WebError> {
     let profile = action.profile.trim().to_owned();
-    if !matches!(profile.as_str(), "scout" | "reader" | "deep") {
+    if !matches!(
+        profile.as_str(),
+        "scout" | "reader" | "deep" | "log_inspector" | "git_detective"
+    ) {
         return Err(WebError::bad_request(
-            "profile must be one of scout, reader, or deep",
+            "profile must be one of scout, reader, deep, log_inspector, or git_detective",
         ));
     }
     let prompt = action.prompt.trim().to_owned();

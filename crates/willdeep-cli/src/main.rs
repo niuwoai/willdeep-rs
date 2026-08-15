@@ -1340,6 +1340,19 @@ impl EventSink for TerminalSink {
                     eprintln!("[subagent] id={id} usage={total}");
                 }
             }
+            AgentEvent::SubagentVerdict {
+                id,
+                verifier_passed,
+                attempts,
+                ..
+            } => eprintln!(
+                "[subagent] id={id} verified={} attempts={attempts}",
+                match verifier_passed {
+                    Some(true) => "passed",
+                    Some(false) => "failed",
+                    None => "not-verified",
+                }
+            ),
             AgentEvent::GoalContinuationInjected { rung } => {
                 eprintln!("[goal] not met · continuing · {rung:?}")
             }
@@ -1460,6 +1473,20 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
                 SoftStopReason::WallClock => "wall_clock",
                 SoftStopReason::Continuations => "continuations",
             }
+        }),
+        AgentEvent::SubagentVerdict {
+            id,
+            repo_commit,
+            verifier_command,
+            verifier_passed,
+            attempts,
+        } => serde_json::json!({
+            "type": "subagent_verdict",
+            "id": id,
+            "repo_commit": repo_commit,
+            "verifier_command": verifier_command,
+            "verifier_passed": verifier_passed,
+            "attempts": attempts
         }),
         AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
             "type": "subagent_turn_started",
