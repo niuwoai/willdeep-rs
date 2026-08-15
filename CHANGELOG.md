@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.0-rc4] - 2026-08-14
+
+### Fixed
+- 所有 Provider 请求统一新增 `X-Client-Name: WillDeep CLI` 与同版本的 `X-Client-Version`，some.im 网关客户端排行榜不再把 WillDeep CLI 请求归为空客户端，BYOK 第三方端点也能明确识别调用方；原有 User-Agent、会话与工作区标识保持不变。
+
+### Tests
+- 新增客户端请求头回归测试，覆盖 some.im、OpenAI Compatible 与 Anthropic 三类 Provider，锁定名称与版本均随请求发出。
+
 ## [0.23.0-rc3] - 2026-08-14
 
 ### Changed

@@ -3,6 +3,7 @@ use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use super::{ProviderConfig, ProviderError, ProviderKind};
 
 const ERROR_BODY_LIMIT: usize = 8 * 1024;
+const CLIENT_NAME: &str = "WillDeep CLI";
 
 pub fn client(config: &ProviderConfig) -> Result<Client, ProviderError> {
     Client::builder()
@@ -32,11 +33,12 @@ pub fn anthropic_endpoint(base_url: &str) -> Result<Url, ProviderError> {
 }
 
 pub fn openai_auth(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {
-    let request = request.bearer_auth(config.api_key.trim());
+    let request = apply_client_headers(request).bearer_auth(config.api_key.trim());
     apply_some_im_headers(request, config)
 }
 
 pub fn anthropic_auth(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {
+    let request = apply_client_headers(request);
     let request = if config.kind == ProviderKind::SomeIm {
         request.bearer_auth(config.api_key.trim())
     } else {
@@ -46,6 +48,12 @@ pub fn anthropic_auth(request: RequestBuilder, config: &ProviderConfig) -> Reque
     apply_some_im_headers(request, config)
 }
 
+fn apply_client_headers(request: RequestBuilder) -> RequestBuilder {
+    request
+        .header("x-client-name", CLIENT_NAME)
+        .header("x-client-version", crate::VERSION)
+}
+
 fn apply_some_im_headers(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {
     if config.kind != ProviderKind::SomeIm {
         return request;
@@ -53,6 +61,57 @@ fn apply_some_im_headers(request: RequestBuilder, config: &ProviderConfig) -> Re
     request
         .header("x-willdeep-session-id", &config.session_id)
         .header("x-willdeep-workspace-id", &config.workspace_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ApiDialect, ProviderConfig};
+
+    #[test]
+    fn every_provider_request_includes_client_identity() {
+        for (kind, base_url) in [
+            (ProviderKind::SomeIm, "https://some.im/v1"),
+            (
+                ProviderKind::OpenAiCompatible,
+                "https://provider.example/v1",
+            ),
+            (ProviderKind::Anthropic, "https://api.anthropic.com"),
+        ] {
+            let config = ProviderConfig::new(
+                kind,
+                ApiDialect::Responses,
+                base_url,
+                "test-key",
+                "test-model",
+            );
+            let request = client(&config)
+                .expect("client")
+                .get(format!("{base_url}/models"));
+            let request = if kind == ProviderKind::Anthropic {
+                anthropic_auth(request, &config)
+            } else {
+                openai_auth(request, &config)
+            }
+            .build()
+            .expect("request");
+
+            assert_eq!(
+                request
+                    .headers()
+                    .get("x-client-name")
+                    .and_then(|value| value.to_str().ok()),
+                Some(CLIENT_NAME)
+            );
+            assert_eq!(
+                request
+                    .headers()
+                    .get("x-client-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::VERSION)
+            );
+        }
+    }
 }
 
 pub async fn decode_success(
