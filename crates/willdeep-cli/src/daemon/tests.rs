@@ -441,6 +441,20 @@ fn agent_store_persists_structured_harness_lifecycle() {
         .apply_harness_event(
             task_id,
             &child_event(
+                "subagent_verdict",
+                serde_json::json!({
+                    "repo_commit": "0123456789abcdef0123456789abcdef01234567",
+                    "verifier_command": "cargo test -p willdeep-core",
+                    "verifier_passed": true,
+                    "attempts": 2
+                }),
+            ),
+        )
+        .unwrap();
+    store
+        .apply_harness_event(
+            task_id,
+            &child_event(
                 "subagent_completed",
                 serde_json::json!({"status": "completed"}),
             ),
@@ -448,6 +462,18 @@ fn agent_store_persists_structured_harness_lifecycle() {
         .unwrap();
     let completed_child = store.get(child_id).unwrap().unwrap();
     assert_eq!(completed_child.status, RuntimeAgentStatus::Completed);
+    // What the run proved has to survive to the persisted record: the verdict
+    // is the only thing that separates a verified pass from a confident report.
+    assert_eq!(completed_child.verifier_passed, Some(true));
+    assert_eq!(completed_child.attempts, Some(2));
+    assert_eq!(
+        completed_child.verifier_command.as_deref(),
+        Some("cargo test -p willdeep-core")
+    );
+    assert_eq!(
+        completed_child.repo_commit.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
     assert_eq!(completed_child.model.as_deref(), Some("scout-model"));
     assert_eq!(completed_child.current_turn, 2);
     assert_eq!(completed_child.total_tokens, Some(9));
@@ -474,6 +500,11 @@ fn agent_store_persists_structured_harness_lifecycle() {
     assert_eq!(retried_child.status, RuntimeAgentStatus::Running);
     assert_eq!(retried_child.current_turn, 0);
     assert_eq!(retried_child.total_tokens, Some(9));
+    // A rerun starts unproved. Carrying the previous verdict forward would
+    // let a retry inherit a pass it has not earned yet.
+    assert_eq!(retried_child.verifier_passed, None);
+    assert_eq!(retried_child.attempts, None);
+    assert_eq!(retried_child.repo_commit, None);
     store
         .apply_harness_event(
             task_id,

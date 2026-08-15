@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-15 | 当前版本：v0.24.0-rc1
+> 最后更新：2026-08-15 | 当前版本：v0.25.0-rc1
 
 ## 项目简介
 
@@ -150,6 +150,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Task Packet 结构化派工（目标 / 已知事实 / 约束 / 相关文件内联 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
 - 写入型工种的文件集写通道：一次审批整个集合、越界拒绝并给出扩权路径、运行中文件集互斥；
 - 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；
+- 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Skill Coverage、Worker Verified Success 与 Escalation Rate 三个指标，「未验证」是独立于通过与失败的第三种答案；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
 - Core `ask_user` 候选单选/多选与自由输入交互；
 - Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；

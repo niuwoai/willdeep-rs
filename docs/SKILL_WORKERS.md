@@ -144,9 +144,42 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | P0 观测/纪律 | 窗口分档、per-profile payload 上限 | ✅ 已落地 |
 | P1 闭环 | Task Packet、Verifier 循环、文件集锁、`test_fixer` / `build_fixer` | ✅ 已落地 |
 | P2 露脸 | 确定性派工触发、`log_inspector` / `git_detective` | ✅ 已落地 |
-| P3 遥测 | `verifierPassed` / `attemptCount` / `repoCommit` 结构化落盘、Skill Coverage 等 KPI 面板、Replay 回放 | ⏳ 未做 |
+| P3 遥测 | 判定结构化落盘、三个北极星指标、Replay 锚点 | ✅ 已落地 |
+| 后续 | Replay 回放工具、per-skill 路由表、verdict 回执上报 some.im | ⏳ 未做 |
 
-P3 之前，verifier 的结果以 `<verifier … />` 标记写在报告文本里，父 Agent 和 Runtime 都能看到，但**还不是可统计的结构化字段**——要算 Worker Verified Success 这类指标，得等 P3 把字段落进 transcript。
+## 遥测与指标
+
+每次子 Agent 运行结束都发一条判定事件并落进 Runtime 的 agent 记录：
+
+| 字段 | 含义 | 公开 API |
+|---|---|---|
+| `verifier_passed` | `true` 通过、`false` 未通过、**`None` 压根没有 verifier** | ✅ |
+| `attempts` | 拿到判定前跑了几次 | ✅ |
+| `repo_commit` | 运行开始时的 HEAD——有了它，一条记录就是一个可回放的 case | ✅ |
+| `verifier_command` | 用哪条命令判的 | ❌ 只留在 Runtime 本地状态文件 |
+
+**「没验证」是独立的第三种答案**，不是通过也不是失败。把它并进任何一边，都会让指标开始自我恭维——每份没验证过的报告都会凭空变成一次成功（或一次失败），而它两样都没挣到。命令原文不进公开记录：命令行会带路径和参数，而算指标根本不需要它。
+
+```bash
+willdeep daemon agent-metrics
+```
+
+```text
+agents                     children=5   workers=4
+skill_coverage             80.0%    (窄工种运行数 / 全部子 Agent 运行数；目标 ≥ 50%)
+worker_verified_success    66.7%    (通过数 / 有 verifier 的运行数：2/3；目标 ≥ 85%)
+escalation_rate            33.3%    (尝试打满、需要更大模型的比例；目标 ≤ 15%)
+attempts_per_verified_run  2.00
+unverified_runs            2        (没给 verifier，所以两边都没证明)
+```
+
+三条口径说明：
+
+- **Skill Coverage** 的分母是全部子 Agent 运行数，`deep` 不算窄工种——它按设计就跑父模型，把它算成派工只会让这个数字自我美化。rs 侧没有「主模型内联轮次」的计数，所以这个口径比 Xedit 设计里的略宽，读的时候记住这一点。
+- **Escalation Rate** 在 rs 侧的口径是「有 verifier 且尝试打满的运行占比」——即需要换更大模型才可能过的比例。rs 的升档是人工 `retry-agent --model`，没有自动升档记录可统计。
+- **分母为 0 时打印 `-`，不打印 0%**。「什么都没验证」和「什么都没通过」是两件事，一个分不清它们的指标比没有指标更糟。
+
+`willdeep daemon agent <id>` 也会多打一行 `verdict`，TUI 在子 Agent 结束时提示验证结果与尝试次数。
 
 ## 相关文档
 

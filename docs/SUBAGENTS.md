@@ -52,6 +52,8 @@
 
 写入型工种（`test_fixer` / `build_fixer`）的可改文件集就是 `task.relevant_files`，一次审批整个集合，越界写入一律拒绝。
 
+每次运行结束都会落盘一条判定（验证结果 / 尝试次数 / 起始 commit），`willdeep daemon agent <id>` 多打一行 `verdict`，`willdeep daemon agent-metrics` 汇总三个派工指标。
+
 完整说明见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 ### 模型绑定与预算
@@ -63,7 +65,8 @@
 provider_profile = "some-im"
 model = "glm-5"
 max_turns = 8
-context_window = 128000
+context_window = 32768      # 工种自己的窗口档位，不是会话窗口
+tool_output_limit = 4096    # 单次工具输出字节上限
 token_budget = 32000
 timeout_seconds = 300
 max_consecutive_failures = 3
@@ -80,7 +83,7 @@ max_turns = 6
 worktree = "dedicated"
 ```
 
-Provider 为 some.im 时，`scout` / `reader` / `editor` 的内置默认模型是 `glm-5`，`deep` 继承父模型。
+Provider 为 some.im 时，除 `deep` 外所有工种的内置默认模型都是 `glm-5`，`deep` 继承父模型。
 
 > **注意**：子 Agent 从 Profile 直接构造 Provider 配置，**不继承** `--api-key` / `WILLDEEP_API_KEY`。给子 Agent 绑定独立 Profile 时必须在该 Profile 里写 `api_key` 或 `api_key_env`，见 [认证与凭据](AUTHENTICATION.md)。
 
@@ -131,12 +134,13 @@ willdeep daemon quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_
 ```bash
 willdeep daemon agents
 willdeep daemon agent <agent-id>
+willdeep daemon agent-metrics
 willdeep daemon stop-agent <agent-id>
 willdeep daemon retry-agent <agent-id>
 willdeep daemon instruct-agent <agent-id> "补充要求"
 ```
 
-`agent <id>` 显示单个 Agent 的 Workspace、Profile、状态、轮次、当前工具和 Token。终态 Agent 可以重试，**重试沿用同一 Agent UUID**；`agent.retry` 支持指定新模型，Harness 在重试边界基于原 Provider 配置重建模型实例——运行中的 Agent 不做热切换。
+`agent <id>` 显示单个 Agent 的 Workspace、Profile、状态、轮次、当前工具、Token 和验证判定（是否通过 / 尝试次数 / 起始 commit）。`agent-metrics` 汇总派工指标，口径见 [小上下文 Skill Worker](SKILL_WORKERS.md)。终态 Agent 可以重试，**重试沿用同一 Agent UUID**；`agent.retry` 支持指定新模型，Harness 在重试边界基于原 Provider 配置重建模型实例——运行中的 Agent 不做热切换。
 
 这些命令与其他 Runtime API 一样必须携带私有 `x-willdeep-token`，通过持久队列交给所属的原 Harness 执行并确认。
 
@@ -146,7 +150,7 @@ willdeep daemon instruct-agent <agent-id> "补充要求"
 - `K` 停止运行中的后台 Child Agent，`R` 重试已结束的；
 - `Enter` 打开详情：按 Agent 过滤的最近工具时间线、Workspace Change Artifact、已有结果报告，支持键盘和鼠标滚轮浏览长内容；
 - 详情中可补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 里已有的草稿；
-- `/agent spawn scout|reader|deep <task>` 在活动父会话中创建只读子 Agent。
+- `/agent spawn scout|reader|deep|log_inspector|git_detective <task>` 在活动父会话中创建只读子 Agent。
 
 Agent 列表保持最小摘要，按 `Enter` 才读取受保护的单项详情。
 

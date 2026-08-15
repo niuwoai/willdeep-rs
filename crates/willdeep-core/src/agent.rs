@@ -111,6 +111,22 @@ pub enum AgentEvent {
         id: uuid::Uuid,
         usage: Usage,
     },
+    /// What a delegated run actually proved, emitted once per run whether it
+    /// passed, failed or had no verifier at all.
+    ///
+    /// This is the only place `verified` is a fact rather than a claim: the
+    /// verdict comes from the verifier's exit code, so a report that reads
+    /// like success but never passed a check cannot be counted as one. With
+    /// `repo_commit` for the tree the run started from, one record is a
+    /// complete replay case — initial state, task, verdict.
+    SubagentVerdict {
+        id: uuid::Uuid,
+        repo_commit: Option<String>,
+        verifier_command: Option<String>,
+        /// `None` when the run had no verifier: unverified, not failed.
+        verifier_passed: Option<bool>,
+        attempts: usize,
+    },
     /// 目标未达，宿主拒绝了一次隐式收口并注入续推引导。
     GoalContinuationInjected {
         rung: ContinuationRung,

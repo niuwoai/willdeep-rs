@@ -834,6 +834,16 @@ async fn run_subagent(
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
         None => None,
     };
+    // Read the anchor before the worker touches anything: with the commit the
+    // run started from, this record replays.
+    let repo_commit = head_commit(&workspace).await;
+    let verdict = |passed: Option<bool>, attempts: usize| AgentEvent::SubagentVerdict {
+        id: agent_id,
+        repo_commit: repo_commit.clone(),
+        verifier_command: verifier.as_ref().map(|verifier| verifier.command.clone()),
+        verifier_passed: passed,
+        attempts,
+    };
     let mut brief = compose_brief(&prompt, task.as_ref(), &workspace, &profile).await;
     let attempts = if verifier.is_some() { max_attempts } else { 1 };
     let mut outcome: Option<VerifierOutcome> = None;
@@ -851,10 +861,14 @@ async fn run_subagent(
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
+            // No verifier: unverified, which is not the same as failed, and
+            // the telemetry has to keep the two apart.
+            lifecycle_sink.emit(verdict(None, attempt)).await;
             return Ok(report);
         };
         let result = run_verifier(&workspace, verifier).await?;
         if result.passed {
+            lifecycle_sink.emit(verdict(Some(true), attempt)).await;
             return Ok(format!(
                 "{report}\n\n<verifier command={:?} attempts={attempt} verdict=\"passed\" />",
                 verifier.command
@@ -874,10 +888,29 @@ async fn run_subagent(
     }
 
     let outcome = outcome.expect("a verified run records an outcome before exhausting attempts");
+    lifecycle_sink
+        .emit(verdict(Some(false), outcome.attempts))
+        .await;
     Err(AgentError::Subagent(format!(
         "worker did not reach a verified pass: {} failed after {} attempt(s). Escalate — retry this agent with the parent model, or re-dispatch with a wider task packet.\n\n{}",
         outcome.command, outcome.attempts, outcome.last_digest
     )))
+}
+
+/// The commit a run started from. Best effort: a workspace that is not a Git
+/// repository is a fine place to delegate work, it just cannot be replayed.
+async fn head_commit(workspace: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (commit.len() == 40 && commit.chars().all(|value| value.is_ascii_hexdigit())).then_some(commit)
 }
 
 /// One model pass: a fresh isolated agent, so a failed attempt never leaves
@@ -1775,6 +1808,76 @@ mod tests {
             3,
             "two claimed-but-unverified passes must not have ended the run"
         );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// Telemetry has to keep three outcomes apart: verified, failed
+    /// verification, and never verified at all. Collapsing the third into
+    /// either of the first two is how a delegation metric starts flattering
+    /// itself — every unverified report becomes a success (or a failure) it
+    /// never earned.
+    #[tokio::test]
+    async fn every_run_reports_a_verdict_and_unverified_is_not_a_pass() {
+        let (catalog, root) = fixture();
+        let sink = Arc::new(CaptureSink::default());
+        let catalog = catalog
+            .with_event_sink(sink.clone())
+            .with_safety_judge(Arc::new(AllowingJudge));
+
+        // 1. No verifier at all.
+        catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "look around".to_owned(),
+                    profile: Some("scout".to_owned()),
+                    run_in_background: Some(false),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .expect("unverified run");
+        // 2. A verifier that never passes.
+        catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "fix".to_owned(),
+                    profile: Some("scout".to_owned()),
+                    run_in_background: Some(false),
+                    task: Some(TaskPacket {
+                        goal: "never reachable".to_owned(),
+                        verifier: Some(TaskVerifier {
+                            command: "test -f definitely-not-here".to_owned(),
+                            expected_exit_code: None,
+                        }),
+                        max_attempts: Some(2),
+                        ..TaskPacket::default()
+                    }),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .expect_err("failing verifier");
+
+        let events = sink.0.lock().unwrap();
+        let verdicts = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::SubagentVerdict {
+                    verifier_passed,
+                    attempts,
+                    ..
+                } => Some((*verifier_passed, *attempts)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            verdicts,
+            vec![(None, 1), (Some(false), 2)],
+            "an unverified run reports None, a failed one reports Some(false) with its attempt count"
+        );
+        drop(events);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

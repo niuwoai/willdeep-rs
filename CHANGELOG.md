@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.25.0-rc1] - 2026-08-15
+
+### Added
+- **子 Agent 判定遥测（Skill Worker 分期的 P3）**。上一版把 verifier 的结果写在报告文本里，人看得见、程序算不出——于是「Worker 到底靠不靠谱」这个问题只能凭印象回答，而凭印象回答的下一步通常是「感觉还行」。现在每次子 Agent 运行结束都发一条判定事件并落进 Runtime 的 agent 记录：
+
+  | 字段 | 含义 | 公开 API |
+  |---|---|---|
+  | `verifier_passed` | `true` 通过 / `false` 未通过 / **`None` 压根没有 verifier** | ✅ |
+  | `attempts` | 拿到判定前跑了几次 | ✅ |
+  | `repo_commit` | 运行开始时的 HEAD——有了它一条记录就是一个可回放的 case | ✅ |
+  | `verifier_command` | 用哪条命令判的 | ❌ 只留在 Runtime 本地状态文件 |
+
+  **「没验证」是独立的第三种答案**，不是通过也不是失败。把它并进任何一边，指标就开始自我恭维：每份没验证过的报告都会凭空变成一次成功（或一次失败），而它两样都没挣到。命令原文不进公开记录——命令行会带路径和参数，而算指标根本不需要它。
+
+- **`willdeep daemon agent-metrics`**：从 Runtime 现有的 agent 记录直接算三个北极星指标（Skill Coverage、Worker Verified Success、Escalation Rate），外加平均尝试次数与未验证运行数。没有另一套计数器，也就没有第二份会跟现实对不上的账。**分母为 0 时打印 `-` 而不是 0%**——「什么都没验证」和「什么都没通过」是两件事，一个分不清它们的指标比没有指标更糟。三条口径（含与 Xedit 设计的偏差）写在 `docs/SKILL_WORKERS.md`。
+- `willdeep daemon agent <id>` 增加 `verdict` 行；TUI 在子 Agent 结束时提示验证结果与尝试次数。
+
+### Changed
+- 子 Agent 记录被复用时（重试、Session 续跑）清空上一轮的判定字段。让重试继承上一次的「通过」，等于把遥测变成一台专门生产好消息的机器。
+
+### Tests
+- 三种结局各发一条判定且互不混淆：无 verifier 报 `None`、验证失败报 `Some(false)` 并带真实尝试次数、通过报 `Some(true)`。
+- Runtime 侧：判定事件落盘到 agent 记录；重试后判定被清空。
+- 手工验证：旧格式 `agents.json`（完全没有新字段）能正常读取，指标计算与 `-` 分母行为符合预期。
+
+### Docs
+- `docs/SKILL_WORKERS.md` 新增「遥测与指标」章节与分期状态更新；`SUBAGENTS.md` 补 `agent-metrics`、判定说明，并把过时的 `context_window = 128000` 示例改成工种档位。
+
 ## [0.24.0-rc1] - 2026-08-15
 
 ### Added
