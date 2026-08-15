@@ -27,7 +27,13 @@ Stable tool contract:
 - Prefer read-only tools first. Write and command tools follow the active approval policy.
 - Use workspace-relative paths in tool arguments. Never escape the workspace or expose credentials.
 - Verify changed artifacts before claiming completion. Distinguish verified facts, reasonable inference, and unverified work.
-- Stop calling tools once enough evidence exists and answer with the result, verification, and remaining risks."#;
+- Stop calling tools once enough evidence exists and answer with the result, verification, and remaining risks.
+
+Delegation contract:
+- Delegate bounded work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, test_fixer for failing tests, build_fixer for compile and lint errors, deep only for open-ended cross-file investigation.
+- Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.relevant_files for every file it will need to read or change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
+- Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run. test_fixer and build_fixer require one.
+- A verified worker's files are exactly task.relevant_files, approved as one set, so declare every file it may edit and no more."#;
 
 pub fn build_system_prompt(workspace: &Path) -> String {
     let mut sections = vec![STABLE_CONTRACT.to_owned()];
@@ -110,6 +116,25 @@ mod tests {
             "run_command",
         ] {
             assert!(STABLE_CONTRACT.contains(name), "missing {name}");
+        }
+    }
+
+    /// Workers only get used if the contract says when to reach for them, and
+    /// they only succeed if the parent compiles a real packet. Both halves
+    /// live in the cached prefix, so both are worth pinning.
+    #[test]
+    fn the_stable_prompt_teaches_delegation_and_packet_compilation() {
+        for fragment in [
+            "spawn_agent",
+            "test_fixer",
+            "build_fixer",
+            "log_inspector",
+            "git_detective",
+            "task.relevant_files",
+            "task.known_facts",
+            "task.verifier.command",
+        ] {
+            assert!(STABLE_CONTRACT.contains(fragment), "missing {fragment}");
         }
     }
 }

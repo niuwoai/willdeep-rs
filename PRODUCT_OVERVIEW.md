@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-14 | 当前版本：v0.23.0-rc4
+> 最后更新：2026-08-15 | 当前版本：v0.24.0-rc1
 
 ## 项目简介
 
@@ -146,7 +146,10 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 上下文用量、Token、耗时、自动摘要压缩及宽屏后台状态侧栏。
 - `/compress` 手动压缩当前会话上下文并立即保存；
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
-- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、deep、editor 工种并支持独立模型绑定；
+- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、test_fixer、build_fixer 八个工种，各自跑在自己的小上下文档位并支持独立模型绑定；
+- Task Packet 结构化派工（目标 / 已知事实 / 约束 / 相关文件内联 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
+- 写入型工种的文件集写通道：一次审批整个集合、越界拒绝并给出扩权路径、运行中文件集互斥；
+- 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
 - Core `ask_user` 候选单选/多选与自由输入交互；
 - Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；

@@ -38,11 +38,15 @@ max_output_tokens = 16384
 # Optional per-trade model bindings. Omit a section to use the built-in
 # defaults: scout/reader/editor use some.im glm-5 when the parent is some.im;
 # deep inherits the parent model. provider_profile references [providers.*].
+# Workers run in small windows on purpose: a cheap model given a 128K window
+# does not get smarter, it just burns the window. Only `deep` inherits the
+# session window, because its work genuinely does not fit in a small one.
 [subagents.scout]
 provider_profile = "some-im"
 model = "glm-5"
 max_turns = 8
-context_window = 128000
+context_window = 32768
+tool_output_limit = 4096
 token_budget = 32000
 timeout_seconds = 300
 max_consecutive_failures = 3
@@ -61,6 +65,40 @@ model = "glm-5"
 max_turns = 6
 # Writing profiles default to a dedicated, reviewable Git worktree.
 worktree = "dedicated"
+
+# Verified workers: the runtime runs task.verifier.command after every attempt
+# and the exit code is the verdict. max_attempts bounds how many times a
+# failure is digested and handed back before the run fails and asks for a
+# model escalation.
+[subagents.test_fixer]
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 8
+context_window = 65536
+tool_output_limit = 6144
+max_attempts = 3
+timeout_seconds = 900
+worktree = "dedicated"
+
+[subagents.build_fixer]
+provider_profile = "some-im"
+model = "glm-5"
+context_window = 32768
+max_attempts = 3
+worktree = "dedicated"
+
+# Read-only reporters. log_inspector reads a failure log and names the cause;
+# git_detective works backwards through history to the commit that broke it.
+[subagents.log_inspector]
+provider_profile = "some-im"
+model = "glm-5"
+context_window = 16384
+tool_output_limit = 3072
+
+[subagents.git_detective]
+provider_profile = "some-im"
+model = "glm-5"
+context_window = 32768
 
 # MCP stdio servers are initialized once and exposed as
 # mcp__<server>__<tool>. Put credentials in inherited environment variables;

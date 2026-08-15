@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.24.0-rc1] - 2026-08-15
+
+### Added
+- **小上下文 Skill Worker 体系**（对齐 macOS 版 Xedit 的 `skill-workers.v1` 设计，见新增的 `docs/SKILL_WORKERS.md`）。四件事一起落地，缺任何一件另外三件都不成立：
+
+  - **窗口分档与 payload 上限**。此前四个工种全部共用会话的 128K 窗口，工具输出上限是全局的 128 KB 常量——**给一个廉价模型配 128K 窗口不会让它变强，只会让它把窗口烧穿**：一条 `cargo test` 的失败日志就能把它的上下文吃光，而这正是最需要它清醒的时刻。现在除 `deep` 外每个工种跑在自己的档位（16K / 32K / 64K），并各自限制工具输出字节数（3–6 KB）；`read_file` 与 git 系工具同样按档位收窄。`deep` 是刻意的例外：它跑父模型，因为它的活本来就装不进小窗口。
+  - **Task Packet**。`spawn_agent` 新增可选参数 `task`：目标、已知事实、约束、相关文件和验证命令。相关文件由 Runtime 按档位预算（窗口 × 3/4 字节）读出并**内联进 Worker 的第一条消息**——Worker 每一轮 grep 都在烧窗口，而父 Agent 早就知道该看哪个文件。超预算与读不到的文件都会显式标注，不静默丢弃。**不传 `task` 时行为与以前逐字节相同**。
+  - **Verifier 闭环：Worker 不自证**。带 `verifier` 的运行由 Runtime 在每次尝试后**亲自执行**验证命令，退出码是唯一裁决；「Worker 声称完成但从没跑过验证」这种情况不存在，Runtime 照样跑一遍再判。失败输出经纯 Rust 的确定性消化（失败聚焦段 + 尾部 20 行，**断言原文逐字保留不许转述**）后作为下一次尝试的简报回灌，每次尝试起一个干净的 Agent，只带走消化后的失败，不带走上一轮的死胡同。尝试打满（默认 3、上限 6）**判整个运行失败**并明确要求升档，而不是交一份读起来像成功的报告。
+  - **文件集写通道**。`test_fixer` / `build_fixer` 必须能同时改测试和实现，单文件锁不够。写通道从 `Option<PathBuf>` 泛化为集合：一次审批整个集合（审批卡逐行列出，上限 8 个文件），越界写入拒绝**并告诉 Worker「要扩权就报告父 Agent 重新派工」**，运行中的 Worker 文件集互斥、冲突时点名冲突文件，锁随 `Drop` 释放（超时、取消、panic 都不会留下死锁）。`editor` 成为集合大小为 1 的特例，走同一段代码——一条通路，不开第二套。
+
+- **四个新工种**：`test_fixer`（把失败测试修到绿，64K）、`build_fixer`（修编译/类型/lint，32K）、`log_inspector`（解释失败日志，16K，只读）、`git_detective`（回归定位与 commit 考古，32K，只读）。后两个同时对外部只读 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）开放。
+- **确定性派工触发**。主 Agent 的 `run_command` 返回非零退出码且命令形状匹配测试/构建特征时，工具结果尾部追加一段 `<delegation-hint>`，给出现成的派工配方。不强制、不自动派工——**决定权仍在父 Agent**，只是把派工成本压到一句话。子 Agent 永远收不到这个提示：它不能派生，给它提示只是给一条它执行不了的指令。
+- `[subagents.*]` 新增 `tool_output_limit` 与 `max_attempts`；`context_window` 补上范围校验（4000–1000000）。
+
+### Changed
+- **Verifier 命令的门禁不是「必须只读」**。诚实的 verifier 本来就会写：build 产出目标文件，测试写 fixture。一刀切只读会把用户推回「相信模型自称通过」，那比放行更危险。改成与主 Agent `run_command` 同一条链：静态判定只读的直接放行，破坏性形状**直接拒绝且不给判官**（模型不能靠把命令改叫 verifier 就把 `rm -rf` 说进来），其余交 AI 判官（some.im 下是网关托管的 `someim-security-guard`）。**唯一不可退让的是「不能没有门禁」**——子 Agent 没有审批 UI，判官没配或掉线时答案是拒绝。
+- 带 verifier 的 Worker 的 `run_command` 被收窄到**只能执行它自己的验证命令**，连静态安全的 `ls` 都不放行。无人值守的上下文里，一个能跑任意命令的 shell 没有主人。
+
+### Tests
+- Verifier 闭环：一个每次都自称完成、实际第三次才真干活的 Worker，必须跑满三次尝试才算通过——两次「自称成功」不能结束运行。
+- 尝试打满时运行判失败，报告带尝试次数、要求升档，并保留失败输出原文。
+- 不可判定的 verifier 在没有判官时被拒绝并说明原因；破坏性 verifier 直接拒绝、不经判官。
+- Task Packet 内联：目标、事实、约束、验证命令与**文件正文**都进首条消息，读不到的文件被点名而非静默丢弃。
+- 文件集锁：交集冲突被拒绝并点名文件，持有者结束后释放。
+- 工种档位回归：只有 `deep` 继承会话窗口，其余工种窗口不超过 64K 且 payload 上限小于窗口。
+- 失败输出消化：500 行编译噪音里的断言原文逐字保留，整体不超预算。
+- 写通道：集合内每个文件可写、集合外拒绝且提示扩权路径；带 allowlist 的 Worker 只能跑验证命令；派工提示只出现在主 Agent 的失败测试命令上。
+
+### Docs
+- 新增 `docs/SKILL_WORKERS.md`：工种表、Task Packet 格式、Verifier 门禁两段规则、文件集锁三道门、配置项、分期现状与**与 Xedit 设计的差异记录**（冲突文件集在 rs 侧是拒绝并点名，不是排队）。
+- `docs/SUBAGENTS.md` 工种表补窗口列与 Task Packet 小节；`docs/ARCHITECTURE.md` 子 Agent 段重写；`config.example.toml` 补四个新工种示例并把 `scout` 的窗口从 128000 改成 32768（原值正是本次要治的病）。
+
+### Known gaps
+- P3 遥测未做：verifier 结果目前以 `<verifier … />` 标记写在报告文本里，父 Agent 和 Runtime 都看得到，但**还不是可统计的结构化字段**。Worker Verified Success、Skill Coverage 这类 KPI 要等字段落进 transcript 才能算。
+
 ## [0.23.0-rc4] - 2026-08-14
 
 ### Fixed

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,6 +34,10 @@ const MAX_SUPERVISOR_REQUEST_BYTES: usize = 256 * 1024;
 const BACKGROUND_SUPERVISOR_ENV: &str = "WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR";
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
+/// Ceiling on how many files one writing subagent may claim. A worker that
+/// wants to touch a dozen files is not doing a bounded local fix; the parent
+/// should split the work instead of widening the blast radius.
+const MAX_SUBAGENT_WRITE_TARGETS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandVerification {
@@ -175,7 +179,24 @@ pub struct ToolRegistry {
     web: Option<WebToolConfig>,
     background: Arc<BackgroundTaskRegistry>,
     allowed_tools: Option<HashSet<String>>,
-    write_target: Option<PathBuf>,
+    /// Every path a subagent is allowed to write. `None` means the registry
+    /// is not write-scoped at all (the main agent); a set means writes are
+    /// confined to exactly these canonical paths. The single-file `editor`
+    /// profile is the set-of-one special case — one gate, not two.
+    write_targets: Option<BTreeSet<PathBuf>>,
+    /// Exact command lines a write-scoped worker may run. `None` leaves
+    /// `run_command` under the ordinary approval chain; a set means only
+    /// these literal commands (its verifier) are runnable at all.
+    command_allowlist: Option<HashSet<String>>,
+    /// Byte cap on tool payloads handed back to the model. `None` keeps the
+    /// per-tool defaults the main agent has always used; `Some` is the
+    /// small-context worker budget — a 128 KB test log would eat a 32K
+    /// window whole, and so would one 256 KB file read.
+    tool_output_limit: Option<usize>,
+    /// Append a delegation hint when a test/build command fails. Only the
+    /// main agent gets these — a subagent cannot spawn anything, so the hint
+    /// would be an instruction it has no way to follow.
+    delegation_hints: bool,
     always_allowed: Arc<Mutex<HashSet<String>>>,
     always_allow_path: Option<PathBuf>,
     verification_reporter: Option<VerificationReporter>,
@@ -205,7 +226,10 @@ impl ToolRegistry {
             web: None,
             background: Arc::new(BackgroundTaskRegistry::default()),
             allowed_tools: None,
-            write_target: None,
+            write_targets: None,
+            command_allowlist: None,
+            tool_output_limit: None,
+            delegation_hints: false,
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
             always_allow_path: None,
             verification_reporter: None,
@@ -294,31 +318,88 @@ impl ToolRegistry {
         self.allowed_tools = Some(names.into_iter().collect());
         self
     }
-    pub fn with_write_target(mut self, target: Option<PathBuf>) -> Self {
-        self.write_target = target;
+    /// Confine writes to exactly this set of already-approved paths.
+    pub fn with_write_targets(mut self, targets: Option<BTreeSet<PathBuf>>) -> Self {
+        self.write_targets = targets;
         self
     }
 
-    pub async fn approve_subagent_editor(&self, requested: &str) -> Result<PathBuf, ToolError> {
+    /// Confine `run_command` to exactly these literal command lines.
+    pub fn with_command_allowlist(mut self, commands: Option<HashSet<String>>) -> Self {
+        self.command_allowlist = commands;
+        self
+    }
+
+    /// Cap every tool payload this registry returns. Values below 1 KB are
+    /// raised to 1 KB: a cap that truncates the failing assertion itself
+    /// defeats the point of showing the output at all.
+    pub fn with_tool_output_limit(mut self, limit: usize) -> Self {
+        self.tool_output_limit = Some(limit.clamp(1_024, MAX_COMMAND_OUTPUT_BYTES));
+        self
+    }
+
+    fn command_output_limit(&self) -> usize {
+        self.tool_output_limit.unwrap_or(MAX_COMMAND_OUTPUT_BYTES)
+    }
+
+    fn read_bytes_limit(&self) -> usize {
+        self.tool_output_limit.unwrap_or(MAX_READ_BYTES)
+    }
+
+    /// Append the "this failure is delegable" hint to failing test/build
+    /// commands. Main agent only.
+    pub fn with_delegation_hints(mut self, enabled: bool) -> Self {
+        self.delegation_hints = enabled;
+        self
+    }
+
+    /// Approve a subagent's write scope: one canonical existing file per
+    /// requested path, approved as one set so the operator sees the whole
+    /// blast radius on a single card rather than N cards they cannot relate
+    /// to each other.
+    pub async fn approve_subagent_write_set(
+        &self,
+        requested: &[String],
+    ) -> Result<BTreeSet<PathBuf>, ToolError> {
         if self.approval_mode == ApprovalMode::ReadOnly {
-            return Err(ToolError::ReadOnlyPolicy("editor subagent".to_owned()));
+            return Err(ToolError::ReadOnlyPolicy("writing subagent".to_owned()));
         }
-        let target = self.resolve_existing(requested)?;
-        if !target.is_file() {
-            return Err(ToolError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "editor target is not a file",
+        if requested.is_empty() {
+            return Err(ToolError::OutsideWorkspace(
+                "a writing subagent needs at least one target file".to_owned(),
+            ));
+        }
+        if requested.len() > MAX_SUBAGENT_WRITE_TARGETS {
+            return Err(ToolError::OutsideWorkspace(format!(
+                "a writing subagent may claim at most {MAX_SUBAGENT_WRITE_TARGETS} files, got {}",
+                requested.len()
             )));
         }
+        let mut targets = BTreeSet::new();
+        for path in requested {
+            let target = self.resolve_existing(path)?;
+            if !target.is_file() {
+                return Err(ToolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("subagent write target is not a file: {path}"),
+                )));
+            }
+            targets.insert(target);
+        }
+        let listing = targets
+            .iter()
+            .map(|target| format!("  - {}", display_relative(&self.workspace, target)))
+            .collect::<Vec<_>>()
+            .join("\n");
         self.require_approval(
             &format!(
-                "allow editor subagent to modify exactly: {}",
-                display_relative(&self.workspace, &target)
+                "allow subagent to modify exactly these {} file(s):\n{listing}",
+                targets.len()
             ),
             false,
         )
         .await?;
-        Ok(target)
+        Ok(targets)
     }
 
     pub fn workspace(&self) -> &Path {
@@ -429,8 +510,22 @@ impl ToolRegistry {
             ),
             definition(
                 "spawn_agent",
-                "Delegate a self-contained task to a child agent with an isolated context. Profiles: scout (locate), reader (summarize), deep (investigate), editor (one separately approved file). Children cannot spawn more agents.",
-                json!({"type":"object","properties":{"prompt":{"type":"string"},"label":{"type":"string"},"profile":{"type":"string","enum":["scout","reader","deep","editor"]},"run_in_background":{"type":"boolean"},"target_file":{"type":"string"}},"required":["prompt"],"additionalProperties":false}),
+                "Delegate a self-contained task to a child agent with an isolated context. Prefer the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (edit one separately approved file), test_fixer (drive failing tests back to green), build_fixer (drive build/type/lint errors back to green), deep (open-ended cross-file investigation, parent model). Children cannot spawn more agents. Pass `task` whenever you can: a worker given relevant_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
+                json!({"type":"object","properties":{
+                    "prompt":{"type":"string","description":"Free-text instruction. Still required when `task` is present; keep it to what the packet does not already say."},
+                    "label":{"type":"string"},
+                    "profile":{"type":"string","enum":["scout","reader","deep","editor","test_fixer","build_fixer","log_inspector","git_detective"]},
+                    "run_in_background":{"type":"boolean"},
+                    "target_file":{"type":"string","description":"Single write target for the editor profile."},
+                    "task":{"type":"object","description":"Structured task packet. Compiling one is your job, not the worker's.","properties":{
+                        "goal":{"type":"string","description":"One sentence: what done looks like."},
+                        "relevant_files":{"type":"array","items":{"type":"string"},"description":"Workspace-relative paths inlined into the worker's first message. For writing profiles this is also exactly the set it may modify, approved as one set."},
+                        "known_facts":{"type":"array","items":{"type":"string"},"description":"What you already established: failing assertion text, the commit that broke it, values observed."},
+                        "constraints":{"type":"array","items":{"type":"string"},"description":"What the worker must not do (public API to keep, files to leave alone)."},
+                        "verifier":{"type":"object","properties":{"command":{"type":"string"},"expected_exit_code":{"type":"integer"}},"required":["command"],"additionalProperties":false,"description":"Command the runtime runs to decide done. The worker never grades itself."},
+                        "max_attempts":{"type":"integer","minimum":1,"maximum":6}
+                    },"required":["goal"],"additionalProperties":false}
+                },"required":["prompt"],"additionalProperties":false}),
             ),
             definition(
                 "ask_user",
@@ -732,7 +827,7 @@ impl ToolRegistry {
         let max_bytes = args
             .max_bytes
             .unwrap_or(DEFAULT_READ_BYTES)
-            .clamp(1, MAX_READ_BYTES);
+            .clamp(1, self.read_bytes_limit());
         let mut output = String::new();
         let mut next_line = None;
         for (index, line) in content.lines().enumerate().skip(offset - 1).take(limit) {
@@ -804,6 +899,7 @@ impl ToolRegistry {
         }
         Ok(truncate_bytes(
             String::from_utf8_lossy(&output.stdout).into_owned(),
+            self.command_output_limit(),
         ))
     }
 
@@ -840,7 +936,7 @@ impl ToolRegistry {
             command.args(["--", path]);
         }
         let output = command.current_dir(&self.workspace).output().await?;
-        git_output(output)
+        git_output(output, self.command_output_limit())
     }
 
     async fn git_blame(&self, args: GitBlameArgs) -> Result<String, ToolError> {
@@ -867,7 +963,7 @@ impl ToolRegistry {
             .current_dir(&self.workspace)
             .output()
             .await?;
-        git_output(output)
+        git_output(output, self.command_output_limit())
     }
 
     async fn list_worktrees(&self) -> Result<String, ToolError> {
@@ -1142,7 +1238,14 @@ impl ToolRegistry {
             },
             &text,
         );
-        Ok(truncate_bytes(text))
+        let mut text = truncate_bytes(text, self.command_output_limit());
+        if self.delegation_hints
+            && !output.status.success()
+            && let Some(profile) = delegable_failure_profile(&args.command)
+        {
+            text.push_str(&delegation_hint(profile, &args.command));
+        }
+        Ok(text)
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
@@ -1207,6 +1310,17 @@ impl ToolRegistry {
         let escalate = |registry: &Self, detail: String| {
             registry.report_approval(command, ApprovalSource::User, detail);
         };
+        // A worker with an allowlist runs its verifier and nothing else. This
+        // gate is first because it is the narrowest: no approval mode, static
+        // rule or judge verdict can widen a worker past the exact command its
+        // dispatcher declared.
+        if let Some(allowed) = &self.command_allowlist
+            && !allowed.contains(command.trim())
+        {
+            return Err(ToolError::ApprovalDenied(format!(
+                "this subagent may only run its declared verifier command, not: {command}"
+            )));
+        }
         if matches!(
             self.approval_mode,
             ApprovalMode::Strict | ApprovalMode::ReadOnly
@@ -1423,16 +1537,21 @@ impl ToolRegistry {
     }
 
     fn require_write_target(&self, requested: &str) -> Result<(), ToolError> {
-        if let Some(target) = &self.write_target {
-            let resolved = self.resolve_existing(requested)?;
-            if &resolved != target {
-                return Err(ToolError::OutsideWorkspace(format!(
-                    "subagent may only edit {}",
-                    display_relative(&self.workspace, target)
-                )));
-            }
+        let Some(targets) = &self.write_targets else {
+            return Ok(());
+        };
+        let resolved = self.resolve_existing(requested)?;
+        if targets.contains(&resolved) {
+            return Ok(());
         }
-        Ok(())
+        let allowed = targets
+            .iter()
+            .map(|target| display_relative(&self.workspace, target))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(ToolError::OutsideWorkspace(format!(
+            "subagent may only edit {allowed}; to widen the scope, report back to the parent agent and ask to be dispatched again with the file in its task packet"
+        )))
     }
 
     fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
@@ -1704,7 +1823,7 @@ pub async fn run_background_supervisor() -> anyhow::Result<()> {
     };
     let mut output = String::from_utf8_lossy(&stdout_task.await??).into_owned();
     output.push_str(&String::from_utf8_lossy(&stderr_task.await??));
-    let output = truncate_bytes(output);
+    let output = truncate_bytes(output, MAX_COMMAND_OUTPUT_BYTES);
     let result = BackgroundSupervisorResult {
         status,
         exit_code,
@@ -2174,18 +2293,18 @@ fn format_search_results(body: &str) -> Result<String, ToolError> {
     })
 }
 
-fn truncate_bytes(value: String) -> String {
-    if value.len() <= MAX_COMMAND_OUTPUT_BYTES {
+fn truncate_bytes(value: String, limit: usize) -> String {
+    if value.len() <= limit {
         return value;
     }
-    let mut boundary = MAX_COMMAND_OUTPUT_BYTES;
+    let mut boundary = limit;
     while !value.is_char_boundary(boundary) {
         boundary -= 1;
     }
     format!("{}\n[output truncated]", &value[..boundary])
 }
 
-fn git_output(output: std::process::Output) -> Result<String, ToolError> {
+fn git_output(output: std::process::Output, limit: usize) -> Result<String, ToolError> {
     if !output.status.success() {
         return Err(ToolError::Io(std::io::Error::other(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -2193,18 +2312,81 @@ fn git_output(output: std::process::Output) -> Result<String, ToolError> {
     }
     Ok(truncate_bytes(
         String::from_utf8_lossy(&output.stdout).into_owned(),
+        limit,
     ))
 }
 
+/// Which worker profile is built for this failing command, if any. Matched on
+/// the shape of the command line, not on the failure text: a `cargo test` that
+/// fails to compile and one that fails an assertion both land in the same
+/// place, and the worker is the one that reads the difference.
+fn delegable_failure_profile(command: &str) -> Option<&'static str> {
+    let lowered = command.to_ascii_lowercase();
+    const TEST_MARKERS: &[&str] = &[
+        "cargo test",
+        "cargo nextest",
+        "go test",
+        "npm test",
+        "yarn test",
+        "pnpm test",
+        "pytest",
+        "rspec",
+        "bundle exec rspec",
+        "jest",
+        "vitest",
+        "xcodebuild test",
+        "swift test",
+        "gradle test",
+        "mvn test",
+    ];
+    const BUILD_MARKERS: &[&str] = &[
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "go build",
+        "go vet",
+        "tsc",
+        "npm run build",
+        "yarn build",
+        "pnpm build",
+        "make",
+        "cmake",
+        "xcodebuild build",
+        "swift build",
+        "mypy",
+        "ruff",
+        "eslint",
+    ];
+    if TEST_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        return Some("test_fixer");
+    }
+    if BUILD_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        return Some("build_fixer");
+    }
+    None
+}
+
+/// The hint appended to a delegable failure. Deliberately a suggestion with a
+/// ready-made recipe rather than an automatic spawn: the parent still owns the
+/// decision, but the cost of delegating drops to one tool call.
+fn delegation_hint(profile: &str, command: &str) -> String {
+    format!(
+        "\n\n<delegation-hint profile=\"{profile}\">\nThis failure is a good fit for the `{profile}` worker. \
+Spawn it with a task packet: goal, the relevant files you already know about, the failing assertions as known_facts, \
+and verifier.command = {command:?}. The worker fixes and re-verifies on its own; only a verified pass or an \
+exhausted attempt budget comes back to you.\n</delegation-hint>"
+    )
+}
+
 #[cfg(windows)]
-fn platform_shell(command: &str) -> Command {
+pub(crate) fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("powershell.exe");
     process.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     process
 }
 
 #[cfg(not(windows))]
-fn platform_shell(command: &str) -> Command {
+pub(crate) fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("/bin/sh");
     process.args(["-lc", command]);
     process
@@ -2533,7 +2715,9 @@ mod tests {
             "unchanged"
         );
         assert!(matches!(
-            registry.approve_subagent_editor("file.txt").await,
+            registry
+                .approve_subagent_write_set(&["file.txt".to_owned()])
+                .await,
             Err(ToolError::ReadOnlyPolicy(_))
         ));
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -2738,7 +2922,7 @@ mod tests {
             .expect("canonical target");
         let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
             .expect("registry")
-            .with_write_target(Some(target));
+            .with_write_targets(Some(BTreeSet::from([target])));
 
         registry
             .edit_file(EditArgs {
@@ -2761,6 +2945,146 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("other.txt")).expect("other"),
             "before"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// The file-set write channel is the single-file channel generalized, so
+    /// the same three gates have to hold for a set: every declared file is
+    /// writable, and anything outside it is refused with a path back to the
+    /// parent rather than a bare denial.
+    #[tokio::test]
+    async fn subagent_file_set_allows_every_declared_file_and_nothing_else() {
+        let root = workspace("subagent-file-set");
+        for name in ["impl.rs", "test.rs", "other.rs"] {
+            std::fs::write(root.join(name), "before").expect("fixture");
+        }
+        let targets = ["impl.rs", "test.rs"]
+            .iter()
+            .map(|name| root.join(name).canonicalize().expect("canonical"))
+            .collect::<BTreeSet<_>>();
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_write_targets(Some(targets));
+
+        for name in ["impl.rs", "test.rs"] {
+            registry
+                .edit_file(EditArgs {
+                    path: name.to_owned(),
+                    old_string: "before".to_owned(),
+                    new_string: "after".to_owned(),
+                    replace_all: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("declared file {name} must be writable: {error}"));
+        }
+        let denied = registry
+            .edit_file(EditArgs {
+                path: "other.rs".to_owned(),
+                old_string: "before".to_owned(),
+                new_string: "after".to_owned(),
+                replace_all: None,
+            })
+            .await;
+        let Err(ToolError::OutsideWorkspace(message)) = denied else {
+            panic!("a file outside the declared set must be refused");
+        };
+        assert!(
+            message.contains("dispatched again"),
+            "the refusal must tell the worker how to widen its scope, got: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("other.rs")).expect("other"),
+            "before"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A worker with a verifier may run that verifier and nothing else — not
+    /// even a command the static classifier would happily wave through.
+    #[tokio::test]
+    async fn a_command_allowlisted_worker_runs_only_its_verifier() {
+        let root = workspace("verifier-allowlist");
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_command_allowlist(Some(HashSet::from(["echo verified".to_owned()])));
+        registry
+            .run_command(CommandArgs {
+                command: "echo verified".to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await
+            .expect("the declared verifier must run");
+        let denied = registry
+            .run_command(CommandArgs {
+                command: "ls".to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await;
+        assert!(
+            matches!(denied, Err(ToolError::ApprovalDenied(_))),
+            "a read-only command outside the allowlist must still be refused"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn only_test_and_build_shaped_commands_are_delegable() {
+        assert_eq!(
+            delegable_failure_profile("cargo test -p willdeep-core"),
+            Some("test_fixer")
+        );
+        assert_eq!(delegable_failure_profile("pytest -q"), Some("test_fixer"));
+        assert_eq!(
+            delegable_failure_profile("cargo clippy --all-targets"),
+            Some("build_fixer")
+        );
+        assert_eq!(delegable_failure_profile("make -j8"), Some("build_fixer"));
+        // Not every failing command is a fixable local defect.
+        assert_eq!(delegable_failure_profile("git push origin main"), None);
+        assert_eq!(delegable_failure_profile("curl https://example.com"), None);
+    }
+
+    /// The delegation hint is the deterministic half of "make workers visible",
+    /// so it has to survive the real command path: appended on a failing build
+    /// command for the main agent, absent for a subagent that cannot spawn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_test_command_carries_a_delegation_hint_for_the_main_agent_only() {
+        let root = workspace("delegable-failure");
+        // `cargo test` outside any crate: statically safe, always fails, instant.
+        let hinted = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_delegation_hints(true)
+            .run_command(CommandArgs {
+                command: "cargo test -p willdeep-core".to_owned(),
+                timeout_seconds: Some(30),
+                label: None,
+                run_in_background: None,
+            })
+            .await
+            .expect("run cargo test");
+        assert!(
+            hinted.contains("test_fixer") && hinted.contains("delegation-hint"),
+            "the main agent must be offered the test_fixer worker, got: {hinted}"
+        );
+        let plain = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .run_command(CommandArgs {
+                command: "cargo test -p willdeep-core".to_owned(),
+                timeout_seconds: Some(30),
+                label: None,
+                run_in_background: None,
+            })
+            .await
+            .expect("run cargo test");
+        assert!(
+            !plain.contains("delegation-hint"),
+            "a subagent cannot spawn anything, so it must not be told to delegate: {plain}"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

@@ -30,7 +30,10 @@ fn parse_agent_command(arguments: &str) -> Result<AgentCommand<'_>> {
     let (action, arguments) = split_head(arguments).context("missing Agent action")?;
     if action == "spawn" {
         let (profile, prompt) = split_head(arguments).context("missing Agent profile")?;
-        if !matches!(profile, "scout" | "reader" | "deep") {
+        if !matches!(
+            profile,
+            "scout" | "reader" | "deep" | "log_inspector" | "git_detective"
+        ) {
             bail!("unsupported external Agent profile");
         }
         if prompt.is_empty() {
@@ -79,9 +82,9 @@ pub(super) async fn handle_agent_command(
     }
     let arguments = value.strip_prefix("/agent").unwrap_or_default().trim();
     let usage = app.language.text(
-        "用法：/agent spawn <scout|reader|deep> <任务> | instruct <ID> <指令> | stop <ID> | retry <ID> [--model <模型>]",
-        "Usage: /agent spawn <scout|reader|deep> <task> | instruct <id> <message> | stop <id> | retry <id> [--model <model>]",
-        "使用法：/agent spawn <scout|reader|deep> <タスク> | instruct <ID> <指示> | stop <ID> | retry <ID> [--model <モデル>]",
+        "用法：/agent spawn <scout|reader|deep|log_inspector|git_detective> <任务> | instruct <ID> <指令> | stop <ID> | retry <ID> [--model <模型>]",
+        "Usage: /agent spawn <scout|reader|deep|log_inspector|git_detective> <task> | instruct <id> <message> | stop <id> | retry <id> [--model <model>]",
+        "使用法：/agent spawn <scout|reader|deep|log_inspector|git_detective> <タスク> | instruct <ID> <指示> | stop <ID> | retry <ID> [--model <モデル>]",
     );
     let command = match parse_agent_command(arguments) {
         Ok(command) => command,

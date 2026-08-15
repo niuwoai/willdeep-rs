@@ -29,16 +29,30 @@
 
 `spawn_agent` 把自包含任务交给隔离上下文的子 Agent，可选择同步等待或 `run_in_background = true`。
 
-| Profile | 用途 | 默认工具 |
-|---|---|---|
-| `scout` | 快速定位文件、符号和调用点 | search / grep / list / read |
-| `reader` | 阅读和总结长文件或文档 | read / list / search |
-| `deep` | 跨文件深入调查 | search / grep / read / list / git status |
-| `editor` | 修改一个明确目标文件 | read / edit |
+| Profile | 用途 | 默认工具 | 窗口 |
+|---|---|---|---:|
+| `scout` | 快速定位文件、符号和调用点 | search / grep / list / read | 32K |
+| `reader` | 阅读和总结长文件或文档 | read / list / search | 32K |
+| `log_inspector` | 解释失败日志、归类错误 | read | 16K |
+| `git_detective` | 回归定位与 commit 考古 | git log / diff / blame / status / read | 32K |
+| `deep` | 跨文件深入调查（父模型） | search / grep / read / list / git status | 继承会话 |
+| `editor` | 修改一个明确目标文件 | read / edit | 32K |
+| `test_fixer` | 把失败测试修到绿（需 verifier） | read / edit / run_command | 64K |
+| `build_fixer` | 修编译 / 类型 / lint 错误（需 verifier） | read / edit / run_command | 32K |
+
+除 `deep` 外，每个工种都跑在**自己的小窗口**里，并对工具输出设了独立的字节上限——给小模型配大窗口不会让它变强，只会让它把窗口烧穿。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 硬性约束：子 Agent **看不到父对话、不能询问用户、不能继续派生**。
 
-外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只接受 `scout` / `reader` / `deep` 三种**只读** Profile，父级、Task 和 Workspace 全部由 Runtime 推导，调用方不能选择写目标。
+外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只接受 `scout` / `reader` / `deep` / `log_inspector` / `git_detective` 五种**只读** Profile，父级、Task 和 Workspace 全部由 Runtime 推导，调用方不能选择写目标。
+
+### Task Packet 与 Verifier
+
+`spawn_agent` 支持可选的结构化参数 `task`（不传时行为与以前完全一致）：主 Agent 把目标、已知事实、约束、相关文件和**验证命令**一次性交给 Worker，Runtime 负责把文件内容内联进 Worker 的第一条消息，并在每次尝试后亲自执行验证命令来判定成败——**Worker 不自证**。
+
+写入型工种（`test_fixer` / `build_fixer`）的可改文件集就是 `task.relevant_files`，一次审批整个集合，越界写入一律拒绝。
+
+完整说明见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 ### 模型绑定与预算
 
@@ -157,6 +171,7 @@ Runtime 持久记录主 Agent 与子 Agent 的 Tool Activity，支持按 Session
 
 ## 相关文档
 
+- [小上下文 Skill Worker](SKILL_WORKERS.md)
 - [Runtime Daemon 与工作区](RUNTIME_DAEMON.md)
 - [审批与自动化](APPROVALS.md)
 - [配置指南](CONFIGURATION.md)

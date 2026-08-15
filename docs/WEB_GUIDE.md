@@ -93,7 +93,7 @@ Web 端的 `/` 命令是前端拦截的：`/clear` 清空显示、`/help` 打印
 默认收起，展开后持续刷新（每 2 秒轮询一次活动快照和会话列表）：
 
 - **计数行** — 工具数、运行中、产物、Agent、Task、需要处理。Agent 计数只统计侧栏可见的活动 Agent，被折叠的历史记录以 `(+N 已结束)` 附注；
-- **创建只读子 Agent** — 选择 `scout` / `reader` / `deep` 加任务描述。需要父会话处于活动状态；
+- **创建只读子 Agent** — 选择 `scout` / `reader` / `deep` / `log_inspector` / `git_detective` 加任务描述。需要父会话处于活动状态；
 - **审批与提问 Gate** — 最多 3 条。审批提供"允许一次 / 拒绝 / 始终允许"（第三项仅在服务端标记可用时出现）；提问支持单选、多选和自由文本回答；
 - **Task 列表** — 最多 4 条，显示 Profile、状态、耗时，失败时显示退出码与失败域；
 - **Agent 列表** — 活动面板，不是归档：只展示仍在运行的 Agent，以及结束不超过 5 分钟的 Agent；从未执行过轮次（`current_turn = 0`）的已结束根 Agent 直接不显示。最多 4 条，子 Agent 缩进显示，展示模型、Token、时长和 worktree 分支。运行中的时长标注为"已运行"，已结束的标注为"耗时"，避免把会话跨度误读成仍在执行。后台 Agent 运行中可"补充指令 / 停止"，终态可"重试 / 换模型重试"。
@@ -156,7 +156,7 @@ ssh -L 9847:127.0.0.1:9847 user@remote
 - 审批、提问、Agent 操作会二次校验目标对象确实属于该工作区，跨工作区操作返回 404；
 - 停止 Turn（`POST /api/turns/{id}/stop`）请求体里没有 `workspace`，服务端先按 Turn id 反查所属 Session，再校验该 Session 的工作区在 allowlist 内；Turn 不存在、会话读不到、工作区不在白名单三种情况统一返回 404；
 - 所有请求体都是 `deny_unknown_fields`，客户端夹带 `workspace_root` / `task_id` / `agent_id` 等额外作用域字段会直接反序列化失败；
-- 子 Agent Spawn 只允许 `scout` / `reader` / `deep` 三种只读 Profile，父级、Task、Workspace 和 Child ID 全部由 Runtime 推导；
+- 子 Agent Spawn 只允许 `scout` / `reader` / `deep` / `log_inspector` / `git_detective` 五种只读 Profile，父级、Task、Workspace 和 Child ID 全部由 Runtime 推导；
 - 静态资源附带 `X-Content-Type-Options: nosniff` 和限制到 `'self'` 的 CSP；
 - 请求体上限 1 MiB；
 - 技能描述中出现 `password` / `api_key` / `secret` / `token=` 时替换为 `[sensitive description hidden]`；
