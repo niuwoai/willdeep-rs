@@ -131,5 +131,5 @@ worker-tier 技能的标准执行路径：主会话读到 `tier=worker` → 编 
 | 系统提示词教会主会话 tier 路由 | ✅ 0.27.0-rc1 |
 | 技能库 29 个逐个标注 | ✅ 2026-08-16（写入 `~/.willdeep/skills`） |
 | L / M 档模型绑定 | ✅ 用现有网关模型：L=`deepseek-v4-flash`、M=`glm-5.x`/`kimi-k3`（均实测在线），不建新虚拟模型。派 L 档任务即 `spawn_agent` 时经 `[subagents.deep] model = "deepseek-v4-flash"` 绑定，或会话内直接换模型 |
-| worker-tier 技能的自动派工触发 | ⏳ 未做——现阶段靠提示词；确定性触发（如 list_skills 命中 worker 技能时附派工配方）是下一步 |
-| air-gapped 降级的自动化（分片 + 归纳） | ⏳ 未做，先靠 scout/reader 手动编排 |
+| worker-tier 技能的确定性派工触发 | ✅ 0.28.0-rc1——`list_skills` 命中 worker 技能时结果尾部附 `<delegation-hint>` 派工配方（仅主 Agent；子 Agent 不能派生，给它提示只是噪音）。配套 `task.skill`：Runtime 把技能正文内联进 Worker 首条消息，Worker 不再需要自己取指令 |
+| air-gapped 降级的自动化（分片 + 归纳） | ✅ 0.28.0-rc1——`task.digest_oversized`：超过内联预算的材料由 Worker 自己的廉价模型分片消化（标识符/断言原文保留，逐块标注 digested，失败的块点名不静默），默认关闭因为它花模型调用，开关在派工者手里 |

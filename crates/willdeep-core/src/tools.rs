@@ -550,6 +550,8 @@ impl ToolRegistry {
                     "target_file":{"type":"string","description":"Single write target for the editor profile."},
                     "task":{"type":"object","description":"Structured task packet. Compiling one is your job, not the worker's.","properties":{
                         "goal":{"type":"string","description":"One sentence: what done looks like."},
+                        "skill":{"type":"string","description":"Installed skill whose body the runtime inlines for the worker. Use for tier=worker skills instead of pasting their steps yourself."},
+                        "digest_oversized":{"type":"boolean","description":"When a relevant file exceeds the worker's inline budget, digest it through the worker's own cheap model (chunked summaries, identifiers verbatim) instead of omitting it. Costs extra model calls."},
                         "relevant_files":{"type":"array","items":{"type":"string"},"description":"Workspace-relative paths inlined into the worker's first message. For writing profiles this is also exactly the set it may modify, approved as one set."},
                         "known_facts":{"type":"array","items":{"type":"string"},"description":"What you already established: failing assertion text, the commit that broke it, values observed."},
                         "constraints":{"type":"array","items":{"type":"string"},"description":"What the worker must not do (public API to keep, files to leave alone)."},
@@ -692,11 +694,38 @@ impl ToolRegistry {
                 None => format!("- {} | name={} | {}", s.identifier, s.name, s.description),
             })
             .collect::<Vec<_>>();
-        Ok(if lines.is_empty() {
+        let mut result = if lines.is_empty() {
             "No installed skills found.".to_owned()
         } else {
             lines.join("\n")
-        })
+        };
+        // Deterministic dispatch trigger, same philosophy as the failed-test
+        // hint: visibility must not depend on the model remembering the
+        // routing rule. When the listing surfaces worker-tier skills, the
+        // recipe rides along — and only for the main agent, because a child
+        // cannot spawn and a hint it cannot act on is just noise.
+        if self.delegation_hints {
+            let workers = self
+                .skills
+                .list()
+                .iter()
+                .filter(|s| {
+                    s.tier == Some(crate::skills::SkillTier::Worker)
+                        && (query.is_empty()
+                            || format!("{} {} {}", s.identifier, s.name, s.description)
+                                .to_ascii_lowercase()
+                                .contains(&query))
+                })
+                .map(|s| s.identifier.clone())
+                .collect::<Vec<_>>();
+            if !workers.is_empty() {
+                result.push_str(&format!(
+                    "\n\n<delegation-hint tier=\"worker\">\nThese skills fit a small-context worker: {}. Instead of running one inline, spawn_agent with a task packet — set task.skill to the skill name (the runtime inlines its body for the worker), task.goal to the outcome, task.relevant_files to the inputs, and task.verifier.command when the skill names a check. Your window stays free and the run gets a real verdict.\n</delegation-hint>",
+                    workers.join(", ")
+                ));
+            }
+        }
+        Ok(result)
     }
     fn read_skill(&self, args: ReadSkillArgs) -> Result<String, ToolError> {
         Ok(self.skills.read(&args.name, args.resource.as_deref())?)
@@ -3055,6 +3084,47 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("other.rs")).expect("other"),
             "before"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// The worker-skill hint is deterministic and main-agent-only: a listing
+    /// that surfaces a worker-tier skill carries the dispatch recipe, and a
+    /// child — which cannot spawn — never sees it.
+    #[test]
+    fn list_skills_hints_worker_dispatch_only_for_the_main_agent() {
+        let root = workspace("skill-hint");
+        let dir = root.join(".willdeep/skills/convert");
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: convert\ndescription: convert images\ntier: worker\n---\n# Steps",
+        )
+        .expect("skill");
+
+        let skills = Arc::new(crate::skills::SkillCatalog::discover(&root, &[]));
+        let main = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_skills(skills.clone())
+            .with_delegation_hints(true);
+        let listing = main
+            .list_skills(ListSkillsArgs { query: None })
+            .expect("list");
+        assert!(listing.contains("tier=worker"));
+        assert!(
+            listing.contains("<delegation-hint tier=\"worker\">") && listing.contains("convert"),
+            "the recipe must ride the listing: {listing}"
+        );
+
+        let child = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_skills(skills);
+        let listing = child
+            .list_skills(ListSkillsArgs { query: None })
+            .expect("list");
+        assert!(
+            !listing.contains("delegation-hint"),
+            "a child cannot spawn, so the hint is noise for it"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
