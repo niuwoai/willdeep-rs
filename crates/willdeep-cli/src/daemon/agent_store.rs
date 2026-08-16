@@ -68,6 +68,14 @@ pub(crate) struct RuntimeAgent {
     pub verifier_passed: Option<bool>,
     #[serde(default)]
     pub attempts: Option<u64>,
+    /// Citations the runtime spot-checked in a report-only run, and how many
+    /// of them pointed at nothing. A read-only trade has no exit code, so
+    /// this is the only thing about its answer a program can confirm — and
+    /// `None` here means the check never ran, not that it came back clean.
+    #[serde(default)]
+    pub claims_checked: Option<u64>,
+    #[serde(default)]
+    pub claims_unverifiable: Option<u64>,
     /// Commit the run started from, so one record is a complete replay case.
     #[serde(default)]
     pub repo_commit: Option<String>,
@@ -163,6 +171,8 @@ impl AgentStore {
             report: None,
             verifier_command: None,
             verifier_passed: None,
+            claims_checked: None,
+            claims_unverifiable: None,
             attempts: None,
             repo_commit: None,
             created_at: timestamp,
@@ -206,6 +216,8 @@ impl AgentStore {
             agent.report = None;
             agent.verifier_command = None;
             agent.verifier_passed = None;
+            agent.claims_checked = None;
+            agent.claims_unverifiable = None;
             agent.attempts = None;
             agent.repo_commit = None;
             agent.updated_at = now();
@@ -244,6 +256,8 @@ impl AgentStore {
             report: None,
             verifier_command: None,
             verifier_passed: None,
+            claims_checked: None,
+            claims_unverifiable: None,
             attempts: None,
             repo_commit: None,
             created_at: timestamp,
@@ -308,6 +322,8 @@ impl AgentStore {
             report: None,
             verifier_command: None,
             verifier_passed: None,
+            claims_checked: None,
+            claims_unverifiable: None,
             attempts: None,
             repo_commit: None,
             created_at: timestamp,
@@ -433,6 +449,10 @@ impl AgentStore {
                     .get("verifier_passed")
                     .and_then(|value| value.as_bool());
                 agent.attempts = value.get("attempts").and_then(|value| value.as_u64());
+                agent.claims_checked = value.get("claims_checked").and_then(|value| value.as_u64());
+                agent.claims_unverifiable = value
+                    .get("claims_unverifiable")
+                    .and_then(|value| value.as_u64());
                 agent.updated_at = now();
             }),
             Some("subagent_turn_started") => self.update_child_from_event(&value, |agent| {
@@ -516,6 +536,8 @@ impl AgentStore {
             agent.report = None;
             agent.verifier_command = None;
             agent.verifier_passed = None;
+            agent.claims_checked = None;
+            agent.claims_unverifiable = None;
             agent.attempts = None;
             agent.repo_commit = None;
             agent.updated_at = now();
@@ -580,6 +602,8 @@ impl AgentStore {
                 report: None,
                 verifier_command: None,
                 verifier_passed: None,
+                claims_checked: None,
+                claims_unverifiable: None,
                 attempts: None,
                 repo_commit: None,
                 created_at: timestamp,

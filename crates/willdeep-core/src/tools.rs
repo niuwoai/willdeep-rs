@@ -184,6 +184,7 @@ pub struct ToolRegistry {
     /// confined to exactly these canonical paths. The single-file `editor`
     /// profile is the set-of-one special case — one gate, not two.
     write_targets: Option<BTreeSet<PathBuf>>,
+    read_only_git_shell: bool,
     /// Exact command lines a write-scoped worker may run. `None` leaves
     /// `run_command` under the ordinary approval chain; a set means only
     /// these literal commands (its verifier) are runnable at all.
@@ -227,6 +228,7 @@ impl ToolRegistry {
             background: Arc::new(BackgroundTaskRegistry::default()),
             allowed_tools: None,
             write_targets: None,
+            read_only_git_shell: false,
             command_allowlist: None,
             tool_output_limit: None,
             delegation_hints: false,
@@ -319,8 +321,37 @@ impl ToolRegistry {
         self
     }
     /// Confine writes to exactly this set of already-approved paths.
+    /// Confine writes to exactly these files.
+    ///
+    /// The targets are canonicalized here because the check they feed compares
+    /// them against a canonicalized edit path. One symlinked component
+    /// anywhere above the workspace — `/tmp`, `/var` on macOS, a symlinked
+    /// checkout — and the two spellings never match: every edit the worker
+    /// sends is refused as "outside the workspace" even though the file is
+    /// the approved one, and the refusal names a path identical to the one it
+    /// just asked for. A worker cannot argue its way out of that, so it burns
+    /// its whole turn budget re-sending a correct patch.
     pub fn with_write_targets(mut self, targets: Option<BTreeSet<PathBuf>>) -> Self {
-        self.write_targets = targets;
+        self.write_targets = targets.map(|targets| {
+            targets
+                .into_iter()
+                .map(|target| target.canonicalize().unwrap_or(target))
+                .collect()
+        });
+        self
+    }
+
+    /// Allow read-only `git` and nothing else.
+    ///
+    /// The regression-archaeology trade has to compose its own queries —
+    /// `git log -p`, `git show <sha>`, `git diff <a> <b>` — so a literal
+    /// allowlist cannot express what it needs, and the fixed git tools cannot
+    /// compare two commits at all. The rule is therefore a shape: the command
+    /// head must be `git`, and it must still pass the same static read-only
+    /// classification as any other command. Nothing else runs, and there is
+    /// no judge to appeal to.
+    pub fn with_read_only_git_shell(mut self, enabled: bool) -> Self {
+        self.read_only_git_shell = enabled;
         self
     }
 
@@ -1314,11 +1345,30 @@ impl ToolRegistry {
         // gate is first because it is the narrowest: no approval mode, static
         // rule or judge verdict can widen a worker past the exact command its
         // dispatcher declared.
+        if self.read_only_git_shell {
+            let trimmed = command.trim();
+            let is_git = trimmed == "git" || trimmed.starts_with("git ");
+            if !is_git || crate::safety::classify(trimmed) != CommandSafety::AlwaysSafe {
+                return Err(ToolError::ApprovalDenied(format!(
+                    "this subagent may only run read-only git commands, not: {command}"
+                )));
+            }
+            return Ok(());
+        }
         if let Some(allowed) = &self.command_allowlist
             && !allowed.contains(command.trim())
         {
+            // Name the command it *may* run. The live-fire range showed the
+            // typical near-miss is a decorated verifier — `cargo build 2>&1`
+            // instead of `cargo build` — and a refusal that only says "not
+            // that" invites the worker to guess again, one turn per guess.
+            let allowed_list = {
+                let mut allowed = allowed.iter().cloned().collect::<Vec<_>>();
+                allowed.sort();
+                allowed.join(", ")
+            };
             return Err(ToolError::ApprovalDenied(format!(
-                "this subagent may only run its declared verifier command, not: {command}"
+                "this subagent may only run its declared verifier command verbatim ({allowed_list}), not: {command}"
             )));
         }
         if matches!(
@@ -3000,6 +3050,96 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
+    /// The history trade composes its own git queries, so its gate is a shape,
+    /// not a literal. The shape has to hold in both directions: any read-only
+    /// git command runs, and everything else — including commands the static
+    /// classifier would happily wave through for the main agent — does not.
+    #[tokio::test]
+    async fn a_read_only_git_worker_composes_git_queries_and_nothing_else() {
+        let root = workspace("git-shell");
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_read_only_git_shell(true);
+        for command in [
+            "git status",
+            "git log -p -3",
+            "git show HEAD~1",
+            "git diff a b",
+        ] {
+            registry
+                .run_command(CommandArgs {
+                    command: command.to_owned(),
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("read-only git must run ({command}): {error}"));
+        }
+        for command in [
+            "ls",
+            "git push origin main",
+            "git commit -m x",
+            "cat /etc/hosts",
+        ] {
+            let denied = registry
+                .run_command(CommandArgs {
+                    command: command.to_owned(),
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                })
+                .await;
+            assert!(
+                matches!(denied, Err(ToolError::ApprovalDenied(_))),
+                "`{command}` is not a read-only git query and must be refused"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A symlink above the workspace must not turn an approved file into a
+    /// forbidden one.
+    ///
+    /// This is the failure the live-fire range found first: on macOS the
+    /// worker's workspace sat under `/var/...` (a symlink to `/private/var`),
+    /// the approved target kept the `/var` spelling, and the edit path was
+    /// canonicalized to `/private/var` before the comparison. The worker sent
+    /// the correct one-line patch on its first turn and was refused every
+    /// time — with a message naming the very path it had asked for. Both
+    /// sides of that comparison have to be canonical.
+    #[tokio::test]
+    async fn an_approved_target_reached_through_a_symlink_is_still_writable() {
+        let root = workspace("write-target-symlink");
+        std::fs::write(root.join("impl.rs"), "before").expect("fixture");
+        let link = std::env::temp_dir().join(format!("willdeep-link-{}", uuid::Uuid::new_v4()));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &link).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        // The uncanonicalized spelling: exactly what a worktree root reached
+        // through a symlinked parent hands over.
+        let registry = ToolRegistry::new(&link, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_write_targets(Some(BTreeSet::from([link.join("impl.rs")])));
+        registry
+            .edit_file(EditArgs {
+                path: "impl.rs".to_owned(),
+                old_string: "before".to_owned(),
+                new_string: "after".to_owned(),
+                replace_all: None,
+            })
+            .await
+            .expect("an approved file stays writable through a symlinked workspace");
+        assert_eq!(
+            std::fs::read_to_string(root.join("impl.rs")).expect("impl"),
+            "after"
+        );
+        std::fs::remove_file(&link).expect("cleanup link");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     /// A worker with a verifier may run that verifier and nothing else — not
     /// even a command the static classifier would happily wave through.
     #[tokio::test]
@@ -3028,6 +3168,24 @@ mod tests {
         assert!(
             matches!(denied, Err(ToolError::ApprovalDenied(_))),
             "a read-only command outside the allowlist must still be refused"
+        );
+        // A decorated verifier is the common near-miss, and the refusal has to
+        // name the exact command that would work — otherwise the worker guesses
+        // again, and each guess costs a turn.
+        let decorated = registry
+            .run_command(CommandArgs {
+                command: "echo verified 2>&1".to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await;
+        let Err(ToolError::ApprovalDenied(message)) = decorated else {
+            panic!("a decorated verifier is not the declared command");
+        };
+        assert!(
+            message.contains("echo verified"),
+            "the refusal must quote the command that is allowed, got: {message}"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

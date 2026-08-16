@@ -598,6 +598,8 @@ mod tests {
                 report: None,
                 verifier_command: None,
                 verifier_passed: None,
+                claims_checked: None,
+                claims_unverifiable: None,
                 attempts: None,
                 repo_commit: None,
                 created_at: 1,

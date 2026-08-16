@@ -538,11 +538,27 @@ pub(crate) async fn build(
     };
     let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
     for subagent in &mut subagent_profiles {
+        // On some.im each trade runs its own relay-hosted virtual model
+        // (`someim-32b-<trade>`), exactly as the macOS app binds it: same
+        // gateway, same account, so the same trade must resolve to the same
+        // model in both clients. The relay prepends that trade's job prompt,
+        // so the client stops sending its own copy. Trades the relay does not
+        // host fall back to the base cheap model with the client prompt.
+        let hosted = (kind == ProviderKind::SomeIm)
+            .then(|| willdeep_core::subagent::hosted_worker_model(&subagent.id))
+            .flatten();
         subagent.model = Some(if subagent.id == "deep" {
             model.clone()
         } else {
-            cheap_model.clone()
+            hosted.clone().unwrap_or_else(|| cheap_model.clone())
         });
+        if let Some(hosted_model) = &hosted {
+            let mut configured = parent_provider_config.clone();
+            configured.model = hosted_model.clone();
+            subagent.provider = build_provider(configured)
+                .with_context(|| format!("initialize hosted subagent model {hosted_model}"))?;
+            subagent.hosted_job_prompt = true;
+        }
         if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
             if let Some(provider_name) = settings.provider_profile.as_deref() {
                 let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
@@ -550,12 +566,17 @@ pub(crate) async fn build(
                     configured.model = model.clone();
                 }
                 subagent.model = Some(configured.model.clone());
+                subagent.hosted_job_prompt = hosted.as_deref() == Some(configured.model.as_str());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             } else if let Some(model) = &settings.model {
                 let mut configured = parent_provider_config.clone();
                 configured.model = model.clone();
                 subagent.model = Some(model.clone());
+                // An explicitly bound model carries no hosted job prompt, so
+                // the client sends its own again — a trade must never end up
+                // with no job description at all.
+                subagent.hosted_job_prompt = hosted.as_deref() == Some(model.as_str());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             }

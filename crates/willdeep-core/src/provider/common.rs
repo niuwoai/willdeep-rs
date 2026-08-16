@@ -60,6 +60,13 @@ fn apply_some_im_headers(request: RequestBuilder, config: &ProviderConfig) -> Re
     }
     request
         .header("x-willdeep-session-id", &config.session_id)
+        // The relay's usage ledger reads `X-Playground-Session-ID` and ignores
+        // our own session header: sending only the latter leaves every usage
+        // record's session_id empty, and worker requests can no longer be
+        // attributed to the chat that spawned them — which is exactly the
+        // number the Skill Worker economics rest on. Same opaque UUID, sent
+        // alongside, as the macOS app does.
+        .header("X-Playground-Session-ID", &config.session_id)
         .header("x-willdeep-workspace-id", &config.workspace_id)
 }
 

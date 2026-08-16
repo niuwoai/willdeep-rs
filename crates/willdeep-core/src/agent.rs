@@ -126,6 +126,15 @@ pub enum AgentEvent {
         /// `None` when the run had no verifier: unverified, not failed.
         verifier_passed: Option<bool>,
         attempts: usize,
+        /// Citations the runtime could check in a report-only run: file paths,
+        /// line numbers and commit hashes the worker named. Zero means the
+        /// report cited nothing checkable, which is not the same as a report
+        /// whose every citation held up.
+        claims_checked: usize,
+        /// Cited locations that do not exist. A read-only trade has no exit
+        /// code to judge it, and this is the one thing a program can still
+        /// verify about its answer.
+        claims_unverifiable: usize,
     },
     /// 目标未达，宿主拒绝了一次隐式收口并注入续推引导。
     GoalContinuationInjected {

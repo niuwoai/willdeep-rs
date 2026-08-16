@@ -742,6 +742,8 @@ fn public_agent(
         timeout_seconds: agent.timeout_seconds,
         report: include_detail.then_some(agent.report).flatten(),
         verifier_passed: agent.verifier_passed,
+        claims_checked: agent.claims_checked,
+        claims_unverifiable: agent.claims_unverifiable,
         attempts: agent.attempts,
         repo_commit: agent.repo_commit,
         created_at: agent.created_at,

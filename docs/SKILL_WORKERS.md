@@ -19,7 +19,7 @@
 | `scout` | 定位文件、符号、调用点 | search / grep / list / read | 32K | 4 KB | 无 | — |
 | `reader` | 阅读并总结长文件 | read / list / search | 32K | 4 KB | 无 | — |
 | `log_inspector` | 解释失败日志、归类错误 | read | 16K | 3 KB | 无 | — |
-| `git_detective` | 回归定位、commit 考古 | git log / diff / blame / status / read | 32K | 4 KB | 无 | — |
+| `git_detective` | 回归定位、commit 考古 | git log / diff / blame / status / read / **run_command（限只读 git）** | 32K | 4 KB | 无 | — |
 | `editor` | 修改一个单独批准的文件 | read / edit | 32K | 4 KB | 单文件锁 | 可选 |
 | `test_fixer` | 把失败测试修到绿 | read / edit / run_command（限 verifier） | 64K | 6 KB | **文件集锁** | 必需 |
 | `build_fixer` | 修编译 / 类型 / lint 错误 | read / edit / run_command（限 verifier） | 32K | 4 KB | **文件集锁** | 必需 |
@@ -27,7 +27,26 @@
 
 `deep` 是**刻意的例外**：它跑父模型，因为它的活本来就装不进小窗口。跨模块重构、架构设计、语义模糊的任务继续走 `deep` 或主 Agent，不要硬拆。
 
-除 `deep` 外全部绑定廉价模型（some.im 下默认 `glm-5`），可在 `[subagents.<工种>]` 里逐个改绑。
+### 模型绑定：托管工种档（与 macOS 版 Xedit 同一张表）
+
+Provider 是 some.im 时，七个工种各自跑网关托管的虚拟模型 `someim-32b-<工种>`
+（连字符：`test_fixer` → `someim-32b-test-fixer`），职能提示词由网关 prepend，
+**客户端不再发自己那份**——同一个工种有两份职能描述，等它们漂移的那天，
+由模型来挑该听谁的。客户端仍然发边界段（看不到父会话、不能问用户、不能派生、
+报告即返回值）：**服务端管职能，客户端管边界**。
+
+| 层 | 归属 | 内容 |
+|---|---|---|
+| 职能段 | 服务端（`someim-32b-<工种>`） | 角色、方法、报告契约、诚实要求 |
+| 边界段 | 客户端 | 无用户、无嵌套、写通道、工具协议 |
+| Task Packet | 客户端 | 目标、事实、约束、相关文件、verifier |
+
+`deep` 例外（跑父模型）。网关没托管的工种回落到基础廉价档（`glm-5`）并由客户端
+发职能段——**一个工种绝不能落到「一份职能描述都没有」**。非 some.im 的 provider
+行为不变。`[subagents.<工种>] model` 显式指定时以用户为准，并自动切回客户端职能段。
+
+> 与 Xedit 的一致性由 `hosted_worker_model()` 的单元测试锁定：同一个操作者从
+> CLI 和从 App 派同一个工种，必须落到同一个模型上。
 
 ## Task Packet
 
@@ -109,6 +128,35 @@ attempt 打满 → 整个运行判失败，报告要求升档
 
 > **与 Xedit 设计的差异**：Xedit 设计里冲突的后来者是「排队」，rs 侧是「拒绝并点名冲突文件」。理由是并发上限本来只有 3，排队会引入等待与死锁面，而拒绝把决定权交回父 Agent——它比锁更清楚该等还是该重新切分。
 
+## 只读工种的弱验证：引用抽查
+
+`test_fixer` 有退出码，`scout` 没有。此前只读工种（`scout` / `reader` /
+`log_inspector` / `git_detective`）的判定字段永远是 `None`——**永远「未验证」，
+于是在指标里永远隐身，而隐身读起来就像没问题**。
+
+它们的答案并非不可证伪：一个位置要么存在，要么不存在。运行结束后 Runtime 对
+报告做一次确定性抽查（纯代码，不花模型、不占轮次）：
+
+| 引用形态 | 核对方式 |
+|---|---|
+| `src/foo.rs` | 文件在不在 |
+| `src/foo.rs:42` | 文件在不在 + 行号是否越过文件末尾 |
+| 7–40 位十六进制 | `git cat-file -e <sha>^{commit}` 能不能解析 |
+
+结果两处落地：报告尾部追加 `<citation-check checked="N" unverifiable="M">`
+（点名对不上的那几条，父 Agent 直接看得见），判定事件带上 `claims_checked` /
+`claims_unverifiable` 两个字段，`willdeep daemon agent-metrics` 多一行
+`citation_accuracy`。
+
+三条边界，写清楚免得把这项当成它不是的东西：
+
+1. **它只证伪「地名是编的」，不证明「答对了」**。一个 Worker 可以引用十个真实
+   文件，同时完全答非所问。靶场里因此把「引用准确率」和「答对率」分成两列算。
+2. **认不出来的 token 一律不计**。把解析器读不懂的词算成坏引用，指标就变成在
+   量解析器，不是在量 Worker。
+3. **`checked = 0` 不是满分**。什么都没引用的报告不进分子也不进分母——和
+   「引用全对」是两件事，正如「没验证」不是「通过」。
+
 ## 确定性派工触发
 
 露脸次数不能只靠主模型自觉。主 Agent 的 `run_command` 返回非零退出码、且命令形状匹配测试 / 构建特征（`cargo test`、`pytest`、`go build`、`tsc`、`make`、`xcodebuild` 等）时，工具结果尾部自动追加一段：
@@ -120,6 +168,11 @@ This failure is a good fit for the `test_fixer` worker. Spawn it with a task pac
 ```
 
 不强制、不自动派工——**决定权仍在父 Agent**，只是把派工成本压到一句话。子 Agent 永远不会收到这个提示：它不能派生，给它提示只是给一条它执行不了的指令。
+
+> Xedit 侧的实测（2026-08-16，358 个会话侧车、25 340 条消息）：**只有 5 个会话
+> 派过工，1.4%**。结论与 rs 侧的 0 派工记录一致——**光有提示不够，模型就是不派**。
+> Xedit 的下一刀切在 workflow 引擎（把 fan-out 步骤直接绑工种）；rs 侧没有
+> workflow 引擎，对应的抓手是 Goal Teams 与调度，尚未动。
 
 ## 配置
 
@@ -137,6 +190,27 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 
 工种名必须是上表之一，写错会在启动时报错而不是静默忽略。
 
+## 与 macOS 版 Xedit 的对照（2026-08-16 盘点）
+
+两边同源、同一个网关、同一批账号，因此**能一致的必须一致**；不一致的地方要写明
+理由，而不是让它自然漂移。
+
+| 项 | Xedit (1.263.0-rc1) | willdeep-rs (0.26.0-rc1) | 状态 |
+|---|---|---|---|
+| 托管工种模型 `someim-32b-<工种>` | ✅ 7 个 | ✅ 同一张表，单测锁定 | **已对齐** |
+| 服务端职能段 / 客户端边界段分工 | ✅ | ✅ | **已对齐** |
+| Task Packet / Verifier 闭环 / 文件集锁 | ✅ | ✅ | 已对齐 |
+| `X-Playground-Session-ID` | ✅ | ✅ | **已对齐** |
+| `git_detective` 带只读 shell | ✅ `run_command` | ✅ 只读 git 形状门禁 | **已对齐** |
+| 确定性派工触发（测试/构建失败） | ✅ | ✅ | 已对齐 |
+| 冲突文件集 | 排队 | 拒绝并点名 | 有意分歧（见上文） |
+| 只读工种引用抽查 | ✅ 1.264.0-rc1 回流 | ✅ 本版新增 | **已对齐**（Xedit 侧第四个指标 Citation Accuracy） |
+| 实弹靶场 | ✅ 1.264.0-rc1 回流（5 样本） | ✅ 12 样本 | **已对齐**（样本各按语言，判定纪律逐字一致） |
+| `security_guard` / `judge` 工种 | ✅ | ❌ 无 | 分歧：网关侧这两个虚拟模型**实测未配置**（`model_not_configured`），rs 的判官走既有 `someim-security-guard`，等服务端补齐再对齐 |
+| `reviewer` / `ops_runner` / `terminal_operator` | ✅ | ❌ 无 | 缺口：前两个可移植（虚拟模型同样未配置），`terminal_operator` 驾驶的是 App 侧栏终端，CLI 无对应物，**不打算做** |
+| Workflow 步骤绑工种 | ✅ 派工率第一刀 | ❌ 无 workflow 引擎 | 结构性差异，rs 侧对应抓手是 Goal Teams |
+| 沙箱档（seatbelt / 凭证档） | ✅ | ❌ 无 seatbelt | 平台差异 |
+
 ## 分期与现状
 
 | 阶段 | 内容 | 状态 |
@@ -146,6 +220,73 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | P2 露脸 | 确定性派工触发、`log_inspector` / `git_detective` | ✅ 已落地 |
 | P3 遥测 | 判定结构化落盘、三个北极星指标、Replay 锚点 | ✅ 已落地 |
 | 后续 | Replay 回放工具、per-skill 路由表、verdict 回执上报 some.im | ⏳ 未做 |
+
+## 实弹靶场
+
+遥测只能算「已经派出去的工」的成绩。**「小模型到底修不修得动」这个问题，靶场
+才能回答**——它现建十个带真实缺陷的 Cargo 仓库，用真 Provider 派工，用真
+`cargo` 退出码判定。
+
+```bash
+ruby scripts/skill_worker_range.rb
+ruby scripts/skill_worker_range.rb --model glm-5 --cases test_off_by_one,build_missing_mut
+```
+
+- 驱动器：`scripts/skill_worker_range.rb`，从 `~/.willdeep/config.toml` 取默认
+  provider 的凭据，产出 `target/skill-worker-range/range.json` 与 `range.md`
+  两份报告，外加每个样本的逐字记录 `traces/<样本>.log`。
+- 靶子：`crates/willdeep-core/src/livefire.rs`，五个 `test_fixer` 样本（逻辑
+  缺陷）＋五个 `build_fixer` 样本（编译错误）＋两个只读样本（`scout` 定位符号、
+  `git_detective` 定位真凶），默认 `#[ignore]`，**不进 CI**：它要真凭据、
+  要网络、要花钱。
+- 每个可验证样本派工前先跑一遍 verifier 确认**是红的**。绿着的靶子测不出任何
+  东西，报告里会点名 `seeded_red = false` 的无效样本。只读样本没有 verifier，
+  衡量的是引用准确率与答对率两列——**分开算**，因为引用真实不等于答对。
+
+两条判定纪律：
+
+1. **成功 = verifier 通过 且 测试块逐字未改**。退出码只知道绿了，不知道绿得
+   干不干净；把测试删掉也能变绿，而那是最省力的通关方式。靶场单独比对测试块
+   原文，作弊的不进分子。
+2. **逐字记录默认留存**。判定告诉你成没成，记录告诉你为什么——第一轮实弹里
+   「跑满 8 轮、一个字没改」的失败，就是靠记录才看出来是 Runtime 拒了 Worker
+   的正确补丁，而不是模型不会修。
+
+### 实测（2026-08-16，`glm-5`，12 样本）
+
+| 指标 | 结果 |
+|---|---|
+| Worker Verified Success（10 个可验证样本） | **10/10（100%）** |
+| 平均尝试次数 | 1.00（没有一个样本用到第二次） |
+| 作弊（verifier 绿但改了测试） | 0 |
+| 只读工种引用准确率 | **4/4（100%）** |
+| 只读工种答对率 | **2/2** |
+| 平均单样本 token | ≈ 5 100（总 61 732） |
+| 平均单样本耗时 | ≈ 19 秒（总 227 秒） |
+
+**这组数字支持的结论只有一条**：形状有界、失败可由退出码判定的局部修复
+（少写 `mut`、类型不符、非穷尽 match、move 后再用、漏 import、off-by-one、
+比较符写反、空输入 panic、漏闰年规则、空白折叠），以及有界的定位类问题
+（多模块里找符号、三个 commit 的历史里找真凶），交给 32K/64K 窗口的 `glm-5`
+是够用的，且**一次就过**。
+
+它**不支持**的结论：小模型能干跨文件重构、能定语义模糊的需求、能替代 `deep`
+或主 Agent。样本是十几个几十行的独立小仓库，是这条谱系上最容易的一端。要把
+结论往难处推，先往靶场里加难样本，别往 PPT 里加形容词。
+
+靶场至今打出的三个真问题（都已修）：
+
+- 审批过的写入目标没做规范化：workspace 路径里只要有一层符号链接
+  （macOS 的 `/var`、`/tmp`、软链的检出目录），Worker 发出的正确补丁会被判成
+  「越界写入」，且拒绝信息里点的就是它刚请求的那个路径。修复前 `glm-5` 在
+  `build_missing_mut` 上跑满 8 轮、烧 1.4 万 token、一个字没改；修复后同一样本
+  1 次尝试通过、4.7k token、13.9 秒。
+- verifier allowlist 的拒绝信息不说「那什么才行」。Worker 的典型近失是给验证
+  命令加装饰（`cargo build 2>&1`），每猜一次就是一轮。现在拒绝信息直接引用
+  允许的原文。
+- `git_detective` 用手上的工具**答不了它得名的那个问题**：`git_diff` 不接受
+  revision 参数，四个固定 git 工具没法比较两个 commit。实测跑满 8 轮、9.4k
+  token、零结论。现在它拿到只读 git shell（形状门禁），同一样本 1 轮答对。
 
 ## 遥测与指标
 

@@ -46,6 +46,25 @@ const MAX_ATTEMPTS_CEILING: usize = 6;
 /// Seconds a verifier command may run before it counts as a failed attempt.
 const VERIFIER_TIMEOUT_SECONDS: u64 = 900;
 
+/// What a trade may put through `run_command`.
+///
+/// A worker runs unattended: there is no approval card to show, so the shell
+/// it gets has to be decided at dispatch time and never widened at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentShell {
+    /// No shell at all.
+    None,
+    /// Exactly the verifier command declared in the task packet, verbatim.
+    VerifierOnly,
+    /// Read-only `git` and nothing else. History questions — which commit
+    /// introduced this, what did that commit change, how do two refs differ —
+    /// cannot be answered by a fixed set of pre-baked git tools: the whole
+    /// job is composing the query. Both halves of the rule matter: the head
+    /// must be `git`, and the command must still pass the same static
+    /// read-only classification every other command passes.
+    ReadOnlyGit,
+}
+
 /// How a profile is allowed to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubagentWriteScope {
@@ -83,6 +102,13 @@ pub struct SubagentProfile {
     pub tool_output_limit: Option<usize>,
     /// Attempt budget for verified runs when the packet does not override it.
     pub max_attempts: usize,
+    /// What this trade may run in a shell.
+    pub shell: SubagentShell,
+    /// The relay prepends this trade's job prompt (`someim-32b-<trade>`), so
+    /// the client must not send its own copy. The boundary paragraph — no
+    /// user, no nesting, the report *is* the return value — is always sent:
+    /// the server owns the trade, the client owns the边界.
+    pub hosted_job_prompt: bool,
 }
 
 #[derive(Clone)]
@@ -409,7 +435,7 @@ impl SubagentCatalog {
         // "fix, then prove it". Without a verifier it has nothing to run and
         // nothing to prove, and its report would be exactly the unverified
         // self-assessment this profile exists to replace.
-        if verifier.is_none() && profile.tool_names.iter().any(|tool| tool == "run_command") {
+        if verifier.is_none() && profile.shell == SubagentShell::VerifierOnly {
             return Err(AgentError::Subagent(format!(
                 "profile {} is a verified worker and requires task.verifier.command",
                 profile.id
@@ -837,12 +863,16 @@ async fn run_subagent(
     // Read the anchor before the worker touches anything: with the commit the
     // run started from, this record replays.
     let repo_commit = head_commit(&workspace).await;
-    let verdict = |passed: Option<bool>, attempts: usize| AgentEvent::SubagentVerdict {
-        id: agent_id,
-        repo_commit: repo_commit.clone(),
-        verifier_command: verifier.as_ref().map(|verifier| verifier.command.clone()),
-        verifier_passed: passed,
-        attempts,
+    let verdict = |passed: Option<bool>, attempts: usize, audit: &CitationAudit| {
+        AgentEvent::SubagentVerdict {
+            id: agent_id,
+            repo_commit: repo_commit.clone(),
+            verifier_command: verifier.as_ref().map(|verifier| verifier.command.clone()),
+            verifier_passed: passed,
+            attempts,
+            claims_checked: audit.checked,
+            claims_unverifiable: audit.unverifiable.len(),
+        }
     };
     let mut brief = compose_brief(&prompt, task.as_ref(), &workspace, &profile).await;
     let attempts = if verifier.is_some() { max_attempts } else { 1 };
@@ -862,13 +892,20 @@ async fn run_subagent(
         .await?;
         let Some(verifier) = verifier.as_ref() else {
             // No verifier: unverified, which is not the same as failed, and
-            // the telemetry has to keep the two apart.
-            lifecycle_sink.emit(verdict(None, attempt)).await;
-            return Ok(report);
+            // the telemetry has to keep the two apart. What can still be
+            // checked without a command is what the report cites.
+            let audit = audit_citations(&workspace, &report).await;
+            lifecycle_sink.emit(verdict(None, attempt, &audit)).await;
+            return Ok(match audit.note() {
+                Some(note) => format!("{report}\n\n{note}"),
+                None => report,
+            });
         };
         let result = run_verifier(&workspace, verifier).await?;
         if result.passed {
-            lifecycle_sink.emit(verdict(Some(true), attempt)).await;
+            lifecycle_sink
+                .emit(verdict(Some(true), attempt, &CitationAudit::default()))
+                .await;
             return Ok(format!(
                 "{report}\n\n<verifier command={:?} attempts={attempt} verdict=\"passed\" />",
                 verifier.command
@@ -889,12 +926,142 @@ async fn run_subagent(
 
     let outcome = outcome.expect("a verified run records an outcome before exhausting attempts");
     lifecycle_sink
-        .emit(verdict(Some(false), outcome.attempts))
+        .emit(verdict(
+            Some(false),
+            outcome.attempts,
+            &CitationAudit::default(),
+        ))
         .await;
     Err(AgentError::Subagent(format!(
         "worker did not reach a verified pass: {} failed after {} attempt(s). Escalate — retry this agent with the parent model, or re-dispatch with a wider task packet.\n\n{}",
         outcome.command, outcome.attempts, outcome.last_digest
     )))
+}
+
+/// What a deterministic spot-check made of a report-only run.
+///
+/// Read-only trades (`scout`, `reader`, `log_inspector`, `git_detective`) have
+/// no exit code to judge them, so their telemetry has been a permanent `None`:
+/// every run "unverified", forever. But their answers are not unfalsifiable —
+/// a location either exists or it does not. This checks the part a program
+/// can check: the paths, line numbers and commits the report names.
+///
+/// It deliberately says nothing about whether the answer is *right*. A worker
+/// can cite ten real files and still miss the point; what it can no longer do
+/// is invent a path and have that pass unnoticed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CitationAudit {
+    pub checked: usize,
+    pub unverifiable: Vec<String>,
+}
+
+impl CitationAudit {
+    fn note(&self) -> Option<String> {
+        if self.checked == 0 {
+            return None;
+        }
+        if self.unverifiable.is_empty() {
+            return Some(format!(
+                "<citation-check checked=\"{}\" unverifiable=\"0\" />",
+                self.checked
+            ));
+        }
+        Some(format!(
+            "<citation-check checked=\"{}\" unverifiable=\"{}\">\nThese cited locations do not exist in the workspace, so anything resting on them is unsupported:\n{}\n</citation-check>",
+            self.checked,
+            self.unverifiable.len(),
+            self.unverifiable
+                .iter()
+                .map(|claim| format!("- {claim}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+}
+
+/// Spot-check every `path`, `path:line` and commit hash a report names.
+///
+/// Cheap and deterministic: no model, no network, a `stat` per path and one
+/// `git cat-file` per hash. Anything it cannot classify it leaves alone —
+/// counting an unrecognized token as a bad citation would make the metric
+/// measure the parser instead of the worker.
+pub async fn audit_citations(workspace: &Path, report: &str) -> CitationAudit {
+    let mut audit = CitationAudit::default();
+    let mut seen = BTreeSet::new();
+    for raw in report.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';'
+            )
+    }) {
+        let token = raw.trim_matches(|ch: char| matches!(ch, '.' | ':' | '*' | '#'));
+        if token.is_empty() || !seen.insert(token.to_owned()) {
+            continue;
+        }
+        if let Some((path, line)) = split_path_citation(token) {
+            let target = workspace.join(path);
+            if !target.is_file() {
+                audit.checked += 1;
+                audit.unverifiable.push(token.to_owned());
+                continue;
+            }
+            audit.checked += 1;
+            let Some(line) = line else { continue };
+            // A line number past the end of the file is the same class of
+            // error as a path that does not exist: it points at nothing.
+            let lines = tokio::fs::read_to_string(&target)
+                .await
+                .map(|text| text.lines().count())
+                .unwrap_or(0);
+            if line == 0 || line > lines {
+                audit.unverifiable.push(token.to_owned());
+            }
+        } else if is_commit_hash(token) {
+            audit.checked += 1;
+            if !commit_exists(workspace, token).await {
+                audit.unverifiable.push(token.to_owned());
+            }
+        }
+    }
+    audit
+}
+
+/// `src/foo.rs:42` → (`src/foo.rs`, Some(42)). Only tokens that look like a
+/// workspace-relative file path qualify: a directory separator and an
+/// extension, no absolute paths, no URLs.
+fn split_path_citation(token: &str) -> Option<(&str, Option<usize>)> {
+    let (path, line) = match token.rsplit_once(':') {
+        Some((head, tail)) if tail.chars().all(|ch| ch.is_ascii_digit()) && !tail.is_empty() => {
+            (head, tail.parse::<usize>().ok())
+        }
+        _ => (token, None),
+    };
+    if path.starts_with('/') || path.contains("://") || path.starts_with('-') {
+        return None;
+    }
+    let file_name = path.rsplit('/').next()?;
+    if !path.contains('/') || !file_name.contains('.') || file_name.starts_with('.') {
+        return None;
+    }
+    Some((path, line))
+}
+
+fn is_commit_hash(token: &str) -> bool {
+    (7..=40).contains(&token.len())
+        && token.chars().all(|ch| ch.is_ascii_hexdigit())
+        && token.chars().any(|ch| ch.is_ascii_digit())
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+async fn commit_exists(workspace: &Path, hash: &str) -> bool {
+    tokio::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{hash}^{{commit}}")])
+        .current_dir(workspace)
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 /// The commit a run started from. Best effort: a workspace that is not a Git
@@ -938,18 +1105,30 @@ async fn run_once(
     if let Some(limit) = profile.tool_output_limit {
         tools = tools.with_tool_output_limit(limit);
     }
-    // A worker that may run commands at all may run exactly its verifier.
-    // Anything else is a shell in an unattended context with no one to ask.
-    tools = tools.with_command_allowlist(Some(
-        verifier
-            .map(|verifier| HashSet::from([verifier.command.trim().to_owned()]))
-            .unwrap_or_default(),
-    ));
-    let system_prompt = format!(
-        "You are a WillDeep subagent working in {}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent.\n\n{}",
-        workspace.display(),
-        profile.capability_prompt
+    // The shell a worker gets is decided here and never widened at runtime.
+    // `ReadOnlyGit` is the one policy that is a *shape* rather than a literal:
+    // composing the query is the job, so the rule constrains what the command
+    // may be, not which command it is.
+    tools = match profile.shell {
+        SubagentShell::ReadOnlyGit => tools.with_read_only_git_shell(true),
+        SubagentShell::None | SubagentShell::VerifierOnly => tools.with_command_allowlist(Some(
+            verifier
+                .map(|verifier| HashSet::from([verifier.command.trim().to_owned()]))
+                .unwrap_or_default(),
+        )),
+    };
+    let boundary = format!(
+        "You are a WillDeep subagent working in {}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent.",
+        workspace.display()
     );
+    // A relay-hosted trade already carries its job prompt server-side. Sending
+    // the client's copy too would put two descriptions of the same trade in
+    // one context — and when they drift, the worker gets to pick.
+    let system_prompt = if profile.hosted_job_prompt {
+        boundary
+    } else {
+        format!("{boundary}\n\n{}", profile.capability_prompt)
+    };
     let timeout_seconds = profile.timeout_seconds;
     let mut agent = Agent::new(
         profile.provider.clone(),
@@ -1220,6 +1399,36 @@ const PAYLOAD_LIMIT_SMALL: usize = 3 * 1024;
 const PAYLOAD_LIMIT_STANDARD: usize = 4 * 1024;
 const PAYLOAD_LIMIT_WIDE: usize = 6 * 1024;
 
+/// Prefix of the some.im virtual models that host the trade job prompts.
+/// `someim-32b` is a *tier* name, not a context promise: the model behind it
+/// is the same cheap model, and the small-window discipline stays on this
+/// side of the wire.
+pub const HOSTED_WORKER_MODEL_PREFIX: &str = "someim-32b";
+
+/// The virtual model that hosts `id`'s job prompt, or `None` for trades the
+/// relay does not host (`deep` runs the parent model; anything absent from
+/// this list has no server-side prompt to prepend).
+///
+/// Mirrors macOS Xedit's `AgentSubagentJobPrompts.hostedModel(for:)` — same
+/// gateway, same accounts, so the two clients must resolve the same trade to
+/// the same model or the same operator gets two different workers depending
+/// on which app they opened. Catalog ids are snake_case, model names are
+/// hyphenated.
+pub fn hosted_worker_model(id: &str) -> Option<String> {
+    const HOSTED: &[&str] = &[
+        "scout",
+        "reader",
+        "editor",
+        "test_fixer",
+        "build_fixer",
+        "log_inspector",
+        "git_detective",
+    ];
+    HOSTED
+        .contains(&id)
+        .then(|| format!("{HOSTED_WORKER_MODEL_PREFIX}-{}", id.replace('_', "-")))
+}
+
 /// Every profile the catalog ships with. `context_window` is the *session's*
 /// window and is used only by `deep`; every worker gets its own tier.
 pub fn builtin_profiles(
@@ -1232,6 +1441,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "scout",
+                shell: SubagentShell::None,
                 purpose: "Locate files, symbols and call sites quickly; no shell or writes.",
                 tools: &["search_files", "grep_files", "list_directory", "read_file"],
                 prompt: "Your trade is LOCATION. Report exact paths and line numbers; do not redesign.",
@@ -1247,6 +1457,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "reader",
+                shell: SubagentShell::None,
                 purpose: "Read and summarize long files or documentation; no shell or writes.",
                 tools: &["read_file", "list_directory", "search_files"],
                 prompt: "Your trade is READING. Answer with specific evidence and say which parts you read.",
@@ -1262,6 +1473,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "log_inspector",
+                shell: SubagentShell::None,
                 purpose: "Explain a failure log or error output and classify the cause; no shell or writes.",
                 tools: &["read_file"],
                 prompt: "Your trade is READING FAILURE OUTPUT. Quote the failing assertion or error verbatim — never paraphrase it — then name the single most likely cause and the file it lives in. If the output does not support a conclusion, say so instead of guessing.",
@@ -1277,6 +1489,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "git_detective",
+                shell: SubagentShell::ReadOnlyGit,
                 purpose: "Find when and where a regression was introduced from repository history; read-only.",
                 tools: &[
                     "git_log",
@@ -1284,8 +1497,9 @@ pub fn builtin_profiles(
                     "git_blame",
                     "git_status",
                     "read_file",
+                    "run_command",
                 ],
-                prompt: "Your trade is REGRESSION ARCHAEOLOGY. Work backwards from the symptom through history and report exact commits, dates and hunks. Name the commit you believe introduced the change, and say plainly when the evidence does not single one out.",
+                prompt: "Your trade is REGRESSION ARCHAEOLOGY. You may run read-only `git` commands directly — `git log -p`, `git show <sha>`, `git diff <a> <b>`, `git bisect` inspection — which is the only way to compare two commits; nothing but git will run. Work backwards from the symptom through history and report exact commits, dates and hunks. Name the commit you believe introduced the change, and say plainly when the evidence does not single one out.",
                 max_turns: 8,
                 context_window: WORKER_WINDOW_STANDARD,
                 tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
@@ -1298,6 +1512,7 @@ pub fn builtin_profiles(
             parent,
             ProfileSpec {
                 id: "deep",
+                shell: SubagentShell::None,
                 purpose: "Complex investigation across files and repository state.",
                 tools: &[
                     "search_files",
@@ -1319,6 +1534,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "editor",
+                shell: SubagentShell::None,
                 purpose: "Edit exactly one separately approved target_file.",
                 tools: &["read_file", "edit_file"],
                 prompt: "Your trade is EDITING EXACTLY ONE FILE. Read it first, make a minimal exact edit, and touch no other path.",
@@ -1334,6 +1550,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "test_fixer",
+                shell: SubagentShell::VerifierOnly,
                 purpose: "Drive failing tests back to green across the declared file set; needs a verifier command.",
                 tools: &["read_file", "edit_file", "run_command"],
                 prompt: "Your trade is MAKING A FAILING TEST PASS. The verifier command is the only judge — run it, read the real failure, fix the cause. Prefer fixing the implementation; change the test only when the test itself encodes the wrong expectation, and say so explicitly in your report. Never delete, skip or weaken a test to make it pass. You may edit only the files declared in your task packet.",
@@ -1349,6 +1566,7 @@ pub fn builtin_profiles(
             cheap,
             ProfileSpec {
                 id: "build_fixer",
+                shell: SubagentShell::VerifierOnly,
                 purpose: "Fix compile, type and lint errors across the declared file set; needs a verifier command.",
                 tools: &["read_file", "edit_file", "run_command"],
                 prompt: "Your trade is MAKING THE BUILD PASS. Read the compiler or linter diagnostic literally: it usually names the file, line and expected type. Make the smallest change that satisfies it without changing behaviour, and never silence a diagnostic with a suppression unless your task packet asked for one. You may edit only the files declared in your task packet.",
@@ -1365,6 +1583,7 @@ pub fn builtin_profiles(
 
 struct ProfileSpec<'a> {
     id: &'a str,
+    shell: SubagentShell,
     purpose: &'a str,
     tools: &'a [&'a str],
     prompt: &'a str,
@@ -1393,6 +1612,8 @@ fn profile(provider: Arc<dyn Provider>, spec: ProfileSpec<'_>) -> SubagentProfil
         worktree: spec.worktree,
         tool_output_limit: spec.tool_output_limit,
         max_attempts: DEFAULT_MAX_ATTEMPTS,
+        shell: spec.shell,
+        hosted_job_prompt: false,
     }
 }
 
@@ -1501,6 +1722,192 @@ mod tests {
         assert_eq!(result.status, BackgroundTaskStatus::Blocked);
         assert_eq!(result.exit_code, None);
         assert_eq!(result.output, "write access needed");
+    }
+
+    /// A report-only trade has no exit code, so the one thing a program can
+    /// still check is whether the places it named exist. Both directions
+    /// matter: an invented path must be caught, and a real citation must not
+    /// be flagged — a check that cries wolf gets switched off.
+    #[tokio::test]
+    async fn a_report_only_run_is_spot_checked_against_the_files_it_cites() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-citations-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).expect("workspace");
+        std::fs::write(root.join("src/real.rs"), "one\ntwo\nthree\n").expect("fixture");
+
+        let clean = audit_citations(
+            &root,
+            "The handler lives in `src/real.rs:2`, and `src/real.rs` has no other callers.",
+        )
+        .await;
+        assert_eq!(clean.checked, 2, "both citations are checkable");
+        assert!(
+            clean.unverifiable.is_empty(),
+            "a real path and an in-range line must not be flagged: {:?}",
+            clean.unverifiable
+        );
+
+        let dirty = audit_citations(
+            &root,
+            "See `src/invented.rs:10` and `src/real.rs:900` for the retry logic.",
+        )
+        .await;
+        assert_eq!(dirty.checked, 2);
+        assert_eq!(
+            dirty.unverifiable.len(),
+            2,
+            "a path that does not exist and a line past the end are both citations of nothing: {:?}",
+            dirty.unverifiable
+        );
+
+        // Prose is not a citation. Counting words the parser merely failed to
+        // understand would measure the parser, not the worker.
+        let prose = audit_citations(&root, "The retry logic looks correct to me.").await;
+        assert_eq!(prose.checked, 0);
+        assert!(prose.note().is_none(), "nothing checked, nothing to report");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A commit hash that does not resolve is the `git_detective` version of
+    /// an invented path.
+    #[tokio::test]
+    async fn a_cited_commit_that_does_not_resolve_is_flagged() {
+        let root = std::env::temp_dir().join(format!("willdeep-commits-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        std::fs::write(root.join("file.txt"), "seed").expect("fixture");
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=range",
+                "-c",
+                "user.email=range@local",
+                "commit",
+                "--quiet",
+                "-m",
+                "seed",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .expect("git");
+        }
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .expect("head")
+                .stdout,
+        )
+        .expect("utf8");
+        let head = head.trim();
+
+        let audit = audit_citations(
+            &root,
+            &format!("Introduced in {head}, not in 0badc0de1234 as the report claimed."),
+        )
+        .await;
+        assert_eq!(audit.checked, 2, "both hashes are checkable");
+        assert_eq!(
+            audit.unverifiable,
+            vec!["0badc0de1234".to_owned()],
+            "only the hash that does not resolve is flagged"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// The trade→model table is shared with the macOS app. One operator, one
+    /// gateway: if the two clients disagree here, the same trade quietly runs
+    /// on two different models depending on which app was opened.
+    #[test]
+    fn hosted_trades_resolve_to_the_relay_virtual_models() {
+        assert_eq!(
+            hosted_worker_model("test_fixer").as_deref(),
+            Some("someim-32b-test-fixer")
+        );
+        assert_eq!(
+            hosted_worker_model("scout").as_deref(),
+            Some("someim-32b-scout")
+        );
+        assert_eq!(
+            hosted_worker_model("git_detective").as_deref(),
+            Some("someim-32b-git-detective")
+        );
+        // `deep` runs the parent model, and a trade the relay does not host
+        // must fall back rather than invent a model name the gateway would
+        // refuse.
+        assert_eq!(hosted_worker_model("deep"), None);
+        assert_eq!(hosted_worker_model("ops_runner"), None);
+    }
+
+    /// With the job prompt hosted, the client sends the boundary paragraph and
+    /// nothing else: two copies of a trade description that can drift is worse
+    /// than one, and the boundary is the half the client owns.
+    #[tokio::test]
+    async fn a_hosted_trade_sends_the_boundary_without_a_second_job_prompt() {
+        struct PromptProbe(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait]
+        impl Provider for PromptProbe {
+            async fn complete(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<Completion, ProviderError> {
+                self.0
+                    .lock()
+                    .expect("prompts")
+                    .push(messages[0].content.clone());
+                Ok(Completion {
+                    content: "report".to_owned(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    usage: None,
+                })
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(PromptProbe(seen.clone()));
+        let root = std::env::temp_dir().join(format!("willdeep-hosted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let mut profiles = builtin_profiles(provider.clone(), provider, 128_000);
+        for profile in &mut profiles {
+            profile.hosted_job_prompt = profile.id == "scout";
+        }
+        let catalog =
+            SubagentCatalog::new(&root, profiles, Arc::new(BackgroundTaskRegistry::default()));
+        for id in ["scout", "reader"] {
+            catalog
+                .run(
+                    SpawnAgentArgs {
+                        prompt: "look".to_owned(),
+                        profile: Some(id.to_owned()),
+                        run_in_background: Some(false),
+                        ..SpawnAgentArgs::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("run");
+        }
+        let prompts = seen.lock().expect("prompts").clone();
+        assert!(
+            prompts[0].contains("cannot spawn another agent") && !prompts[0].contains("LOCATION"),
+            "a hosted trade keeps the boundary and drops the client job prompt: {}",
+            prompts[0]
+        );
+        assert!(
+            prompts[1].contains("cannot spawn another agent") && prompts[1].contains("READING"),
+            "an unhosted trade still gets its job prompt from the client: {}",
+            prompts[1]
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[tokio::test]
