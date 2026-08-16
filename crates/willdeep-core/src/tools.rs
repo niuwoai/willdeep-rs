@@ -681,7 +681,16 @@ impl ToolRegistry {
                         .to_ascii_lowercase()
                         .contains(&query)
             })
-            .map(|s| format!("- {} | name={} | {}", s.identifier, s.name, s.description))
+            .map(|s| match s.tier {
+                Some(tier) => format!(
+                    "- {} | name={} | tier={} | {}",
+                    s.identifier,
+                    s.name,
+                    tier.as_str(),
+                    s.description
+                ),
+                None => format!("- {} | name={} | {}", s.identifier, s.name, s.description),
+            })
             .collect::<Vec<_>>();
         Ok(if lines.is_empty() {
             "No installed skills found.".to_owned()
