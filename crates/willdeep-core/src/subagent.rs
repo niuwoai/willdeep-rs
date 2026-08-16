@@ -129,6 +129,8 @@ pub struct SubagentCatalog {
     /// decide. A subagent has no approval UI, so an undecidable command with
     /// no judge is refused rather than silently run.
     safety_judge: Option<Arc<dyn SafetyJudge>>,
+    /// Skill library used to resolve `task.skill` at dispatch time.
+    skills: Option<Arc<crate::skills::SkillCatalog>>,
 }
 
 /// The structured half of a dispatch: what the parent already knows, so the
@@ -136,6 +138,12 @@ pub struct SubagentCatalog {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TaskPacket {
     pub goal: String,
+    /// Skill whose body the runtime inlines into the worker's first message.
+    /// Workers have no skill tools of their own — a worker that had to fetch
+    /// its own instructions would spend its window doing it — so the parent
+    /// names the skill and the runtime does the reading.
+    #[serde(default)]
+    pub skill: Option<String>,
     #[serde(default)]
     pub relevant_files: Vec<String>,
     #[serde(default)]
@@ -146,6 +154,13 @@ pub struct TaskPacket {
     pub verifier: Option<TaskVerifier>,
     #[serde(default)]
     pub max_attempts: Option<usize>,
+    /// Air-gapped degradation: when a relevant file does not fit the inline
+    /// budget, digest it through the worker's own cheap model (shard →
+    /// per-chunk structured summary) instead of dropping it with an
+    /// "omitted" marker. Off by default — it spends model calls, and that is
+    /// the dispatcher's decision to make, not the runtime's.
+    #[serde(default)]
+    pub digest_oversized: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -263,7 +278,15 @@ impl SubagentCatalog {
             worktrees: None,
             claimed_files: Arc::new(Mutex::new(BTreeSet::new())),
             safety_judge: None,
+            skills: None,
         }
+    }
+
+    /// Attach the skill library so a task packet can name a skill and have
+    /// its body inlined into the worker's opening message.
+    pub fn with_skills(mut self, skills: Arc<crate::skills::SkillCatalog>) -> Self {
+        self.skills = Some(skills);
+        self
     }
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
@@ -482,6 +505,7 @@ impl SubagentCatalog {
             verifier,
             max_attempts,
             claimed_files: self.claimed_files.clone(),
+            skills: self.skills.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -829,6 +853,7 @@ struct SubagentRun {
     verifier: Option<TaskVerifier>,
     max_attempts: usize,
     claimed_files: Arc<Mutex<BTreeSet<PathBuf>>>,
+    skills: Option<Arc<crate::skills::SkillCatalog>>,
 }
 
 /// Run a worker to a verdict.
@@ -855,6 +880,7 @@ async fn run_subagent(
         verifier,
         max_attempts,
         claimed_files,
+        skills,
     } = run;
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
@@ -874,7 +900,14 @@ async fn run_subagent(
             claims_unverifiable: audit.unverifiable.len(),
         }
     };
-    let mut brief = compose_brief(&prompt, task.as_ref(), &workspace, &profile).await;
+    let mut brief = compose_brief(
+        &prompt,
+        task.as_ref(),
+        &workspace,
+        &profile,
+        skills.as_deref(),
+    )
+    .await;
     let attempts = if verifier.is_some() { max_attempts } else { 1 };
     let mut outcome: Option<VerifierOutcome> = None;
 
@@ -1275,12 +1308,34 @@ async fn compose_brief(
     task: Option<&TaskPacket>,
     workspace: &Path,
     profile: &SubagentProfile,
+    skills: Option<&crate::skills::SkillCatalog>,
 ) -> String {
     let Some(task) = task else {
         return prompt.to_owned();
     };
     let mut brief = String::new();
     brief.push_str(&format!("<goal>\n{}\n</goal>\n", task.goal.trim()));
+    if let Some(name) = task
+        .skill
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        // The skill body rides in the opening message like a relevant file:
+        // a worker made to fetch its own instructions spends its window on
+        // the fetching. Unresolvable skills are named, never silent — the
+        // worker must not improvise the procedure it thinks it was given.
+        let budget = inline_budget(profile.context_window) / 2;
+        match skills.and_then(|catalog| catalog.read(name, None).ok()) {
+            Some(body) => brief.push_str(&format!(
+                "\n<skill name={name:?}>\n{}\n</skill>\n",
+                bounded(body, budget)
+            )),
+            None => brief.push_str(&format!(
+                "\n<skill name={name:?} status=\"unavailable: not installed on this runtime; say so in your report instead of improvising the procedure\" />\n"
+            )),
+        }
+    }
     if !task.known_facts.is_empty() {
         brief.push_str("\n<known-facts>\n");
         for fact in &task.known_facts {
@@ -1304,7 +1359,16 @@ async fn compose_brief(
     }
     if !task.relevant_files.is_empty() {
         let budget = inline_budget(profile.context_window);
-        brief.push_str(&inline_relevant_files(workspace, &task.relevant_files, budget).await);
+        brief.push_str(
+            &inline_relevant_files(
+                workspace,
+                &task.relevant_files,
+                budget,
+                task.digest_oversized.unwrap_or(false),
+                profile,
+            )
+            .await,
+        );
     }
     brief.push_str(&format!(
         "\n<instruction>\n{}\n</instruction>\n",
@@ -1313,7 +1377,13 @@ async fn compose_brief(
     brief
 }
 
-async fn inline_relevant_files(workspace: &Path, files: &[String], budget: usize) -> String {
+async fn inline_relevant_files(
+    workspace: &Path,
+    files: &[String],
+    budget: usize,
+    digest_oversized: bool,
+    profile: &SubagentProfile,
+) -> String {
     let mut rendered = String::from("\n<relevant-files>\n");
     let mut spent = 0usize;
     for path in files {
@@ -1323,6 +1393,16 @@ async fn inline_relevant_files(workspace: &Path, files: &[String], budget: usize
             continue;
         };
         let remaining = budget.saturating_sub(spent);
+        // Air-gapped degradation: material that does not fit the window gets
+        // digested through the worker's own cheap model instead of dropped.
+        // The digest is honest about what it is — a summary, not the file —
+        // and the raw path stays named so the worker can still read slices.
+        if digest_oversized && content.len() > remaining.max(1) {
+            let digest = digest_material(profile, path, &content, remaining.min(budget / 4)).await;
+            spent += digest.len();
+            rendered.push_str(&digest);
+            continue;
+        }
         if remaining == 0 {
             rendered.push_str(&format!(
                 "<file path={path:?} status=\"omitted: inline budget exhausted, read it yourself if you need it\" />\n"
@@ -1342,6 +1422,77 @@ async fn inline_relevant_files(workspace: &Path, files: &[String], budget: usize
         ));
     }
     rendered.push_str("</relevant-files>\n");
+    rendered
+}
+
+/// Map-reduce a file that does not fit the inline budget: shard it, summarize
+/// each shard on the worker's own cheap model, and inline the digests.
+///
+/// This is the automated form of the air-gapped degradation ladder in
+/// `docs/MODEL_TIERS.md`: when no long-context tier exists, oversized
+/// material is sharded and reduced rather than silently dropped. Three
+/// disciplines keep it honest:
+///
+/// - the result is *labeled* a digest, chunk by chunk, so nothing downstream
+///   mistakes a summary for the file;
+/// - identifiers, signatures and assertions are demanded verbatim — the same
+///   rule the verifier failure digest lives by;
+/// - a chunk whose summary call fails is reported failed, not skipped: a
+///   digest with an unmarked hole reads as complete coverage.
+const DIGEST_MAX_CHUNKS: usize = 4;
+
+async fn digest_material(
+    profile: &SubagentProfile,
+    path: &str,
+    content: &str,
+    output_budget: usize,
+) -> String {
+    // Chunk on char boundaries, sized so every chunk fits the worker window
+    // with room for the instruction and the reply.
+    let chunk_bytes = (inline_budget(profile.context_window) / 2).max(4 * 1024);
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() && chunks.len() < DIGEST_MAX_CHUNKS {
+        let mut cut = rest.len().min(chunk_bytes);
+        while cut > 0 && !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (head, tail) = rest.split_at(cut);
+        chunks.push(head);
+        rest = tail;
+    }
+    let uncovered = !rest.is_empty();
+    let per_chunk = (output_budget / chunks.len().max(1)).max(512);
+
+    let mut rendered = format!(
+        "<file path={path:?} status=\"digested: too large to inline, summarized in {} chunk(s) by {}\">\n",
+        chunks.len(),
+        profile.model.as_deref().unwrap_or("the worker model")
+    );
+    for (index, chunk) in chunks.iter().enumerate() {
+        let request = crate::types::Message::user(format!(
+            "Summarize this chunk ({} of {}) of file {path} for an engineer who cannot read the original. Preserve identifiers, function signatures, error messages and assertions verbatim. Be dense and factual; no advice.\n\n{chunk}",
+            index + 1,
+            chunks.len()
+        ));
+        match profile.provider.complete(&[request], &[]).await {
+            Ok(completion) => rendered.push_str(&format!(
+                "<chunk index=\"{}\">\n{}\n</chunk>\n",
+                index + 1,
+                bounded(completion.content, per_chunk)
+            )),
+            Err(error) => rendered.push_str(&format!(
+                "<chunk index=\"{}\" status=\"digest failed: {error}\" />\n",
+                index + 1
+            )),
+        }
+    }
+    if uncovered {
+        rendered.push_str(&format!(
+            "<uncovered note=\"content beyond {DIGEST_MAX_CHUNKS} chunks was not digested; read {path:?} directly for the remainder\" />\n"
+        ));
+    }
+    rendered.push_str("</file>\n");
     rendered
 }
 
@@ -1817,6 +1968,158 @@ mod tests {
             audit.unverifiable,
             vec!["0badc0de1234".to_owned()],
             "only the hash that does not resolve is flagged"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A packet that names a skill gets the skill body inlined by the
+    /// runtime; a skill this runtime does not have is named as unavailable —
+    /// a worker must never improvise the procedure it thinks it was given.
+    #[tokio::test]
+    async fn a_named_skill_is_inlined_and_a_missing_one_is_called_out() {
+        struct PromptProbe(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait]
+        impl Provider for PromptProbe {
+            async fn complete(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<Completion, ProviderError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(messages.last().unwrap().content.clone());
+                Ok(Completion {
+                    content: "report".to_owned(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    usage: None,
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("willdeep-skillpkt-{}", uuid::Uuid::new_v4()));
+        let skill_dir = root.join(".willdeep/skills/convert");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: convert\ndescription: convert images\ntier: worker\n---\n# Steps\nUse sips.",
+        )
+        .expect("skill");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(PromptProbe(seen.clone()));
+        let catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(provider.clone(), provider, 128_000),
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_skills(Arc::new(crate::skills::SkillCatalog::discover(&root, &[])));
+
+        for (skill, marker) in [
+            ("convert", "Use sips."),
+            ("no-such-skill", "status=\"unavailable"),
+        ] {
+            catalog
+                .run(
+                    SpawnAgentArgs {
+                        prompt: "do it".to_owned(),
+                        profile: Some("scout".to_owned()),
+                        run_in_background: Some(false),
+                        task: Some(TaskPacket {
+                            goal: "convert the asset".to_owned(),
+                            skill: Some(skill.to_owned()),
+                            ..TaskPacket::default()
+                        }),
+                        ..SpawnAgentArgs::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("run");
+            let prompt = seen.lock().unwrap().last().cloned().unwrap();
+            assert!(
+                prompt.contains(marker),
+                "skill {skill} should surface {marker}: {prompt}"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// Oversized material with digestion on is sharded and summarized by the
+    /// worker model, labeled as a digest — never silently dropped, never
+    /// passed off as the file itself.
+    #[tokio::test]
+    async fn oversized_material_is_digested_not_dropped() {
+        struct DigestProvider(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait]
+        impl Provider for DigestProvider {
+            async fn complete(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<Completion, ProviderError> {
+                let content = messages.last().unwrap().content.clone();
+                self.0.lock().unwrap().push(content.clone());
+                Ok(Completion {
+                    content: if content.contains("Summarize this chunk") {
+                        "digest: the assertion `left == 42` fails".to_owned()
+                    } else {
+                        "report".to_owned()
+                    },
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    usage: None,
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("willdeep-digest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        // Far past any inline budget for a 16K-window profile.
+        std::fs::write(root.join("huge.log"), "x".repeat(64 * 1024)).expect("fixture");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(DigestProvider(seen.clone()));
+        let catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(provider.clone(), provider, 128_000),
+            Arc::new(BackgroundTaskRegistry::default()),
+        );
+        catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "explain".to_owned(),
+                    profile: Some("log_inspector".to_owned()),
+                    run_in_background: Some(false),
+                    task: Some(TaskPacket {
+                        goal: "explain the failure".to_owned(),
+                        relevant_files: vec!["huge.log".to_owned()],
+                        digest_oversized: Some(true),
+                        ..TaskPacket::default()
+                    }),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .expect("run");
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("Summarize this chunk")),
+            "the digest path must actually call the model"
+        );
+        let brief = prompts
+            .iter()
+            .find(|p| p.contains("<relevant-files>"))
+            .expect("worker brief");
+        assert!(
+            brief.contains("status=\"digested"),
+            "the digest must be labeled a digest: {brief}"
+        );
+        assert!(
+            brief.contains("left == 42"),
+            "chunk digests must reach the brief"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -2429,9 +2732,12 @@ mod tests {
                     expected_exit_code: None,
                 }),
                 max_attempts: None,
+                skill: None,
+                digest_oversized: None,
             }),
             &root,
             &profile,
+            None,
         )
         .await;
         assert!(brief.contains("make testCrossSignOff pass"));

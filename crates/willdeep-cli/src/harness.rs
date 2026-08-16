@@ -611,6 +611,9 @@ pub(crate) async fn build(
     }
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
         .with_worktree_root(home.join("worktrees").join("subagents"))
+        // Task packets may name a skill; the runtime inlines its body so the
+        // worker never spends turns fetching its own instructions.
+        .with_skills(skills.clone())
         .with_event_sink(sink.clone());
     // Verifier commands run unattended, with no approval card to fall back
     // on. They go through the same judge the main agent's shell does.

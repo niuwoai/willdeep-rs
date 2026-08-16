@@ -31,6 +31,7 @@ Stable tool contract:
 
 Delegation contract:
 - Delegate bounded work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, test_fixer for failing tests, build_fixer for compile and lint errors, deep only for open-ended cross-file investigation.
+- A skill listed as tier=worker belongs in a worker, not in your window: spawn_agent with task.skill set to the skill name and the runtime inlines its body for the worker. Oversized inputs can ride task.digest_oversized instead of being dropped.
 - Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.relevant_files for every file it will need to read or change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
 - Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run. test_fixer and build_fixer require one.
 - A verified worker's files are exactly task.relevant_files, approved as one set, so declare every file it may edit and no more."#;

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.28.0-rc1] - 2026-08-16
+
+> 本版主题：把 model-tiers.v1 的三个「⏳ 未做」做完——**派工不再靠模型自觉，降级不再靠人手动编排**。
+
+### Added
+- **worker 技能的确定性派工触发**。`list_skills` 的结果里出现 `tier=worker` 技能时，尾部自动附 `<delegation-hint>` 派工配方（怎么设 task.skill / goal / relevant_files / verifier）。与失败测试的派工提示同一哲学：**露脸不能依赖模型记得路由规则**——Xedit 侧 1.4% 派工率已经证明「写在提示词里」约等于没写。仅主 Agent 可见：子 Agent 不能派生，给它提示只是一条它执行不了的指令。
+- **`task.skill`：Task Packet 可以点名技能，Runtime 把技能正文内联进 Worker 的首条消息**。此前有个没人踩过就写进文档的坑：文档说「技能正文由 worker 用 read_skill 自取」，而八个工种的工具白名单里**根本没有** read_skill——worker 拿到派工却拿不到操作手册。现在由 Runtime 代读（预算内截断），装不下就截、没装此技能就在首条消息里**点名 unavailable 并要求 Worker 如实报告而不是即兴发挥**。
+- **`task.digest_oversized`：air-gapped 降级第一条路自动化**。相关文件超过内联预算时，不再打个 `omitted` 标记了事，而是用 Worker 自己的廉价模型分片消化（最多 4 片）后内联。三条纪律：逐块标注 `digested`（摘要绝不冒充原文）、标识符/签名/断言要求原文保留（与 verifier 失败消化同一条规矩）、某块消化失败就点名失败（**有洞的摘要冒充完整覆盖，比没有摘要更糟**）。默认关闭——它花模型调用，这个决定属于派工者，不属于 Runtime。
+
+### Tests
+- 点名的技能正文必须出现在 Worker 首条消息；没装的技能必须被点名 unavailable。
+- 超预算材料走消化通道：真的调了模型、结果标注 digested、块摘要进简报。
+- 派工提示门控：主 Agent 的列表带配方，子 Agent 的列表永远不带。
+
+### Docs
+- `docs/MODEL_TIERS.md` 实现状态表两个 ⏳ 转 ✅；`spawn_agent` 工具 schema 与系统提示词同步 task.skill / digest_oversized 用法。
+
 ## [0.27.0-rc1] - 2026-08-16
 
 > 本版主题：**模型上下文三档切分（model-tiers.v1）与 skill→档位关联**。完整设计见新增的 `docs/MODEL_TIERS.md`。

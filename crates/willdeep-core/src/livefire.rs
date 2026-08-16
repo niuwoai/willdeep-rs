@@ -681,6 +681,8 @@ async fn skill_worker_range() {
                             expected_exit_code: Some(0),
                         }),
                         max_attempts: None,
+                        skill: None,
+                        digest_oversized: None,
                     }),
                     ..SpawnAgentArgs::default()
                 },
