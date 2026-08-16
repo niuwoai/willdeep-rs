@@ -517,7 +517,7 @@ pub(crate) async fn build(
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
     if !skills.list().is_empty() {
         system_prompt.push_str(
-            "\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill.\n",
+            "\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill. Entries may carry a tier: `tier=worker` marks a skill whose steps fit a small-context worker — prefer dispatching it via spawn_agent with a task packet instead of running it inline; `tier=deep` marks work that needs the largest window available. Untagged skills run at the session's default tier.\n",
         );
         system_prompt.push_str(&skills.summary());
     }

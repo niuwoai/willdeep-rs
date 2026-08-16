@@ -4,11 +4,55 @@ use std::path::{Path, PathBuf};
 const MAX_SKILLS: usize = 300;
 const MAX_RESOURCE_CHARS: usize = 48_000;
 
+/// Context tier a skill declares for itself (`tier:` in SKILL.md frontmatter).
+///
+/// This is a *dispatch hint*, not a quality grade: it answers "how much
+/// context does a run of this skill actually need, and can its result be
+/// verified without trusting the model". The point is sovereignty as much as
+/// cost — in an air-gapped deployment the only models available are usually
+/// the ones a worker or standard tier can run on, and a skill library that
+/// silently assumes a frontier model stops working the day it goes on-prem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillTier {
+    /// 32–64K window, verifiable or strongly templated work. Deliverable to
+    /// the small-context skill workers.
+    Worker,
+    /// ~256K window: the session's default tier. Ordinary development loops,
+    /// reviews, single-module work.
+    Standard,
+    /// Long-context work: whole-repo reasoning, long-form writing, huge
+    /// source material. Runs on the largest window available.
+    Deep,
+}
+
+impl SkillTier {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "worker" | "small" => Some(Self::Worker),
+            "standard" | "medium" => Some(Self::Standard),
+            "deep" | "large" => Some(Self::Deep),
+            // Unknown spellings are user data, not errors: a skill written
+            // for some other tool must not break discovery here.
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Standard => "standard",
+            Self::Deep => "deep",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub identifier: String,
     pub name: String,
     pub description: String,
+    /// Declared context tier, if the skill's frontmatter names one.
+    pub tier: Option<SkillTier>,
     pub path: PathBuf,
 }
 
@@ -43,13 +87,14 @@ impl SkillCatalog {
                     continue;
                 };
                 let fallback = entry.file_name().to_string_lossy().into_owned();
-                let (name, description) = metadata(&body, &fallback);
+                let (name, description, tier) = metadata(&body, &fallback);
                 let identifier = normalize(&fallback);
                 if !identifier.is_empty() {
                     by_id.entry(identifier.clone()).or_insert(Skill {
                         identifier,
                         name,
                         description,
+                        tier,
                         path,
                     });
                 }
@@ -85,7 +130,20 @@ impl SkillCatalog {
     pub fn summary(&self) -> String {
         self.skills
             .iter()
-            .map(|s| format!("- {} | {} | {}", s.identifier, s.name, s.description))
+            .map(|s| match s.tier {
+                // The tier rides in the listing so the dispatch decision can
+                // be made *before* the skill body is read: a worker-tier
+                // skill is a spawn_agent candidate, not a reason to burn the
+                // parent's window.
+                Some(tier) => format!(
+                    "- {} | {} | tier={} | {}",
+                    s.identifier,
+                    s.name,
+                    tier.as_str(),
+                    s.description
+                ),
+                None => format!("- {} | {} | {}", s.identifier, s.name, s.description),
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -138,9 +196,10 @@ pub enum SkillError {
     Io(#[from] std::io::Error),
 }
 
-fn metadata(body: &str, fallback: &str) -> (String, String) {
+fn metadata(body: &str, fallback: &str) -> (String, String, Option<SkillTier>) {
     let mut name = None;
     let mut description = None;
+    let mut tier = None;
     if body.starts_with("---") {
         for line in body.lines().skip(1).take_while(|line| *line != "---") {
             if let Some(value) = line.strip_prefix("name:") {
@@ -149,12 +208,16 @@ fn metadata(body: &str, fallback: &str) -> (String, String) {
             if let Some(value) = line.strip_prefix("description:") {
                 description = Some(value.trim().trim_matches(['\'', '"']).to_owned());
             }
+            if let Some(value) = line.strip_prefix("tier:") {
+                tier = SkillTier::parse(value.trim().trim_matches(['\'', '"']));
+            }
         }
     }
     (
         name.filter(|v| !v.is_empty())
             .unwrap_or_else(|| fallback.to_owned()),
         description.unwrap_or_else(|| "Installed skill".to_owned()),
+        tier,
     )
 }
 
@@ -200,6 +263,47 @@ mod tests {
                 .any(|skill| skill.identifier == "reviewer")
         );
         assert!(catalog.read("reviewer", None).unwrap().contains("# Steps"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The tier is a dispatch hint read before the skill body: worker-tier
+    /// skills go to spawn_agent, not into the parent's window. Both
+    /// directions matter — a declared tier must surface, and a skill without
+    /// one (or with a spelling from some other tool) must not break or lie.
+    #[test]
+    fn a_declared_tier_surfaces_and_an_unknown_one_stays_silent() {
+        let root = std::env::temp_dir().join(format!("willdeep-tier-{}", uuid::Uuid::new_v4()));
+        for (name, tier_line) in [
+            ("convert", "tier: worker\n"),
+            ("write", "tier: epic\n"),
+            ("plain", ""),
+        ] {
+            let dir = root.join(".willdeep/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: test\n{tier_line}---\n"),
+            )
+            .unwrap();
+        }
+        let catalog = SkillCatalog::discover(&root, &[]);
+        let tier_of = |id: &str| {
+            catalog
+                .list()
+                .iter()
+                .find(|skill| skill.identifier == id)
+                .expect("skill discovered")
+                .tier
+        };
+        assert_eq!(tier_of("convert"), Some(SkillTier::Worker));
+        assert_eq!(tier_of("write"), None, "unknown spellings are not errors");
+        assert_eq!(tier_of("plain"), None);
+        assert!(
+            catalog
+                .summary()
+                .contains("convert | convert | tier=worker |")
+        );
+        assert!(!catalog.summary().contains("tier=epic"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
