@@ -1116,6 +1116,15 @@ async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
             .map_or_else(|| "-".to_owned(), |value| value.to_string())
     );
     println!(
+        "citations\tchecked={}\tunverifiable={}",
+        agent
+            .claims_checked
+            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        agent
+            .claims_unverifiable
+            .map_or_else(|| "-".to_owned(), |value| value.to_string())
+    );
+    println!(
         "verdict\tverified={}\tattempts={}\tcommit={}",
         match agent.verifier_passed {
             Some(true) => "passed",
@@ -1196,6 +1205,27 @@ async fn report_agent_metrics(home: &Path) -> Result<()> {
     println!(
         "escalation_rate\t{}\t(verified runs that exhausted their attempts and need a bigger model; target <= 15%)",
         rate(verified.len() - passed, verified.len())
+    );
+    // Report-only trades never earn a verifier verdict, so without this line
+    // they are permanently invisible in the numbers — and "invisible" reads
+    // as "fine". A citation either resolves or it does not.
+    let audited = children
+        .iter()
+        .filter(|agent| agent.claims_checked.is_some_and(|checked| checked > 0))
+        .collect::<Vec<_>>();
+    let claims = audited
+        .iter()
+        .filter_map(|agent| agent.claims_checked)
+        .sum::<u64>();
+    let bad_claims = audited
+        .iter()
+        .filter_map(|agent| agent.claims_unverifiable)
+        .sum::<u64>();
+    println!(
+        "citation_accuracy\t{}\t(cited locations that exist / cited locations checked in report-only runs: {}/{})",
+        rate((claims - bad_claims).min(claims) as usize, claims as usize),
+        claims - bad_claims,
+        claims
     );
     println!(
         "attempts_per_verified_run\t{}",

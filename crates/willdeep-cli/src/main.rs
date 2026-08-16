@@ -1480,13 +1480,17 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             verifier_command,
             verifier_passed,
             attempts,
+            claims_checked,
+            claims_unverifiable,
         } => serde_json::json!({
             "type": "subagent_verdict",
             "id": id,
             "repo_commit": repo_commit,
             "verifier_command": verifier_command,
             "verifier_passed": verifier_passed,
-            "attempts": attempts
+            "attempts": attempts,
+            "claims_checked": claims_checked,
+            "claims_unverifiable": claims_unverifiable
         }),
         AgentEvent::SubagentTurnStarted { id, turn } => serde_json::json!({
             "type": "subagent_turn_started",

@@ -3,6 +3,9 @@ pub mod attention;
 pub mod background;
 pub mod goal;
 pub mod judge;
+/// 实弹靶场：真 Provider、真缺陷、真退出码。仅测试构建，默认 `#[ignore]`。
+#[cfg(test)]
+mod livefire;
 pub mod mcp;
 pub mod prompt;
 pub mod provider;

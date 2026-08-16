@@ -34,6 +34,14 @@ async fn chat_completions_runs_a_tool_round_with_some_im_headers() {
             .to_ascii_lowercase()
             .contains("x-willdeep-session-id:")
     );
+    // The relay's usage ledger keys on this one. Without it every usage record
+    // lands with an empty session_id and worker spend cannot be traced back to
+    // the session that spawned it.
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("x-playground-session-id:")
+    );
     assert!(requests[1].contains("tool_call_id"));
 }
 

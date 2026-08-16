@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.26.0-rc1] - 2026-08-16
+
+> 本版主题：**与 macOS 版 Xedit（1.263.0-rc1）对齐**，外加只读工种第一次有了可统计的判定。完整对照表见 `docs/SKILL_WORKERS.md`「与 macOS 版 Xedit 的对照」。
+
+### Added
+- **托管工种模型：some.im 下每个工种跑自己的 `someim-32b-<工种>`**，与 Xedit 用同一张表（`test_fixer` → `someim-32b-test-fixer`，下划线转连字符）。此前 rs 侧七个工种共用一个裸 `glm-5`，同一个操作者从 CLI 和从 App 派同一个工种，落到的是两个不同的东西——而两边连的是同一个网关、同一批账号。职能提示词由网关 prepend，**客户端不再发自己那份**：一个工种有两份职能描述，等它们漂移的那天由模型挑该听谁的。客户端仍然发边界段（看不到父会话、不能问用户、不能派生、报告即返回值）——**服务端管职能，客户端管边界**。网关未托管的工种回落基础廉价档并由客户端发职能段：一个工种绝不能落到「一份职能描述都没有」。上线前逐个实测过网关：七个工种档全部可用，`security-guard` / `judge` / `reviewer` / `ops-runner` 返回 `model_not_configured`，故本版不引入这四个工种。
+- **只读工种的弱验证：报告引用抽查。** `scout` / `reader` / `log_inspector` / `git_detective` 没有退出码，判定字段此前永远是 `None`——**永远「未验证」，在指标里永远隐身，而隐身读起来就像没问题**。它们的答案并非不可证伪：位置要么存在要么不存在。运行结束后 Runtime 纯代码抽查报告里的 `路径`、`路径:行号` 与 commit 哈希（`git cat-file`），结果写进报告尾部的 `<citation-check …>`（点名对不上的条目）与判定事件的 `claims_checked` / `claims_unverifiable` 两个字段，`willdeep daemon agent-metrics` 增加 `citation_accuracy` 一行，`daemon agent <id>` 增加 `citations` 一行。**它只证伪「地名是编的」，不证明「答对了」**；认不出来的 token 一律不计（否则量的是解析器不是 Worker）；`checked = 0` 不进分子也不进分母。
+- **`git_detective` 拿到只读 git shell**，与 Xedit 的同名工种对齐。靶场实测暴露的问题：rs 给它的是四个固定 git 工具，而 `git_diff` 压根不接受 revision 参数——**「哪个 commit 改的」这个它得名的问题，用它手上的工具无法回答**，实测跑满 8 轮、9.4k token、一个结论都没出。现在放行 `run_command`，门禁是**形状**而非字面量：命令头必须是 `git`，且必须通过与主 Agent 同一套静态只读分类。修复后同一样本 1 轮答对、4 条引用全部核实通过。
+- **靶场扩到 12 个样本**，新增两个只读样本（`scout` 在多模块里定位符号、`git_detective` 在三个 commit 的历史里定位真凶），报告新增「引用准确率」与「答对率」两列——**引用真实 ≠ 答对**，混在一起算的指标会自我恭维。`scripts/skill_worker_range.rb` 新增 `--report-only`（不花钱重渲染）。本版实测（`glm-5`，12 样本）：可验证样本 10/10 通过、平均 1.00 次尝试、0 作弊；只读样本引用准确率 4/4、答对率 2/2；单样本平均约 5 100 token / 19 秒。
+
+### Fixed
+- **补发 `X-Playground-Session-ID`**，与 Xedit 1.260.0-rc1 的同一处修复对齐。网关的用量账本只读这个头、不读我们自家的 `x-willdeep-session-id`，于是**全部流量的 `session_id` 都是空的**，Worker 的花费无法归到派它出去的那次会话——而这正是 Skill Worker 经济账赖以成立的那个数字。同一个不透明 UUID，随另一个头一起发。
+
+### Tests
+- 工种→模型映射与 Xedit 逐条对齐（`hosted_worker_model`），并锁定「托管时只发边界段、未托管时仍发客户端职能段」。
+- 引用抽查双向锁定：编造的路径与越界的行号必须被抓，真实路径与真实行号不得误伤，散文不计数；解析不出的 commit 哈希被点名，真哈希放行。
+- 只读 git shell 双向锁定：`git log -p` / `git show` / `git diff a b` 放行，`ls`、`git push`、`git commit` 拒绝。
+- `X-Playground-Session-ID` 进入 provider 请求头回归测试。
+
+### Docs
+- 对照表随 Xedit 1.264.0-rc1 更新：引用抽查与实弹靶场两项已回流到 macOS 侧，两边判定纪律逐字一致（样本各按语言：rs 用 Cargo，Xedit 用 SwiftPM）。
+- `docs/SKILL_WORKERS.md`：新增「模型绑定：托管工种档」「只读工种的弱验证」「与 macOS 版 Xedit 的对照」三节，工种表补 `git_detective` 的 shell 列，并记下 Xedit 侧派工率实测（358 个会话仅 5 个派过工，1.4%）——与 rs 侧 0 派工记录同向，**光有提示不够**。
+
+## [0.25.0-rc2] - 2026-08-16
+
+### Fixed
+- **审批过的写入目标没做路径规范化，Worker 的正确补丁被判成越界写入**。`require_write_target` 把 `edit_file` 解析出的**规范化**路径，去比对**未规范化**的审批集合；workspace 上方只要有一层符号链接（macOS 的 `/var`、`/tmp`、软链的检出目录），两种写法永远对不上：Worker 每次编辑都被拒，而拒绝信息里点名的「你只能改这个文件」正是它刚刚请求的那个文件。**它没有任何办法自证清白，只能一轮一轮重发同一份正确补丁直到烧完轮次**。实测（`glm-5`、`build_missing_mut` 样本）：修复前跑满 8 轮、1.4 万 token、一个字没改；修复后 1 次尝试通过、4.7k token、13.9 秒。修法是在 `with_write_targets` 里把集合一并规范化——比较的两端必须是同一种写法。
+- **verifier allowlist 的拒绝信息不告诉 Worker 什么才是对的**。典型近失是给验证命令加装饰（`cargo build 2>&1` 而不是 `cargo build`），而「不是这条」这种回答等于请它继续猜，每猜一次一轮。现在拒绝信息逐字引用允许的命令原文。
+
+### Added
+- **实弹靶场 `scripts/skill_worker_range.rb` + `crates/willdeep-core/src/livefire.rs`**。此前仓库里没有任何一处能证伪「可自动验证的小任务可以交给弱模型」这句话——单元测试用的是桩 Provider，而**桩 Provider 永远修得好**。靶场现建十个带真实缺陷的 Cargo 仓库（5 个逻辑缺陷派 `test_fixer`、5 个编译错误派 `build_fixer`），用真 Provider 派工、真 `cargo` 退出码判定，产出 JSON + Markdown 两份报告和每个样本的逐字记录。默认 `#[ignore]`、不进 CI：它要真凭据、真网络、真花钱。
+  - **成功的定义是「verifier 通过**且**测试块逐字未改」**。退出码只知道绿了，不知道绿得干不干净；删掉测试是最省力的通关方式，而作弊不进分子。
+  - **派工前先跑一遍 verifier 确认靶子是红的**。绿着的靶子测不出任何东西，报告会点名这类无效样本。
+  - 逐字记录（Worker 发的每个工具调用参数 + Runtime 的每条回执）默认留存——上面那两个 Fixed 就是靠它看出来的，判定本身只会说「没通过」。
+
+### Docs
+- `docs/SKILL_WORKERS.md` 新增「实弹靶场」章节与首轮实测结果（`glm-5`，10/10 样本 100% 通过、平均 1.00 次尝试、0 作弊、单样本约 5 000 token / 17 秒），并写明这组数字**支持**什么结论、**不支持**什么结论：样本是十个几十行的独立小仓库，是难度谱系最容易的一端。
+
 ## [0.25.0-rc1] - 2026-08-15
 
 ### Added

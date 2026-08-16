@@ -475,6 +475,13 @@ pub struct RuntimeAgent {
     /// metrics do not need it.
     #[serde(default)]
     pub verifier_passed: Option<bool>,
+    /// Citations the runtime spot-checked in a report-only run, and how many
+    /// pointed at nothing. Counts only — the offending paths stay in the
+    /// report the parent already reads. `None` means no check ran.
+    #[serde(default)]
+    pub claims_checked: Option<u64>,
+    #[serde(default)]
+    pub claims_unverifiable: Option<u64>,
     /// Attempts the run took before its verdict.
     #[serde(default)]
     pub attempts: Option<u64>,
