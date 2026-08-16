@@ -57,6 +57,10 @@ model = "glm-5"
 
 [subagents.deep]
 # Inherits the current session when provider_profile/model are omitted.
+# For L-tier work (whole-repo reasoning, huge material) bind the 1M-window
+# model instead of the session default — see docs/MODEL_TIERS.md:
+#   provider_profile = "some-im"
+#   model = "deepseek-v4-flash"
 max_turns = 12
 
 [subagents.editor]
