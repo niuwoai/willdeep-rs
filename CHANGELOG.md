@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.34.0-rc2] - 2026-08-17
+
+### Fixed
+- **headless 模式的通知 Webhook 此前根本发不出去。** 投递是 detach 出去的，而 `execute_noninteractive` 返回后进程立即退出，tokio 运行时一析构就把还没跑的 task 丢掉——请求连离开 socket 的机会都没有，15 秒超时形同虚设。新增 `Notifier::flush()`，headless 路径在返回前等待已启动的投递（上限 6 秒，短于请求超时，不让一个通知拖慢 `willdeep run` 退出）。
+- **运行时快照路径只会发出会话里第一条待处理事项，之后永久静默。** 去重键原先只用 `AttentionItem.id`，而 daemon 侧的审批与提问由 `AttentionItem::approval()` / `question()` 构造，id 是常量 `approval:current` / `question:current`。现在改为真正的电平转边沿：键含状态与内容指纹，且条目离开快照即遗忘——一次审批关闭正是下一次能再次触发的前提。
+- **`attention_kind` 不再用 `Debug` 输出当线上取值。** 原先 `format!("{:?}", source).to_lowercase()` 产出 `diffreview`，既不是 snake_case 也不是接收端认得的形式，而且枚举改名会静默改变报文。改为显式 `match`，取值为 `diff_review` / `background_shell` 等。
+- **headless 下的投递失败不再静默丢弃。** `take_error()` 此前只有 TUI 会 drain，headless 配错地址是纯静默。现在 headless 在 flush 后 drain 并写 stderr，stdout 保持干净以兼容 `--output json`。
+
+### Notes
+- `attention_kind` 的语义与 macOS 端仍有已知差异：app 的 `AgentToolApprovalNotifier` 在该字段填**工具名**，而 CLI 的审批边界只能拿到本地化的人话描述（`"run command: …"`），只能如实上报来源分类。从人话反推工具名会在语言切换时失效，故不做。
+
+### Tests
+- 两个回归测试均已反向验证：把修复退回原逻辑后精准失败（去重退回纯 id 时第二次审批消失、flush 空操作时零投递），修复在位时通过。另补 `source_label` 线上取值锁定与开启/关闭 gate 的状态迁移测试。
+
 ## [0.34.0-rc1] - 2026-08-17
 
 ### Added

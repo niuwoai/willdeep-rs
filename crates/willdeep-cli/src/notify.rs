@@ -17,17 +17,25 @@
 //! one timeout on a background task.
 
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use willdeep_core::{AttentionItem, AttentionSection, RuntimeStatus, format_iso8601};
+use willdeep_core::{
+    AttentionItem, AttentionSection, AttentionSource, RuntimeStatus, format_iso8601,
+};
 
 use crate::config::NotificationSettings;
 
 /// Matches `URLSessionConfiguration.timeoutIntervalForRequest` on the app side
 /// so a slow endpoint behaves the same whichever client is talking to it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Ceiling on how long `flush` will hold a process open waiting for deliveries
+/// it already started. Shorter than `REQUEST_TIMEOUT`: a courtesy ping must
+/// never become the reason `willdeep run` feels slow to exit.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(6);
 /// `summary` is a human hint, not a transcript. Truncating hard keeps a long
 /// command or diff from riding out to a remote endpoint.
 const MAX_SUMMARY_CHARS: usize = 400;
@@ -149,11 +157,16 @@ struct Inner {
     on_task_completed: bool,
     on_attention_required: bool,
     session: Mutex<Option<SessionIdentity>>,
-    /// Runtime attention is level-triggered — the same open gate reappears in
-    /// every snapshot — so only the first sighting of an id is worth a post.
-    announced: Mutex<HashSet<String>>,
+    /// The gate keys present in the previous snapshot. Runtime attention is
+    /// level-triggered — an open gate reappears in every snapshot — so this
+    /// set is what converts it to edges: post on keys that just appeared, and
+    /// forget a key once the gate closes so the *next* one fires again.
+    open_gates: Mutex<HashSet<String>>,
+    /// Deliveries already started. `flush` awaits these so a short-lived
+    /// process does not exit out from under an in-flight request.
+    pending: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Delivery is detached, so failures land here instead of being swallowed;
-    /// the TUI drains this into its notice line once per refresh tick.
+    /// callers drain this and surface it.
     last_error: Mutex<Option<String>>,
 }
 
@@ -198,7 +211,8 @@ impl Notifier {
                 on_task_completed: settings.webhook_on_task_completed.unwrap_or(true),
                 on_attention_required: settings.webhook_on_attention_required.unwrap_or(true),
                 session: Mutex::new(None),
-                announced: Mutex::new(HashSet::new()),
+                open_gates: Mutex::new(HashSet::new()),
+                pending: Mutex::new(Vec::new()),
                 last_error: Mutex::new(None),
             })),
         }
@@ -263,31 +277,73 @@ impl Notifier {
         ));
     }
 
-    /// Level-triggered counterpart for runtime snapshots: post only the items
-    /// that actually need a human, and only the first time each one is seen.
+    /// Level-triggered counterpart for runtime snapshots: post the gates that
+    /// need a human, once per gate.
+    ///
+    /// "Once per gate" cannot mean "once per id". The daemon builds these with
+    /// [`AttentionItem::approval`] / [`AttentionItem::question`], whose ids are
+    /// the constants `approval:current` and `question:current` — remembering an
+    /// id forever would post the first approval of a session and silently
+    /// swallow every one after it. So the key carries the status and a content
+    /// fingerprint too, and a key is forgotten as soon as the gate leaves the
+    /// snapshot: closing one approval is what re-arms the next.
     pub fn attention_snapshot(&self, items: &[AttentionItem]) {
         let Some(inner) = &self.inner else { return };
         if !inner.on_attention_required {
             return;
         }
-        for item in items {
-            if item.status.section() != Some(AttentionSection::NeedsYou) {
-                continue;
-            }
-            let Ok(mut announced) = inner.announced.lock() else {
-                return;
-            };
-            if !announced.insert(item.id.clone()) {
-                continue;
-            }
-            drop(announced);
+        let gates = items
+            .iter()
+            .filter(|item| item.status.section() == Some(AttentionSection::NeedsYou))
+            .map(|item| (gate_key(item), item))
+            .collect::<Vec<_>>();
+        let current = gates
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<HashSet<_>>();
+        let Ok(mut open) = inner.open_gates.lock() else {
+            return;
+        };
+        let opened = gates
+            .into_iter()
+            .filter(|(key, _)| !open.contains(key))
+            .map(|(_, item)| item.clone())
+            .collect::<Vec<_>>();
+        *open = current;
+        drop(open);
+        for item in opened {
             self.post(inner.payload(
                 NotificationEvent::AttentionRequired,
                 status_label(item.status),
                 Some(item.id.clone()),
-                Some(format!("{:?}", item.source).to_lowercase()),
+                Some(source_label(item.source).to_owned()),
                 Some(format!("{} · {}", item.title, item.detail)),
             ));
+        }
+    }
+
+    /// Await deliveries already started, bounded by [`FLUSH_TIMEOUT`].
+    ///
+    /// A detached `tokio::spawn` is dropped when the runtime shuts down, so a
+    /// short-lived process — `willdeep run` returns the moment the turn ends —
+    /// would exit before the request ever left the socket. Long-lived frontends
+    /// like the TUI never need this; the headless path always does.
+    pub async fn flush(&self) {
+        let Some(inner) = &self.inner else { return };
+        let handles = match inner.pending.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
+            Err(_) => return,
+        };
+        if handles.is_empty() {
+            return;
+        }
+        let joined = async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        };
+        if tokio::time::timeout(FLUSH_TIMEOUT, joined).await.is_err() {
+            inner.record_error("webhook delivery did not finish before exit".to_owned());
         }
     }
 
@@ -306,7 +362,9 @@ impl Notifier {
             inner.record_error("no async runtime available for webhook delivery".to_owned());
             return;
         };
-        handle.spawn(async move {
+        let task = inner.clone();
+        let delivery = handle.spawn(async move {
+            let inner = task;
             let request = inner
                 .client
                 .post(&inner.url)
@@ -326,6 +384,12 @@ impl Notifier {
                 Err(error) => inner.record_error(format!("webhook delivery failed: {error}")),
             }
         });
+        if let Ok(mut pending) = inner.pending.lock() {
+            // Drop handles that already finished so a long TUI session does not
+            // accumulate one per notification.
+            pending.retain(|handle| !handle.is_finished());
+            pending.push(delivery);
+        }
     }
 }
 
@@ -376,6 +440,44 @@ impl Inner {
     }
 }
 
+/// Which subsystem raised the gate.
+///
+/// Spelled out rather than derived from `Debug` or serde: this is a wire value,
+/// and `{:?}` would silently change it the day an enum variant is renamed (it
+/// also yields `diffreview`, which is neither the snake_case form nor anything
+/// a receiver would expect).
+///
+/// Note this is not the same thing the desktop app puts in `attention_kind` —
+/// `AgentToolApprovalNotifier` sends the *tool name* there. The CLI's approval
+/// boundary only ever receives a localized human sentence ("run command: …"),
+/// so a category is the most it can report honestly; inferring a tool name from
+/// prose would break the moment the language changes.
+fn source_label(source: AttentionSource) -> &'static str {
+    match source {
+        AttentionSource::Approval => "approval",
+        AttentionSource::Question => "question",
+        AttentionSource::BackgroundShell => "background_shell",
+        AttentionSource::Subagent => "subagent",
+        AttentionSource::Worktree => "worktree",
+        AttentionSource::DiffReview => "diff_review",
+    }
+}
+
+/// Identifies one *occurrence* of a gate, not one gate slot. The id alone is a
+/// constant for daemon approvals and questions, so status and content have to
+/// take part or consecutive approvals collapse into one notification.
+fn gate_key(item: &AttentionItem) -> String {
+    let mut hasher = DefaultHasher::new();
+    item.title.hash(&mut hasher);
+    item.detail.hash(&mut hasher);
+    format!(
+        "{}|{}|{:016x}",
+        item.id,
+        status_label(item.status),
+        hasher.finish()
+    )
+}
+
 fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -402,6 +504,33 @@ mod tests {
             webhook_url: Some("http://127.0.0.1:8787/willdeep".to_owned()),
             ..NotificationSettings::default()
         }
+    }
+
+    /// A loopback endpoint that records every body it receives, in order.
+    /// Returns the port and the shared log.
+    async fn capture_listener() -> (u16, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = received.clone();
+        let app = axum::Router::new().route(
+            "/willdeep",
+            axum::routing::post(move |body: axum::Json<serde_json::Value>| {
+                let sink = sink.clone();
+                async move {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push(body.0);
+                    }
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, received)
     }
 
     fn needs_you(id: &str) -> AttentionItem {
@@ -446,18 +575,90 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_announces_each_gate_once_and_skips_non_gates() {
+    fn snapshot_tracks_open_gates_and_skips_non_gates() {
         let notifier = Notifier::new(&enabled_settings());
         let inner = notifier.inner.clone().expect("enabled");
         let mut working = needs_you("background:1");
         working.status = RuntimeStatus::Working;
 
         notifier.attention_snapshot(&[needs_you("diff-review:1"), working]);
-        notifier.attention_snapshot(&[needs_you("diff-review:1")]);
+        let open = inner.open_gates.lock().expect("lock").clone();
+        assert_eq!(open.len(), 1, "only the NeedsYou item is a gate");
+        assert!(open.iter().all(|key| key.starts_with("diff-review:1|")));
 
-        let announced = inner.announced.lock().expect("lock");
-        assert_eq!(announced.len(), 1);
-        assert!(announced.contains("diff-review:1"));
+        // The gate closing must clear the key, or the next one cannot fire.
+        notifier.attention_snapshot(&[]);
+        assert!(inner.open_gates.lock().expect("lock").is_empty());
+    }
+
+    /// Regression: the daemon builds these with `AttentionItem::approval`, whose
+    /// id is the constant `approval:current`. Keying de-duplication on the id
+    /// alone posted the first approval of a session and silently swallowed every
+    /// one after it.
+    #[tokio::test]
+    async fn consecutive_daemon_approvals_each_notify_despite_a_constant_id() {
+        let (port, received) = capture_listener().await;
+        let mut settings = enabled_settings();
+        settings.webhook_url = Some(format!("http://127.0.0.1:{port}/willdeep"));
+        let notifier = Notifier::new(&settings);
+
+        let mut first = willdeep_core::AttentionItem::approval("run command: ls");
+        first.source = AttentionSource::Approval;
+        let mut second = willdeep_core::AttentionItem::approval("run command: rm -rf build");
+        second.source = AttentionSource::Approval;
+        assert_eq!(first.id, second.id, "the daemon reuses one id");
+
+        notifier.attention_snapshot(std::slice::from_ref(&first));
+        notifier.attention_snapshot(std::slice::from_ref(&first)); // still open
+        notifier.attention_snapshot(&[]); // resolved
+        notifier.attention_snapshot(std::slice::from_ref(&second)); // next approval
+        notifier.flush().await;
+
+        let bodies = received.lock().expect("lock").clone();
+        let summaries = bodies
+            .iter()
+            .map(|body| body["summary"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summaries.len(),
+            2,
+            "one post per approval, not per snapshot: {summaries:?}"
+        );
+        assert!(summaries[0].contains("run command: ls"));
+        assert!(summaries[1].contains("run command: rm -rf build"));
+        assert_eq!(bodies[0]["attention_kind"], "approval");
+    }
+
+    /// Regression: `willdeep run` returns straight into process teardown, so a
+    /// detached delivery was dropped with the runtime and never left the socket.
+    #[test]
+    fn flush_lets_a_short_lived_process_finish_delivering() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let delivered = runtime.block_on(async {
+            let (port, received) = capture_listener().await;
+            let mut settings = enabled_settings();
+            settings.webhook_url = Some(format!("http://127.0.0.1:{port}/willdeep"));
+            let notifier = Notifier::new(&settings);
+            notifier.set_session("runtime-42", None);
+            notifier.task_completed("done");
+            // Exactly what execute_noninteractive does before returning.
+            notifier.flush().await;
+            assert!(notifier.take_error().is_none());
+            received.lock().expect("lock").len()
+        });
+        drop(runtime); // process exit
+        assert_eq!(delivered, 1, "flush must not return before the POST lands");
+    }
+
+    #[test]
+    fn source_labels_are_stable_wire_values_not_debug_output() {
+        // `format!("{:?}", ..).to_lowercase()` used to produce "diffreview".
+        assert_eq!(source_label(AttentionSource::DiffReview), "diff_review");
+        assert_eq!(
+            source_label(AttentionSource::BackgroundShell),
+            "background_shell"
+        );
+        assert_eq!(source_label(AttentionSource::Approval), "approval");
     }
 
     /// Locks the contract against `Xedit/AgentAttentionSettings.swift`. The
