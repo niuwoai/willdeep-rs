@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.29.0-rc2] - 2026-08-17
+
+### Fixed
+- **`[notifications]`不再拒绝未知字段。** 该段是 WillDeep.app 与 CLI 共读同一份 `~/.willdeep/config.toml` 的唯一交叉点，此前的 `deny_unknown_fields` 会让 app 每加一个新字段就把未升级的 CLI 整个配置解析打挂，等于把两端发版节奏焊死。现在该段忽略未知键；其余配置段仍然严格拒绝拼写错误。
+
 ## [0.29.0-rc1] - 2026-08-17
 
 ### Added

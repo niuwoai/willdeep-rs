@@ -114,7 +114,7 @@ pub struct ConfigFile {
     /// Cross-client attention delivery settings shared with WillDeep.app.
     /// The CLI accepts the full section even when only webhook fields are
     /// relevant on a headless machine; desktop-only sound fields remain
-    /// harmless, forward-compatible metadata.
+    /// harmless metadata.
     #[serde(default)]
     pub notifications: NotificationSettings,
 }
@@ -140,9 +140,14 @@ pub struct SkillSettings {
     pub roots: Vec<PathBuf>,
 }
 
+/// Deliberately *not* `deny_unknown_fields`: this is the one section both
+/// WillDeep.app and the CLI read out of the same file. Rejecting unknown keys
+/// would mean the app cannot add a field without breaking every CLI that has
+/// not been upgraded yet, which would weld the two release trains together.
+/// Unknown keys here are ignored; the CLI never rewrites the file, so nothing
+/// is lost on the way back out.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)] // Shared desktop schema; the CLI currently validates only webhook delivery fields.
+#[allow(dead_code)] // Sound fields belong to the desktop client; the CLI only carries them.
 pub struct NotificationSettings {
     pub sound: Option<String>,
     pub custom_sound_file: Option<String>,
@@ -510,6 +515,26 @@ webhook_on_attention_required = false
             parsed.notifications.webhook_on_attention_required,
             Some(false)
         );
+    }
+
+    #[test]
+    fn notifications_tolerate_fields_only_the_desktop_app_knows() {
+        // WillDeep.app must be able to ship a new key into the shared file
+        // without bricking every CLI that has not been upgraded yet.
+        let parsed: ConfigFile = toml::from_str(
+            "version = 1\n[notifications]\nsound = \"custom\"\nwebhook_retry_count = 3\n",
+        )
+        .expect("ignore unknown desktop-only fields");
+
+        assert_eq!(parsed.notifications.sound.as_deref(), Some("custom"));
+        validate(&parsed, Path::new("config.toml")).expect("unknown fields stay valid");
+    }
+
+    #[test]
+    fn unknown_keys_outside_notifications_are_still_rejected() {
+        let error = toml::from_str::<ConfigFile>("version = 1\nnot_a_real_key = true\n")
+            .expect_err("top-level typos must still fail loudly");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]
