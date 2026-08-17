@@ -220,6 +220,15 @@ pub(crate) async fn search_remote_sessions(
     home: &Path,
     parameters: &[(String, String)],
 ) -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(
+        search_remote_session_results(home, parameters).await?,
+    )?)
+}
+
+pub(crate) async fn search_remote_session_results(
+    home: &Path,
+    parameters: &[(String, String)],
+) -> Result<Vec<willdeep_runtime_protocol::SessionSearchResult>> {
     let state = ensure_running(home).await?;
     let mut params = willdeep_runtime_protocol::SearchSessionsParams {
         query: None,
@@ -243,7 +252,7 @@ pub(crate) async fn search_remote_sessions(
         }
     }
     let results = api_data(runtime_client(&state)?.search_sessions(&params).await?)?;
-    Ok(serde_json::to_value(results)?)
+    Ok(results)
 }
 
 pub(crate) async fn ensure_runtime_session(

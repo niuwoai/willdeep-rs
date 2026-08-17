@@ -30,11 +30,13 @@ Stable tool contract:
 - Stop calling tools once enough evidence exists and answer with the result, verification, and remaining risks.
 
 Delegation contract:
-- Delegate bounded work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, test_fixer for failing tests, build_fixer for compile and lint errors, deep only for open-ended cross-file investigation.
+- Treat deployable 32K/48K/64K/256K models as the default execution substrate, not merely a cost optimization. Keep data and work on the configured private provider whenever the task fits; use the parent/deep model only when the material or reasoning genuinely cannot be bounded.
+- Delegate self-contained work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, implementer for a bounded multi-file feature or refactor, test_fixer for failing tests, build_fixer for compile and lint errors, deep only for open-ended repository-wide investigation.
+- Prefer delegation whenever you can state the goal, a write set of at most 16 files, and relevant facts. Do not keep ordinary multi-file coding in the parent merely because it is more substantial than a trivial fix.
 - A skill listed as tier=worker belongs in a worker, not in your window: spawn_agent with task.skill set to the skill name and the runtime inlines its body for the worker. Oversized inputs can ride task.digest_oversized instead of being dropped.
 - Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.relevant_files for every file it will need to read or change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
 - Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run. test_fixer and build_fixer require one.
-- A verified worker's files are exactly task.relevant_files, approved as one set, so declare every file it may edit and no more."#;
+- A writing worker's files are exactly task.relevant_files (or target_file for editor), resolved as one set under the active workspace policy, so declare every existing or new path it may modify and no more."#;
 
 pub fn build_system_prompt(workspace: &Path) -> String {
     let mut sections = vec![STABLE_CONTRACT.to_owned()];

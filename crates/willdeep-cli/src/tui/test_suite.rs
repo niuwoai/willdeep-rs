@@ -371,6 +371,34 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Prompt);
     }
     #[test]
+    fn expanded_composer_toggles_without_losing_the_draft() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.input.insert("第一行\n第二行");
+        app.focus = FocusPane::Chat;
+
+        app.toggle_composer_expanded();
+        assert!(app.composer_expanded);
+        assert_eq!(app.focus, FocusPane::Prompt);
+        assert_eq!(app.input.text(), "第一行\n第二行");
+
+        app.toggle_composer_expanded();
+        assert!(!app.composer_expanded);
+        assert_eq!(app.input.text(), "第一行\n第二行");
+    }
+    #[test]
+    fn expanded_composer_owns_the_terminal_body() {
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(composer_layout_constraints(true, 5, 3, 8))
+            .split(Rect::new(0, 0, 100, 30));
+
+        assert_eq!(areas[0].height, 0);
+        assert_eq!(areas[1].height, 0);
+        assert_eq!(areas[2].height, 0);
+        assert_eq!(areas[3].height, 29);
+        assert_eq!(areas[4].height, 1);
+    }
+    #[test]
     fn clicking_sidebar_focuses_it_and_clicking_prompt_restores_prompt_focus() {
         let mut app = App::new(Vec::new(), Language::En);
         let registry = BackgroundTaskRegistry::default();
@@ -862,7 +890,11 @@ mod tests {
     }
     #[test]
     fn chat_search_highlights_matches_without_removing_markdown_styles() {
-        let text = colored_transcript(&["WillDeep: **Alpha** and alpha".to_owned()], Some("alpha"));
+        let text = colored_transcript_at_width(
+            &["WillDeep: **Alpha** and alpha".to_owned()],
+            Some("alpha"),
+            80,
+        );
         let highlighted = text
             .lines
             .iter()
@@ -906,6 +938,102 @@ mod tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
     #[test]
+    fn session_picker_edits_query_navigates_and_selects_archived_session() {
+        let current_id = uuid::Uuid::new_v4();
+        let target_id = uuid::Uuid::new_v4();
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(current_id);
+
+        assert!(matches!(
+            app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('登'), KeyModifiers::NONE)),
+            SessionPickerAction::Refresh
+        ));
+        assert_eq!(app.session_picker.as_ref().unwrap().editor.text(), "登");
+
+        app.set_session_picker_results(vec![
+            willdeep_runtime_protocol::SessionSearchResult {
+                id: current_id,
+                title: "当前会话".to_owned(),
+                workspace: Some("/workspace".to_owned()),
+                status: willdeep_runtime_protocol::SessionStatus::Idle,
+                profile: None,
+                model: None,
+                updated_at: 1,
+                message_count: 2,
+                snippet: None,
+            },
+            willdeep_runtime_protocol::SessionSearchResult {
+                id: target_id,
+                title: "登录设计".to_owned(),
+                workspace: Some("/workspace".to_owned()),
+                status: willdeep_runtime_protocol::SessionStatus::Archived,
+                profile: None,
+                model: None,
+                updated_at: 2,
+                message_count: 8,
+                snippet: Some("讨论 OAuth 登录".to_owned()),
+            },
+        ]);
+        assert!(matches!(
+            app.handle_session_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            SessionPickerAction::None
+        ));
+        match app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            SessionPickerAction::Switch(target) => {
+                assert_eq!(target.id, target_id.to_string());
+                assert!(target.archived);
+            }
+            _ => panic!("expected Session switch"),
+        }
+    }
+    #[test]
+    fn session_picker_result_includes_content_snippet_without_embedded_lines() {
+        let result = willdeep_runtime_protocol::SessionSearchResult {
+            id: uuid::Uuid::new_v4(),
+            title: "SSO\n设计".to_owned(),
+            workspace: Some("/workspace".to_owned()),
+            status: willdeep_runtime_protocol::SessionStatus::Idle,
+            profile: None,
+            model: None,
+            updated_at: 1,
+            message_count: 4,
+            snippet: Some("RBAC\n数据权限".to_owned()),
+        };
+
+        let line = session_picker_result_line(&result, true, Language::ZhCn, true);
+
+        assert!(line.contains("SSO 设计"));
+        assert!(line.contains("RBAC 数据权限"));
+        assert!(line.contains("[当前]"));
+        assert!(!line.contains('\n'));
+    }
+    #[test]
+    fn command_palette_session_item_queues_direct_switch() {
+        let workspace = std::env::temp_dir().join(format!(
+            "willdeep-palette-session-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = Session::new(workspace.clone(), None, "Unique history title");
+        let store = SessionStore::new(workspace.join("home"));
+        let registry = BackgroundTaskRegistry::default();
+        let mut app = App::new(Vec::new(), Language::En);
+        app.open_palette(&SkillCatalog::default(), &store, &session);
+        for character in "uniquehistorytitle".chars() {
+            app.handle_palette_key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &registry,
+            );
+        }
+
+        app.handle_palette_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &registry);
+
+        let target = app.pending_session_switch.unwrap();
+        assert_eq!(target.id, session.id.to_string());
+        assert!(!target.archived);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+    #[test]
     fn workspace_file_palette_is_bounded_and_skips_heavy_directories() {
         let workspace = std::env::temp_dir().join(format!(
             "willdeep-palette-files-{}",
@@ -931,6 +1059,7 @@ mod tests {
     fn renders_common_markdown_for_terminal() {
         let lines = render_assistant_markdown(
             "# Title\n- **bold** and `code`\n[Docs](https://example.com)",
+            80,
         );
         let rendered = lines
             .iter()
@@ -945,6 +1074,71 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+    #[test]
+    fn renders_html_breaks_as_terminal_lines() {
+        let lines = render_assistant_markdown("第一行<br>第二行<BR />第三行", 80);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["WillDeep: 第一行", "第二行", "第三行"]);
+        assert!(rendered.iter().all(|line| !line.contains("<br")));
+    }
+    #[test]
+    fn renders_gfm_tables_with_cjk_width_and_wrapped_cells() {
+        let lines = render_assistant_markdown(
+            "说明：\n\n| 层级 | 说明 |\n|---|---|\n| 产品 | 官网、用户体系 |\n| SSO | 1. 登录<br>2. 同步权限 |",
+            24,
+        );
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("层级"));
+        assert!(rendered.contains("─┼─"));
+        assert!(rendered.contains("产品"));
+        assert!(rendered.contains("1. 登录"));
+        assert!(rendered.contains("2. 同步权限"));
+        assert!(!rendered.contains("|---|"));
+        assert!(!rendered.contains("<br>"));
+    }
+    #[test]
+    fn recognizes_terminal_line_navigation_control_bytes() {
+        assert_eq!(
+            prompt_line_navigation_for_key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL
+            )),
+            Some(PromptLineNavigation::Start)
+        );
+        assert_eq!(
+            prompt_line_navigation_for_key(KeyEvent::new(
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL
+            )),
+            Some(PromptLineNavigation::End)
+        );
+        assert_eq!(
+            prompt_line_navigation_for_key(KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL
+            )),
+            None
         );
     }
     #[test]
@@ -1302,9 +1496,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(app.transcript, vec!["WillDeep: 真实的 AI 回复"]);
+        assert!(
+            !app.running,
+            "the completed Runtime output must end the busy state"
+        );
+        assert!(app.last_elapsed.is_some());
         assert!(app.transcript.iter().all(|line| {
             !line.contains("turn") && !line.contains("task_id") && !line.contains(&task.to_string())
         }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_terminal_failure_stops_the_busy_indicator() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-tui-runtime-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "failed runtime");
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(true, "Submitted to Runtime".to_owned());
+        let event = crate::daemon::RemoteRuntimeEvent {
+            sequence: 1,
+            kind: "task.failed".to_owned(),
+            message: format!("task_id={} error=provider", uuid::Uuid::new_v4()),
+            visible: true,
+            session_id: Some(session.id),
+        };
+
+        runtime_ui::apply_runtime_events(&mut app, vec![event], &mut session, &store).unwrap();
+
+        assert!(!app.running);
+        assert!(app.last_elapsed.is_some());
+        assert!(
+            app.transcript
+                .iter()
+                .any(|line| line.contains("Runtime task failed"))
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -1556,6 +1786,82 @@ mod tests {
             KeyCode::Char('c'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
+        assert!(is_selection_copy_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_selection_copy_key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn internal_chat_selection_copies_unicode_display_columns() {
+        let rows = vec!["你好吗".to_owned(), "second".to_owned()];
+        assert_eq!(selected_text(&rows, (0, 2), (1, 3)), "好吗\nsec");
+        assert_eq!(quote_selected_text("第一行\n第二行"), "> 第一行\n> 第二行");
+    }
+
+    #[test]
+    fn styled_chat_wrap_and_selection_highlight_share_visual_rows() {
+        let source = Text::from(Line::from(vec![
+            Span::styled("abc", Style::default().fg(Color::Cyan)),
+            Span::styled("中文", Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        let mut wrapped = wrap_styled_text(source, 5);
+        assert_eq!(text_rows(&wrapped), vec!["abc中", "文"]);
+
+        highlight_text_selection(&mut wrapped, (0, 3), (0, 5));
+        let highlighted = wrapped.lines[0]
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(Color::Blue))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(highlighted, "中");
+    }
+
+    #[test]
+    fn dragging_chat_text_enters_internal_selection_mode() {
+        let mut app = App::new(vec!["hello world".to_owned()], Language::En);
+        app.transcript_rect = Rect::new(0, 0, 20, 6);
+        app.transcript_rows = vec!["hello world".to_owned()];
+        app.transcript_render_offset = 0;
+
+        assert!(!app.handle_chat_selection_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.handle_chat_selection_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.selection_mode);
+        assert_eq!(app.selected_chat_text(), "ello");
+    }
+
+    #[test]
+    fn quoting_chat_selection_preserves_the_existing_draft() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.input.insert("我的补充");
+        app.transcript_rows = vec!["第一行".to_owned(), "第二行".to_owned()];
+        app.chat_selection = Some(ChatSelection {
+            anchor: ChatSelectionPoint { row: 0, column: 0 },
+            head: ChatSelectionPoint { row: 1, column: 5 },
+        });
+        app.selection_mode = true;
+
+        app.quote_chat_selection();
+
+        assert_eq!(app.input.text(), "我的补充\n\n> 第一行\n> 第二行");
+        assert_eq!(app.focus, FocusPane::Prompt);
+        assert!(!app.selection_mode);
+        assert!(app.chat_selection.is_none());
     }
 
     #[test]
@@ -1948,6 +2254,71 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(None));
         assert!(app.question.is_none());
         assert!(app.notice.is_some(), "the drop must be reported");
+    }
+
+    #[test]
+    fn working_summary_distinguishes_progress_waiting_and_silence() {
+        let recent = format_working_summary(
+            Language::ZhCn,
+            true,
+            "Runtime · 正在使用 read_file",
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert!(recent.contains("正在使用 read_file"));
+        assert!(recent.contains("已运行 5.0s"));
+
+        let waiting = format_working_summary(
+            Language::ZhCn,
+            true,
+            "Runtime · 正在使用 read_file",
+            Duration::from_secs(18),
+            Duration::from_secs(9),
+        );
+        assert!(waiting.contains("等待 Runtime / 模型返回"));
+
+        let silent = format_working_summary(
+            Language::ZhCn,
+            true,
+            "Runtime · 正在使用 read_file",
+            Duration::from_secs(48),
+            Duration::from_secs(31),
+        );
+        assert!(silent.contains("暂未收到新事件"));
+        assert!(silent.contains("已等待 31s"));
+    }
+
+    #[test]
+    fn active_runtime_snapshot_restores_busy_state_after_reconnect() {
+        let current_session = uuid::Uuid::new_v4();
+        let task = crate::daemon::tui_bridge::RemoteTask {
+            id: uuid::Uuid::new_v4(),
+            session_id: Some(current_session),
+            turn_id: Some(uuid::Uuid::new_v4()),
+            agent_id: Some(uuid::Uuid::new_v4()),
+            status: willdeep_runtime_protocol::TaskStatus::Running,
+            profile: None,
+            created_at: unix_now(),
+            started_at: Some(unix_now()),
+            completed_at: None,
+            exit_code: None,
+            failure_domain: None,
+        };
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+
+        app.observe_runtime_tasks(std::slice::from_ref(&task), current_session);
+
+        assert!(app.running);
+        assert!(app.runtime_turn);
+        assert!(app.turn_started.is_some());
+        assert!(app.activity_line.contains("重新连接 Runtime"));
+
+        let mut other_session_app = App::new(Vec::new(), Language::ZhCn);
+        other_session_app.observe_runtime_tasks(&[task], uuid::Uuid::new_v4());
+        assert!(
+            !other_session_app.running,
+            "another session's task must not mark this chat as busy"
+        );
     }
 
     #[test]

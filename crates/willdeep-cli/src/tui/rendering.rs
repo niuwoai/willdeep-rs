@@ -9,11 +9,15 @@ pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-pub(super) fn colored_transcript(entries: &[String], search_query: Option<&str>) -> Text<'static> {
+pub(super) fn colored_transcript_at_width(
+    entries: &[String],
+    search_query: Option<&str>,
+    width: usize,
+) -> Text<'static> {
     let mut lines = Vec::new();
     for value in entries {
         if let Some(content) = value.strip_prefix("WillDeep: ") {
-            lines.extend(render_assistant_markdown(content));
+            lines.extend(render_assistant_markdown(content, width));
             continue;
         }
         let style = if value.starts_with("You:") {
@@ -81,87 +85,490 @@ fn highlight_matches(text: &mut Text<'static>, query: &str) {
 }
 
 pub(super) fn rendered_transcript_height(entries: &[String], width: usize) -> usize {
-    Paragraph::new(colored_transcript(entries, None))
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1).min(u16::MAX as usize) as u16)
+    wrap_styled_text(colored_transcript_at_width(entries, None, width), width)
+        .lines
+        .len()
 }
 
-pub(super) fn render_assistant_markdown(content: &str) -> Vec<Line<'static>> {
-    let mut output = Vec::new();
-    let mut code_block = false;
-    for (index, raw) in content.lines().enumerate() {
-        if raw.trim_start().starts_with("```") {
-            code_block = !code_block;
+pub(super) fn wrap_styled_text(text: Text<'static>, width: usize) -> Text<'static> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for source in text.lines {
+        let cells = source
+            .spans
+            .into_iter()
+            .flat_map(|span| {
+                span.content
+                    .chars()
+                    .map(move |character| StyledCharacter {
+                        character,
+                        style: span.style,
+                        width: UnicodeWidthChar::width(character).unwrap_or(0),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if cells.is_empty() {
+            rows.push(Line::default());
             continue;
         }
-        let prefix = (index == 0).then(|| {
-            Span::styled(
-                "WillDeep: ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
-        let mut spans = Vec::new();
-        if let Some(prefix) = prefix {
-            spans.push(prefix);
+        let mut line = Vec::new();
+        let mut line_width: usize = 0;
+        let mut whitespace = Vec::new();
+        let mut index = 0;
+        while index < cells.len() {
+            if cells[index].character.is_whitespace() {
+                whitespace.push(cells[index]);
+                index += 1;
+                continue;
+            }
+            let word_start = index;
+            while index < cells.len() && !cells[index].character.is_whitespace() {
+                index += 1;
+            }
+            let word = &cells[word_start..index];
+            let whitespace_width = whitespace.iter().map(|cell| cell.width).sum::<usize>();
+            let word_width = word.iter().map(|cell| cell.width).sum::<usize>();
+            if word_width <= width {
+                if line_width > 0
+                    && line_width
+                        .saturating_add(whitespace_width)
+                        .saturating_add(word_width)
+                        > width
+                {
+                    rows.push(Line::from(std::mem::take(&mut line)));
+                    line_width = 0;
+                    whitespace.clear();
+                }
+                append_styled_cells(&mut line, &whitespace);
+                line_width = line_width.saturating_add(whitespace_width);
+                whitespace.clear();
+                append_styled_cells(&mut line, word);
+                line_width = line_width.saturating_add(word_width);
+                continue;
+            }
+            if line_width > 0 && line_width.saturating_add(whitespace_width) >= width {
+                rows.push(Line::from(std::mem::take(&mut line)));
+                line_width = 0;
+                whitespace.clear();
+            }
+            for cell in whitespace.drain(..).chain(word.iter().copied()) {
+                if line_width > 0 && line_width.saturating_add(cell.width) > width {
+                    rows.push(Line::from(std::mem::take(&mut line)));
+                    line_width = 0;
+                }
+                push_styled_character(&mut line, cell.character, cell.style);
+                line_width = line_width.saturating_add(cell.width);
+            }
+        }
+        for cell in whitespace {
+            if line_width > 0 && line_width.saturating_add(cell.width) > width {
+                rows.push(Line::from(std::mem::take(&mut line)));
+                line_width = 0;
+            }
+            push_styled_character(&mut line, cell.character, cell.style);
+            line_width = line_width.saturating_add(cell.width);
+        }
+        if !line.is_empty() {
+            rows.push(Line::from(line));
+        }
+    }
+    Text::from(rows)
+}
+
+#[derive(Clone, Copy)]
+struct StyledCharacter {
+    character: char,
+    style: Style,
+    width: usize,
+}
+
+fn append_styled_cells(spans: &mut Vec<Span<'static>>, cells: &[StyledCharacter]) {
+    for cell in cells {
+        push_styled_character(spans, cell.character, cell.style);
+    }
+}
+
+fn push_styled_character(spans: &mut Vec<Span<'static>>, character: char, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push(character);
+        return;
+    }
+    spans.push(Span::styled(character.to_string(), style));
+}
+
+pub(super) fn text_rows(text: &Text<'static>) -> Vec<String> {
+    text.lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+pub(super) fn selected_text(rows: &[String], start: (usize, usize), end: (usize, usize)) -> String {
+    if rows.is_empty() || start >= end {
+        return String::new();
+    }
+    let last_row = end.0.min(rows.len().saturating_sub(1));
+    (start.0..=last_row)
+        .map(|row| {
+            let start_column = if row == start.0 { start.1 } else { 0 };
+            let end_column = if row == end.0 { end.1 } else { usize::MAX };
+            display_column_slice(&rows[row], start_column, end_column)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn display_column_slice(value: &str, start: usize, end: usize) -> String {
+    let mut output = String::new();
+    let mut column = 0;
+    let mut previous_selected = false;
+    for character in value.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        let selected = if width == 0 {
+            previous_selected
+        } else {
+            column < end && column.saturating_add(width) > start
+        };
+        if selected {
+            output.push(character);
+        }
+        previous_selected = selected;
+        column = column.saturating_add(width);
+    }
+    output
+}
+
+pub(super) fn highlight_text_selection(
+    text: &mut Text<'static>,
+    start: (usize, usize),
+    end: (usize, usize),
+) {
+    if start >= end {
+        return;
+    }
+    let selection_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    for (row, line) in text.lines.iter_mut().enumerate() {
+        if row < start.0 || row > end.0 {
+            continue;
+        }
+        let start_column = if row == start.0 { start.1 } else { 0 };
+        let end_column = if row == end.0 { end.1 } else { usize::MAX };
+        let source = std::mem::take(&mut line.spans);
+        let mut column = 0;
+        let mut previous_selected = false;
+        let mut highlighted = Vec::new();
+        for span in source {
+            for character in span.content.chars() {
+                let width = UnicodeWidthChar::width(character).unwrap_or(0);
+                let selected = if width == 0 {
+                    previous_selected
+                } else {
+                    column < end_column && column.saturating_add(width) > start_column
+                };
+                let style = if selected {
+                    span.style.patch(selection_style)
+                } else {
+                    span.style
+                };
+                push_styled_character(&mut highlighted, character, style);
+                previous_selected = selected;
+                column = column.saturating_add(width);
+            }
+        }
+        line.spans = highlighted;
+    }
+}
+
+pub(super) fn render_assistant_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
+    let mut output = Vec::new();
+    let mut code_block = false;
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        let raw = lines[index];
+        if raw.trim_start().starts_with("```") {
+            code_block = !code_block;
+            index += 1;
+            continue;
         }
         if code_block {
+            let mut spans = assistant_prefix(index == 0);
             spans.push(Span::styled(
                 raw.to_owned(),
                 Style::default().fg(Color::White).bg(Color::DarkGray),
             ));
-        } else {
-            let trimmed = raw.trim_start();
-            let (marker, body, base) = if let Some(body) = trimmed.strip_prefix("### ") {
-                (
-                    "▸ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("## ") {
-                (
-                    "◆ ",
-                    body,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("# ") {
-                (
-                    "■ ",
-                    body,
-                    Style::default()
-                        .fg(Color::LightYellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if let Some(body) = trimmed.strip_prefix("> ") {
-                (
-                    "│ ",
-                    body,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )
-            } else if let Some(body) = trimmed
-                .strip_prefix("- ")
-                .or_else(|| trimmed.strip_prefix("* "))
-            {
-                ("• ", body, Style::default().fg(Color::Green))
-            } else {
-                ("", raw, Style::default().fg(Color::Green))
-            };
-            if !marker.is_empty() {
-                spans.push(Span::styled(marker, base));
-            }
-            spans.extend(render_inline_markdown(body, base));
+            output.push(Line::from(spans));
+            index += 1;
+            continue;
         }
-        output.push(Line::from(spans));
+
+        if index + 1 < lines.len()
+            && parse_table_row(raw).is_some()
+            && is_table_separator(lines[index + 1])
+        {
+            let mut rows = vec![parse_table_row(raw).expect("table header was checked")];
+            index += 2;
+            while index < lines.len() {
+                let Some(row) = parse_table_row(lines[index]) else {
+                    break;
+                };
+                rows.push(row);
+                index += 1;
+            }
+            if output.is_empty() {
+                output.push(Line::from(assistant_prefix(true)));
+            }
+            output.extend(render_markdown_table(&rows, width));
+            continue;
+        }
+
+        let normalized = normalize_html_breaks(raw);
+        for (piece_index, piece) in normalized.split('\n').enumerate() {
+            output.push(render_markdown_line(piece, index == 0 && piece_index == 0));
+        }
+        index += 1;
     }
     if output.is_empty() {
         output.push(Line::styled("WillDeep:", Style::default().fg(Color::Green)));
+    }
+    output
+}
+
+fn assistant_prefix(show: bool) -> Vec<Span<'static>> {
+    show.then(|| {
+        Span::styled(
+            "WillDeep: ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    })
+    .into_iter()
+    .collect()
+}
+
+fn render_markdown_line(raw: &str, show_prefix: bool) -> Line<'static> {
+    let mut spans = assistant_prefix(show_prefix);
+    let trimmed = raw.trim_start();
+    let (marker, body, base) = if let Some(body) = trimmed.strip_prefix("### ") {
+        (
+            "▸ ",
+            body,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(body) = trimmed.strip_prefix("## ") {
+        (
+            "◆ ",
+            body,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(body) = trimmed.strip_prefix("# ") {
+        (
+            "■ ",
+            body,
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(body) = trimmed.strip_prefix("> ") {
+        (
+            "│ ",
+            body,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )
+    } else if let Some(body) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        ("• ", body, Style::default().fg(Color::Green))
+    } else {
+        ("", raw, Style::default().fg(Color::Green))
+    };
+    if !marker.is_empty() {
+        spans.push(Span::styled(marker, base));
+    }
+    spans.extend(render_inline_markdown(body, base));
+    Line::from(spans)
+}
+
+fn normalize_html_breaks(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(index) = rest.find('<') {
+        output.push_str(&rest[..index]);
+        let candidate = &rest[index..];
+        let tag_length = ["<br />", "<br/>", "<br>"]
+            .into_iter()
+            .find(|tag| {
+                candidate
+                    .get(..tag.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(tag))
+            })
+            .map(str::len);
+        if let Some(tag_length) = tag_length {
+            output.push('\n');
+            rest = &candidate[tag_length..];
+        } else {
+            output.push('<');
+            rest = &candidate[1..];
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+fn parse_table_row(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return None;
+    }
+    let cells = trimmed[1..trimmed.len() - 1]
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect::<Vec<_>>();
+    (cells.len() >= 2).then_some(cells)
+}
+
+fn is_table_separator(value: &str) -> bool {
+    parse_table_row(value).is_some_and(|cells| {
+        cells.iter().all(|cell| {
+            let marker = cell.trim().trim_matches(':').trim();
+            marker.len() >= 3 && marker.bytes().all(|byte| byte == b'-')
+        })
+    })
+}
+
+fn terminal_cell_text(value: &str) -> String {
+    normalize_html_breaks(value)
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+}
+
+fn table_column_widths(rows: &[Vec<String>], width: usize) -> Vec<usize> {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut natural = vec![1; columns];
+    for row in rows {
+        for (column, cell) in row.iter().enumerate() {
+            for line in terminal_cell_text(cell).split('\n') {
+                natural[column] = natural[column].max(UnicodeWidthStr::width(line).max(1));
+            }
+        }
+    }
+    let separators = columns.saturating_sub(1) * 3;
+    let available = width.max(columns + separators).saturating_sub(separators);
+    if natural.iter().sum::<usize>() <= available {
+        return natural;
+    }
+    let mut result = vec![1; columns];
+    let mut remaining = available.saturating_sub(columns);
+    while remaining > 0 {
+        let mut changed = false;
+        for column in 0..columns {
+            if result[column] < natural[column] && remaining > 0 {
+                result[column] += 1;
+                remaining -= 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    result
+}
+
+fn wrap_table_cell(value: &str, width: usize) -> Vec<String> {
+    let mut output = Vec::new();
+    for explicit_line in terminal_cell_text(value).split('\n') {
+        let mut line = String::new();
+        let mut columns = 0;
+        for character in explicit_line.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if columns + character_width > width && !line.is_empty() {
+                output.push(std::mem::take(&mut line));
+                columns = 0;
+            }
+            line.push(character);
+            columns += character_width;
+            if columns >= width {
+                output.push(std::mem::take(&mut line));
+                columns = 0;
+            }
+        }
+        if !line.is_empty() || explicit_line.is_empty() {
+            output.push(line);
+        }
+    }
+    if output.is_empty() {
+        output.push(String::new());
+    }
+    output
+}
+
+fn render_markdown_table(rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
+    let widths = table_column_widths(rows, width.max(1));
+    let mut output = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let cells = widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| {
+                wrap_table_cell(row.get(column).map(String::as_str).unwrap_or(""), *width)
+            })
+            .collect::<Vec<_>>();
+        let row_height = cells.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..row_height {
+            let mut spans = Vec::new();
+            for (column, column_width) in widths.iter().enumerate() {
+                if column > 0 {
+                    spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                }
+                let value = cells[column]
+                    .get(line_index)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let padding = column_width.saturating_sub(UnicodeWidthStr::width(value));
+                let style = if row_index == 0 {
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Green)
+                };
+                spans.push(Span::styled(value.to_owned(), style));
+                spans.push(Span::styled(" ".repeat(padding), style));
+            }
+            output.push(Line::from(spans));
+        }
+        if row_index == 0 {
+            let separator = widths
+                .iter()
+                .map(|width| "─".repeat(*width))
+                .collect::<Vec<_>>()
+                .join("─┼─");
+            output.push(Line::styled(
+                separator,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
     output
 }

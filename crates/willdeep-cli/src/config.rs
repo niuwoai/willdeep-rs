@@ -301,6 +301,7 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
                 | "reader"
                 | "deep"
                 | "editor"
+                | "implementer"
                 | "test_fixer"
                 | "build_fixer"
                 | "log_inspector"

@@ -486,7 +486,7 @@ impl Agent {
                 let requested = args.requested_write_targets(scope);
                 if requested.is_empty() {
                     return Err(ToolError::OutsideWorkspace(
-                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for test_fixer or build_fixer".to_owned(),
+                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for implementer, test_fixer or build_fixer".to_owned(),
                     ));
                 }
                 Some(self.tools.approve_subagent_write_set(&requested).await?)

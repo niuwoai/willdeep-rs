@@ -2,7 +2,7 @@
 
 > 与 macOS 版 Xedit 的 `docs/SMALL_MODEL_SKILL_WORKERS_DESIGN.md`（skill-workers.v1）同源。本文是 willdeep-rs 侧的落地说明与差异记录。
 
-一句话：**把「可自动验证」的编程小任务拆给 16K～64K 的小模型工种，用 Task Packet 喂料、用 Verifier 判结果——模型不自证，程序来证。**
+一句话：**优先把编码工作交给可私有部署的 32K / 48K / 64K / 256K 模型：窄工种用 Task Packet 喂料、用 Verifier 判结果，日常多文件实现交给 256K `implementer`；模型不自证，程序来证。**
 
 ## 为什么
 
@@ -17,12 +17,13 @@
 | 工种 | 职能 | 工具 | 窗口 | Payload 上限 | 写通道 | Verifier |
 |---|---|---|---:|---:|---|---|
 | `scout` | 定位文件、符号、调用点 | search / grep / list / read | 32K | 4 KB | 无 | — |
-| `reader` | 阅读并总结长文件 | read / list / search | 32K | 4 KB | 无 | — |
-| `log_inspector` | 解释失败日志、归类错误 | read | 16K | 3 KB | 无 | — |
+| `reader` | 阅读并总结长文件 | read / list / search | 48K | 5 KB | 无 | — |
+| `log_inspector` | 解释失败日志、归类错误 | read | 32K | 4 KB | 无 | — |
 | `git_detective` | 回归定位、commit 考古 | git log / diff / blame / status / read / **run_command（限只读 git）** | 32K | 4 KB | 无 | — |
-| `editor` | 修改一个单独批准的文件 | read / edit | 32K | 4 KB | 单文件锁 | 可选 |
+| `editor` | 修改一个明确文件 | read / edit | 48K | 5 KB | 单文件锁 | 可选 |
+| `implementer` | 有界多文件功能、重构、新文件 | search / grep / list / read / create / edit / run_command（可选 verifier） | 256K | 16 KB | **文件集锁** | 可选 |
 | `test_fixer` | 把失败测试修到绿 | read / edit / run_command（限 verifier） | 64K | 6 KB | **文件集锁** | 必需 |
-| `build_fixer` | 修编译 / 类型 / lint 错误 | read / edit / run_command（限 verifier） | 32K | 4 KB | **文件集锁** | 必需 |
+| `build_fixer` | 修编译 / 类型 / lint 错误 | read / edit / run_command（限 verifier） | 48K | 5 KB | **文件集锁** | 必需 |
 | `deep` | 开放式跨文件调查 | search / grep / read / list / git status | **继承会话窗口** | 默认 | 无 | — |
 
 `deep` 是**刻意的例外**：它跑父模型，因为它的活本来就装不进小窗口。跨模块重构、架构设计、语义模糊的任务继续走 `deep` 或主 Agent，不要硬拆。
@@ -113,18 +114,15 @@ attempt 打满 → 整个运行判失败，报告要求升档
 
 ## 写通道：文件集锁
 
-`test_fixer` / `build_fixer` 必须能同时改测试和实现，`editor` 的单文件锁不够。做法是把「单文件」推广成「声明式文件集」，**同一条通路，不开第二套**：
+`implementer` / `test_fixer` / `build_fixer` 必须能同时改多个实现与测试文件，`editor` 的单文件锁不够。做法是把「单文件」推广成「声明式文件集」，**同一条通路，不开第二套**：
 
-1. **spawn 即审批**：审批对象是「允许子 Agent 修改这 N 个文件」，审批卡逐行列出全集合，一次批完。上限 8 个文件——想动一打文件的活不是有界局部修复，该由父 Agent 拆开。
+1. **继承 Workspace 策略**：`smart/workspace-write` 下，声明文件集和主 Agent 的普通工作区编辑一样免除额外审批；`strict` 用一张审批卡列出全集合；`read-only` 一律拒绝。上限 16 个文件，覆盖一个有界功能切片，更多文件由父 Agent 拆分。
 2. **逐条落点校验**：`edit_file` / `create_file` 的路径必须在集合内，越界拒绝，并明确告诉 Worker「要扩大范围就报告父 Agent 重新派工」——给出路，不是给闭门羹。
 3. **文件集互斥**：同一 Catalog 内两个运行中 Worker 的文件集有交集时，后者被拒绝并点名冲突文件。锁在运行结束、超时、取消、panic 时都会释放（`Drop`）。
 
 `editor` 是集合大小为 1 的特例，走的是同一段代码。
 
-两条限制值得先知道，免得派工时踩空：
-
-- 集合里的路径必须是**已存在的文件**——Worker 不能凭空建新文件。要新建文件，由主 Agent 先建好空文件再派工，或者干脆自己写。
-- `relevant_files` 同时承担「内联给你看」和「允许你改」两个角色。只想让 Worker 读、不想让它改的文件，别放进写入型工种的 `relevant_files`——放进去就是授权。
+`relevant_files` 同时承担「内联给你看」和「允许你改/创建」两个角色。不存在的路径会作为待创建文件保留在白名单里；只想让 Worker 读、不想让它改的文件，不要放进写入型工种的 `relevant_files`。
 
 > **与 Xedit 设计的差异**：Xedit 设计里冲突的后来者是「排队」，rs 侧是「拒绝并点名冲突文件」。理由是并发上限本来只有 3，排队会引入等待与死锁面，而拒绝把决定权交回父 Agent——它比锁更清楚该等还是该重新切分。
 
@@ -216,7 +214,7 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 观测/纪律 | 窗口分档、per-profile payload 上限 | ✅ 已落地 |
-| P1 闭环 | Task Packet、Verifier 循环、文件集锁、`test_fixer` / `build_fixer` | ✅ 已落地 |
+| P1 闭环 | Task Packet、Verifier 循环、文件集锁、`implementer` / `test_fixer` / `build_fixer` | ✅ 已落地 |
 | P2 露脸 | 确定性派工触发、`log_inspector` / `git_detective` | ✅ 已落地 |
 | P3 遥测 | 判定结构化落盘、三个北极星指标、Replay 锚点 | ✅ 已落地 |
 | 后续 | Replay 回放工具、per-skill 路由表、verdict 回执上报 some.im | ⏳ 未做 |

@@ -152,7 +152,7 @@ pub(super) fn parse_fork_options(arguments: &str) -> Result<ForkOptions> {
     Ok(options)
 }
 
-async fn switch(
+pub(super) async fn switch(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,

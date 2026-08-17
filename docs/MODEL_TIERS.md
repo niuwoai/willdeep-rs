@@ -1,6 +1,6 @@
 # 模型上下文三档切分（model-tiers.v1）
 
-> 2026-08-16 定稿。与 macOS 版 Xedit 共用同一套档位语义；rs 侧实现状态见文末。
+> 2026-08-16 定稿，2026-08-17 按企业私有部署目标取消 16K 并引入 256K `implementer`。与 macOS 版 Xedit 共用同一套档位语义；rs 侧实现状态见文末。
 > 关联：`docs/SKILL_WORKERS.md`（S 档的完整落地）、Xedit `docs/SMALL_MODEL_SKILL_WORKERS_DESIGN.md`。
 
 ## 动机：不只是省钱，是主权
@@ -12,7 +12,7 @@ Skill Worker 体系立项时的叙事是成本：小模型便宜，能下放就�
 制造）的数据不允许离开机房，能部署的只有开源权重 + 自有 GPU。这个约束下的
 现实是：
 
-- **32K–64K 档**：单卡可跑，选择极多，私有化最容易。
+- **32K–64K 档**：单卡可跑，选择极多，私有化最容易。目标部署基线中，16GB 显存可承载 35B-A3B 级模型并覆盖 32K，按 KV cache 与量化配置可选择 48K/64K，因此不再保留 16K 档。
 - **128K–256K 档**：开源权重的主流窗口（DeepSeek、Qwen、GLM、Kimi 开源版
   都在这个区间），多卡可部署，选择很多。
 - **1M 档**：私有化选择极少。长上下文推理的 KV cache 内存开销巨大，就算权重
@@ -26,8 +26,8 @@ Skill Worker 体系立项时的叙事是成本：小模型便宜，能下放就�
 
 | 档 | 窗口 | 角色 | 私有化难度 | some.im 模型（2026-08-16 全部实测在线） |
 |---|---|---|---|---|
-| **S（worker）** | 32K–64K | 可验证的有界任务：修测试、修编译、定位、日志解释、模板生成、命令编排 | 单卡，容易 | `someim-32b-<工种>`（已建成） |
-| **M（standard）** | ~256K | **会话默认档**：日常编码循环、单模块开发、评审、文档、单章创作 | 多卡，可行 | 会话主模型（`someim-auto-flash` 托管路由）；显式选 M 用 `glm-5.x` / `kimi-k3` |
+| **S（worker）** | 32K / 48K / 64K | 有界任务：修测试、修编译、定位、日志解释、单文件编辑、模板生成 | 单卡，容易 | `someim-32b-<工种>`（已建成） |
+| **M（standard）** | 256K | **日常编码主力**：`implementer` 承担最多 16 个声明文件的功能、重构、新文件、评审与文档 | 多卡，可行 | 默认 `glm-5`，企业部署绑定本地/内网 256K Provider |
 | **L（deep）** | 1M | 跨模块重构、全库理解、超长材料（大日志全量、多文档综述、长篇规划） | 极难，多数场景没有 | `deepseek-v4-flash` |
 
 **不建新的档位虚拟模型**。网关现有模型已经覆盖三档——L 直接用
@@ -48,9 +48,9 @@ Skill Worker 体系立项时的叙事是成本：小模型便宜，能下放就�
 
 ```text
 任务进来
-  ↓ 能拆出可验证的有界子任务吗？ → 是：S 档 worker（spawn_agent + task packet）
-  ↓ 剩下的部分材料装得进 256K 吗？ → 是：M 档（会话默认）
-  ↓ 只有材料真实超过 M 且不可消化/分片时 → L 档，且要说明理由
+  ↓ 能拆成 32K/48K/64K 的窄任务吗？ → 是：S 档 worker
+  ↓ 能声明目标、事实和不超过 16 个写入路径吗？ → 是：256K implementer
+  ↓ 先消化或分片，仍无法装进 256K 吗？ → 是：L/deep，且要说明理由
 ```
 
 **L 是稀缺资源，用它要有理由**（像内存分配一样）。三种真实理由：
@@ -113,8 +113,8 @@ worker（Xedit 的 `target_command` 单命令授权就是这条通路），失�
 
 ## 与 Skill Worker 体系的关系
 
-S 档不是新东西——`SKILL_WORKERS.md` 的八个工种就是 S 档的执行器。本文档补的
-是上面两层：M 档作为默认、L 档作为申请制稀缺资源，以及 **skill → tier 的显式
+S 档不是新东西——`SKILL_WORKERS.md` 的窄工种就是 S 档执行器；新增的
+`implementer` 是 M 档执行器。本文档补的是上面两层：M 档作为日常编码默认、L 档作为申请制稀缺资源，以及 **skill → tier 的显式
 关联**（`tier:` frontmatter），让派工决策在读技能正文之前就能做。
 
 worker-tier 技能的标准执行路径：主会话读到 `tier=worker` → 编 Task Packet
@@ -130,6 +130,9 @@ worker-tier 技能的标准执行路径：主会话读到 `tier=worker` → 编 
 | `list_skills` / 技能摘要带 tier | ✅ 0.27.0-rc1 |
 | 系统提示词教会主会话 tier 路由 | ✅ 0.27.0-rc1 |
 | 技能库 29 个逐个标注 | ✅ 2026-08-16（写入 `~/.willdeep/skills`） |
+| 16K 档退出 | ✅ 0.33.0-rc1——最低档提升到 32K，reader/editor/build_fixer 使用 48K，test_fixer 使用 64K |
+| 256K 通用编码执行器 | ✅ 0.33.0-rc1——`implementer` 支持有界多文件创建/编辑、可选 verifier、最多 16 个声明路径和独立 Worktree |
+| 写入权限继承 | ✅ 0.33.0-rc1——`smart/workspace-write` 的 Worker 继承工作区写权限免额外审批；`strict` 仍审批，`read-only` 仍拒绝 |
 | L / M 档模型绑定 | ✅ 用现有网关模型：L=`deepseek-v4-flash`、M=`glm-5.x`/`kimi-k3`（均实测在线），不建新虚拟模型。派 L 档任务即 `spawn_agent` 时经 `[subagents.deep] model = "deepseek-v4-flash"` 绑定，或会话内直接换模型 |
 | worker-tier 技能的确定性派工触发 | ✅ 0.28.0-rc1——`list_skills` 命中 worker 技能时结果尾部附 `<delegation-hint>` 派工配方（仅主 Agent；子 Agent 不能派生，给它提示只是噪音）。配套 `task.skill`：Runtime 把技能正文内联进 Worker 首条消息，Worker 不再需要自己取指令 |
 | air-gapped 降级的自动化（分片 + 归纳） | ✅ 0.28.0-rc1——`task.digest_oversized`：超过内联预算的材料由 Worker 自己的廉价模型分片消化（标识符/断言原文保留，逐块标注 digested，失败的块点名不静默），默认关闭因为它花模型调用，开关在派工者手里 |

@@ -52,11 +52,11 @@ model = "claude-sonnet-4-5"
 max_output_tokens = 16384
 
 # Optional per-trade model bindings. Omit a section to use the built-in
-# defaults: scout/reader/editor use some.im glm-5 when the parent is some.im;
+# defaults: deployable workers use some.im glm-5 when the parent is some.im;
 # deep inherits the parent model. provider_profile references [providers.*].
-# Workers run in small windows on purpose: a cheap model given a 128K window
-# does not get smarter, it just burns the window. Only `deep` inherits the
-# session window, because its work genuinely does not fit in a small one.
+# The built-in deployable tiers are 32K/48K/64K/256K. Bind them to private or
+# on-prem Provider profiles to keep enterprise source and prompts off the
+# public internet. Only `deep` inherits the session window.
 [subagents.scout]
 provider_profile = "some-im"
 model = "glm-5"
@@ -70,6 +70,7 @@ max_consecutive_failures = 3
 [subagents.reader]
 provider_profile = "some-im"
 model = "glm-5"
+context_window = 49152
 
 [subagents.deep]
 # Inherits the current session when provider_profile/model are omitted.
@@ -84,6 +85,16 @@ provider_profile = "some-im"
 model = "glm-5"
 max_turns = 6
 # Writing profiles default to a dedicated, reviewable Git worktree.
+worktree = "dedicated"
+
+[subagents.implementer]
+# Bind this to an intranet/on-prem model for private daily coding.
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 18
+context_window = 262144
+tool_output_limit = 16384
+timeout_seconds = 1200
 worktree = "dedicated"
 
 # Verified workers: the runtime runs task.verifier.command after every attempt
@@ -103,7 +114,8 @@ worktree = "dedicated"
 [subagents.build_fixer]
 provider_profile = "some-im"
 model = "glm-5"
-context_window = 32768
+context_window = 49152
+tool_output_limit = 5120
 max_attempts = 3
 worktree = "dedicated"
 
@@ -112,8 +124,8 @@ worktree = "dedicated"
 [subagents.log_inspector]
 provider_profile = "some-im"
 model = "glm-5"
-context_window = 16384
-tool_output_limit = 3072
+context_window = 32768
+tool_output_limit = 4096
 
 [subagents.git_detective]
 provider_profile = "some-im"

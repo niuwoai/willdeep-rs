@@ -34,10 +34,10 @@ const MAX_SUPERVISOR_REQUEST_BYTES: usize = 256 * 1024;
 const BACKGROUND_SUPERVISOR_ENV: &str = "WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR";
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
-/// Ceiling on how many files one writing subagent may claim. A worker that
-/// wants to touch a dozen files is not doing a bounded local fix; the parent
-/// should split the work instead of widening the blast radius.
-const MAX_SUBAGENT_WRITE_TARGETS: usize = 8;
+/// Ceiling on how many files one writing subagent may claim. Sixteen files
+/// cover a bounded feature slice while keeping the write set reviewable; a
+/// larger change should still be split by the parent.
+const MAX_SUBAGENT_WRITE_TARGETS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandVerification {
@@ -320,7 +320,6 @@ impl ToolRegistry {
         self.allowed_tools = Some(names.into_iter().collect());
         self
     }
-    /// Confine writes to exactly this set of already-approved paths.
     /// Confine writes to exactly these files.
     ///
     /// The targets are canonicalized here because the check they feed compares
@@ -384,10 +383,11 @@ impl ToolRegistry {
         self
     }
 
-    /// Approve a subagent's write scope: one canonical existing file per
-    /// requested path, approved as one set so the operator sees the whole
-    /// blast radius on a single card rather than N cards they cannot relate
-    /// to each other.
+    /// Resolve a subagent's declared write scope before it starts. Existing
+    /// files are canonicalized and new files keep their validated workspace
+    /// path. Smart/workspace-write mode inherits the main Agent's normal
+    /// workspace write permission; strict mode still presents the whole set
+    /// on one approval card.
     pub async fn approve_subagent_write_set(
         &self,
         requested: &[String],
@@ -408,13 +408,19 @@ impl ToolRegistry {
         }
         let mut targets = BTreeSet::new();
         for path in requested {
-            let target = self.resolve_existing(path)?;
-            if !target.is_file() {
-                return Err(ToolError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("subagent write target is not a file: {path}"),
-                )));
-            }
+            let candidate = self.workspace.join(path);
+            let target = if candidate.exists() {
+                let target = self.resolve_existing(path)?;
+                if !target.is_file() {
+                    return Err(ToolError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("subagent write target is not a file: {path}"),
+                    )));
+                }
+                target
+            } else {
+                self.resolve_new(path)?
+            };
             targets.insert(target);
         }
         let listing = targets
@@ -427,7 +433,7 @@ impl ToolRegistry {
                 "allow subagent to modify exactly these {} file(s):\n{listing}",
                 targets.len()
             ),
-            false,
+            true,
         )
         .await?;
         Ok(targets)
@@ -541,11 +547,11 @@ impl ToolRegistry {
             ),
             definition(
                 "spawn_agent",
-                "Delegate a self-contained task to a child agent with an isolated context. Prefer the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (edit one separately approved file), test_fixer (drive failing tests back to green), build_fixer (drive build/type/lint errors back to green), deep (open-ended cross-file investigation, parent model). Children cannot spawn more agents. Pass `task` whenever you can: a worker given relevant_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
+                "Delegate a self-contained task to a child agent with an isolated context. Prefer deployable models and the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (one file), implementer (bounded multi-file coding in 256K), test_fixer (failing tests), build_fixer (compile/type/lint errors), deep only when the work genuinely needs the parent model. Children cannot spawn more agents. Pass `task` whenever you can: a worker given relevant_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
                 json!({"type":"object","properties":{
                     "prompt":{"type":"string","description":"Free-text instruction. Still required when `task` is present; keep it to what the packet does not already say."},
                     "label":{"type":"string"},
-                    "profile":{"type":"string","enum":["scout","reader","deep","editor","test_fixer","build_fixer","log_inspector","git_detective"]},
+                    "profile":{"type":"string","enum":["scout","reader","deep","editor","implementer","test_fixer","build_fixer","log_inspector","git_detective"]},
                     "run_in_background":{"type":"boolean"},
                     "target_file":{"type":"string","description":"Single write target for the editor profile."},
                     "task":{"type":"object","description":"Structured task packet. Compiling one is your job, not the worker's.","properties":{
@@ -1318,7 +1324,7 @@ impl ToolRegistry {
     }
 
     async fn create_file(&self, args: CreateArgs) -> Result<String, ToolError> {
-        self.require_write_target(&args.path)?;
+        self.require_write_target(&args.path, true)?;
         self.require_approval(&format!("create file: {}", args.path), true)
             .await?;
         let path = self.resolve_new(&args.path)?;
@@ -1340,7 +1346,7 @@ impl ToolRegistry {
     }
 
     async fn edit_file(&self, args: EditArgs) -> Result<String, ToolError> {
-        self.require_write_target(&args.path)?;
+        self.require_write_target(&args.path, false)?;
         if args.old_string == args.new_string {
             return Err(ToolError::IdenticalEdit);
         }
@@ -1624,11 +1630,15 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::ApprovalDenied("user skipped ask_user".to_owned()))
     }
 
-    fn require_write_target(&self, requested: &str) -> Result<(), ToolError> {
+    fn require_write_target(&self, requested: &str, allow_new: bool) -> Result<(), ToolError> {
         let Some(targets) = &self.write_targets else {
             return Ok(());
         };
-        let resolved = self.resolve_existing(requested)?;
+        let resolved = if allow_new {
+            self.resolve_new(requested)?
+        } else {
+            self.resolve_existing(requested)?
+        };
         if targets.contains(&resolved) {
             return Ok(());
         }
@@ -2807,6 +2817,45 @@ mod tests {
                 .approve_subagent_write_set(&["file.txt".to_owned()])
                 .await,
             Err(ToolError::ReadOnlyPolicy(_))
+        ));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn smart_subagent_inherits_workspace_write_and_can_create_a_declared_file() {
+        let root = workspace("smart-subagent-write");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart).expect("registry");
+        let targets = registry
+            .approve_subagent_write_set(&["src/new.rs".to_owned()])
+            .await
+            .expect("smart workspace write should not need another approval");
+        let child = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("child registry")
+            .with_write_targets(Some(targets));
+
+        child
+            .create_file(CreateArgs {
+                path: "src/new.rs".to_owned(),
+                content: "pub fn ready() -> bool { true }\n".to_owned(),
+            })
+            .await
+            .expect("create declared file");
+
+        assert!(root.join("src/new.rs").is_file());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn strict_subagent_write_set_still_requires_operator_approval() {
+        let root = workspace("strict-subagent-write");
+        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
+
+        assert!(matches!(
+            registry
+                .approve_subagent_write_set(&["file.txt".to_owned()])
+                .await,
+            Err(ToolError::ApprovalDenied(_))
         ));
         std::fs::remove_dir_all(root).expect("cleanup");
     }

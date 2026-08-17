@@ -56,6 +56,9 @@ pub enum SubagentShell {
     None,
     /// Exactly the verifier command declared in the task packet, verbatim.
     VerifierOnly,
+    /// No shell unless the task packet declares a verifier; when it does,
+    /// only that exact command is available.
+    VerifierOptional,
     /// Read-only `git` and nothing else. History questions — which commit
     /// introduced this, what did that commit change, how do two refs differ —
     /// cannot be answered by a fixed set of pre-baked git tools: the whole
@@ -1144,11 +1147,13 @@ async fn run_once(
     // may be, not which command it is.
     tools = match profile.shell {
         SubagentShell::ReadOnlyGit => tools.with_read_only_git_shell(true),
-        SubagentShell::None | SubagentShell::VerifierOnly => tools.with_command_allowlist(Some(
-            verifier
-                .map(|verifier| HashSet::from([verifier.command.trim().to_owned()]))
-                .unwrap_or_default(),
-        )),
+        SubagentShell::None | SubagentShell::VerifierOnly | SubagentShell::VerifierOptional => {
+            tools.with_command_allowlist(Some(
+                verifier
+                    .map(|verifier| HashSet::from([verifier.command.trim().to_owned()]))
+                    .unwrap_or_default(),
+            ))
+        }
     };
     let boundary = format!(
         "You are a WillDeep subagent working in {}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent.",
@@ -1540,15 +1545,17 @@ fn bounded_report(value: String) -> String {
 /// makes small models succeed is a small average context, and the only place
 /// to enforce it is here. `deep` is the deliberate exception — it runs on the
 /// parent model precisely because its work does not fit in a small window.
-pub const WORKER_WINDOW_SMALL: u64 = 16_384;
 pub const WORKER_WINDOW_STANDARD: u64 = 32_768;
+pub const WORKER_WINDOW_BALANCED: u64 = 49_152;
 pub const WORKER_WINDOW_WIDE: u64 = 65_536;
+pub const STANDARD_WINDOW: u64 = 262_144;
 
 /// Tool payload caps per tier, in bytes. One 128 KB test log would consume a
 /// 32K window several times over, so the cap is part of the tier, not a knob.
-const PAYLOAD_LIMIT_SMALL: usize = 3 * 1024;
 const PAYLOAD_LIMIT_STANDARD: usize = 4 * 1024;
+const PAYLOAD_LIMIT_BALANCED: usize = 5 * 1024;
 const PAYLOAD_LIMIT_WIDE: usize = 6 * 1024;
+const PAYLOAD_LIMIT_IMPLEMENTER: usize = 16 * 1024;
 
 /// Prefix of the some.im virtual models that host the trade job prompts.
 /// `someim-32b` is a *tier* name, not a context promise: the model behind it
@@ -1613,8 +1620,8 @@ pub fn builtin_profiles(
                 tools: &["read_file", "list_directory", "search_files"],
                 prompt: "Your trade is READING. Answer with specific evidence and say which parts you read.",
                 max_turns: 8,
-                context_window: WORKER_WINDOW_STANDARD,
-                tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
+                context_window: WORKER_WINDOW_BALANCED,
+                tool_output_limit: Some(PAYLOAD_LIMIT_BALANCED),
                 write_scope: SubagentWriteScope::None,
                 timeout_seconds: 300,
                 worktree: SubagentWorktreePolicy::Shared,
@@ -1629,8 +1636,8 @@ pub fn builtin_profiles(
                 tools: &["read_file"],
                 prompt: "Your trade is READING FAILURE OUTPUT. Quote the failing assertion or error verbatim — never paraphrase it — then name the single most likely cause and the file it lives in. If the output does not support a conclusion, say so instead of guessing.",
                 max_turns: 4,
-                context_window: WORKER_WINDOW_SMALL,
-                tool_output_limit: Some(PAYLOAD_LIMIT_SMALL),
+                context_window: WORKER_WINDOW_STANDARD,
+                tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
                 write_scope: SubagentWriteScope::None,
                 timeout_seconds: 300,
                 worktree: SubagentWorktreePolicy::Shared,
@@ -1690,10 +1697,34 @@ pub fn builtin_profiles(
                 tools: &["read_file", "edit_file"],
                 prompt: "Your trade is EDITING EXACTLY ONE FILE. Read it first, make a minimal exact edit, and touch no other path.",
                 max_turns: 6,
-                context_window: WORKER_WINDOW_STANDARD,
-                tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
+                context_window: WORKER_WINDOW_BALANCED,
+                tool_output_limit: Some(PAYLOAD_LIMIT_BALANCED),
                 write_scope: SubagentWriteScope::SingleFile,
                 timeout_seconds: 300,
+                worktree: SubagentWorktreePolicy::Dedicated,
+            },
+        ),
+        profile(
+            cheap.clone(),
+            ProfileSpec {
+                id: "implementer",
+                shell: SubagentShell::VerifierOptional,
+                purpose: "Implement a bounded multi-file change with a deployable 256K model.",
+                tools: &[
+                    "search_files",
+                    "grep_files",
+                    "list_directory",
+                    "read_file",
+                    "create_file",
+                    "edit_file",
+                    "run_command",
+                ],
+                prompt: "Your trade is BOUNDED IMPLEMENTATION. Complete the requested multi-file change inside the declared file set. Inspect neighboring code, preserve public behaviour outside the task, and use the verifier when one is supplied. You may create or edit only paths declared in task.relevant_files. Report changed files, verification and remaining uncertainty.",
+                max_turns: 18,
+                context_window: STANDARD_WINDOW,
+                tool_output_limit: Some(PAYLOAD_LIMIT_IMPLEMENTER),
+                write_scope: SubagentWriteScope::FileSet,
+                timeout_seconds: 1_200,
                 worktree: SubagentWorktreePolicy::Dedicated,
             },
         ),
@@ -1722,8 +1753,8 @@ pub fn builtin_profiles(
                 tools: &["read_file", "edit_file", "run_command"],
                 prompt: "Your trade is MAKING THE BUILD PASS. Read the compiler or linter diagnostic literally: it usually names the file, line and expected type. Make the smallest change that satisfies it without changing behaviour, and never silence a diagnostic with a suppression unless your task packet asked for one. You may edit only the files declared in your task packet.",
                 max_turns: 8,
-                context_window: WORKER_WINDOW_STANDARD,
-                tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
+                context_window: WORKER_WINDOW_BALANCED,
+                tool_output_limit: Some(PAYLOAD_LIMIT_BALANCED),
                 write_scope: SubagentWriteScope::FileSet,
                 timeout_seconds: 900,
                 worktree: SubagentWorktreePolicy::Dedicated,
@@ -2077,7 +2108,7 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("willdeep-digest-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("workspace");
-        // Far past any inline budget for a 16K-window profile.
+        // Far past any inline budget for a deployable worker profile.
         std::fs::write(root.join("huge.log"), "x".repeat(64 * 1024)).expect("fixture");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let provider: Arc<dyn Provider> = Arc::new(DigestProvider(seen.clone()));
@@ -2145,6 +2176,7 @@ mod tests {
         // must fall back rather than invent a model name the gateway would
         // refuse.
         assert_eq!(hosted_worker_model("deep"), None);
+        assert_eq!(hosted_worker_model("implementer"), None);
         assert_eq!(hosted_worker_model("ops_runner"), None);
     }
 
@@ -2781,11 +2813,11 @@ mod tests {
         );
     }
 
-    /// Small windows are the discipline that makes cheap models work, so the
-    /// tiers are asserted rather than left to drift: only `deep` inherits the
-    /// session window, and every worker caps its tool payloads.
+    /// Deployable windows are asserted rather than left to drift: narrow
+    /// trades stay within 32K-64K, implementer owns the 256K daily-coding
+    /// tier, and only `deep` inherits the session window.
     #[test]
-    fn workers_run_in_small_windows_with_capped_payloads() {
+    fn workers_run_in_deployable_windows_with_capped_payloads() {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
         for profile in builtin_profiles(provider.clone(), provider, 200_000) {
             if profile.id == "deep" {
@@ -2793,9 +2825,15 @@ mod tests {
                 assert_eq!(profile.tool_output_limit, None);
                 continue;
             }
+            if profile.id == "implementer" {
+                assert_eq!(profile.context_window, STANDARD_WINDOW);
+                assert_eq!(profile.tool_output_limit, Some(PAYLOAD_LIMIT_IMPLEMENTER));
+                continue;
+            }
             assert!(
-                profile.context_window <= WORKER_WINDOW_WIDE,
-                "{} must run in a worker window, got {}",
+                profile.context_window >= WORKER_WINDOW_STANDARD
+                    && profile.context_window <= WORKER_WINDOW_WIDE,
+                "{} must run in a 32K-64K worker window, got {}",
                 profile.id,
                 profile.context_window
             );
