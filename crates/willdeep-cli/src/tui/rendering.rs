@@ -94,15 +94,22 @@ pub(super) fn wrap_styled_text(text: Text<'static>, width: usize) -> Text<'stati
     let width = width.max(1);
     let mut rows = Vec::new();
     for source in text.lines {
+        // A `Line` carries a style of its own, and `Line::styled` puts the
+        // colour *there* while leaving its spans raw. Flattening to characters
+        // has to fold that base in, or every line coloured that way — the whole
+        // `You:` / `Error:` transcript palette — renders in the terminal's
+        // default foreground.
+        let base = source.style;
         let cells = source
             .spans
             .into_iter()
             .flat_map(|span| {
+                let style = base.patch(span.style);
                 span.content
                     .chars()
                     .map(move |character| StyledCharacter {
                         character,
-                        style: span.style,
+                        style,
                         width: UnicodeWidthChar::width(character).unwrap_or(0),
                     })
                     .collect::<Vec<_>>()

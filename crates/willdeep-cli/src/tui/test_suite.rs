@@ -53,6 +53,7 @@ mod command_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn aggregates_tools() {
         let mut a = ToolActivity::default();
@@ -1801,6 +1802,146 @@ mod tests {
         let rows = vec!["你好吗".to_owned(), "second".to_owned()];
         assert_eq!(selected_text(&rows, (0, 2), (1, 3)), "好吗\nsec");
         assert_eq!(quote_selected_text("第一行\n第二行"), "> 第一行\n> 第二行");
+    }
+
+    /// Regression: `Line::styled` records the colour on the line, leaving its
+    /// spans raw. Flattening to characters while reading only `span.style` threw
+    /// the whole `You:` / `Error:` transcript palette away and everything came
+    /// out in the terminal's default foreground.
+    #[test]
+    fn wrapping_preserves_line_level_styles_not_just_span_styles() {
+        let wrapped = wrap_styled_text(
+            colored_transcript_at_width(
+                &["You: 初始化".to_owned(), "Error: boom".to_owned()],
+                None,
+                40,
+            ),
+            40,
+        );
+        let colour_of = |row: usize| {
+            wrapped.lines[row]
+                .spans
+                .iter()
+                .map(|span| wrapped.lines[row].style.patch(span.style).fg)
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            colour_of(0).iter().all(|fg| *fg == Some(Color::Cyan)),
+            "user lines stay cyan after wrapping: {:?}",
+            colour_of(0)
+        );
+        assert!(
+            colour_of(1).iter().all(|fg| *fg == Some(Color::Red)),
+            "error lines stay red after wrapping: {:?}",
+            colour_of(1)
+        );
+    }
+
+    /// The dialog has to read as its own region: the row under the cursor gets a
+    /// highlight bar, the free-text field is picked out, and the key hints dim.
+    #[test]
+    fn question_modal_highlights_the_cursor_row_and_dims_the_hints() {
+        let request = UserQuestion {
+            question: "现在提交首次 commit 吗？".to_owned(),
+            options: vec!["提交".to_owned(), "暂不提交".to_owned()],
+            multi_select: false,
+        };
+        let (tx, _rx) = oneshot::channel();
+        let dialog = AskDialog {
+            request,
+            selected: 1,
+            checked: vec![false; 2],
+            answer: PromptEditor::default(),
+            sender: tx,
+        };
+        let content =
+            "现在提交首次 commit 吗？\n\n  ( ) 提交\n▶ (*) 暂不提交\n\n其他答案: \n↑/↓ 选择";
+        let lines = question_lines(&dialog, content);
+
+        assert_eq!(lines.len(), 7);
+        assert!(lines[0].style.add_modifier.contains(Modifier::BOLD));
+        // Row 2 is the first option, row 3 the cursor row.
+        assert_eq!(lines[2].style.bg, None);
+        assert_eq!(lines[3].style.bg, Some(Color::LightCyan));
+        assert!(lines[3].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(lines[5].style.fg, Some(Color::LightYellow));
+        assert_eq!(lines[6].style.fg, Some(Color::Gray));
+    }
+
+    /// The complaint was that the dialog did not read as its own region: its
+    /// text fell back to the terminal's default colour and chat showed through.
+    /// Render it for real and check the panel is opaque and covers what was
+    /// underneath.
+    #[test]
+    fn modal_panel_renders_opaque_over_whatever_was_underneath() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buffer = Buffer::empty(area);
+        // Stand in for the transcript sitting under the modal.
+        Paragraph::new("chat chat chat chat chat chat chat chat").render(area, &mut buffer);
+        assert!(
+            buffer_text(&buffer).contains("chat"),
+            "precondition: chat is on screen"
+        );
+
+        let popup = Rect::new(4, 2, 32, 6);
+        Clear.render(modal_halo(popup, area), &mut buffer);
+        Block::default()
+            .style(MODAL_PANEL)
+            .render(modal_halo(popup, area), &mut buffer);
+        Paragraph::new("现在提交首次 commit 吗？")
+            .block(modal_block("智能体提问".to_owned(), Color::LightCyan))
+            .render(popup, &mut buffer);
+        let halo = modal_halo(popup, area);
+        // Without this, the trailing cell of every CJK grapheme in the title and
+        // the question is reset to the terminal background — a solid-looking
+        // panel with transparent holes punched through the Chinese text.
+        assert!(
+            (halo.x..halo.x + halo.width).any(|x| buffer[(x, halo.y + 1)].bg == Color::Reset),
+            "precondition: wide graphemes leave gaps before sealing"
+        );
+        seal_modal_background(&mut buffer, halo);
+
+        // Every cell of the panel and its halo carries the panel background.
+        for y in halo.y..halo.y + halo.height {
+            for x in halo.x..halo.x + halo.width {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    Color::Blue,
+                    "cell ({x},{y}) is not part of an opaque panel"
+                );
+            }
+        }
+        // Rows the modal covers no longer show the transcript underneath.
+        for y in halo.y..halo.y + halo.height {
+            let row = (halo.x..halo.x + halo.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            assert!(!row.contains("chat"), "row {y} still leaks chat: {row}");
+        }
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn modals_span_most_of_the_terminal_so_chat_never_sits_beside_them() {
+        // A narrow centered popup left transcript rows visible to either side,
+        // which is what made the dialog look tangled with the chat.
+        let wide = modal_width(Rect::new(0, 0, 200, 50));
+        assert_eq!(wide, 110, "capped so it does not become unreadably wide");
+        let typical = modal_width(Rect::new(0, 0, 100, 50));
+        assert_eq!(typical, 92, "leaves a 4-column gutter each side");
+        let narrow = modal_width(Rect::new(0, 0, 30, 20));
+        assert_eq!(narrow, 30, "never wider than the terminal");
     }
 
     #[test]

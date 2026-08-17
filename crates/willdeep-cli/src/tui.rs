@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -3606,6 +3606,10 @@ fn draw(
                             Color::DarkGray
                         })),
                 )
+                // Same cyan the transcript gives `You:` lines, so what you are
+                // typing and what you already said read as one voice instead of
+                // falling back to the terminal's default foreground.
+                .style(Style::default().fg(Color::Cyan))
                 .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0)),
             areas[3],
         );
@@ -4175,20 +4179,20 @@ fn draw(
         app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {
             let content = approval_content(description, *always, app.language);
-            let popup = centered_rect(f.area().width.min(76), 9.min(f.area().height), f.area());
+            let popup = centered_rect(modal_width(f.area()), 9.min(f.area().height), f.area());
             app.approval_rect = popup;
-            f.render_widget(Clear, popup);
+            paint_modal_halo(f, popup);
             f.render_widget(
                 Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(approval_title(app.language, app.approval_queue.len()))
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Yellow)),
-                    )
+                    .block(modal_block(
+                        approval_title(app.language, app.approval_queue.len()),
+                        Color::LightYellow,
+                    ))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
+            let halo = modal_halo(popup, f.area());
+            seal_modal_background(f.buffer_mut(), halo);
         }
         app.question_rect = Rect::default();
         app.question_hits.clear();
@@ -4237,8 +4241,9 @@ fn draw(
                 dialog.answer.text(),
                 help
             );
-            let popup_width = f.area().width.min(84);
-            let content_width = popup_width.saturating_sub(2).max(1) as usize;
+            let popup_width = modal_width(f.area());
+            // Borders take 2 columns, the block's horizontal padding another 2.
+            let content_width = popup_width.saturating_sub(4).max(1) as usize;
             let height = (visual_lines(&content, content_width) as u16 + 2)
                 .min(f.area().height)
                 .max(8);
@@ -4257,29 +4262,143 @@ fn draw(
                     )
                 })
                 .collect();
-            f.render_widget(Clear, popup);
+            paint_modal_halo(f, popup);
             f.render_widget(
-                Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(queued_title(
-                                app.language.text(
-                                    "智能体提问",
-                                    "Question from Agent",
-                                    "エージェントからの質問",
-                                ),
-                                app.language,
-                                app.question_queue.len(),
-                            ))
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Cyan)),
-                    )
+                Paragraph::new(question_lines(dialog, &content))
+                    .block(modal_block(
+                        queued_title(
+                            app.language.text(
+                                "智能体提问",
+                                "Question from Agent",
+                                "エージェントからの質問",
+                            ),
+                            app.language,
+                            app.question_queue.len(),
+                        ),
+                        Color::LightCyan,
+                    ))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
+            let halo = modal_halo(popup, f.area());
+            seal_modal_background(f.buffer_mut(), halo);
         }
     })?;
     Ok(())
+}
+
+/// Styles the question modal's rows: bold question, a highlight bar on the row
+/// the cursor is on, the free-text field picked out, and the key hints dimmed.
+///
+/// Takes the already-assembled `content` rather than rebuilding the text, so the
+/// styled rows cannot drift from the string the height and mouse-row math use.
+fn question_lines(dialog: &AskDialog, content: &str) -> Vec<Line<'static>> {
+    let question_rows = dialog.request.question.split('\n').count();
+    let first_option = question_rows + 1; // one blank line after the question
+    let after_options = first_option + dialog.request.options.len();
+    let other_answer_row = after_options + 1; // one blank line after the options
+    content
+        .split('\n')
+        .enumerate()
+        .map(|(index, row)| {
+            let style = if index < question_rows {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if (first_option..after_options).contains(&index) {
+                if index - first_option == dialog.selected {
+                    Style::default()
+                        .bg(Color::LightCyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }
+            } else if index == other_answer_row {
+                Style::default().fg(Color::LightYellow)
+            } else if index > other_answer_row {
+                Style::default().fg(Color::Gray)
+            } else {
+                Style::default()
+            };
+            Line::styled(row.to_owned(), style)
+        })
+        .collect()
+}
+
+/// The panel colours shared by the approval and question modals. One identity
+/// for both — they are the same class of thing, a gate waiting on the human —
+/// with the accent left to the caller.
+const MODAL_PANEL: Style = Style::new().bg(Color::Blue).fg(Color::White);
+
+/// How wide a modal gets. Deliberately most of the terminal: a narrow centered
+/// popup leaves transcript text sitting to either side on the same rows, which
+/// is what made the dialog read as tangled with the chat instead of as its own
+/// region.
+fn modal_width(area: Rect) -> u16 {
+    area.width.saturating_sub(8).clamp(40, 110).min(area.width)
+}
+
+/// The one-cell ring around `popup`, clamped to `area`.
+fn modal_halo(popup: Rect, area: Rect) -> Rect {
+    let x = popup.x.saturating_sub(1);
+    let y = popup.y.saturating_sub(1);
+    Rect {
+        x,
+        y,
+        width: popup
+            .width
+            .saturating_add(2)
+            .min(area.width.saturating_sub(x)),
+        height: popup
+            .height
+            .saturating_add(2)
+            .min(area.height.saturating_sub(y)),
+    }
+}
+
+/// Paints the ring in panel colour, so the modal reads as a raised,
+/// self-contained block rather than text floating over the chat.
+fn paint_modal_halo(f: &mut ratatui::Frame<'_>, popup: Rect) {
+    let halo = modal_halo(popup, f.area());
+    f.render_widget(Clear, halo);
+    f.render_widget(Block::default().style(MODAL_PANEL), halo);
+}
+
+/// Re-applies the panel background over `area` once its contents are drawn.
+///
+/// Necessary because `Buffer::set_stringn` calls `Cell::reset` on the trailing
+/// cell of every double-width grapheme, which knocks the background back to the
+/// terminal default. A Chinese title or option label therefore punches
+/// transparent holes in an otherwise solid panel. This pass only touches
+/// colours, never symbols, so borders, text and the cursor-row highlight all
+/// survive — only the missing background is filled back in.
+fn seal_modal_background(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+    let area = area.intersection(*buffer.area());
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buffer[(x, y)];
+            if cell.bg == Color::Reset {
+                cell.bg = Color::Blue;
+            }
+        }
+    }
+}
+
+/// Chrome for a modal panel: thick accent border, bold title, and horizontal
+/// padding only — vertical padding would shift the option rows that
+/// [`question_option_row`] uses for mouse hit-testing.
+fn modal_block(title: String, accent: Color) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(accent))
+        .style(MODAL_PANEL)
+        .padding(Padding::horizontal(1))
 }
 
 fn composer_layout_constraints(
