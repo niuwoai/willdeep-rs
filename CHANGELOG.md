@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.0-rc1] - 2026-08-17
+
+### Added
+- **与 macOS WillDeep 共用通知配置 Schema。** `~/.willdeep/config.toml` 新增 `[notifications]`，兼容系统/自定义声音元数据、Webhook 地址以及“任务完成 / 等待用户处理”事件开关。Webhook 地址按普通本地偏好保存，不进入 Keychain；启用时必须是带主机的 HTTP(S) URL。
+
+### Tests
+- 示例配置与 macOS Schema 字段同步，并覆盖本地 HTTP Webhook 与非网络 URL 拒绝规则。
+
 ## [0.28.0-rc1] - 2026-08-16
 
 > 本版主题：把 model-tiers.v1 的三个「⏳ 未做」做完——**派工不再靠模型自觉，降级不再靠人手动编排**。
