@@ -618,7 +618,9 @@ fn parse_iso8601(text: &str) -> Option<u64> {
     Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
-fn format_iso8601(timestamp: u64) -> String {
+/// 供 CLI 的 webhook 复用：Xedit 的 `willdeep.webhook.v1` 用同一种
+/// ISO8601 UTC 表示，两端必须逐字一致。
+pub fn format_iso8601(timestamp: u64) -> String {
     let days = (timestamp / 86_400) as i64;
     let seconds = timestamp % 86_400;
     let (year, month, day) = civil_from_days(days);

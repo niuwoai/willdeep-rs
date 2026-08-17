@@ -37,7 +37,7 @@ pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use safety::{CommandSafety, classify_with_workspace_write};
-pub use session::{Session, SessionDigest, SessionStore};
+pub use session::{Session, SessionDigest, SessionStore, format_iso8601};
 pub use skills::SkillCatalog;
 pub use subagent::{
     SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket, TaskVerifier,

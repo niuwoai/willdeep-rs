@@ -12,8 +12,9 @@ safety_judge = true
 
 # Shared by WillDeep.app and willdeep-rs. Local HTTP endpoints are supported
 # for home automation, desktop notifications, and other personal workflows.
-# The CLI POSTs a small JSON body — event, client, workspace, session_id,
-# title, truncated detail, status — and never the conversation itself.
+# Both clients POST the same `willdeep.webhook.v1` envelope, so one endpoint
+# can serve the app and the CLI with one parser. The body carries the event,
+# status, session identity, and a truncated summary — never the conversation.
 # Unknown keys here are ignored on purpose so the desktop app can add fields
 # without breaking an older CLI reading the same file.
 [notifications]

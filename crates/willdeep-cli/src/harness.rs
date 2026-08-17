@@ -300,11 +300,10 @@ pub(crate) async fn execute_noninteractive(
     }
     // A headless run is exactly the case where nobody is watching the
     // terminal, so this is the ping that matters most.
-    built.notifier.set_session(&session.id.to_string());
-    built.notifier.task_completed(
-        language.text("任务已完成", "Task finished", "タスクが完了しました"),
-        outcome.final_text.as_str(),
-    );
+    built
+        .notifier
+        .set_session(&session.id.to_string(), Some(session.title.as_str()));
+    built.notifier.task_completed(outcome.final_text.as_str());
     Ok(HarnessOutcome {
         final_text: outcome.final_text,
         turns: outcome.turns,
@@ -654,7 +653,7 @@ pub(crate) async fn build(
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
-    let notifier = crate::notify::Notifier::new(&loaded.file.notifications, &workspace);
+    let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
         agent: Arc::new(agent),
         workspace,

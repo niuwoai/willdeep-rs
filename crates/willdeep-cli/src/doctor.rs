@@ -379,7 +379,7 @@ fn check_config(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
 /// and this report gets written into shareable diagnostic bundles.
 fn check_notifications(loaded: &LoadedConfig, checks: &mut Vec<DoctorCheck>) {
     let settings = &loaded.file.notifications;
-    let notifier = crate::notify::Notifier::new(settings, Path::new("."));
+    let notifier = crate::notify::Notifier::new(settings);
     if !notifier.is_enabled() {
         checks.push(check(
             "notifications",

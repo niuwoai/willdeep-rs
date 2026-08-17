@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.30.0-rc2] - 2026-08-17
+
+### Fixed
+- **Webhook 报文改用 macOS 端既有的 `willdeep.webhook.v1` 契约。** rc1 里的 payload 是我自己拟的，与 WillDeep.app 的 `AgentAttentionWebhookEvent`（`Xedit/AgentAttentionSettings.swift`）字段完全对不上，同一个接收端没法用一套解析同时吃两端的事件。现在逐字段对齐：`schema_version` / `source` / `event` / `type` / `hook_event_name` / `occurred_at` / `application` / `app_version` / `runtime_id` / `session_id` / `thread-id` / `session_title` / `executor` / `executor_kind` / `status` / `task_id` / `attention_kind` / `notification_type` / `message` / `summary`。
+- **补齐 app 的四个路由请求头**：`X-Agent-Source`、`X-Agent-Executor`、`X-Webhook-Schema`、`X-Agent-Event`，并把 `User-Agent` 改成 `some.im/WillDeep-<版本> (willdeep-cli)`。app 的 `AgentWebhookFormatDetector` 先看请求头再看 body，这些值决定它把事件判成哪家；缺了就只能靠 body 猜。
+- **`status` 改用 app 的 `AgentToolCallStatus` 词汇**（`pendingApproval` / `awaitingUserAnswer` / `succeeded` 等），因为两端都由这个字符串推导 `notification_type`（`permission_prompt` / `elicitation_dialog` / `idle_prompt`），拼写必须逐字一致。
+- 请求超时从 5 秒改为 15 秒，与 app 的 `URLSessionConfiguration.timeoutIntervalForRequest` 对齐。
+
+### Changed
+- CLI 通过 `executor = "willdeep-cli"` 表明身份。app 的检测器会把任何含 "willdeep" 的 executor 归到 `willdeep` 厂商，所以 `executor_kind` 仍是 `willdeep`——既能被正确识别，又能让接收端区分是 CLI 还是 app 发的。
+- `willdeep_core::format_iso8601` 改为公开。`occurred_at` 与 Xedit 桥接用的是同一种 ISO8601 UTC 表示，复用同一个实现才能保证两端逐字一致。
+
+### Tests
+- 新增两个契约测试对着 `Xedit/AgentAttentionSettings.swift` 锁死信封与 `notification_type` 分桶规则（对应 Swift 侧的 `webhookCompatibilityEnvelope`）；端到端测试同时断言四个路由请求头与 body 字段。
+
 ## [0.30.0-rc1] - 2026-08-17
 
 ### Added
