@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.30.0-rc1] - 2026-08-17
+
+### Added
+- **通知 Webhook 真正会发了。** 此前 `[notifications]` 只是存下来校验一遍，没有任何投递代码。新增 `notify` 模块，在两类时机 POST 到配置的地址：任务完成（TUI turn 结束、headless run 结束）、需要人处理（审批、提问、运行时快照里的 NeedsYou 条目）。两个开关 `webhook_on_task_completed` / `webhook_on_attention_required` 分别生效，默认都开。
+- **`willdeep doctor` 新增 notifications 检查项**，显示 Webhook 是否启用以及两个事件开关状态。**不打印 URL 本身**——Webhook 地址可能在 path 或 query 里带 token，而 doctor 报告会被打进可分享的诊断包。
+
+### Security
+- Webhook payload 刻意保持扁平且不含会话正文：只有事件类型、客户端名与版本、workspace 路径、session id、标题、截断到 400 字符的 detail、状态。这样即便地址指向远端也不会把 transcript 带出去。
+
+### Notes
+- 投递是旁路：detach 执行、5 秒超时、不重试，任何失败都不会打断 agent。失败不静默吞掉——记录后由 TUI 在下一个刷新 tick 显示为 notice。
+- 运行时快照是 level-triggered（同一个未处理的 gate 每秒都会重现），按条目 id 去重，只在首次出现时发一次；审批/提问是 edge-triggered，不去重。
+
+### Tests
+- 起真实 axum 本地监听端点做端到端投递验证，断言 payload 字段；另覆盖禁用态静默、URL 不可用降级、逐事件开关、去重、截断与不落 transcript、无 runtime 与投递失败时的错误记录。
+
 ## [0.29.0-rc2] - 2026-08-17
 
 ### Fixed

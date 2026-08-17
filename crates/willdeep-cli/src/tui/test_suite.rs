@@ -132,6 +132,7 @@ mod tests {
         store.save(&mut target).unwrap();
         let mut runtime = TuiRuntime {
             home: root.clone(),
+            notifier: crate::notify::Notifier::disabled(),
             skills: Arc::new(SkillCatalog::default()),
             relay_bridge: RelayBridge::new(),
             context_window: 128_000,

@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-17 | 当前版本：v0.29.0-rc1
+> 最后更新：2026-08-17 | 当前版本：v0.30.0-rc1
 
 ## 项目简介
 
@@ -8,7 +8,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 
 ## 核心功能
 
-- 与 macOS WillDeep 共用 `~/.willdeep/config.toml` 的 `[notifications]` Schema：可保留桌面通知声音设置，并严格校验本地或远程 HTTP(S) Webhook 地址；Webhook 地址按普通个人偏好落盘，不使用 Keychain；
+- 与 macOS WillDeep 共用 `~/.willdeep/config.toml` 的 `[notifications]` Schema：保留桌面通知声音设置，校验本地或远程 HTTP(S) Webhook 地址，并在「任务完成」「需要人处理」两类时机实际投递 Webhook；投递为旁路，失败不影响 agent；Webhook 地址按普通个人偏好落盘，不使用 Keychain；
 - Chat Completions、Responses、Anthropic Messages 三协议；
 - some.im 与 BYOK Provider；
 - 文件搜索、读取、创建和精确编辑；

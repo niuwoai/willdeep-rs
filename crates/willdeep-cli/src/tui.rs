@@ -290,6 +290,7 @@ pub async fn run(
         Arc<BackgroundTaskRegistry>,
         crate::daemon::RuntimeSubmitOptions,
         Language,
+        crate::notify::Notifier,
     ),
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -301,8 +302,10 @@ pub async fn run(
         EnableMouseCapture
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
+    ui.6.set_session(&session.id.to_string());
     let mut runtime = TuiRuntime {
         home,
+        notifier: ui.6,
         skills,
         relay_bridge,
         context_window: ui.2,
@@ -326,6 +329,7 @@ pub async fn run(
 
 struct TuiRuntime {
     home: PathBuf,
+    notifier: crate::notify::Notifier,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
     context_window: u64,
@@ -686,6 +690,9 @@ async fn event_loop(
         draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
             _=refresh.tick()=>{
+                // Webhook delivery is detached; drain its failures here so a
+                // dead endpoint shows up as a notice instead of silence.
+                if let Some(error)=runtime.notifier.take_error(){app.notice=Some(format!("{}: {error}",language.text("通知 Webhook","Notification webhook","通知 Webhook")));}
                 app.background_tasks=runtime.background_tasks.snapshots();
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
@@ -693,6 +700,7 @@ async fn event_loop(
                 tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace).await{let _=tx.send(snapshot);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
+                runtime.notifier.attention_snapshot(&snapshot.attention);
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
                 app.runtime_agents=snapshot.agents;
@@ -1204,9 +1212,9 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::SubagentVerdict{id,verifier_passed,attempts,..})=>{if let Some(passed)=verifier_passed{app.record_progress(format!("{} {} · {} · {attempts} {}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),if passed{language.text("验证通过","verified","検証通過")}else{language.text("验证未通过","not verified","検証失敗")},language.text("次尝试","attempt(s)","回試行")));}},
                 UiMessage::Agent(AgentEvent::GoalContinuationInjected{rung})=>app.record_progress(format!("{} · {rung:?}",language.text("目标未达成 · 继续推进","Goal not met · continuing","目標未達成 · 継続します"))),
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
-                UiMessage::Approval(v,a,s)=>if app.enqueue_approval((v,a,s)){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;},
-                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(language.text("需要审批","Approval required","承認が必要です"),detail,RuntimeStatus::WaitingApproval);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
+                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(language.text("需要你回答","Answer required","回答が必要です"),detail,RuntimeStatus::WaitingAnswer);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(language.text("任务已完成","Task finished","タスクが完了しました"),outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},

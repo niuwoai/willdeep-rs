@@ -104,6 +104,9 @@ pub(crate) struct BuiltHarness {
     pub skills: Arc<willdeep_core::SkillCatalog>,
     pub background_tasks: Arc<BackgroundTaskRegistry>,
     pub context_window: u64,
+    /// Built here so every frontend — TUI, headless run, runtime — shares one
+    /// dispatcher and one set of `[notifications]` switches.
+    pub notifier: crate::notify::Notifier,
     _command_watcher: Option<AgentCommandWatcher>,
 }
 
@@ -295,6 +298,13 @@ pub(crate) async fn execute_noninteractive(
             store.save(session)?;
         }
     }
+    // A headless run is exactly the case where nobody is watching the
+    // terminal, so this is the ping that matters most.
+    built.notifier.set_session(&session.id.to_string());
+    built.notifier.task_completed(
+        language.text("任务已完成", "Task finished", "タスクが完了しました"),
+        outcome.final_text.as_str(),
+    );
     Ok(HarnessOutcome {
         final_text: outcome.final_text,
         turns: outcome.turns,
@@ -644,12 +654,14 @@ pub(crate) async fn build(
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
+    let notifier = crate::notify::Notifier::new(&loaded.file.notifications, &workspace);
     Ok(BuiltHarness {
         agent: Arc::new(agent),
         workspace,
         skills,
         background_tasks,
         context_window,
+        notifier,
         _command_watcher: command_watcher,
     })
 }

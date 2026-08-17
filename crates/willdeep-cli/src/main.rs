@@ -21,6 +21,7 @@ mod harness;
 mod i18n;
 mod integrations;
 mod mobile;
+mod notify;
 mod onboarding;
 mod projects;
 mod tui;
@@ -658,6 +659,7 @@ async fn run() -> Result<()> {
                     config: Some(cli.config.clone().unwrap_or(config::default_config_path()?)),
                 },
                 language,
+                built.notifier.clone(),
             ),
         )
         .await;

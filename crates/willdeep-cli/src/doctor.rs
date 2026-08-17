@@ -327,6 +327,7 @@ fn check_config(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
         CheckStatus::Pass,
         format!("valid; provider_profiles={}", loaded.file.providers.len()),
     ));
+    check_notifications(&loaded, checks);
     match loaded.select_provider(options.profile.as_deref()) {
         Ok(Some(provider)) => {
             let credentials = options.api_key_present
@@ -371,6 +372,31 @@ fn check_config(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
             "requested provider profile does not exist",
         )),
     }
+}
+
+/// Reports whether attention webhooks will actually fire. The URL itself is
+/// never included — a webhook endpoint can carry a token in its path or query,
+/// and this report gets written into shareable diagnostic bundles.
+fn check_notifications(loaded: &LoadedConfig, checks: &mut Vec<DoctorCheck>) {
+    let settings = &loaded.file.notifications;
+    let notifier = crate::notify::Notifier::new(settings, Path::new("."));
+    if !notifier.is_enabled() {
+        checks.push(check(
+            "notifications",
+            CheckStatus::Pass,
+            "webhook disabled; attention stays local",
+        ));
+        return;
+    }
+    checks.push(check(
+        "notifications",
+        CheckStatus::Pass,
+        format!(
+            "webhook enabled; task_completed={}; attention_required={}",
+            availability(settings.webhook_on_task_completed.unwrap_or(true)),
+            availability(settings.webhook_on_attention_required.unwrap_or(true)),
+        ),
+    ));
 }
 
 fn check_cli_provider(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
