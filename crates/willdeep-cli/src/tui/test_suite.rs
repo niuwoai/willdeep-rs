@@ -618,6 +618,15 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_group_headings_use_terminal_foreground_with_bold_contrast() {
+        let style = sidebar::sidebar_group_heading_style();
+
+        assert_eq!(style.fg, None);
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
     fn sidebar_drops_long_finished_agents_and_keeps_selection_on_the_visible_ones() {
         let mut app = App::new(Vec::new(), Language::En);
         let now = unix_now();

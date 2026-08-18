@@ -296,7 +296,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     }
                     lines.push(Line::styled(
                         format!("  {heading} · {}", grouped.len()),
-                        Style::default().fg(Color::Gray),
+                        sidebar_group_heading_style(),
                     ));
                     for (item_index, item) in grouped {
                         if app.sidebar_selected == 1 && app.attention_selected == item_index {
@@ -415,7 +415,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                             ),
                             sidebar_agents.len()
                         ),
-                        Style::default().fg(Color::Gray),
+                        sidebar_group_heading_style(),
                     ));
                     app.runtime_agent_selected = app
                         .runtime_agent_selected
@@ -577,6 +577,12 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
             Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1),
         );
     }
+}
+
+/// 分组标题继承终端的默认前景色，避免 ANSI Gray 在浅色配色中与背景融为一体。
+/// 加粗保留它与普通内容的视觉层级，同时兼容浅色、深色和自定义终端主题。
+pub(super) fn sidebar_group_heading_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
 }
 
 /// 已结束超过这个时长的 Agent 退出侧栏，去详情/历史里找。
