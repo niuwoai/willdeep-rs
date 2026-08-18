@@ -132,6 +132,62 @@ pub trait Provider: Send + Sync {
     ) -> Result<Completion, ProviderError>;
 }
 
+/// Return the model identifiers exposed by an OpenAI-compatible `/models`
+/// endpoint. Providers in the wild use a few equivalent envelopes, so the
+/// parser accepts `data`, `models`, a root array, and string/object entries.
+pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, ProviderError> {
+    let endpoint = if config.kind == ProviderKind::Anthropic {
+        let base_url = config
+            .base_url
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/v1");
+        common::endpoint(base_url, "v1/models")?
+    } else {
+        common::endpoint(&config.base_url, "models")?
+    };
+    let request = common::client(config)?.get(endpoint);
+    let request = if config.kind == ProviderKind::Anthropic {
+        common::anthropic_auth(request, config)
+    } else {
+        common::openai_auth(request, config)
+    };
+    let bytes = common::decode_success(request.send().await?, config).await?;
+    parse_model_list(&bytes)
+}
+
+fn parse_model_list(bytes: &[u8]) -> Result<Vec<String>, ProviderError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+    let entries = value
+        .as_array()
+        .or_else(|| value.get("data").and_then(serde_json::Value::as_array))
+        .or_else(|| value.get("models").and_then(serde_json::Value::as_array))
+        .ok_or_else(|| {
+            ProviderError::InvalidResponse(
+                "model list must be an array or contain a data/models array".to_owned(),
+            )
+        })?;
+    let mut models = entries
+        .iter()
+        .filter_map(|entry| {
+            entry.as_str().or_else(|| {
+                ["id", "model", "name"]
+                    .into_iter()
+                    .find_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
+            })
+        })
+        .map(str::trim)
+        .filter(|model| {
+            !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    models.sort_by_key(|model| model.to_ascii_lowercase());
+    models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(models)
+}
+
 pub fn build_provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, ProviderError> {
     config.validate()?;
     match config.dialect {
@@ -162,6 +218,20 @@ mod tests {
         assert_eq!(
             ProviderKind::infer("https://some.im.example/v1"),
             ProviderKind::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn model_list_accepts_common_envelopes_and_deduplicates_ids() {
+        let models = parse_model_list(
+            br#"{"data":[{"id":"qwen3"},{"model":"GPT-5"},"glm-5",{"name":"QWEN3"},"bad\nmodel"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(models, ["glm-5", "GPT-5", "qwen3"]);
+        assert_eq!(
+            parse_model_list(br#"{"models":[{"name":"local-model"}]}"#).unwrap(),
+            ["local-model"]
         );
     }
 }

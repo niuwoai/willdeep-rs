@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 
@@ -203,7 +203,7 @@ pub enum AgentError {
 }
 
 pub struct Agent {
-    provider: Arc<dyn Provider>,
+    provider: RwLock<Arc<dyn Provider>>,
     tools: ToolRegistry,
     config: AgentConfig,
     sink: Arc<dyn EventSink>,
@@ -217,7 +217,7 @@ pub struct Agent {
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self {
-            provider,
+            provider: RwLock::new(provider),
             tools,
             config,
             sink: Arc::new(NoopSink),
@@ -227,6 +227,29 @@ impl Agent {
             goal_continuation: None,
             background_tasks: None,
         }
+    }
+
+    /// Switch future completions to another model without rebuilding the
+    /// Agent's tools, approvals, subagents, or event sinks.
+    pub fn set_model(&self, model: &str) -> Result<(), ProviderError> {
+        let configured = self
+            .provider
+            .read()
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))?
+            .with_model(model)?;
+        *self
+            .provider
+            .write()
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))? =
+            configured;
+        Ok(())
+    }
+
+    fn provider(&self) -> Result<Arc<dyn Provider>, ProviderError> {
+        self.provider
+            .read()
+            .map(|provider| provider.clone())
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))
     }
 
     pub fn with_image_fallback(
@@ -337,7 +360,7 @@ impl Agent {
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
             let completion = self
-                .provider
+                .provider()?
                 .complete(&request_messages, &definitions)
                 .await?;
             if let Some(usage) = completion.usage {
@@ -526,7 +549,7 @@ impl Agent {
         let request = Message::user(format!(
             "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
         ));
-        let summary = self.provider.complete(&[request], &[]).await?.content;
+        let summary = self.provider()?.complete(&[request], &[]).await?.content;
         let recent = history.split_off(split);
         let mut compressed = vec![Message::user(format!(
             "<context-summary>\n{summary}\n</context-summary>"
@@ -570,7 +593,7 @@ impl Agent {
             let request = Message::user(format!(
                 "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
             ));
-            let summary = self.provider.complete(&[request], &[]).await?.content;
+            let summary = self.provider()?.complete(&[request], &[]).await?.content;
             *cache = Some((split, summary));
         }
         let mut result = vec![messages[0].clone()];

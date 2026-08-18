@@ -1,6 +1,6 @@
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 15] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 16] {
     [
         (
             "/help",
@@ -16,6 +16,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "压缩会话上下文",
                 "Compress conversation context",
                 "会話コンテキストを圧縮",
+            ),
+        ),
+        (
+            "/model",
+            language.text(
+                "列出、筛选或切换当前模型",
+                "List, filter, or switch the current model",
+                "現在のモデルを一覧・絞り込み・切替",
             ),
         ),
         (

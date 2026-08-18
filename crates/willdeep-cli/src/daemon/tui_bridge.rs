@@ -284,6 +284,23 @@ pub(crate) async fn ensure_runtime_session(
     })
 }
 
+pub(crate) async fn update_remote_session_model(
+    home: &Path,
+    id: uuid::Uuid,
+    model: String,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .update_session_model(
+                &willdeep_runtime_protocol::UpdateSessionModelParams { id, model },
+                uuid::Uuid::new_v4(),
+            )
+            .await?,
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn submit_runtime_turn(
     home: &Path,
     session_id: uuid::Uuid,

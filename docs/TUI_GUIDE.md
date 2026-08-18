@@ -56,6 +56,13 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
 | `Ctrl+D` | 删除当前（最近）附件，可重复删除 |
 
+### 切换模型
+
+- 输入 `/model <模型名>` 可直接切换当前 Session 后续对话使用的模型，例如 `/model qwen3-coder`。
+- 只输入 `/model` 会从当前 Provider 的 `/v1/models` 获取完整模型列表。直接键入文字即可模糊筛选，使用 `↑` / `↓` / `Tab`、`PageUp` / `PageDown` 或鼠标滚轮浏览，按 `Enter` 或点击模型完成切换，`Esc` 关闭。
+- 模型选择按 Session 持久保存，并同步到 Runtime 与进程内 `/local` Agent；正在执行的轮次不会被中途换模，切换作用于下一轮对话。
+- 若 Provider 不支持模型列表接口或接口暂时不可用，仍可使用 `/model <模型名>` 直接指定。
+
 ### 聊天与活动
 
 | 按键 | 行为 |
@@ -118,7 +125,8 @@ tmux set -g mouse on
 
 开启鼠标捕获后，终端原生的拖选复制会被程序接管。两种办法：
 
-- 按 `Ctrl+S` 进入文本选择模式。WillDeep 会临时关闭鼠标捕获，把终端还给用户：拖选聊天文字后用 `Cmd+C` / `Ctrl+Shift+C` 复制，按 `Esc` 返回交互模式并重新开启鼠标。状态行常驻 `Ctrl+S 选择` 入口。
+- 直接拖动会使用 WillDeep 内部选区；松开鼠标时自动复制，也可按 `Cmd/Ctrl+C` 或 `Y` 再次复制。
+- 按 `Ctrl+S` 进入终端原生选择模式。WillDeep 会临时关闭鼠标捕获，把终端还给用户：拖选聊天文字后可使用右键菜单、`Cmd+C` 或 `Ctrl+Shift+C` 复制，按 `Esc` 返回交互模式并重新开启鼠标。状态行常驻 `Ctrl+S 选择` 入口。
 - 或者按住修饰键绕过程序：多数 Linux 终端是 `Shift`，macOS 上通常是 `Option`（iTerm2）或 `Fn`。
 
 这一点本地和 SSH 完全相同，不是远程特有的问题。

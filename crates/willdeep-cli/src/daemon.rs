@@ -56,7 +56,7 @@ pub(crate) use tui_bridge::{
     retry_remote_agent, retry_remote_agent_with_model, runtime_event_head, runtime_events,
     runtime_snapshot, search_remote_session_results, search_remote_sessions,
     set_remote_session_archived, spawn_remote_agent, start_runtime_event_follower,
-    stop_remote_agent, stop_remote_turn, submit_runtime_turn,
+    stop_remote_agent, stop_remote_turn, submit_runtime_turn, update_remote_session_model,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
 pub(crate) use workspace_store::{

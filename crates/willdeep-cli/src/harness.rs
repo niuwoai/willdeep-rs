@@ -104,6 +104,7 @@ pub(crate) struct BuiltHarness {
     pub skills: Arc<willdeep_core::SkillCatalog>,
     pub background_tasks: Arc<BackgroundTaskRegistry>,
     pub context_window: u64,
+    pub provider_config: ProviderConfig,
     /// Built here so every frontend — TUI, headless run, runtime — shares one
     /// dispatcher and one set of `[notifications]` switches.
     pub notifier: crate::notify::Notifier,
@@ -675,6 +676,7 @@ pub(crate) async fn build(
         skills,
         background_tasks,
         context_window,
+        provider_config: parent_provider_config,
         notifier,
         _command_watcher: command_watcher,
     })

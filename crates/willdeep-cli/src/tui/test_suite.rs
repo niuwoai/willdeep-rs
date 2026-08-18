@@ -144,6 +144,13 @@ mod tests {
                 model: None,
                 config: None,
             },
+            provider_config: willdeep_core::provider::ProviderConfig::new(
+                willdeep_core::provider::ProviderKind::OpenAiCompatible,
+                willdeep_core::provider::ApiDialect::ChatCompletions,
+                "https://provider.example/v1",
+                "test-key",
+                "test-model",
+            ),
             local_workspace: root.join("workspace"),
             tx,
             rx,
@@ -258,6 +265,60 @@ mod tests {
         assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input.text(), "/session ");
         assert!(app.transcript.is_empty());
+    }
+    #[test]
+    fn command_menu_discovers_model_switching() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.input.insert("/mod");
+
+        assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input.text(), "/model");
+    }
+
+    #[test]
+    fn exact_slash_command_enter_falls_through_for_immediate_execution() {
+        for command in ["/model", "/compress", "/diff", "/session"] {
+            let mut app = App::new(Vec::new(), Language::En);
+            app.input.insert(command);
+
+            assert!(!app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert_eq!(app.input.text(), command);
+        }
+    }
+
+    #[test]
+    fn model_picker_filters_and_navigates_long_model_lists() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.open_model_picker("provider/model-000".to_owned());
+        let mut models = (0..125)
+            .map(|index| format!("provider/model-{index:03}"))
+            .collect::<Vec<_>>();
+        models.push("special/vision-alpha".to_owned());
+        app.set_model_picker_result(Ok(models));
+
+        for _ in 0..35 {
+            assert!(matches!(
+                app.handle_model_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                ModelPickerAction::None
+            ));
+        }
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 35);
+        app.handle_model_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 45);
+
+        for character in "vision".chars() {
+            app.handle_model_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ));
+        }
+        let picker = app.model_picker.as_ref().unwrap();
+        assert_eq!(picker.filtered.len(), 1);
+        assert_eq!(picker.models[picker.filtered[0]], "special/vision-alpha");
+        assert!(matches!(
+            app.handle_model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ModelPickerAction::Select(model) if model == "special/vision-alpha"
+        ));
     }
     #[test]
     fn command_menu_discovers_workspace_switching() {
@@ -1993,6 +2054,26 @@ mod tests {
         }));
         assert!(app.selection_mode);
         assert_eq!(app.selected_chat_text(), "ello");
+        assert!(!app.native_selection_mode);
+    }
+
+    #[test]
+    fn native_selection_mode_has_an_explicit_state_and_exit() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.chat_selection = Some(ChatSelection {
+            anchor: ChatSelectionPoint { row: 0, column: 0 },
+            head: ChatSelectionPoint { row: 0, column: 1 },
+        });
+
+        app.enter_native_selection_mode();
+        assert!(app.selection_mode);
+        assert!(app.native_selection_mode);
+        assert!(app.chat_selection.is_none());
+        assert_eq!(app.focus, FocusPane::Chat);
+
+        app.exit_selection_mode();
+        assert!(!app.selection_mode);
+        assert!(!app.native_selection_mode);
     }
 
     #[test]
@@ -2314,6 +2395,8 @@ mod tests {
         for command in [
             "/daemon",
             "/daemon upgrade",
+            "/model",
+            "/model qwen3-coder",
             "/webapp",
             "/webapp stop",
             "/webapp status",
@@ -2340,7 +2423,7 @@ mod tests {
     #[test]
     fn command_completion_offers_the_runtime_controls() {
         let matches = command_catalog::command_candidates(Language::En);
-        for command in ["/daemon", "/webapp"] {
+        for command in ["/daemon", "/model", "/webapp"] {
             assert!(
                 matches.iter().any(|(name, _)| *name == command),
                 "{command} missing from the completion catalog"

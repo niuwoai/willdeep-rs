@@ -43,6 +43,7 @@ mod command_catalog;
 mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
+mod model_commands;
 mod rendering;
 mod runtime_ui;
 mod session_commands;
@@ -56,6 +57,10 @@ use agent_worktree_ui::render_agent_overlays;
 use command_catalog::command_candidates;
 use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use model_commands::{
+    ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
+    switch_model,
+};
 use rendering::*;
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
@@ -71,6 +76,7 @@ pub enum UiMessage {
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
+    ModelsLoaded(std::result::Result<Vec<String>, String>),
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
 pub struct TuiSink {
@@ -208,6 +214,7 @@ struct App {
     language: Language,
     transient_thought: Option<String>,
     selection_mode: bool,
+    native_selection_mode: bool,
     chat_selection: Option<ChatSelection>,
     transcript_rows: Vec<String>,
     transcript_render_offset: usize,
@@ -241,6 +248,9 @@ struct App {
     session_picker: Option<SessionPickerState>,
     session_picker_rect: Rect,
     session_picker_hits: Vec<(u16, usize)>,
+    model_picker: Option<ModelPickerState>,
+    model_picker_rect: Rect,
+    model_picker_hits: Vec<(u16, usize)>,
     pending_session_switch: Option<PendingSessionSwitch>,
     transcript_rect: Rect,
     command_rect: Rect,
@@ -324,6 +334,16 @@ enum PaletteAction {
 /// A pending approval: what is being asked, whether Always Allow applies,
 /// and the channel the waiting harness is parked on.
 type ApprovalRequest = (String, bool, oneshot::Sender<ApprovalDecision>);
+pub type TuiRuntimeInputs = (
+    mpsc::UnboundedSender<UiMessage>,
+    mpsc::UnboundedReceiver<UiMessage>,
+    u64,
+    Arc<BackgroundTaskRegistry>,
+    crate::daemon::RuntimeSubmitOptions,
+    willdeep_core::provider::ProviderConfig,
+    Language,
+    crate::notify::Notifier,
+);
 
 struct AskDialog {
     request: UserQuestion,
@@ -340,15 +360,7 @@ pub async fn run(
     home: PathBuf,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
-    ui: (
-        mpsc::UnboundedSender<UiMessage>,
-        mpsc::UnboundedReceiver<UiMessage>,
-        u64,
-        Arc<BackgroundTaskRegistry>,
-        crate::daemon::RuntimeSubmitOptions,
-        Language,
-        crate::notify::Notifier,
-    ),
+    ui: TuiRuntimeInputs,
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -359,20 +371,21 @@ pub async fn run(
         EnableMouseCapture
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
-    ui.6.set_session(&session.id.to_string(), Some(session.title.as_str()));
+    ui.7.set_session(&session.id.to_string(), Some(session.title.as_str()));
     let mut runtime = TuiRuntime {
         home,
-        notifier: ui.6,
+        notifier: ui.7,
         skills,
         relay_bridge,
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
+        provider_config: ui.5,
         local_workspace: session.workspace.clone(),
         tx: ui.0,
         rx: ui.1,
     };
-    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.5).await;
+    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.6).await;
     terminal::disable_raw_mode()?;
     execute!(
         term.backend_mut(),
@@ -392,9 +405,35 @@ struct TuiRuntime {
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
+    provider_config: willdeep_core::provider::ProviderConfig,
     local_workspace: PathBuf,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
+}
+
+impl TuiRuntime {
+    fn refresh_provider_config(&mut self) -> Result<()> {
+        let loaded = crate::config::LoadedConfig::load(self.runtime_submit.config.as_deref())?;
+        let profile_name = self
+            .runtime_submit
+            .profile
+            .clone()
+            .or_else(|| loaded.file.default_provider.clone())
+            .or_else(|| {
+                (loaded.file.providers.len() == 1)
+                    .then(|| loaded.file.providers.keys().next().cloned())
+                    .flatten()
+            });
+        let Some(profile_name) = profile_name else {
+            return Ok(());
+        };
+        let mut config = crate::provider_config_from_profile(&loaded.file, &profile_name)?;
+        if let Some(model) = &self.runtime_submit.model {
+            config.model = model.clone();
+        }
+        self.provider_config = config;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -901,7 +940,10 @@ async fn event_loop(
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>{
-                    if let Some(picker)=app.session_picker.as_mut() {
+                    if let Some(picker)=app.model_picker.as_mut() {
+                        picker.editor.insert(&value);
+                        app.refresh_model_picker_matches();
+                    } else if let Some(picker)=app.session_picker.as_mut() {
                         picker.editor.insert(&value);
                         refresh_session_picker(&mut app,runtime,session).await;
                     } else {
@@ -912,6 +954,22 @@ async fn event_loop(
                     if app.question.is_some()||app.approval.is_some() {
                         if matches!(mouse.kind,MouseEventKind::Down(_)) {
                             app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        }
+                        continue;
+                    }
+                    if app.model_picker.is_some() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp=>app.model_picker_scroll(-1),
+                            MouseEventKind::ScrollDown=>app.model_picker_scroll(1),
+                            MouseEventKind::Down(MouseButton::Left)=>{
+                                if let Some(model)=app.activate_model_picker_at(mouse.column,mouse.row) {
+                                    match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                        Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
+                                        Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                    }
+                                }
+                            },
+                            _=>{},
                         }
                         continue;
                     }
@@ -979,22 +1037,28 @@ async fn event_loop(
                     _=>{}
                 }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
+                    if app.native_selection_mode {
+                        if selection_mode_exit_key(key) {
+                            execute!(term.backend_mut(), EnableMouseCapture)?;
+                            app.exit_selection_mode();
+                            app.notice=Some(language.text("已恢复 WillDeep 鼠标操作","WillDeep mouse controls restored","WillDeep のマウス操作を復元しました").to_owned());
+                        }
+                        continue;
+                    }
                     if app.selection_mode {
                         if is_selection_copy_key(key) {
                             app.copy_chat_selection();
                         } else if key.code==KeyCode::Char('q')&&!key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER|KeyModifiers::ALT) {
                             app.quote_chat_selection();
                         } else if selection_mode_exit_key(key) {
-                            app.selection_mode=false;
-                            app.chat_selection=None;
+                            app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
                         }
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
-                        app.selection_mode = true;
-                        app.chat_selection = None;
-                        app.focus = FocusPane::Chat;
+                        execute!(term.backend_mut(), DisableMouseCapture)?;
+                        app.enter_native_selection_mode();
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
@@ -1201,6 +1265,19 @@ async fn event_loop(
                         }
                         continue;
                     }
+                    if app.model_picker.is_some(){
+                        match app.handle_model_picker_key(key) {
+                            ModelPickerAction::None=>{},
+                            ModelPickerAction::Close=>app.model_picker=None,
+                            ModelPickerAction::Select(model)=>{
+                                match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                }
+                            },
+                        }
+                        continue;
+                    }
                     if app.session_picker.is_some(){
                         match app.handle_session_picker_key(key) {
                             SessionPickerAction::None=>{},
@@ -1391,6 +1468,19 @@ async fn event_loop(
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
                             }
+                            if let Some(model_command)=model_commands::parse(&prompt) {
+                                match model_command {
+                                    ModelCommand::List=>{
+                                        let current=session.model.clone().unwrap_or_else(||runtime.provider_config.model.clone());
+                                        request_model_list(&mut app,runtime,current);
+                                    },
+                                    ModelCommand::Switch(model)=>match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                        Ok(message)=>app.append_transcript(format!("System: {message}")),
+                                        Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                    },
+                                }
+                                continue;
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if let Some(parsed)=daemon_commands::parse(&prompt) {
                                 match parsed {
@@ -1469,6 +1559,7 @@ async fn event_loop(
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
+                UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
             },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
@@ -1546,6 +1637,7 @@ impl App {
             language,
             transient_thought: None,
             selection_mode: false,
+            native_selection_mode: false,
             chat_selection: None,
             transcript_rows: Vec::new(),
             transcript_render_offset: 0,
@@ -1582,6 +1674,9 @@ impl App {
             session_picker: None,
             session_picker_rect: Rect::default(),
             session_picker_hits: Vec::new(),
+            model_picker: None,
+            model_picker_rect: Rect::default(),
+            model_picker_hits: Vec::new(),
             pending_session_switch: None,
             transcript_rect: Rect::default(),
             command_rect: Rect::default(),
@@ -1622,6 +1717,7 @@ impl App {
         self.goal = session.goal.clone();
         self.transient_thought = None;
         self.selection_mode = false;
+        self.native_selection_mode = false;
         self.chat_selection = None;
         self.transcript_rows.clear();
         self.transcript_render_offset = 0;
@@ -1629,6 +1725,7 @@ impl App {
         self.search = None;
         self.palette = None;
         self.session_picker = None;
+        self.model_picker = None;
         self.pending_session_switch = None;
         self.attention_read = session.attention_read.clone();
         self.workspace = Some(session.workspace.clone());
@@ -2179,6 +2276,7 @@ impl App {
                 let suffix = if matches!(
                     command.as_str(),
                     "/goal"
+                        | "/model"
                         | "/mobile"
                         | "/runtime"
                         | "/local"
@@ -2262,6 +2360,9 @@ impl App {
             return false;
         }
         let matches = self.command_matches();
+        let exact_command = command_candidates(self.language)
+            .into_iter()
+            .any(|(command, _)| self.input.text().trim() == command);
         match key.code {
             KeyCode::Esc => {
                 self.command_menu_dismissed = true;
@@ -2278,6 +2379,7 @@ impl App {
                 self.command_selected = (self.command_selected + 1) % matches.len();
                 true
             }
+            KeyCode::Enter if exact_command => false,
             KeyCode::Tab | KeyCode::Enter
                 if !matches.is_empty()
                     && !key
@@ -2792,6 +2894,7 @@ impl App {
                 selection.head = point;
                 self.chat_selection = Some(selection);
                 self.selection_mode = true;
+                self.native_selection_mode = false;
                 self.focus = FocusPane::Chat;
                 true
             }
@@ -2805,6 +2908,7 @@ impl App {
                 {
                     selection.head = point;
                 }
+                self.copy_chat_selection();
                 true
             }
             MouseEventKind::ScrollUp if self.selection_mode => {
@@ -2817,6 +2921,19 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn enter_native_selection_mode(&mut self) {
+        self.selection_mode = true;
+        self.native_selection_mode = true;
+        self.chat_selection = None;
+        self.focus = FocusPane::Chat;
+    }
+
+    fn exit_selection_mode(&mut self) {
+        self.selection_mode = false;
+        self.native_selection_mode = false;
+        self.chat_selection = None;
     }
 
     fn selected_chat_text(&self) -> String {
@@ -2885,6 +3002,7 @@ impl App {
         }
         self.input.insert(&quote_selected_text(&value));
         self.selection_mode = false;
+        self.native_selection_mode = false;
         self.chat_selection = None;
         self.focus = FocusPane::Prompt;
         self.notice = Some(
@@ -3010,7 +3128,7 @@ impl App {
                 self.command_hits.iter().find(|(row, _)| *row == y).copied()
             {
                 self.command_selected = selected;
-                self.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                self.handle_command_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             }
         } else if self.skill_rect.contains((x, y).into()) {
             if let Some((_, selected)) = self.skill_hits.iter().find(|(row, _)| *row == y).copied()
@@ -3063,6 +3181,7 @@ impl App {
                 | "/diff"
                 | "/local"
                 | "/mobile"
+                | "/model"
                 | "/runtime"
                 | "/session"
                 | "/webapp"
@@ -3072,7 +3191,7 @@ impl App {
         }
         match command {
             "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /sidebar [on|off] (status sidebar, hidden by default; Ctrl+B too) · /daemon [status|start|stop|upgrade] · /webapp [status|start|stop|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
+                "System: prompts use Runtime by default · /model [model] · /local <task> · /goal <text>|off · /compress · /sidebar [on|off] (status sidebar, hidden by default; Ctrl+B too) · /daemon [status|start|stop|upgrade] · /webapp [status|start|stop|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
                     .to_owned(),
             ),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
@@ -3391,7 +3510,15 @@ fn draw(
         let offset = max
             .saturating_sub(app.scroll_from_bottom)
             .min(u16::MAX as usize) as u16;
-        let mut title = if app.selection_mode {
+        let mut title = if app.native_selection_mode {
+            app.language
+                .text(
+                    "WillDeep · 终端原生选择 · 拖选后右键或 Cmd+C 复制 · Esc 退出",
+                    "WillDeep · native terminal selection · drag, then right-click or Cmd+C · Esc exits",
+                    "WillDeep · 端末の標準選択 · ドラッグ後に右クリック / Cmd+C · Esc 終了",
+                )
+                .to_owned()
+        } else if app.selection_mode {
             app.language
                 .text(
                     "WillDeep · 拖动选择 · Ctrl/Cmd+C 或 Y 复制 · Q 引用 · Esc 退出",
@@ -3618,7 +3745,17 @@ fn draw(
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
-        let status = if app.selection_mode {
+        let status = if app.native_selection_mode {
+            app.notice.take().unwrap_or_else(|| {
+                app.language
+                    .text(
+                        "终端原生选择 · 拖选后可用右键复制 · Esc 恢复 WillDeep 鼠标操作",
+                        "Native terminal selection · drag, then right-click to copy · Esc restores WillDeep mouse controls",
+                        "端末の標準選択 · ドラッグ後に右クリックでコピー · Esc でマウス操作を復元",
+                    )
+                    .to_owned()
+            })
+        } else if app.selection_mode {
             app.notice.take().unwrap_or_else(|| {
                 app.language
                     .text(
@@ -3828,6 +3965,7 @@ fn draw(
                 f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
             }
         }
+        render_model_picker(f, app);
         app.search_rect = Rect::default();
         if let Some(search) = &app.search {
             let width = f.area().width.min(72);

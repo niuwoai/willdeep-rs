@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.35.0-rc3] - 2026-08-18
+
+### Fixed
+- 修复 TUI `Ctrl+S` 仅切换界面提示、未真正关闭终端鼠标捕获，导致终端原生右键“复制”仍不可用的问题。
+- WillDeep 内部拖选现在会在松开鼠标时自动写入系统剪贴板，并保留 `Cmd/Ctrl+C`、`Y` 手动复制与 `Q` 引用。
+
+### Tests
+- 新增终端原生选择模式进入、清理内部选区和退出状态的回归测试。
+
+## [0.35.0-rc2] - 2026-08-18
+
+### Fixed
+- 修复 TUI 中精确输入 `/model`、`/compress`、`/diff`、`/session` 等斜杠命令后，第一次 `Enter` 只关闭补全菜单、需要第二次 `Enter` 才执行的问题；前缀输入仍可用 `Enter` 或 `Tab` 补全。
+
+### Tests
+- 新增精确斜杠命令单次 `Enter` 直接进入执行链的回归测试。
+
+## [0.35.0-rc1] - 2026-08-18
+
+### Added
+- **TUI 新增 `/model [模型名]`。** `/model qwen3-coder` 直接切换当前 Session 后续对话使用的模型；裸 `/model` 从当前 Provider 的 `/v1/models` 获取完整列表，打开支持模糊筛选、方向键/Tab、PageUp/PageDown、鼠标滚轮和点击选择的可滚动面板。列表获取失败时保留明确错误，并提示仍可直接输入模型名。
+- Provider Core 新增兼容 OpenAI 常见 `data`、`models` 与根数组响应的模型列表解析；Runtime Protocol/Client 新增类型化 `session.update_model` 操作。
+
+### Changed
+- 模型切换会同步 Core Session、Runtime Session、后续 Runtime Turn 与进程内 `/local` Agent，不再出现界面显示新模型、实际请求仍走旧模型的假切换。
+
+### Tests
+- 新增模型列表兼容解析、命令解析、长列表筛选与翻页导航、Runtime/Core Session 模型一致性和公开协议参数回归测试。
+
 ## [0.34.0-rc4] - 2026-08-18
 
 ### Fixed

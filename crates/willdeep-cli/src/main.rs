@@ -658,6 +658,7 @@ async fn run() -> Result<()> {
                     model: cli.model.clone(),
                     config: Some(cli.config.clone().unwrap_or(config::default_config_path()?)),
                 },
+                built.provider_config.clone(),
                 language,
                 built.notifier.clone(),
             ),
@@ -896,7 +897,10 @@ fn resolve_base(
     }
 }
 
-fn provider_config_from_profile(file: &config::ConfigFile, name: &str) -> Result<ProviderConfig> {
+pub(crate) fn provider_config_from_profile(
+    file: &config::ConfigFile,
+    name: &str,
+) -> Result<ProviderConfig> {
     let profile = file
         .providers
         .get(name)

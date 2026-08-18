@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-18 | 当前版本：v0.34.0-rc4
+> 最后更新：2026-08-18 | 当前版本：v0.35.0-rc3
 
 ## 项目简介
 
@@ -22,6 +22,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 顶层 `willdeep session list/get/turns/stop` 查询持久会话并精确停止其 active Turn；
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
 - TOML 多 Provider Profile 与安全凭据引用；
+- TUI 支持 `/model <模型名>` 直接切换当前 Session 模型；裸 `/model` 从 Provider `/v1/models` 获取模型，提供模糊筛选、键盘翻页、鼠标滚动和点击选择，并同步 Runtime 与进程内 Agent；
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
