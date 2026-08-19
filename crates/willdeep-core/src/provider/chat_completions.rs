@@ -71,6 +71,7 @@ impl Provider for ChatCompletionsProvider {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 total_tokens: usage.total_tokens,
+                cache_read_tokens: usage.cache_read_tokens(),
             }),
         })
     }
@@ -215,6 +216,24 @@ struct ChatUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    /// OpenAI 与多数兼容网关走这里。
+    prompt_tokens_details: Option<PromptTokensDetails>,
+    /// DeepSeek 等网关把命中数平铺在顶层，字段名也不一样。
+    prompt_cache_hit_tokens: Option<u64>,
+}
+
+impl ChatUsage {
+    fn cache_read_tokens(&self) -> Option<u64> {
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .or(self.prompt_cache_hit_tokens)
+    }
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    cached_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -235,5 +254,37 @@ mod attachment_tests {
         let value = chat_content(&message);
         assert_eq!(value[1]["type"], "image_url");
         assert_eq!(value[1]["image_url"]["url"], "data:image/png;base64,YWJj");
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    /// OpenAI 兼容网关各报各的缓存字段，两种写法都得认。
+    #[test]
+    fn cache_hits_are_read_from_either_wire_shape() {
+        let openai: ChatUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020,
+                "prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .expect("openai usage");
+        assert_eq!(openai.cache_read_tokens(), Some(768));
+
+        let deepseek: ChatUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020,
+                "prompt_cache_hit_tokens":512}"#,
+        )
+        .expect("deepseek usage");
+        assert_eq!(deepseek.cache_read_tokens(), Some(512));
+
+        let silent: ChatUsage =
+            serde_json::from_str(r#"{"prompt_tokens":1000,"completion_tokens":20}"#)
+                .expect("silent usage");
+        assert_eq!(
+            silent.cache_read_tokens(),
+            None,
+            "a gateway that says nothing must not be reported as a cache miss"
+        );
     }
 }

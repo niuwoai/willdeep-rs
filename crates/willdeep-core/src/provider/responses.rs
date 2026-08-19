@@ -91,6 +91,9 @@ impl Provider for ResponsesProvider {
                     (Some(input), Some(output)) => Some(input + output),
                     _ => None,
                 },
+                cache_read_tokens: usage
+                    .input_tokens_details
+                    .and_then(|details| details.cached_tokens),
             }),
         })
     }
@@ -275,6 +278,12 @@ struct ResponseOutputContent {
 struct ResponseUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    input_tokens_details: Option<ResponseInputTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct ResponseInputTokensDetails {
+    cached_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -319,5 +328,23 @@ mod tests {
             input[0].content[1].image_url.as_deref(),
             Some("data:image/png;base64,YWJj")
         );
+    }
+
+    #[test]
+    fn cache_reads_are_lifted_from_the_input_token_details() {
+        let usage: ResponseUsage = serde_json::from_str(
+            r#"{"input_tokens":2000,"output_tokens":40,"input_tokens_details":{"cached_tokens":1600}}"#,
+        )
+        .expect("usage");
+        assert_eq!(
+            usage
+                .input_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(1600)
+        );
+
+        let silent: ResponseUsage =
+            serde_json::from_str(r#"{"input_tokens":2000,"output_tokens":40}"#).expect("usage");
+        assert!(silent.input_tokens_details.is_none());
     }
 }

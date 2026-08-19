@@ -54,7 +54,7 @@ mod workspace_commands;
 use activity::ToolActivity;
 use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
-use command_catalog::command_candidates;
+use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
 use model_commands::{
@@ -1540,7 +1540,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
-                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
+                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens,dropped_messages})=>{app.context_tokens=estimated_tokens;let compressed=language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました");app.record_progress(if dropped_messages>0{language.pick(format!("{compressed} · 本轮请求丢弃 {dropped_messages} 条最旧消息（存档不受影响）"),format!("{compressed} · dropped {dropped_messages} oldest message(s) from this request (the archive is untouched)"),format!("{compressed} · 今回のリクエストから最も古い {dropped_messages} 件を破棄（アーカイブは無変更）"))}else{compressed.to_owned()});},
                 UiMessage::Agent(AgentEvent::BackgroundShellStarted{id})=>app.record_progress(format!("{} {id}",language.text("后台命令已启动","Background command started","バックグラウンドコマンド開始"))),
                 UiMessage::Agent(AgentEvent::BackgroundShellCompleted{id,status,..})=>app.record_progress(format!("{} {id} · {status:?}",language.text("后台命令已结束","Background command finished","バックグラウンドコマンド完了"))),
                 UiMessage::Agent(AgentEvent::SubagentStarted{id,profile,background,..})=>app.record_progress(format!("{} {} · {profile} · {}",language.text("子 Agent 已启动","Subagent started","サブエージェント開始"),id.to_string().get(..8).unwrap_or("agent"),if background{language.text("后台","background","バックグラウンド")}else{language.text("前台","foreground","フォアグラウンド")})),
@@ -3190,10 +3190,7 @@ impl App {
             return false;
         }
         match command {
-            "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /model [model] · /local <task> · /goal <text>|off · /compress · /sidebar [on|off] (status sidebar, hidden by default; Ctrl+B too) · /daemon [status|start|stop|upgrade] · /webapp [status|start|stop|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
-                    .to_owned(),
-            ),
+            "/help" => self.append_transcript(help_text(self.language)),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
                 self.goal = None;
                 self.append_transcript("System: Goal mode disabled".to_owned());
@@ -3767,9 +3764,19 @@ fn draw(
             })
         } else {
             app.notice.take().unwrap_or_else(|| {
-            let input = app.latest_usage.input_tokens.unwrap_or(0);
-            let output = app.latest_usage.output_tokens.unwrap_or(0);
-            let context_tokens = app.context_tokens.max(input);
+            let input_tokens = app.latest_usage.input_tokens.unwrap_or(0);
+            let output_tokens = app.latest_usage.output_tokens.unwrap_or(0);
+            let input = format_token_count(input_tokens);
+            let output = format_token_count(output_tokens);
+            let cache = cache_hit_rate(&app.latest_usage)
+                .map(|rate| {
+                    format!(
+                        " · {} {rate:.2}%",
+                        app.language.text("缓存", "cache", "キャッシュ")
+                    )
+                })
+                .unwrap_or_default();
+            let context_tokens = app.context_tokens.max(input_tokens);
             let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
             let elapsed = app
                 .turn_started
@@ -3779,7 +3786,7 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · Ctrl+S {} · F1",
                     app.working_summary().unwrap_or_else(|| app.language.text("运行中", "Running", "実行中").to_owned()),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
@@ -3789,7 +3796,7 @@ fn draw(
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),

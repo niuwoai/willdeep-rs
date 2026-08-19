@@ -120,4 +120,8 @@ pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    /// 命中提示词缓存的输入 token。`None` 是「Provider 没报」，`Some(0)` 是
+    /// 「确实一条没命中」——两者不是一回事，界面只在知道时展示命中率。
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
 }

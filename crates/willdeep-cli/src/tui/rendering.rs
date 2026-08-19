@@ -695,6 +695,30 @@ pub(super) fn transcript(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
+/// 状态栏里的 token 计数：过千收敛成 K/M，保留两位小数。
+///
+/// 千以下原样输出——把 42 写成 `0.04K` 只会让人多算一次乘法。
+pub(super) fn format_token_count(value: u64) -> String {
+    match value {
+        ..1_000 => value.to_string(),
+        // 上界不是 1_000_000：999_999 四舍五入到两位小数就是 1000.00K，
+        // 与其印一个比 M 还长的 K，不如让它直接进位。
+        1_000..999_995 => format!("{:.2}K", value as f64 / 1_000.0),
+        _ => format!("{:.2}M", value as f64 / 1_000_000.0),
+    }
+}
+
+/// 提示词缓存命中率。Provider 没报缓存数就返回 `None`，状态栏据此整段隐藏，
+/// 而不是显示一个像「真的一次没命中」的 0.00%。
+pub(super) fn cache_hit_rate(usage: &willdeep_core::types::Usage) -> Option<f64> {
+    let cached = usage.cache_read_tokens?;
+    let input = usage.input_tokens.unwrap_or(0);
+    if input == 0 {
+        return None;
+    }
+    Some(cached as f64 / input as f64 * 100.0)
+}
+
 pub(super) fn welcome_message(workspace: &std::path::Path, language: Language) -> String {
     let project = workspace
         .file_name()
@@ -703,13 +727,13 @@ pub(super) fn welcome_message(workspace: &std::path::Path, language: Language) -
         .unwrap_or(language.text("当前工作区", "current workspace", "現在のワークスペース"));
     match language {
         Language::ZhCn => format!(
-            "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。"
+            "WillDeep: 你好，我已经进入 {project}。你可以直接告诉我想实现、修复或调查什么；我会先了解项目，再开始动手。输入 `/help` 查看全部命令，`/model` 切换模型。"
         ),
         Language::En => format!(
-            "WillDeep: Hello, I’m in {project}. Tell me what you want to build, fix, or investigate; I’ll inspect the project before making changes."
+            "WillDeep: Hello, I’m in {project}. Tell me what you want to build, fix, or investigate; I’ll inspect the project before making changes. Type `/help` for every command, or `/model` to switch models."
         ),
         Language::Ja => format!(
-            "WillDeep: こんにちは。{project} を開きました。実装、修正、調査したいことを教えてください。まずプロジェクトを確認してから作業します。"
+            "WillDeep: こんにちは。{project} を開きました。実装、修正、調査したいことを教えてください。まずプロジェクトを確認してから作業します。`/help` で全コマンド、`/model` でモデルを切り替えられます。"
         ),
     }
 }

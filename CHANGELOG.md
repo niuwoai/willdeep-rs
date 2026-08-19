@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.36.0-rc1] - 2026-08-19
+
+### Added
+- **状态栏显示提示词缓存命中率。** 新增 `缓存 xx.xx%`（命中输入 Token ÷ 输入 Token），四种网关方言的字段都会解析：Anthropic `cache_read_input_tokens`、OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`。Provider 不上报缓存数据时整段隐藏，不把「未知」显示成 `0.00%`。
+- **状态栏 Token 改用 K/M 单位，保留两位小数**（`1.23K`、`4.56M`）。千以下原样显示；四舍五入会越过 `1000.00K` 的数值直接进位成 `M`。
+- **自动压缩补齐三道防线：** 90% 逃生水位（越过即无视 16 条门槛照压，并按历史长度收缩保留区）、单条消息超过窗口 25% 就地裁掉中段（纯字符串处理，不花 Provider 调用）、95% 天花板兜底（摘要后仍超窗则从保留区头部继续丢，至少保住首条、摘要与最近一轮问答）。此前少数几条巨型工具输出凑不够 16 条门槛，会带着必然超窗的请求直冲 Provider。
+- 首屏欢迎语补充 `/help` 与 `/model` 指引。
+
+### Changed
+- **`/help` 改为按当前语言输出的多行命令表。** 此前是一行写死的英文长串：中文与日文界面看不懂，终端里也糊成一坨。说明文案与补全菜单共用同一份目录，用法签名的占位符随语言走。
+- 在途自动压缩的触发水位由配置窗口的 80% 下调至 75%。
+- 压缩相关阈值全部抽为具名常量（`AUTO_COMPRESSION_TRIGGER_PERCENT` / `_ESCAPE_PERCENT` / `_CEILING_PERCENT` / `_KEEP_RECENT` / `_MIN_MESSAGES` / `_MIN_TAIL`、`OVERSIZED_MESSAGE_PERCENT`）。
+- `Usage` 新增 `cache_read_tokens`，`AgentEvent::CompressionCompleted` 新增 `dropped_messages`；Runtime JSON 事件与 TUI 提示同步透传，兜底丢弃不再是静默行为。
+- `Language` 新增 `pick`，供需要插值的文案取值。
+
+### Tests
+- 新增压缩水位回归测试四则：75% 触发线、短历史逃生压缩、超大单条消息就地裁剪且不额外调用 Provider、保留区超窗时丢弃并如实上报条数。
+- 新增 `/help` 本地化与逐行排版回归测试，锁定旧的英文长串不再出现。
+- 新增 Token K/M 格式化与缓存命中率回归测试（区分「Provider 未上报」与「确实零命中」）。
+- 新增三种网关缓存字段解析测试。
+
 ## [0.35.0-rc3] - 2026-08-18
 
 ### Fixed

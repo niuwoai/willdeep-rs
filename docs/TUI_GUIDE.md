@@ -198,7 +198,7 @@ Tools: 6 calls · list_directory×3 · read_file×2 · git_status×1
 
 失败数量不会被隐藏。需要排查时按 `Ctrl+O` 查看最近明细。
 
-状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。
+状态栏按 Provider Profile 的 `context_window` 显示上下文占比，并显示最近一次输入/输出 Token 与耗时。Token 过千按 `K`／`M` 收敛并保留两位小数（`1.23K`、`4.56M`）。当 Provider 上报提示词缓存命中数据时，同一行追加 `缓存 xx.xx%`（命中的输入 Token ÷ 输入 Token）；Provider 不报缓存数据就整段不显示，避免把「未知」误读成「一次没命中」。
 
 ## Markdown 渲染
 

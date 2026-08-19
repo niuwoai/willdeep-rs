@@ -255,6 +255,9 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                 input_tokens: value.get("input_tokens").and_then(|value| value.as_u64()),
                 output_tokens: value.get("output_tokens").and_then(|value| value.as_u64()),
                 total_tokens: value.get("total_tokens").and_then(|value| value.as_u64()),
+                cache_read_tokens: value
+                    .get("cache_read_tokens")
+                    .and_then(|value| value.as_u64()),
             };
             app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
         }

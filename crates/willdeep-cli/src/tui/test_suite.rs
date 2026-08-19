@@ -76,6 +76,106 @@ mod tests {
         assert!(welcome.starts_with("WillDeep:"));
         assert!(welcome.contains("willdeep-rs"));
     }
+
+    /// 第一屏就得告诉用户从哪儿问路，否则命令表等于不存在。
+    #[test]
+    fn welcome_points_at_help_and_model_in_every_language() {
+        for language in [Language::ZhCn, Language::En, Language::Ja] {
+            let welcome = welcome_message(std::path::Path::new("/tmp/willdeep-rs"), language);
+            assert!(welcome.contains("/help"), "{language:?} must mention /help");
+            assert!(
+                welcome.contains("/model"),
+                "{language:?} must mention /model"
+            );
+        }
+    }
+
+    /// `/help` 曾经是一行写死的英文长串：中文界面看不懂，终端里也糊成一坨。
+    #[test]
+    fn help_is_localized_and_laid_out_one_command_per_line() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        let skills = SkillCatalog::default();
+
+        assert!(app.handle_slash_command("/help", &skills));
+        let help = app.transcript.last().expect("help").clone();
+
+        let lines = help.lines().collect::<Vec<_>>();
+        assert!(
+            lines.len() >= 17,
+            "every command needs its own line, got {}",
+            lines.len()
+        );
+        assert!(lines[0].starts_with("System: "));
+        assert!(
+            !help.contains("prompts use Runtime by default"),
+            "the old single-line English blob must be gone"
+        );
+        assert!(help.contains("命令一览"));
+        assert!(help.contains("/model [模型名]"));
+        assert!(help.contains("列出、筛选或切换当前模型"));
+        for command in ["/help", "/compress", "/session", "/skills", "/clear"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.trim_start().starts_with(command)),
+                "{command} must own a line"
+            );
+        }
+
+        let mut english = App::new(Vec::new(), Language::En);
+        assert!(english.handle_slash_command("/help", &skills));
+        let english_help = english.transcript.last().expect("help").clone();
+        assert!(english_help.contains("/model [model]"));
+        assert!(
+            !english_help.contains("命令一览"),
+            "English help must not leak Chinese"
+        );
+    }
+
+    /// 状态栏宽度有限，六位数的 token 读起来也费劲。
+    #[test]
+    fn token_counts_collapse_to_k_and_m_with_two_decimals() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1.00K");
+        assert_eq!(format_token_count(1_234), "1.23K");
+        assert_eq!(format_token_count(994_999), "995.00K");
+        // 四舍五入会越过 1000.00K 的都直接进位成 M。
+        assert_eq!(format_token_count(999_999), "1.00M");
+        assert_eq!(format_token_count(1_000_000), "1.00M");
+        assert_eq!(format_token_count(1_234_567), "1.23M");
+    }
+
+    /// 「没报缓存」和「一次没命中」必须区分，否则状态栏会天天挂着 0.00%。
+    #[test]
+    fn cache_rate_is_hidden_unless_the_provider_reported_it() {
+        let silent = Usage {
+            input_tokens: Some(1_000),
+            output_tokens: Some(10),
+            total_tokens: Some(1_010),
+            cache_read_tokens: None,
+        };
+        assert_eq!(cache_hit_rate(&silent), None);
+
+        let missed = Usage {
+            cache_read_tokens: Some(0),
+            ..silent.clone()
+        };
+        assert_eq!(cache_hit_rate(&missed), Some(0.0));
+
+        let hit = Usage {
+            cache_read_tokens: Some(750),
+            ..silent.clone()
+        };
+        assert_eq!(cache_hit_rate(&hit), Some(75.0));
+
+        let no_input = Usage {
+            input_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            ..silent
+        };
+        assert_eq!(cache_hit_rate(&no_input), None);
+    }
     #[test]
     fn loading_another_session_replaces_transient_chat_state() {
         let workspace = std::env::temp_dir();

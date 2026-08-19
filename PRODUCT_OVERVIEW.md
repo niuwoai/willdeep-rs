@@ -147,7 +147,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - `rg` 优先、内置扫描兜底的跨平台文件搜索；
 - some.im 纯文本模型的 `qwen3-vl-plus` 图片描述降级链路；
 - 受审批保护的网页搜索和公网网页正文读取；
-- 上下文用量、Token、耗时、自动摘要压缩及宽屏后台状态侧栏。
+- 上下文用量、Token（K/M 两位小数）、缓存命中率、耗时、自动摘要压缩及宽屏后台状态侧栏。
 - `/compress` 手动压缩当前会话上下文并立即保存；
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
 - `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer 九个工种；默认优先使用可私有部署的 32K / 48K / 64K / 256K 档位，支持为企业内网或离线环境独立绑定模型；
