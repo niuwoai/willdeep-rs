@@ -101,8 +101,12 @@ async fn some_im_login() -> Result<(String, String, String, String)> {
                     ],
                 )
                 .context("some.im 已确认登录，但未返回 API Key")?;
-                let model = string(data, &["default_model", "defaultModel"])
-                    .unwrap_or_else(|| "deepseek-v4-flash".to_owned());
+                // Browser login establishes credentials, not the routing
+                // policy. Start new installations on the private-deployable
+                // standard tier; `deep` remains an explicit escalation
+                // profile instead of silently becoming every session's root.
+                let model = string(data, &["standard_model", "standardModel"])
+                    .unwrap_or_else(|| "glm-5".to_owned());
                 return Ok((
                     "some-im".to_owned(),
                     "https://some.im/v1".to_owned(),

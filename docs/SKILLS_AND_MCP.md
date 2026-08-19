@@ -66,12 +66,16 @@ enabled = true
 NODE_NO_WARNINGS = "1"
 ```
 
-启动时完成 `initialize` 和 `tools/list`，远端工具以命名空间形式暴露给模型：
+启动时完成 `initialize` 和 `tools/list`，远端工具保留命名空间名称：
 
 ```text
 mcp__filesystem__read_file
 mcp__filesystem__write_file
 ```
+
+完整 MCP Schema 不再塞进每一轮 Provider 请求。模型先调用 `list_mcp_tools`
+按关键字读取匹配工具的名称、说明和参数 Schema，再通过 `call_mcp_tool` 传入精确
+命名空间名称与参数。这样连接大量 MCP server 时，固定上下文仍适合 32K/48K Worker。
 
 当前支持 stdio 传输。
 
@@ -85,7 +89,8 @@ Runtime 控制 Token 不会传给 MCP 子进程。
 
 **MCP 调用在所有审批模式下均逐次确认。** `smart`、`workspace-write` 和兼容参数 `--full-auto` 只免审当前工作区内的创建、编辑操作，不涉及 MCP。
 
-Always Allow 对 MCP 的粒度是精确的 `server/tool` 组合，不是整个 server。
+Always Allow 对 MCP 的粒度仍是精确的 `server/tool` 组合，不是通用
+`call_mcp_tool`，更不是整个 server。
 
 `read-only` 策略的 Workspace 会在审批前直接拒绝 MCP 调用。
 

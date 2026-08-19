@@ -16,7 +16,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use willdeep_core::{MessageAttachment, Role, Session, SessionStore, SkillCatalog};
 
@@ -47,6 +47,8 @@ struct WebState {
     home: PathBuf,
     language: Language,
     harness_slots: Arc<Semaphore>,
+    settings_writable: bool,
+    settings_write_lock: Mutex<()>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -274,6 +276,8 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         home: config.home,
         language: config.language,
         harness_slots: Arc::new(Semaphore::new(2)),
+        settings_writable: config.listen.ip().is_loopback(),
+        settings_write_lock: Mutex::new(()),
     });
     let app = Router::new()
         .route("/health", get(health))
@@ -308,6 +312,10 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route(
             "/api/runtime/agents/{id}/prompt",
             post(prompt_runtime_agent),
+        )
+        .route(
+            "/api/settings/model-routing",
+            get(model_routing_settings).put(update_model_routing_settings),
         )
         .route("/api/composer", get(composer))
         .route("/", get(index))
@@ -351,6 +359,38 @@ async fn composer(
         commands: vec!["/help", "/goal", "/compress", "/skills", "/clear"],
         skills,
     }))
+}
+
+async fn model_routing_settings(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<crate::model_routing::ModelRoutingSettings>, WebError> {
+    crate::model_routing::load(&state.config_path, state.profile.as_deref())
+        .map(Json)
+        .map_err(WebError::from_anyhow)
+}
+
+async fn update_model_routing_settings(
+    State(state): State<Arc<WebState>>,
+    Json(update): Json<crate::model_routing::ModelRoutingUpdate>,
+) -> Result<Json<crate::model_routing::ModelRoutingSettings>, WebError> {
+    if !state.settings_writable {
+        return Err(WebError::forbidden(
+            "model routing settings can only be changed from a loopback Web server",
+        ));
+    }
+    let _guard = state.settings_write_lock.lock().await;
+    crate::model_routing::save(&state.config_path, state.profile.as_deref(), &update)
+        .map(Json)
+        .map_err(|error| {
+            if error
+                .to_string()
+                .contains(crate::model_routing::STALE_CONFIG_MESSAGE)
+            {
+                WebError::conflict(error.to_string())
+            } else {
+                WebError::bad_request(error.to_string())
+            }
+        })
 }
 
 fn safe_skill_description(value: &str) -> String {
@@ -658,10 +698,10 @@ fn validate_agent_spawn(
     let profile = action.profile.trim().to_owned();
     if !matches!(
         profile.as_str(),
-        "scout" | "reader" | "deep" | "log_inspector" | "git_detective"
+        "scout" | "reader" | "log_inspector" | "git_detective"
     ) {
         return Err(WebError::bad_request(
-            "profile must be one of scout, reader, deep, log_inspector, or git_detective",
+            "profile must be one of scout, reader, log_inspector, or git_detective; deep requires a runtime escalation ticket",
         ));
     }
     let prompt = action.prompt.trim().to_owned();
@@ -1588,6 +1628,12 @@ impl WebError {
             message: message.into(),
         }
     }
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
     fn from_anyhow(error: anyhow::Error) -> Self {
         Self::internal(error.to_string())
     }
@@ -2011,7 +2057,7 @@ mod tests {
         assert_eq!(prompt, "read the architecture docs");
         assert_eq!(label.as_deref(), Some("architecture reader"));
 
-        for profile in ["editor", "writer", "shell"] {
+        for profile in ["deep", "editor", "writer", "shell"] {
             let action = WebAgentSpawnAction {
                 workspace: "/allowed".to_owned(),
                 session_id,
@@ -2024,7 +2070,7 @@ mod tests {
         let empty_prompt = WebAgentSpawnAction {
             workspace: "/allowed".to_owned(),
             session_id,
-            profile: "deep".to_owned(),
+            profile: "reader".to_owned(),
             prompt: "   ".to_owned(),
             label: None,
         };

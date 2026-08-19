@@ -148,6 +148,49 @@ impl SkillCatalog {
             .join("\n")
     }
 
+    /// Bounded catalog view for the always-on system prompt. Full skill
+    /// bodies stay behind `read_skill`, and the complete index stays behind
+    /// `list_skills`; this prevents dozens of unrelated descriptions from
+    /// taxing every small-context turn.
+    pub fn routing_summary(&self, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+        let mut skills = self.skills.iter().collect::<Vec<_>>();
+        skills.sort_by_key(|skill| match skill.tier {
+            Some(SkillTier::Worker) => 0,
+            Some(SkillTier::Standard) | None => 1,
+            Some(SkillTier::Deep) => 2,
+        });
+        let mut output = String::new();
+        let mut included = 0;
+        for skill in skills {
+            let line = match skill.tier {
+                Some(tier) => format!(
+                    "- {} | tier={} | {}\n",
+                    skill.identifier,
+                    tier.as_str(),
+                    skill.description
+                ),
+                None => format!("- {} | {}\n", skill.identifier, skill.description),
+            };
+            if output.chars().count().saturating_add(line.chars().count()) > max_chars {
+                break;
+            }
+            output.push_str(&line);
+            included += 1;
+        }
+        if included < self.skills.len() {
+            let suffix = format!(
+                "[{} more skill(s); search with list_skills]\n",
+                self.skills.len() - included
+            );
+            let remaining = max_chars.saturating_sub(output.chars().count());
+            output.extend(suffix.chars().take(remaining));
+        }
+        output.trim_end().to_owned()
+    }
+
     pub fn read(&self, name: &str, resource: Option<&str>) -> Result<String, SkillError> {
         let skill = self
             .skills
@@ -245,6 +288,35 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_summary_is_bounded_and_prioritizes_worker_skills() {
+        let catalog = SkillCatalog {
+            skills: vec![
+                Skill {
+                    identifier: "deep-book".to_owned(),
+                    name: "Deep Book".to_owned(),
+                    description: "d".repeat(200),
+                    tier: Some(SkillTier::Deep),
+                    path: PathBuf::new(),
+                },
+                Skill {
+                    identifier: "worker-check".to_owned(),
+                    name: "Worker Check".to_owned(),
+                    description: "bounded verifier".to_owned(),
+                    tier: Some(SkillTier::Worker),
+                    path: PathBuf::new(),
+                },
+            ],
+        };
+
+        let summary = catalog.routing_summary(96);
+
+        assert!(summary.chars().count() <= 96);
+        assert!(summary.starts_with("- worker-check | tier=worker"));
+        assert!(summary.contains("more skill"));
+    }
+
     #[test]
     fn discovers_and_reads_skill() {
         let root = std::env::temp_dir().join(format!("willdeep-skill-{}", uuid::Uuid::new_v4()));

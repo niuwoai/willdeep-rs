@@ -74,7 +74,7 @@ Agent Loop 只理解：
 
 Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为 `SKILL.md`；附属资源 canonicalize 后必须仍位于 Skill 根目录，单次读取最多 48,000 字符。
 
-MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并将工具动态注册成 `mcp__<server>__<tool>`。所有 MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链；后两种模式只免审当前工作区内的 `create_file`、`edit_file`。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
+MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。所有 MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链；后两种模式只免审当前工作区内的 `create_file`、`edit_file`。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
 
 ### Prompt 与附件
 

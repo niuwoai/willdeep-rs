@@ -59,7 +59,8 @@ Provider 是 some.im 时，七个工种各自跑网关托管的虚拟模型 `som
   "prompt": "修到绿，别动公开接口",
   "task": {
     "goal": "修复 subagent::tests::verifier_loop 失败",
-    "relevant_files": ["crates/willdeep-core/src/subagent.rs"],
+    "read_files": ["crates/willdeep-core/src/subagent.rs", "crates/willdeep-core/src/agent.rs"],
+    "write_files": ["crates/willdeep-core/src/subagent.rs"],
     "known_facts": ["失败始于 f936618", "断言是 attempts=3 实得 1"],
     "constraints": ["不改 SubagentProfile 的公开字段"],
     "verifier": { "command": "cargo test -p willdeep-core subagent", "expected_exit_code": 0 },
@@ -70,9 +71,9 @@ Provider 是 some.im 时，七个工种各自跑网关托管的虚拟模型 `som
 
 运行时处理：
 
-1. `relevant_files` 由 Runtime 读出内联进 Worker 的第一条消息。内联预算 = 窗口 × 3/4 字节（32K 档 ≈ 24 KB，64K 档 ≈ 48 KB），超预算的文件**明确标注被省略**，不静默丢弃；读不到的文件标 `unreadable`，也不静默丢弃。
+1. `read_files` 与 `write_files` 都由 Runtime 读出并内联进 Worker 的第一条消息。内联预算 = 窗口 × 3/4 字节（32K 档 ≈ 24 KB，64K 档 ≈ 48 KB），超预算的文件**明确标注被省略**，不静默丢弃；读不到的文件标 `unreadable`，也不静默丢弃。
 2. `known_facts` / `constraints` 作为独立段落进入首条消息。
-3. **对写入型工种，`relevant_files` 同时就是它能改的文件集**——审批和写通道是同一份清单，不存在「批准了 A 却能改 B」。
+3. **对写入型工种，只有 `write_files` 是它能改的文件集**——`read_files` 只给上下文，不扩大权限。审批和写通道使用同一份写清单，不存在「批准了 A 却能改 B」。旧 `relevant_files` 仅作兼容，并继续保留旧的读写合并语义。
 4. `verifier.command` 先过门禁（见下），再作为该 Worker `run_command` 的**唯一**可执行命令。
 5. `max_attempts` 覆盖工种默认值（默认 3，上限 6）。
 
@@ -122,7 +123,7 @@ attempt 打满 → 整个运行判失败，报告要求升档
 
 `editor` 是集合大小为 1 的特例，走的是同一段代码。
 
-`relevant_files` 同时承担「内联给你看」和「允许你改/创建」两个角色。不存在的路径会作为待创建文件保留在白名单里；只想让 Worker 读、不想让它改的文件，不要放进写入型工种的 `relevant_files`。
+`read_files` 只承担「内联给你看」，`write_files` 承担「允许你改/创建」；不存在的写路径会作为待创建文件保留在白名单里。两者分开后，父 Agent 可以把接口、测试和相邻实现作为只读上下文，同时只授权真正需要修改的文件。
 
 > **与 Xedit 设计的差异**：Xedit 设计里冲突的后来者是「排队」，rs 侧是「拒绝并点名冲突文件」。理由是并发上限本来只有 3，排队会引入等待与死锁面，而拒绝把决定权交回父 Agent——它比锁更清楚该等还是该重新切分。
 
@@ -143,8 +144,8 @@ attempt 打满 → 整个运行判失败，报告要求升档
 
 结果两处落地：报告尾部追加 `<citation-check checked="N" unverifiable="M">`
 （点名对不上的那几条，父 Agent 直接看得见），判定事件带上 `claims_checked` /
-`claims_unverifiable` 两个字段，`willdeep daemon agent-metrics` 多一行
-`citation_accuracy`。
+`claims_unverifiable` 两个字段。`willdeep daemon agent-metrics` 同时报告
+Worker/Standard/Deep 实际运行数、Deep Share 与 `citation_accuracy`。
 
 三条边界，写清楚免得把这项当成它不是的东西：
 

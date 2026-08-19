@@ -285,28 +285,23 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn approval_shortcuts_are_colored_and_localized() {
-        let lines = approval_content("run command", true, Language::Ja);
-        let actions = lines.last().unwrap();
-        assert_eq!(actions.spans[0].content, " Y ");
-        assert_eq!(actions.spans[0].style.bg, Some(Color::Yellow));
-        assert!(
-            actions
-                .spans
-                .iter()
-                .any(|span| span.content.contains("常に許可"))
+    fn approval_actions_are_stacked_localized_and_selectable() {
+        let allow = approval_action_text(ApprovalDecision::AllowOnce, Language::Ja, true);
+        let always = approval_action_text(ApprovalDecision::AlwaysAllow, Language::Ja, false);
+        let deny = approval_action_text(ApprovalDecision::Deny, Language::Ja, false);
+
+        assert!(allow.contains("Y / Enter"));
+        assert!(allow.starts_with('▶'));
+        assert!(always.contains("常に許可"));
+        assert!(deny.contains("N / Esc"));
+        assert!(deny.contains("拒否"));
+        assert_eq!(
+            approval_action_style(ApprovalDecision::AllowOnce, true).bg,
+            Some(Color::LightCyan)
         );
-        let deny = actions
-            .spans
-            .iter()
-            .find(|span| span.content == " N ")
-            .unwrap();
-        assert_eq!(deny.style.bg, Some(Color::Red));
-        assert!(
-            actions
-                .spans
-                .iter()
-                .any(|span| span.content.contains("拒否"))
+        assert_eq!(
+            approval_action_style(ApprovalDecision::Deny, false).fg,
+            Some(Color::LightRed)
         );
     }
     #[test]
@@ -423,7 +418,8 @@ mod tests {
     #[test]
     fn command_menu_discovers_workspace_switching() {
         let mut app = App::new(Vec::new(), Language::En);
-        app.input.insert("/work");
+        // “Worker” 也会命中模型路由说明；用命令名的唯一前缀验证 workspace。
+        app.input.insert("/works");
 
         assert!(app.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input.text(), "/workspace ");
@@ -1367,6 +1363,30 @@ mod tests {
         assert_eq!(receiver.await.expect("answer").as_deref(), Some("A, B"));
     }
     #[tokio::test]
+    async fn approval_keyboard_ignores_ime_text_and_supports_menu_and_shortcuts() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        let (menu_sender, menu_receiver) = oneshot::channel();
+        app.approval = Some(("Run tests".to_owned(), true, menu_sender));
+
+        app.handle_approval_key(KeyEvent::new(KeyCode::Char('中'), KeyModifiers::NONE));
+        assert!(app.approval.is_some(), "IME text must not decide approval");
+        app.handle_approval_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.approval_selected, 1);
+        app.handle_approval_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(menu_receiver.await.unwrap(), ApprovalDecision::AlwaysAllow);
+
+        let (allow_sender, allow_receiver) = oneshot::channel();
+        app.approval = Some(("Run build".to_owned(), false, allow_sender));
+        app.handle_approval_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert_eq!(allow_receiver.await.unwrap(), ApprovalDecision::AllowOnce);
+
+        let (deny_sender, deny_receiver) = oneshot::channel();
+        app.approval = Some(("Run deploy".to_owned(), false, deny_sender));
+        app.handle_approval_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(deny_receiver.await.unwrap(), ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
     async fn mouse_can_resolve_approval_and_single_choice_question() {
         let registry = BackgroundTaskRegistry::default();
         let skills = SkillCatalog::default();
@@ -1374,7 +1394,12 @@ mod tests {
         let (approval_sender, approval_receiver) = oneshot::channel();
         app.approval = Some(("Run tests".to_owned(), true, approval_sender));
         app.approval_rect = Rect::new(10, 10, 60, 9);
-        app.handle_mouse(35, 18, &registry, &skills);
+        app.approval_action_hits = vec![
+            (Rect::new(11, 15, 58, 1), ApprovalDecision::AllowOnce),
+            (Rect::new(11, 16, 58, 1), ApprovalDecision::AlwaysAllow),
+            (Rect::new(11, 17, 58, 1), ApprovalDecision::Deny),
+        ];
+        app.handle_mouse(35, 16, &registry, &skills);
         assert_eq!(
             approval_receiver.await.unwrap(),
             ApprovalDecision::AlwaysAllow

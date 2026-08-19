@@ -4,7 +4,7 @@ import type { Messages } from "./i18n";
 import { RuntimeDetailPanel, type RuntimeDetailTarget } from "./RuntimeDetailPanel";
 import { agentDuration, isSidebarAgent } from "./runtimeAgents";
 
-export type AgentSpawnProfile = "scout" | "reader" | "deep";
+export type AgentSpawnProfile = "scout" | "reader" | "log_inspector" | "git_detective";
 
 export type RuntimeTool = {
   id: string;
@@ -150,7 +150,8 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
         <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
           <option value="scout">{t.agentProfileScout}</option>
           <option value="reader">{t.agentProfileReader}</option>
-          <option value="deep">{t.agentProfileDeep}</option>
+          <option value="log_inspector">{t.agentProfileLogInspector}</option>
+          <option value="git_detective">{t.agentProfileGitDetective}</option>
         </NativeSelect.Field>
         <NativeSelect.Indicator />
       </NativeSelect.Root>

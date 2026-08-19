@@ -169,7 +169,12 @@ impl RuntimeEventSink {
 fn tool_may_modify_workspace(name: &str) -> bool {
     matches!(
         name,
-        "create_file" | "edit_file" | "run_command" | "create_worktree" | "computer_use"
+        "create_file"
+            | "edit_file"
+            | "run_command"
+            | "create_worktree"
+            | "computer_use"
+            | "call_mcp_tool"
     ) || name.starts_with("mcp__")
 }
 
@@ -1156,8 +1161,9 @@ const WORKER_PROFILES: &[&str] = &[
     "build_fixer",
 ];
 
-/// The three delegation numbers, computed from the agent records the Runtime
-/// still holds — no separate counters to drift out of sync with reality.
+/// Delegation and model-tier numbers computed from the agent records the
+/// Runtime still holds — no separate counters to drift out of sync with
+/// reality.
 ///
 /// Every rate is printed with its denominator, and a rate with no denominator
 /// prints `-` rather than a reassuring 0%: "nothing was verified" and "nothing
@@ -1179,6 +1185,14 @@ async fn report_agent_metrics(home: &Path) -> Result<()> {
                 .is_some_and(|profile| WORKER_PROFILES.contains(&profile))
         })
         .count();
+    let standard = children
+        .iter()
+        .filter(|agent| agent.profile.as_deref() == Some("implementer"))
+        .count();
+    let deep = children
+        .iter()
+        .filter(|agent| agent.profile.as_deref() == Some("deep"))
+        .count();
     let verified = children
         .iter()
         .filter(|agent| agent.verifier_passed.is_some())
@@ -1193,6 +1207,11 @@ async fn report_agent_metrics(home: &Path) -> Result<()> {
         .sum::<u64>();
 
     println!("agents\tchildren={}\tworkers={workers}", children.len());
+    println!("model_tiers\tworker={workers}\tstandard={standard}\tdeep={deep}");
+    println!(
+        "deep_share\t{}\t(actual deep child runs / all child runs; target <= 5%)",
+        rate(deep, children.len())
+    );
     println!(
         "skill_coverage\t{}\t(narrow worker runs / all child runs; target >= 50%)",
         rate(workers, children.len())

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.38.0-rc2] - 2026-08-19
+
+### Fixed
+- **TUI 审批不再依赖英文输入法。** “允许一次”“始终允许”“拒绝”改为上下多行菜单，支持方向键选择后按 `Enter`、`Y/A/N` 快捷键、中文“是/否”和整行鼠标左键点击；未识别按键与输入法提交文本会被忽略，不再像旧实现那样被误判为拒绝。
+
+### Tests
+- 新增输入法字符不触发审批、上下菜单确认、Y/N 快捷键与精确鼠标行命中的回归测试。
+
+## [0.38.0-rc1] - 2026-08-19
+
+### Added
+- **TUI 新增 `/routing` 模型与路由设置面板。** 可持久修改 Root Provider/模型、九个子 Agent 工种的 Provider/模型/上下文窗口、小模型路由开关、只读自动派工开关和 Deep 调用预算；`Space` 一键恢复 some.im 推荐托管映射，`Ctrl+S` 原子保存。
+- **Web 左栏新增“模型与路由”设置。** 提供与 TUI 相同的持久化配置矩阵及中英日文案；非回环监听只允许读取，不允许通过无鉴权 Web 修改本机配置。
+- 新增模型路由配置 API 和版本指纹。UI 保存只修改受管 TOML 键并保留其他段落与注释；若用户同时手改 `config.toml`，旧页面保存会返回冲突而不是覆盖新内容。
+
+### Changed
+- 设置语义对齐 Swift WillDeep/Xedit 的 `ModelBinding`：空 Provider/模型表示继承或推荐默认，显式 Provider/模型在运行时解析；Rust 版按产品要求允许覆盖 some.im 托管模型，并提供恢复推荐值的入口。
+- 模型路由配置使用同目录 `0600` 临时文件、落盘同步及原子替换。新值对新 Harness/子 Agent 生效，正在运行的任务不热切模型。
+
+### Tests
+- 新增 TOML 注释与跨客户端字段保留、显式/推荐模型往返、陈旧版本拒绝和 TUI 推荐映射恢复测试；同步运行 Rust 静态检查、工作区测试、Web ESLint 与生产构建。
+
+## [0.37.0-rc1] - 2026-08-19
+
+### Added
+- **Small-model-first 路由进入 Runtime，而不再只靠系统提示词。** 高置信度的定位、阅读、日志分析和 Git 追溯在 Root 调用前自动下发对应的 `someim-32b-<trade>`；测试/构建故障与普通实现分别路由到有 Verifier 的 Worker 或 GLM-5 `implementer`。每次决策以 `route_decided` 事件持久化并在终端/TUI 可见。
+- **`deep` 改为申请制。** `spawn_agent(profile="deep")` 必须提交升级票据（失败原因、已尝试的低档工种、上下文证据、不可拆分原因）；Runtime 会用本 Harness 已观察到的 Worker/仓库检查交叉验证，并按 `max_deep_calls_per_harness` 控制 1M 上下文预算。
+- `[agent]` 新增 `small_model_routing`、`auto_dispatch_read_only` 与 `max_deep_calls_per_harness`。默认开启小模型路由、自动只读预检，每个 Harness 最多一次 Deep 升级。
+- Core Runtime 直接识别 `<goal>…</goal>`，Web、TUI、Headless 与恢复 Session 共用同一个 GoalContinuation 闭环。
+
+### Changed
+- some.im 默认 Root 模型由 `deepseek-v4-flash` 改为 `glm-5`；示例配置不再用显式 `glm-5` 覆盖七个托管窄工种，因此这些工种会真正命中 `someim-32b-scout/reader/editor/test-fixer/build-fixer/log-inspector/git-detective`。`deep` 显式绑定 1M 的 `deepseek-v4-flash`。
+- Task Packet 将上下文输入 `read_files` 与精确写权限 `write_files` 分离；旧 `relevant_files` 保持兼容，但新派工不再因为“让 Worker 看见文件”而顺手授予写权限。未知 Profile 不再静默回落到 `deep`。
+- 固定上下文税显著下降：系统提示中的技能路由索引限制为 4KB，完整技能正文继续按需读取；MCP 不再把全部工具 Schema 常驻每轮请求，改为 `list_mcp_tools` 搜索后通过 `call_mcp_tool` 按名调用。
+- `willdeep daemon agent-metrics` 新增 Worker/Standard/Deep 实际运行数与 Deep Share，直接从 Runtime 的子 Agent 记录计算，用于持续检查 Deep 调用占比是否保持在 5% 以内。
+
+### Tests
+- 新增路由分类、Deep 票据/观测证据/预算、Goal Runtime 激活、Goal 文本与当前请求隔离、技能摘要上限及 MCP 按需索引测试；同步加强示例配置，锁定 Root、Worker 与 Deep 的真实模型绑定。
+
 ## [0.36.0-rc1] - 2026-08-19
 
 ### Added

@@ -1,6 +1,6 @@
 # 模型上下文三档切分（model-tiers.v1）
 
-> 2026-08-16 定稿，2026-08-17 按企业私有部署目标取消 16K 并引入 256K `implementer`。与 macOS 版 Xedit 共用同一套档位语义；rs 侧实现状态见文末。
+> 2026-08-16 定稿，2026-08-19 将路由与 Deep 准入从提示词升级为 Runtime 强制策略。与 macOS 版 Xedit 共用同一套档位语义；rs 侧实现状态见文末。
 > 关联：`docs/SKILL_WORKERS.md`（S 档的完整落地）、Xedit `docs/SMALL_MODEL_SKILL_WORKERS_DESIGN.md`。
 
 ## 动机：不只是省钱，是主权
@@ -117,10 +117,10 @@ S 档不是新东西——`SKILL_WORKERS.md` 的窄工种就是 S 档执行器�
 `implementer` 是 M 档执行器。本文档补的是上面两层：M 档作为日常编码默认、L 档作为申请制稀缺资源，以及 **skill → tier 的显式
 关联**（`tier:` frontmatter），让派工决策在读技能正文之前就能做。
 
-worker-tier 技能的标准执行路径：主会话读到 `tier=worker` → 编 Task Packet
-（goal / 相关文件 / verifier=技能自带的验证命令）→ `spawn_agent` 派给对应工种
-→ Runtime 跑 verifier 判定。技能正文由 worker 用 `read_skill` 自取，不占主会话
-窗口。
+worker-tier 技能的标准执行路径：主会话从 4KB 路由索引或 `list_skills` 读到
+`tier=worker` → 编 Task Packet（goal / read_files / write_files / verifier=技能自带的
+验证命令）→ `spawn_agent` 派给对应工种 → Runtime 将技能正文内联并跑 verifier
+判定。完整技能库和正文都不再常驻主会话窗口。
 
 ## 实现状态（rs 侧）
 
@@ -128,11 +128,15 @@ worker-tier 技能的标准执行路径：主会话读到 `tier=worker` → 编 
 |---|---|
 | `tier:` frontmatter 解析（worker/standard/deep，容错别名 small/medium/large） | ✅ 0.27.0-rc1 |
 | `list_skills` / 技能摘要带 tier | ✅ 0.27.0-rc1 |
-| 系统提示词教会主会话 tier 路由 | ✅ 0.27.0-rc1 |
+| 系统提示词教会主会话 tier 路由 | ✅ 0.27.0-rc1；0.37.0-rc1 起只是补充说明，真实准入由 Runtime 决定 |
 | 技能库 29 个逐个标注 | ✅ 2026-08-16（写入 `~/.willdeep/skills`） |
 | 16K 档退出 | ✅ 0.33.0-rc1——最低档提升到 32K，reader/editor/build_fixer 使用 48K，test_fixer 使用 64K |
 | 256K 通用编码执行器 | ✅ 0.33.0-rc1——`implementer` 支持有界多文件创建/编辑、可选 verifier、最多 16 个声明路径和独立 Worktree |
 | 写入权限继承 | ✅ 0.33.0-rc1——`smart/workspace-write` 的 Worker 继承工作区写权限免额外审批；`strict` 仍审批，`read-only` 仍拒绝 |
-| L / M 档模型绑定 | ✅ 用现有网关模型：L=`deepseek-v4-flash`、M=`glm-5.x`/`kimi-k3`（均实测在线），不建新虚拟模型。派 L 档任务即 `spawn_agent` 时经 `[subagents.deep] model = "deepseek-v4-flash"` 绑定，或会话内直接换模型 |
+| L / M 档模型绑定 | ✅ 0.37.0-rc1 默认 Root=`glm-5`，七个窄工种自动命中 `someim-32b-<trade>`，L=`deepseek-v4-flash`；显式配置仍可覆盖 |
+| 确定性请求路由 | ✅ 0.37.0-rc1——定位/阅读/日志/Git 追溯自动 S 档预检，测试/构建/实现写入结构化路由事件，Goal 信封不污染当前请求分类 |
+| L 档升级票据与预算 | ✅ 0.37.0-rc1——必须携带低档尝试、上下文证据与不可拆分原因；Runtime 交叉验证本 Harness 观测并限制调用次数 |
+| 固定上下文税 | ✅ 0.37.0-rc1——技能路由摘要上限 4KB，MCP Schema 改为搜索后按需加载 |
+| 模型路由设置界面 | ✅ 0.38.0-rc1——TUI `/routing` 与 Web 设置矩阵共同原子更新 `config.toml`，支持推荐默认、显式覆盖、上下文档位、Deep 预算和并发修改冲突检测 |
 | worker-tier 技能的确定性派工触发 | ✅ 0.28.0-rc1——`list_skills` 命中 worker 技能时结果尾部附 `<delegation-hint>` 派工配方（仅主 Agent；子 Agent 不能派生，给它提示只是噪音）。配套 `task.skill`：Runtime 把技能正文内联进 Worker 首条消息，Worker 不再需要自己取指令 |
 | air-gapped 降级的自动化（分片 + 归纳） | ✅ 0.28.0-rc1——`task.digest_oversized`：超过内联预算的材料由 Worker 自己的廉价模型分片消化（标识符/断言原文保留，逐块标注 digested，失败的块点名不静默），默认关闭因为它花模型调用，开关在派工者手里 |

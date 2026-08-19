@@ -1,0 +1,90 @@
+.routing-dialog {
+  width: min(1100px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.routing-warning {
+  padding: 8px 10px;
+  margin-bottom: 14px;
+  border: 1px solid #725e2d;
+  border-radius: 7px;
+  background: #2b2413;
+  color: #e8c978;
+  font-size: 13px;
+}
+
+.routing-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.routing-root-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.routing-grid label > span {
+  display: block;
+  margin-bottom: 5px;
+  color: #8fa4ba;
+  font-size: 12px;
+}
+
+.routing-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #cbd7e3;
+  font-size: 13px;
+}
+
+.routing-check input,
+.routing-table input[type="checkbox"] {
+  accent-color: #5f8fe8;
+}
+
+.routing-table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
+}
+
+.routing-table th,
+.routing-table td {
+  padding: 8px 7px;
+  border-bottom: 1px solid #253342;
+  text-align: left;
+  font-size: 12px;
+}
+
+.routing-table th {
+  color: #8290a3;
+  font-weight: 600;
+}
+
+.routing-table td:first-child {
+  color: #e6edf5;
+  font-weight: 600;
+}
+
+.routing-table input,
+.routing-table select {
+  width: 100%;
+  min-width: 110px;
+  padding: 7px 8px;
+  border: 1px solid #405266;
+  border-radius: 6px;
+  background: #101820;
+  color: #dce6f1;
+}
+
+.routing-table input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+}
+
+@media (max-width: 760px) {
+  .routing-root-grid {
+    grid-template-columns: 1fr;
+  }
+}

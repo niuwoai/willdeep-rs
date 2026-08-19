@@ -45,6 +45,7 @@ mod diff_review_ui;
 mod dispatch;
 mod model_commands;
 mod rendering;
+mod routing_settings;
 mod runtime_ui;
 mod session_commands;
 mod sidebar;
@@ -62,6 +63,7 @@ use model_commands::{
     switch_model,
 };
 use rendering::*;
+use routing_settings::{RoutingSettingsAction, RoutingSettingsState, render_routing_settings};
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::handle_session_command;
@@ -150,6 +152,7 @@ struct App {
     transcript: Vec<String>,
     running: bool,
     approval: Option<ApprovalRequest>,
+    approval_selected: usize,
     /// Approvals that arrived while another one was on screen. Without this
     /// queue the newer request overwrote the older one, dropping its oneshot
     /// sender — which the harness reads as a silent Deny the user never saw.
@@ -251,6 +254,8 @@ struct App {
     model_picker: Option<ModelPickerState>,
     model_picker_rect: Rect,
     model_picker_hits: Vec<(u16, usize)>,
+    routing_settings: Option<RoutingSettingsState>,
+    routing_settings_rect: Rect,
     pending_session_switch: Option<PendingSessionSwitch>,
     transcript_rect: Rect,
     command_rect: Rect,
@@ -258,6 +263,7 @@ struct App {
     skill_rect: Rect,
     skill_hits: Vec<(u16, usize)>,
     approval_rect: Rect,
+    approval_action_hits: Vec<(Rect, ApprovalDecision)>,
     question_rect: Rect,
     question_hits: Vec<(u16, usize)>,
     search_rect: Rect,
@@ -334,6 +340,22 @@ enum PaletteAction {
 /// A pending approval: what is being asked, whether Always Allow applies,
 /// and the channel the waiting harness is parked on.
 type ApprovalRequest = (String, bool, oneshot::Sender<ApprovalDecision>);
+
+const APPROVAL_DECISIONS: [ApprovalDecision; 2] =
+    [ApprovalDecision::AllowOnce, ApprovalDecision::Deny];
+const APPROVAL_DECISIONS_WITH_ALWAYS: [ApprovalDecision; 3] = [
+    ApprovalDecision::AllowOnce,
+    ApprovalDecision::AlwaysAllow,
+    ApprovalDecision::Deny,
+];
+
+fn approval_decisions(always: bool) -> &'static [ApprovalDecision] {
+    if always {
+        &APPROVAL_DECISIONS_WITH_ALWAYS
+    } else {
+        &APPROVAL_DECISIONS
+    }
+}
 pub type TuiRuntimeInputs = (
     mpsc::UnboundedSender<UiMessage>,
     mpsc::UnboundedReceiver<UiMessage>,
@@ -940,7 +962,10 @@ async fn event_loop(
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>{
-                    if let Some(picker)=app.model_picker.as_mut() {
+                    if app.approval.is_some() {
+                        app.handle_approval_text(&value);
+                    } else if app.routing_settings_paste(&value) {
+                    } else if let Some(picker)=app.model_picker.as_mut() {
                         picker.editor.insert(&value);
                         app.refresh_model_picker_matches();
                     } else if let Some(picker)=app.session_picker.as_mut() {
@@ -952,9 +977,12 @@ async fn event_loop(
                 },
                 Event::Mouse(mouse)=>{
                     if app.question.is_some()||app.approval.is_some() {
-                        if matches!(mouse.kind,MouseEventKind::Down(_)) {
+                        if mouse.kind==MouseEventKind::Down(MouseButton::Left) {
                             app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
                         }
+                        continue;
+                    }
+                    if app.routing_settings.is_some() {
                         continue;
                     }
                     if app.model_picker.is_some() {
@@ -1056,7 +1084,7 @@ async fn event_loop(
                         }
                         continue;
                     }
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
+                    if app.routing_settings.is_none()&&key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
                         execute!(term.backend_mut(), DisableMouseCapture)?;
                         app.enter_native_selection_mode();
                         continue;
@@ -1065,7 +1093,7 @@ async fn event_loop(
                     if key.code==KeyCode::Esc&&app.mobile_qr.take().is_some(){continue;}
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if app.approval.is_some(){
-                        app.resolve_approval(|always|match key.code {KeyCode::Char('y')|KeyCode::Char('Y')=>ApprovalDecision::AllowOnce,KeyCode::Char('a')|KeyCode::Char('A') if always=>ApprovalDecision::AlwaysAllow,_=>ApprovalDecision::Deny});
+                        app.handle_approval_key(key);
                         continue;
                     }
                     if let Some(detail)=app.attention_detail.clone(){
@@ -1262,6 +1290,23 @@ async fn event_loop(
                                 Ok(preview)=>if let Some(review)=app.diff_review.as_mut(){review.commit_preview=Some(preview);},
                                 Err(error)=>app.notice=Some(format!("{}: {error}",language.text("生成 Commit Preview 失败","Commit Preview failed","Commit Preview に失敗しました"))),
                             }
+                        }
+                        continue;
+                    }
+                    if app.routing_settings.is_some(){
+                        match app.handle_routing_settings_key(key) {
+                            RoutingSettingsAction::None=>{},
+                            RoutingSettingsAction::Close=>app.routing_settings=None,
+                            RoutingSettingsAction::Save(update)=>{
+                                let config_path=runtime.runtime_submit.config.clone().map(Ok).unwrap_or_else(crate::config::default_config_path);
+                                match config_path.and_then(|path|crate::model_routing::save(&path,runtime.runtime_submit.profile.as_deref(),&update)) {
+                                    Ok(settings)=>{
+                                        app.set_routing_settings_saved(settings);
+                                        app.notice=Some(language.text("模型与路由设置已保存","Models and routing saved","モデルとルーティングを保存しました").to_owned());
+                                    },
+                                    Err(error)=>app.set_routing_settings_error(error.to_string()),
+                                }
+                            },
                         }
                         continue;
                     }
@@ -1481,6 +1526,14 @@ async fn event_loop(
                                 }
                                 continue;
                             }
+                            if prompt.trim()=="/routing" {
+                                let config_path=runtime.runtime_submit.config.clone().map(Ok).unwrap_or_else(crate::config::default_config_path);
+                                match config_path.and_then(|path|crate::model_routing::load(&path,runtime.runtime_submit.profile.as_deref())) {
+                                    Ok(settings)=>app.open_routing_settings(settings),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("读取模型路由设置失败","Load model routing settings failed","モデルルーティング設定の読込に失敗"))),
+                                }
+                                continue;
+                            }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if let Some(parsed)=daemon_commands::parse(&prompt) {
                                 match parsed {
@@ -1535,6 +1588,7 @@ async fn event_loop(
             }},
             Some(message)=runtime.rx.recv()=>match message {
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在整理思路","Working through it","考えを整理中").to_owned();app.transient_thought=Some(compact_thought(&v));},
+                UiMessage::Agent(AgentEvent::RouteDecided{tier,profile,confidence,auto_dispatched,..})=>app.record_progress(format!("{} {} · {} · {confidence}%{}",language.text("模型路由","Model route","モデルルート"),tier.as_str(),profile.as_deref().unwrap_or("root"),if auto_dispatched{language.text(" · 已自动下发"," · auto-dispatched"," · 自動ディスパッチ済み")}else{""})),
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
@@ -1585,6 +1639,7 @@ impl App {
             transcript,
             running: false,
             approval: None,
+            approval_selected: 0,
             approval_queue: VecDeque::new(),
             question: None,
             question_queue: VecDeque::new(),
@@ -1677,6 +1732,8 @@ impl App {
             model_picker: None,
             model_picker_rect: Rect::default(),
             model_picker_hits: Vec::new(),
+            routing_settings: None,
+            routing_settings_rect: Rect::default(),
             pending_session_switch: None,
             transcript_rect: Rect::default(),
             command_rect: Rect::default(),
@@ -1684,6 +1741,7 @@ impl App {
             skill_rect: Rect::default(),
             skill_hits: Vec::new(),
             approval_rect: Rect::default(),
+            approval_action_hits: Vec::new(),
             question_rect: Rect::default(),
             question_hits: Vec::new(),
             search_rect: Rect::default(),
@@ -2578,7 +2636,70 @@ impl App {
             return false;
         }
         self.approval = Some(request);
+        self.approval_selected = 0;
         true
+    }
+
+    /// Approval dialogs must remain usable while an IME owns alphabetic
+    /// keystrokes. Unknown keys are consumed without deciding anything;
+    /// Enter confirms the selected row and Esc explicitly denies.
+    fn handle_approval_key(&mut self, key: KeyEvent) {
+        let Some((_, always, _)) = self.approval.as_ref() else {
+            return;
+        };
+        let always = *always;
+        let decisions = approval_decisions(always);
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT);
+        let decision = match key.code {
+            KeyCode::Up | KeyCode::Left if plain => {
+                self.approval_selected = self
+                    .approval_selected
+                    .checked_sub(1)
+                    .unwrap_or(decisions.len() - 1);
+                None
+            }
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab if plain => {
+                self.approval_selected = (self.approval_selected + 1) % decisions.len();
+                None
+            }
+            KeyCode::BackTab if plain => {
+                self.approval_selected = self
+                    .approval_selected
+                    .checked_sub(1)
+                    .unwrap_or(decisions.len() - 1);
+                None
+            }
+            KeyCode::Enter if plain => decisions.get(self.approval_selected).copied(),
+            KeyCode::Esc => Some(ApprovalDecision::Deny),
+            KeyCode::Char('y' | 'Y' | '是') if plain => Some(ApprovalDecision::AllowOnce),
+            KeyCode::Char('a' | 'A') if plain && always => Some(ApprovalDecision::AlwaysAllow),
+            KeyCode::Char('n' | 'N' | '否') if plain => Some(ApprovalDecision::Deny),
+            _ => None,
+        };
+        if let Some(decision) = decision {
+            self.resolve_approval(|_| decision);
+        }
+    }
+
+    /// Some terminals surface committed IME text as a paste event. Accept
+    /// only an exact approval word and never leak it into the prompt behind
+    /// the modal.
+    fn handle_approval_text(&mut self, value: &str) {
+        let Some((_, always, _)) = self.approval.as_ref() else {
+            return;
+        };
+        let normalized = value.trim().to_lowercase();
+        let decision = match normalized.as_str() {
+            "y" | "yes" | "是" | "允许" | "同意" => Some(ApprovalDecision::AllowOnce),
+            "a" | "always" | "始终允许" if *always => Some(ApprovalDecision::AlwaysAllow),
+            "n" | "no" | "否" | "拒绝" => Some(ApprovalDecision::Deny),
+            _ => None,
+        };
+        if let Some(decision) = decision {
+            self.resolve_approval(|_| decision);
+        }
     }
 
     /// Answer the visible approval and immediately promote the next queued
@@ -2590,6 +2711,7 @@ impl App {
         };
         let _ = sender.send(decide(always));
         self.approval = self.approval_queue.pop_front();
+        self.approval_selected = 0;
     }
 
     /// Show a question immediately, or queue it behind the visible one.
@@ -3066,25 +3188,16 @@ impl App {
                     self.search_rect.width.saturating_sub(2).max(1) as usize,
                 );
             }
-        } else if self.approval.is_some()
-            && self.approval_rect.contains((x, y).into())
-            && y >= self.approval_rect.bottom().saturating_sub(2)
-        {
-            let relative = x.saturating_sub(self.approval_rect.x) as usize;
-            let width = self.approval_rect.width.max(1) as usize;
-            self.resolve_approval(|always| {
-                if always {
-                    match relative.saturating_mul(3) / width {
-                        0 => ApprovalDecision::AllowOnce,
-                        1 => ApprovalDecision::AlwaysAllow,
-                        _ => ApprovalDecision::Deny,
-                    }
-                } else if relative < width / 2 {
-                    ApprovalDecision::AllowOnce
-                } else {
-                    ApprovalDecision::Deny
-                }
-            });
+        } else if self.approval.is_some() && self.approval_rect.contains((x, y).into()) {
+            let point = (x, y).into();
+            if let Some((_, decision)) = self
+                .approval_action_hits
+                .iter()
+                .find(|(rect, _)| rect.contains(point))
+                .copied()
+            {
+                self.resolve_approval(|_| decision);
+            }
         } else if self.question.is_some() && self.question_rect.contains((x, y).into()) {
             if let Some((_, selected)) = self
                 .question_hits
@@ -3182,6 +3295,7 @@ impl App {
                 | "/local"
                 | "/mobile"
                 | "/model"
+                | "/routing"
                 | "/runtime"
                 | "/session"
                 | "/webapp"
@@ -3973,6 +4087,7 @@ fn draw(
             }
         }
         render_model_picker(f, app);
+        render_routing_settings(f, app);
         app.search_rect = Rect::default();
         if let Some(search) = &app.search {
             let width = f.area().width.min(72);
@@ -4322,20 +4437,51 @@ fn draw(
         render_agent_overlays(f, app);
         render_attention_detail(f, app);
         app.approval_rect = Rect::default();
+        app.approval_action_hits.clear();
         if let Some((description, always, _)) = &app.approval {
-            let content = approval_content(description, *always, app.language);
-            let popup = centered_rect(modal_width(f.area()), 9.min(f.area().height), f.area());
+            let description = description.clone();
+            let always = *always;
+            let action_count = approval_decisions(always).len() as u16;
+            let popup_height = if always { 12 } else { 11 }.min(f.area().height);
+            let popup = centered_rect(modal_width(f.area()), popup_height, f.area());
             app.approval_rect = popup;
             paint_modal_halo(f, popup);
-            f.render_widget(
-                Paragraph::new(content)
-                    .block(modal_block(
-                        approval_title(app.language, app.approval_queue.len()),
-                        Color::LightYellow,
-                    ))
-                    .wrap(Wrap { trim: false }),
-                popup,
+            let block = modal_block(
+                approval_title(app.language, app.approval_queue.len()),
+                Color::LightYellow,
             );
+            let inner = block.inner(popup);
+            f.render_widget(block, popup);
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(action_count),
+                ])
+                .split(inner);
+            f.render_widget(
+                Paragraph::new(description).wrap(Wrap { trim: false }),
+                rows[0],
+            );
+            for (index, decision) in approval_decisions(always).iter().copied().enumerate() {
+                let row = Rect::new(
+                    rows[2].x,
+                    rows[2].y.saturating_add(index as u16),
+                    rows[2].width,
+                    1.min(rows[2].height.saturating_sub(index as u16)),
+                );
+                if row.height == 0 {
+                    continue;
+                }
+                let selected = app.approval_selected == index;
+                f.render_widget(
+                    Paragraph::new(approval_action_text(decision, app.language, selected))
+                        .style(approval_action_style(decision, selected)),
+                    row,
+                );
+                app.approval_action_hits.push((row, decision));
+            }
             let halo = modal_halo(popup, f.area());
             seal_modal_background(f.buffer_mut(), halo);
         }
@@ -4647,45 +4793,35 @@ fn first_line(description: &str) -> String {
         .collect()
 }
 
-fn approval_content(description: &str, always: bool, language: Language) -> Vec<Line<'static>> {
-    let allow_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let deny_style = Style::default()
-        .fg(Color::White)
-        .bg(Color::Red)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let mut content = description
-        .lines()
-        .map(|line| Line::raw(line.to_owned()))
-        .collect::<Vec<_>>();
-    content.push(Line::raw(""));
-    let mut actions = vec![
-        Span::styled(" Y ", allow_style),
-        Span::styled(
-            language.text(" 允许一次  ", " Allow once  ", " 一度だけ許可  "),
-            label_style,
+fn approval_action_text(decision: ApprovalDecision, language: Language, selected: bool) -> String {
+    let marker = if selected { "▶" } else { " " };
+    let (shortcut, label) = match decision {
+        ApprovalDecision::AllowOnce => (
+            "Y / Enter",
+            language.text("允许一次", "Allow once", "一度だけ許可"),
         ),
-    ];
-    if always {
-        actions.extend([
-            Span::styled(" A ", allow_style),
-            Span::styled(
-                language.text(" 始终允许  ", " Always allow  ", " 常に許可  "),
-                label_style,
-            ),
-        ]);
+        ApprovalDecision::AlwaysAllow => {
+            ("A", language.text("始终允许", "Always allow", "常に許可"))
+        }
+        ApprovalDecision::Deny => ("N / Esc", language.text("拒绝", "Disallow", "拒否")),
+    };
+    format!("{marker}  {shortcut:<10}  {label}")
+}
+
+fn approval_action_style(decision: ApprovalDecision, selected: bool) -> Style {
+    if selected {
+        return Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD);
     }
-    actions.extend([
-        Span::styled(" N ", deny_style),
-        Span::styled(language.text(" 拒绝", " Disallow", " 拒否"), label_style),
-    ]);
-    content.push(Line::from(actions));
-    content
+    Style::default()
+        .fg(if decision == ApprovalDecision::Deny {
+            Color::LightRed
+        } else {
+            Color::LightYellow
+        })
+        .add_modifier(Modifier::BOLD)
 }
 
 fn session_picker_result_line(

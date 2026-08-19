@@ -131,6 +131,13 @@ pub struct AgentSettings {
     pub safety_judge: Option<bool>,
     /// Model used for the judge. Defaults to the profile's cheap model.
     pub judge_model: Option<String>,
+    /// Deterministic worker/standard/deep routing. Defaults to enabled.
+    pub small_model_routing: Option<bool>,
+    /// Dispatch high-confidence read-only requests before the root model sees
+    /// the repository. Defaults to enabled when routing is enabled.
+    pub auto_dispatch_read_only: Option<bool>,
+    /// Admission budget for the scarce deep profile in one harness.
+    pub max_deep_calls_per_harness: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -144,8 +151,8 @@ pub struct SkillSettings {
 /// WillDeep.app and the CLI read out of the same file. Rejecting unknown keys
 /// would mean the app cannot add a field without breaking every CLI that has
 /// not been upgraded yet, which would weld the two release trains together.
-/// Unknown keys here are ignored; the CLI never rewrites the file, so nothing
-/// is lost on the way back out.
+/// Unknown keys here are ignored; the model-routing editor patches only its
+/// named scalar keys, so desktop-only values survive a TUI/Web save.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[allow(dead_code)] // Sound fields belong to the desktop client; the CLI only carries them.
 pub struct NotificationSettings {
@@ -254,7 +261,7 @@ pub fn willdeep_home() -> Result<PathBuf> {
         .to_path_buf())
 }
 
-fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
+pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     if let Some(version) = file.version
         && version != CONFIG_VERSION
     {
@@ -267,6 +274,13 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         && !(1..=100).contains(&max_turns)
     {
         bail!("agent.max_turns must be between 1 and 100");
+    }
+    if file
+        .agent
+        .max_deep_calls_per_harness
+        .is_some_and(|value| value > 16)
+    {
+        bail!("agent.max_deep_calls_per_harness must be between 0 and 16");
     }
     crate::i18n::Language::parse(file.agent.language.as_deref())?;
     if file.notifications.webhook_enabled.unwrap_or(false) {
@@ -476,6 +490,19 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn deep_budget_is_bounded_and_can_be_disabled() {
+        let disabled: ConfigFile =
+            toml::from_str("version = 1\n[agent]\nmax_deep_calls_per_harness = 0\n")
+                .expect("parse disabled deep budget");
+        validate(&disabled, Path::new("config.toml")).expect("zero disables deep");
+
+        let excessive: ConfigFile =
+            toml::from_str("version = 1\n[agent]\nmax_deep_calls_per_harness = 17\n")
+                .expect("parse excessive deep budget");
+        assert!(validate(&excessive, Path::new("config.toml")).is_err());
+    }
+
+    #[test]
     fn example_config_stays_valid() {
         let parsed: ConfigFile = toml::from_str(include_str!("../../../config.example.toml"))
             .expect("parse config.example.toml");
@@ -489,6 +516,26 @@ base_url = "https://example.com/v1"
             parsed.notifications.webhook_url.as_deref(),
             Some("http://127.0.0.1:8787/willdeep")
         );
+        let some_im = parsed.providers.get("some-im").expect("some.im profile");
+        assert_eq!(some_im.model.as_deref(), Some("glm-5"));
+        assert_eq!(parsed.agent.small_model_routing, Some(true));
+        assert_eq!(parsed.agent.auto_dispatch_read_only, Some(true));
+        assert_eq!(parsed.agent.max_deep_calls_per_harness, Some(1));
+        for hosted in [
+            "scout",
+            "reader",
+            "editor",
+            "test_fixer",
+            "build_fixer",
+            "log_inspector",
+            "git_detective",
+        ] {
+            let profile = parsed.subagents.get(hosted).expect("hosted worker policy");
+            assert_eq!(profile.provider_profile, None, "{hosted} provider override");
+            assert_eq!(profile.model, None, "{hosted} model override");
+        }
+        let deep = parsed.subagents.get("deep").expect("deep profile");
+        assert_eq!(deep.model.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]

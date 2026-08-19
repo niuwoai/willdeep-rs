@@ -27,15 +27,18 @@ default_provider = "some-im"
 max_turns = 24
 approval = "smart"
 language = "zh-CN"      # zh-CN | en | ja
+small_model_routing = true
+auto_dispatch_read_only = true
+max_deep_calls_per_harness = 1
 
 [providers.some-im]
 provider = "some-im"
 api = "chat-completions"
 api_base = "https://some.im/v1"
 api_key_env = "SOMEIM_API_KEY"
-model = "deepseek-v4-flash"
+model = "glm-5"
 vision_model = "qwen3-vl-plus"
-context_window = 128000
+context_window = 131072
 
 [providers.openai]
 provider = "openai-compatible"
@@ -68,6 +71,9 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | `max_turns` | 模型/工具轮次上限 |
 | `approval` | `strict` / `smart`（默认）/ `workspace-write`，见 [审批与自动化](APPROVALS.md) |
 | `language` | 界面语言 `zh-CN` / `en` / `ja` |
+| `small_model_routing` | Runtime 小模型优先路由；默认 `true` |
+| `auto_dispatch_read_only` | 自动把高置信度定位、阅读、日志、Git 追溯派给窄工种；默认 `true` |
+| `max_deep_calls_per_harness` | 每个 Harness 允许的 1M Deep 升级次数，`0..16`，默认 `1` |
 
 ## `[providers.*]` 段
 
@@ -117,7 +123,7 @@ willdeep --provider some-im --api anthropic-messages ...
 
 ```bash
 export SOMEIM_API_KEY="<your-key>"
-willdeep --provider some-im --model deepseek-v4-flash --workspace . "检查当前仓库"
+willdeep --provider some-im --model glm-5 --workspace . "检查当前仓库"
 ```
 
 详见 [some.im 集成](SOMEIM_INTEGRATION.md)。
@@ -193,6 +199,20 @@ API Key 的完整解析链和权限强制规则见 [认证与凭据](AUTHENTICAT
 3. 自动探测（Web 端读浏览器语言，默认 `zh-CN`）。
 
 Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage 中。
+
+## 图形化模型路由设置
+
+- TUI 输入 `/routing`；
+- Web 左栏点击“模型与路由”。
+
+两者编辑同一个 `config.toml`，覆盖 Root Provider/模型、`[agent]` 路由开关与 Deep
+预算，以及 `[subagents.*]` 的 Provider、模型和上下文窗口。空的 Worker Provider/模型
+表示采用推荐默认：some.im 的七个托管工种使用 `someim-32b-<trade>`，其余情况继承
+Root/Provider。显式值始终优先。
+
+保存使用配置内容指纹检测并发修改，并通过 `0600` 临时文件原子替换；不会重写无关
+字段或整份文件的注释。若页面打开后又手改了文件，保存会失败，重新打开设置即可。
+正在运行的 Harness 不热切配置，新值从下一次 Harness/子 Agent 创建开始生效。
 
 ## 其他配置段
 

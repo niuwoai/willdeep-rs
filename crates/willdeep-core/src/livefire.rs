@@ -654,11 +654,10 @@ async fn skill_worker_range() {
 
         let writes = case.verifier.is_some();
         let targets = writes.then(|| BTreeSet::from([fixture.join("src/lib.rs")]));
-        let mut relevant_files = vec!["src/lib.rs".to_owned()];
+        let mut task_files = vec!["src/lib.rs".to_owned()];
         if !writes {
-            // 只读工种的 relevant_files 同时就是写通道，所以这里刻意留空：
-            // 让它自己去找，测的才是「找」这门手艺。
-            relevant_files.clear();
+            // 让只读工种自己去找，测的才是「找」这门手艺。
+            task_files.clear();
         }
         let started = Instant::now();
         let outcome = catalog
@@ -673,7 +672,9 @@ async fn skill_worker_range() {
                     run_in_background: Some(false),
                     task: Some(TaskPacket {
                         goal: case.goal.to_owned(),
-                        relevant_files,
+                        read_files: task_files.clone(),
+                        write_files: if writes { task_files } else { Vec::new() },
+                        relevant_files: Vec::new(),
                         known_facts: case.known_facts.iter().map(|f| (*f).to_owned()).collect(),
                         constraints: case.constraints.iter().map(|c| (*c).to_owned()).collect(),
                         verifier: case.verifier.map(|command| TaskVerifier {

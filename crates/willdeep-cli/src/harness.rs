@@ -6,8 +6,8 @@ use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::tools::{ApprovalSource, ApprovalTrace};
 use willdeep_core::{
     Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
-    BackgroundTaskStatus, EventSink, ProviderSafetyJudge, SafetyJudge, SubagentCatalog,
-    ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
+    BackgroundTaskStatus, EventSink, ProviderSafetyJudge, RoutingGuard, RoutingPolicy, SafetyJudge,
+    SubagentCatalog, ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
 };
 
 use crate::config::LoadedConfig;
@@ -363,7 +363,7 @@ pub(crate) async fn build(
         .model
         .clone()
         .or_else(|| profile.and_then(|provider| provider.model.clone()))
-        .or_else(|| (kind == ProviderKind::SomeIm).then(|| "deepseek-v4-flash".to_owned()))
+        .or_else(|| (kind == ProviderKind::SomeIm).then(|| "glm-5".to_owned()))
         .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: base.clone(),
@@ -544,7 +544,7 @@ pub(crate) async fn build(
         system_prompt.push_str(
             "\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill. Entries may carry a tier: `tier=worker` marks a skill whose steps fit a small-context worker — prefer dispatching it via spawn_agent with a task packet instead of running it inline; `tier=deep` marks work that needs the largest window available. Untagged skills run at the session's default tier.\n",
         );
-        system_prompt.push_str(&skills.summary());
+        system_prompt.push_str(&skills.routing_summary(4_096));
     }
     let context_window = profile
         .and_then(|value| value.context_window)
@@ -652,6 +652,9 @@ pub(crate) async fn build(
         subagents.clone(),
     )?;
     let goal_continuation = Arc::new(willdeep_core::GoalContinuation::new());
+    if let Some(goal) = resumed.and_then(|session| session.goal.as_deref()) {
+        goal_continuation.activate(goal, willdeep_core::GoalBudget::default());
+    }
     let mut agent = Agent::new(
         provider,
         tools,
@@ -666,6 +669,12 @@ pub(crate) async fn build(
     .with_subagents(subagents)
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone());
+    if loaded.file.agent.small_model_routing.unwrap_or(true) {
+        agent = agent.with_routing_guard(Arc::new(RoutingGuard::new(RoutingPolicy {
+            auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
+            max_deep_calls: loaded.file.agent.max_deep_calls_per_harness.unwrap_or(1),
+        })));
+    }
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }

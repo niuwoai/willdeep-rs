@@ -9,7 +9,7 @@ export SOMEIM_API_KEY="<your-key>"
 
 willdeep \
   --provider some-im \
-  --model deepseek-v4-flash \
+  --model glm-5 \
   --workspace ~/Sites/project \
   "检查当前仓库并修复测试"
 ```
@@ -22,9 +22,9 @@ provider = "some-im"
 api = "chat-completions"
 api_base = "https://some.im/v1"
 api_key_env = "SOMEIM_API_KEY"
-model = "deepseek-v4-flash"
+model = "glm-5"
 vision_model = "qwen3-vl-plus"
-context_window = 128000
+context_window = 131072
 ```
 
 ## 登录
@@ -53,7 +53,7 @@ willdeep --onboarding
 export WILLDEEP_API_BASE="https://api.niuwoai.com/v1"
 ```
 
-`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认模型为 `deepseek-v4-flash`。
+`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认 Root 模型为 `glm-5`。1M 的 `deepseek-v4-flash` 只作为通过升级票据后的 Deep 档使用。
 
 ## 请求头
 
@@ -113,7 +113,7 @@ vision_model = "qwen3-vl-plus"
 
 ## 子 Agent 的廉价模型
 
-Provider 为 some.im 时，子 Agent 的默认廉价模型固定为 `glm-5`。可以在 `[subagents.*]` 中显式绑定其它 Profile 与模型来覆盖，见 [子 Agent 与后台任务](SUBAGENTS.md)。
+Provider 为 some.im 时，七个托管窄工种自动绑定各自的 `someim-32b-<trade>`，未托管工种回落 `glm-5`；`implementer` 使用 GLM-5，`deep` 推荐显式绑定 `deepseek-v4-flash`。可以在 `[subagents.*]` 中显式覆盖，见 [子 Agent 与后台任务](SUBAGENTS.md)。
 
 ## 错误脱敏
 
