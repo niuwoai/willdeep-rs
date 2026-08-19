@@ -38,7 +38,7 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
@@ -46,6 +46,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
             "/goal <文本>|off",
             "/compress",
             "/model [模型名]",
+            "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:端口]",
             "/sidebar [on|off]",
@@ -64,6 +65,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
             "/goal <text>|off",
             "/compress",
             "/model [model]",
+            "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:PORT]",
             "/sidebar [on|off]",
@@ -82,6 +84,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
             "/goal <テキスト>|off",
             "/compress",
             "/model [モデル名]",
+            "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:ポート]",
             "/sidebar [on|off]",
@@ -110,7 +113,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 16] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 17] {
     [
         (
             "/help",
@@ -134,6 +137,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "列出、筛选或切换当前模型",
                 "List, filter, or switch the current model",
                 "現在のモデルを一覧・絞り込み・切替",
+            ),
+        ),
+        (
+            "/routing",
+            language.text(
+                "配置 Root、Worker 与 Deep 模型路由",
+                "Configure Root, Worker, and Deep model routing",
+                "Root、Worker、Deep のモデルルーティングを設定",
             ),
         ),
         (

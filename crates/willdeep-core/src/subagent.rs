@@ -15,6 +15,7 @@ use crate::background::{
 };
 use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
 use crate::provider::Provider;
+use crate::routing::EscalationTicket;
 use crate::safety::CommandSafety;
 use crate::subagent_worktree::{
     PreparedSubagentWorkspace, SubagentWorktreeManager, SubagentWorktreePolicy,
@@ -148,6 +149,16 @@ pub struct TaskPacket {
     #[serde(default)]
     pub skill: Option<String>,
     #[serde(default)]
+    pub read_files: Vec<String>,
+    /// Exact write allowlist for writing profiles. Kept separate from
+    /// `read_files` so giving a worker enough context never grants it more
+    /// authority. When absent, legacy `relevant_files` remains the write set
+    /// for backwards compatibility.
+    #[serde(default)]
+    pub write_files: Vec<String>,
+    /// Legacy combined read/write set. New callers should use `read_files`
+    /// plus `write_files`; old packets retain their original semantics.
+    #[serde(default)]
     pub relevant_files: Vec<String>,
     #[serde(default)]
     pub known_facts: Vec<String>,
@@ -164,6 +175,31 @@ pub struct TaskPacket {
     /// the dispatcher's decision to make, not the runtime's.
     #[serde(default)]
     pub digest_oversized: Option<bool>,
+}
+
+impl TaskPacket {
+    fn inline_files(&self) -> Vec<String> {
+        let mut files = Vec::new();
+        for path in self
+            .read_files
+            .iter()
+            .chain(self.write_files.iter())
+            .chain(self.relevant_files.iter())
+        {
+            if !files.contains(path) {
+                files.push(path.clone());
+            }
+        }
+        files
+    }
+
+    fn requested_write_files(&self) -> Vec<String> {
+        if self.write_files.is_empty() {
+            self.relevant_files.clone()
+        } else {
+            self.write_files.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -235,12 +271,13 @@ pub(crate) struct SpawnAgentArgs {
     pub run_in_background: Option<bool>,
     pub target_file: Option<String>,
     pub task: Option<TaskPacket>,
+    pub escalation: Option<EscalationTicket>,
 }
 
 impl SpawnAgentArgs {
     /// Paths the parent is asking this worker to be allowed to modify: the
-    /// packet's `relevant_files` for a file-set profile, the single
-    /// `target_file` for the editor.
+    /// packet's `write_files` for a file-set profile, the single `target_file`
+    /// for the editor. Legacy packets fall back to `relevant_files`.
     pub(crate) fn requested_write_targets(&self, scope: SubagentWriteScope) -> Vec<String> {
         match scope {
             SubagentWriteScope::None => Vec::new(),
@@ -249,7 +286,7 @@ impl SpawnAgentArgs {
                 let mut files = self
                     .task
                     .as_ref()
-                    .map(|task| task.relevant_files.clone())
+                    .map(TaskPacket::requested_write_files)
                     .unwrap_or_default();
                 if let Some(target) = &self.target_file
                     && !files.contains(target)
@@ -356,9 +393,13 @@ impl SubagentCatalog {
             .map_or(SubagentWriteScope::None, |profile| profile.write_scope)
     }
 
+    pub(crate) fn has_profile(&self, id: &str) -> bool {
+        self.profiles.contains_key(&id.trim().to_ascii_lowercase())
+    }
+
     fn profile(&self, id: Option<&str>) -> Option<&SubagentProfile> {
         let id = id.unwrap_or("deep").trim().to_ascii_lowercase();
-        self.profiles.get(&id).or_else(|| self.profiles.get("deep"))
+        self.profiles.get(&id)
     }
 
     pub(crate) async fn run(
@@ -382,6 +423,12 @@ impl SubagentCatalog {
             .unwrap_or("deep")
             .trim()
             .to_ascii_lowercase();
+        if profile_id == "deep" {
+            return Err(AgentError::Subagent(
+                "external deep spawn is disabled; the parent Agent must provide a runtime-validated escalation ticket"
+                    .to_owned(),
+            ));
+        }
         let selected = self.profiles.get(&profile_id).ok_or_else(|| {
             AgentError::Subagent(format!("subagent profile not found: {profile_id}"))
         })?;
@@ -448,7 +495,7 @@ impl SubagentCatalog {
         if profile.write_scope.writes() && approved_targets.as_ref().is_none_or(BTreeSet::is_empty)
         {
             return Err(AgentError::Subagent(format!(
-                "profile {} may write, so it requires an approved file set: pass target_file, or task.relevant_files for a file-set profile",
+                "profile {} may write, so it requires an approved file set: pass target_file, or task.write_files for a file-set profile",
                 profile.id
             )));
         }
@@ -1362,12 +1409,13 @@ async fn compose_brief(
             verifier.expected_exit_code()
         ));
     }
-    if !task.relevant_files.is_empty() {
+    let inline_files = task.inline_files();
+    if !inline_files.is_empty() {
         let budget = inline_budget(profile.context_window);
         brief.push_str(
             &inline_relevant_files(
                 workspace,
-                &task.relevant_files,
+                &inline_files,
                 budget,
                 task.digest_oversized.unwrap_or(false),
                 profile,
@@ -1719,7 +1767,7 @@ pub fn builtin_profiles(
                     "edit_file",
                     "run_command",
                 ],
-                prompt: "Your trade is BOUNDED IMPLEMENTATION. Complete the requested multi-file change inside the declared file set. Inspect neighboring code, preserve public behaviour outside the task, and use the verifier when one is supplied. You may create or edit only paths declared in task.relevant_files. Report changed files, verification and remaining uncertainty.",
+                prompt: "Your trade is BOUNDED IMPLEMENTATION. Complete the requested multi-file change inside the declared file set. Inspect neighboring code, preserve public behaviour outside the task, and use the verifier when one is supplied. You may create or edit only paths declared in task.write_files (legacy packets use task.relevant_files). Report changed files, verification and remaining uncertainty.",
                 max_turns: 18,
                 context_window: STANDARD_WINDOW,
                 tool_output_limit: Some(PAYLOAD_LIMIT_IMPLEMENTER),
@@ -2335,6 +2383,17 @@ mod tests {
             catalog
                 .spawn_external_read_only(
                     uuid::Uuid::new_v4(),
+                    "inspect everything".to_owned(),
+                    None,
+                    Some("deep".to_owned()),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            catalog
+                .spawn_external_read_only(
+                    uuid::Uuid::new_v4(),
                     "inspect".to_owned(),
                     None,
                     Some("missing".to_owned()),
@@ -2756,7 +2815,9 @@ mod tests {
             "fix it",
             Some(&TaskPacket {
                 goal: "make testCrossSignOff pass".to_owned(),
-                relevant_files: vec!["target.rs".to_owned(), "missing.rs".to_owned()],
+                read_files: vec!["target.rs".to_owned(), "missing.rs".to_owned()],
+                write_files: vec!["target.rs".to_owned()],
+                relevant_files: Vec::new(),
                 known_facts: vec!["broke at caba8df7".to_owned()],
                 constraints: vec!["do not change the public API".to_owned()],
                 verifier: Some(TaskVerifier {

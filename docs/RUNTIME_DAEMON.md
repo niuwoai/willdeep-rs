@@ -215,7 +215,7 @@ Commit Preview 是只读的，汇总提交消息、暂存/未暂存文件、分�
 
 CLI、TUI 和 Web 的 Workspace、Session、Turn、Task、Agent、审批、问答和 Diff 管理统一使用共享 Client，不再手写操作名、参数 JSON 或旧资源 URL。修改操作携带显式 Request ID 并进入跨重启幂等日志。
 
-外部 Spawn 只接受活跃 Session、Prompt、可选标签和 `scout` / `reader` / `deep` 只读 Profile；父 Agent、Task 与 Workspace 由 Runtime 推导，调用方不能提交路径或写目标。
+外部 Spawn 只接受活跃 Session、Prompt、可选标签和 `scout` / `reader` / `log_inspector` / `git_detective` Worker 档只读 Profile；父 Agent、Task 与 Workspace 由 Runtime 推导，调用方不能提交路径或写目标。`deep` 必须由父 Agent 携带升级票据调用，外部 Spawn 不能绕过准入。
 
 进程内 Harness 的 Task、Interaction、Agent 命令及 Daemon 生命周期使用带内部标记的 `/v1/internal` 私有传输，**不属于公开协议**。
 

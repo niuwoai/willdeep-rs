@@ -9,6 +9,7 @@ mod livefire;
 pub mod mcp;
 pub mod prompt;
 pub mod provider;
+pub mod routing;
 pub mod safety;
 pub mod session;
 pub mod skills;
@@ -36,6 +37,7 @@ pub use goal::{
 pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
+pub use routing::{EscalationTicket, RouteDecision, RoutingGuard, RoutingPolicy, RoutingTier};
 pub use safety::{CommandSafety, classify_with_workspace_write};
 pub use session::{Session, SessionDigest, SessionStore, format_iso8601};
 pub use skills::SkillCatalog;

@@ -31,12 +31,12 @@ Stable tool contract:
 
 Delegation contract:
 - Treat deployable 32K/48K/64K/256K models as the default execution substrate, not merely a cost optimization. Keep data and work on the configured private provider whenever the task fits; use the parent/deep model only when the material or reasoning genuinely cannot be bounded.
-- Delegate self-contained work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, implementer for a bounded multi-file feature or refactor, test_fixer for failing tests, build_fixer for compile and lint errors, deep only for open-ended repository-wide investigation.
+- Delegate self-contained work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, implementer for a bounded multi-file feature or refactor, test_fixer for failing tests, build_fixer for compile and lint errors. Deep is scarce: use it only for indivisible repository-wide work, after lower tiers were attempted, and include an escalation ticket with runtime-checkable evidence.
 - Prefer delegation whenever you can state the goal, a write set of at most 16 files, and relevant facts. Do not keep ordinary multi-file coding in the parent merely because it is more substantial than a trivial fix.
 - A skill listed as tier=worker belongs in a worker, not in your window: spawn_agent with task.skill set to the skill name and the runtime inlines its body for the worker. Oversized inputs can ride task.digest_oversized instead of being dropped.
-- Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.relevant_files for every file it will need to read or change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
+- Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.read_files for context it may inspect, task.write_files for the exact files it may change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
 - Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run. test_fixer and build_fixer require one.
-- A writing worker's files are exactly task.relevant_files (or target_file for editor), resolved as one set under the active workspace policy, so declare every existing or new path it may modify and no more."#;
+- A writing worker's files are exactly task.write_files (or target_file for editor), resolved as one set under the active workspace policy. task.read_files adds context without adding write authority. Legacy task.relevant_files remains a combined set only for backwards compatibility."#;
 
 pub fn build_system_prompt(workspace: &Path) -> String {
     let mut sections = vec![STABLE_CONTRACT.to_owned()];
@@ -133,6 +133,8 @@ mod tests {
             "build_fixer",
             "log_inspector",
             "git_detective",
+            "task.read_files",
+            "task.write_files",
             "task.relevant_files",
             "task.known_facts",
             "task.verifier.command",

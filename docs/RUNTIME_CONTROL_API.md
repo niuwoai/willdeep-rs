@@ -112,7 +112,7 @@ diff.revert
 }
 ```
 
-成功响应是状态为 `queued` 的 `RuntimeAgent`，其中 `id` 可直接传给 `agent.get` 或 `agent.wait`。当前公开 Spawn 固定后台执行，Profile 仅允许 `scout`、`reader`、`deep`；它不接受 Parent ID、Task ID、Workspace、工具权限、`target_file` 或前台执行开关。
+成功响应是状态为 `queued` 的 `RuntimeAgent`，其中 `id` 可直接传给 `agent.get` 或 `agent.wait`。当前公开 Spawn 固定后台执行，Profile 仅允许 `scout`、`reader`、`log_inspector`、`git_detective`；它不接受 Parent ID、Task ID、Workspace、工具权限、`target_file` 或前台执行开关。`deep` 只允许父 Agent 携 Runtime 校验的升级票据发起。
 
 内嵌 Web 的同源适配端点为 `POST /api/runtime/agents/spawn`。浏览器请求额外携带当前选择的 `workspace`，服务端先以启动白名单与 Runtime 注册表交叉验证 Workspace，再确认 `session_id` 属于该 Workspace 且存在活动 Turn；随后只把经过边界校验的 `session_id`、`prompt`、只读 `profile` 和可选 `label` 转交统一 `agent.spawn`。该适配层不接受 Parent ID、Task ID、Child ID、路径、工具权限或写 Profile，成功返回 HTTP `202` 与公开 Agent 摘要。
 

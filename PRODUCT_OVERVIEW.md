@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-18 | 当前版本：v0.35.0-rc3
+> 最后更新：2026-08-19 | 当前版本：v0.38.0-rc2
 
 ## 项目简介
 
@@ -22,8 +22,9 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 顶层 `willdeep session list/get/turns/stop` 查询持久会话并精确停止其 active Turn；
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
 - TOML 多 Provider Profile 与安全凭据引用；
+- TUI `/routing` 与 Web“模型与路由”设置共用同一套持久化配置：可调整 Root、九个子 Agent 工种、上下文窗口、自动派工与 Deep 预算；保存带版本冲突检测并原子更新 `config.toml`，可一键恢复 some.im 推荐 Worker 映射；
 - TUI 支持 `/model <模型名>` 直接切换当前 Session 模型；裸 `/model` 从 Provider `/v1/models` 获取模型，提供模糊筛选、键盘翻页、鼠标滚动和点击选择，并同步 Runtime 与进程内 Agent；
-- TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；
+- TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；Core Runtime 统一识别 `<goal>` 信封，Web、TUI 与 Headless 共用同一续推判定；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
 - 后台 Shell 由同版本内部 Supervisor 通过匿名帧管道接收命令并监视父 Harness 存活；命令不进入进程参数或 Runtime 资源索引，Unix 在取消、超时或父端断开时终止独立进程组；
@@ -34,7 +35,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
-- Ratatui 多轮 TUI、可滚动聊天记录、可点击聚焦并展开/收起的聚合工具活动和界面内审批；
+- Ratatui 多轮 TUI、可滚动聊天记录、可点击聚焦并展开/收起的聚合工具活动和界面内审批；审批动作纵向排列，支持方向键加 Enter、Y/A/N、中文“是/否”和整行鼠标点击，输入法提交的无关字符不会触发决定；
 - TUI 侧边栏右下角以低对比度常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
 - 空白新会话的即时工作区欢迎引导；
 - 多行 Prompt 编辑使用同一套 Unicode 单元格规则完成换行、滚动、鼠标定位与光标渲染；支持 F2 临时展开为终端大输入空间，并保留文本粘贴附件和可删除图片附件；
@@ -48,14 +49,14 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 统一 `agent.spawn` API 与 Rust Client 可在活跃 Session 中创建稳定 ID 的后台只读子 Agent，并通过 `agent.wait` 观察完成；父级、Task 和 Workspace 均由服务端推导，外部调用不能选择写目标；
 - Web Runtime 侧栏按当前 Workspace 展示 Agent、后台 Task、待审批/回答、关注项、Tool 与 Artifact 摘要；进行中与最近五分钟完成的 Task 可查看状态、Profile、耗时、退出码、失败域和归属时间线，Workspace、Prompt、命令、参数、输出、报告、路径、模型、配置、PID 和内部错误不会下发；
 - Web Runtime 侧栏可解决三类审批、回答单选/多选/自定义问题，并停止、重试、指定模型重试或补充后台 Agent；写操作重新验证 Workspace 和目标归属，请求体拒绝客户端夹带额外作用域；
-- Web Runtime 侧栏可在活动父会话中创建 Scout、Reader、Deep 只读子 Agent；父级、Task、Workspace 和 Child ID 均由 Runtime 推导，聊天 SSE 输出不会锁死审批、回答和 Agent 控件；
+- Web Runtime 侧栏可在活动父会话中创建 Scout、Reader、Log Inspector、Git Detective 四种 Worker 档只读子 Agent；Deep 必须由父 Agent 走升级票据；父级、Task、Workspace 和 Child ID 均由 Runtime 推导，聊天 SSE 输出不会锁死审批、回答和 Agent 控件；
 - Web Runtime 摘要默认收起但持续刷新，历史会话默认可见并使用明确的暗色对比度；空白会话不进入历史列表，技能候选提供独立搜索框，侧栏 Footer 展示服务端当前版本；
 - Web Agent 与待处理 Task 详情按公开 `agent_id` / `task_id` 展示最近工具时间线、状态、耗时和 Diff Artifact；仅使用已脱敏 Runtime DTO，不下发 Prompt、工具载荷、报告、路径或内部错误；
 - Rust Runtime Client 覆盖 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销，TUI Diff Center 直接复用；
 - Worktree Review、Merge、Audit、Quarantine 已进入统一 API 和 Rust Client，精确 Review/Snapshot ID 与确认字段继续约束写操作；
 - 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
 - TUI 状态行常驻 `Ctrl+S 选择` 入口；聊天区也可直接拖动进入内建选区，以 `Ctrl/Cmd+C` 或 `Y` 复制、`Q` 引用，并以 `Esc` 返回普通交互；
-- TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建只读 Scout、Reader、Deep 子 Agent；
+- TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建 Scout、Reader、Log Inspector、Git Detective 四种 Worker 档只读子 Agent；
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `Ctrl+R` 可按标题或消息内容搜索当前 Workspace 的历史会话，展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
@@ -138,7 +139,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Web 恢复请求与 Turn 完成竞态安全：若断线期间活动 Turn 已进入终态，服务端从最新持久 Turn 和 Core Session 返回最终消息，而不是要求仍存在 `active_turn_id`；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
-- MCP stdio 工具发现、注册和调用。
+- MCP stdio 工具发现、注册和调用；工具 Schema 不再全量常驻每轮上下文，通过 `list_mcp_tools` 按需搜索、`call_mcp_tool` 精确调用；
 - `/goal` 命令模式和 `$skill-name` 显式技能触发；
 - 分阶段 CLI/TUI/Runtime 产品路线图与逐项验收状态；
 - `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
@@ -150,11 +151,11 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 上下文用量、Token（K/M 两位小数）、缓存命中率、耗时、自动摘要压缩及宽屏后台状态侧栏。
 - `/compress` 手动压缩当前会话上下文并立即保存；
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
-- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer 九个工种；默认优先使用可私有部署的 32K / 48K / 64K / 256K 档位，支持为企业内网或离线环境独立绑定模型；
-- Task Packet 结构化派工（目标 / 已知事实 / 约束 / 相关文件内联 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
+- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer 九个工种；Runtime 将高置信度只读请求自动派给 someim-32b 托管工种，Root 默认使用 GLM-5，Deep 必须通过升级票据和每 Harness 调用预算；
+- Task Packet 结构化派工（目标 / 已知事实 / 约束 / `read_files` 上下文 / `write_files` 精确权限 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
 - 写入型工种的文件集写通道：最多声明 16 个现有或待创建文件，`smart/workspace-write` 继承主 Agent 工作区写权限，`strict` 一次审批整个集合，越界拒绝并给出扩权路径，运行中文件集互斥；
 - 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；
-- 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Skill Coverage、Worker Verified Success 与 Escalation Rate 三个指标，「未验证」是独立于通过与失败的第三种答案；
+- 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Worker/Standard/Deep 实际运行数、Deep Share、Skill Coverage、Worker Verified Success 与 Escalation Rate，「未验证」是独立于通过与失败的第三种答案；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
 - Core `ask_user` 候选单选/多选与自由输入交互；
 - Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；
@@ -188,7 +189,7 @@ docs/                   架构与协议说明
 ```bash
 SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
   --provider some-im \
-  --model deepseek-v4-flash \
+  --model glm-5 \
   --workspace . \
   '检查项目状态'
 ```
@@ -200,6 +201,7 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] Provider 原生 token streaming；当前 SSE 已实时传输 Harness 阶段、工具进度和最终回答。
 - [ ] ACP/Codex App Server/Goose 接入；
 - [ ] MCP Streamable HTTP 与 OAuth；
+- [ ] LSP 诊断、Hooks/插件、自动记忆与 OS 级 Shell 沙箱；当前已有结构化工具门禁、工作区边界和小模型路由，但这些仍是与 Claude Code 完整能力面的主要差距；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；

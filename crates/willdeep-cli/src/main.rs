@@ -21,6 +21,7 @@ mod harness;
 mod i18n;
 mod integrations;
 mod mobile;
+mod model_routing;
 mod notify;
 mod onboarding;
 mod projects;
@@ -1295,6 +1296,19 @@ impl EventSink for TerminalSink {
             return;
         }
         match event {
+            AgentEvent::RouteDecided {
+                tier,
+                profile,
+                confidence,
+                auto_dispatched,
+                reason,
+            } => eprintln!(
+                "[route] tier={} profile={} confidence={} auto={} reason={reason}",
+                tier.as_str(),
+                profile.as_deref().unwrap_or("root"),
+                confidence,
+                auto_dispatched
+            ),
             AgentEvent::TurnStarted { turn } if turn > 1 => eprintln!("[turn {turn}]"),
             AgentEvent::ToolRequested(call) => eprintln!("[tool] {}", call.name),
             AgentEvent::ToolCompleted {
@@ -1381,6 +1395,20 @@ impl EventSink for TerminalSink {
 
 pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
     match event {
+        AgentEvent::RouteDecided {
+            tier,
+            profile,
+            confidence,
+            auto_dispatched,
+            reason,
+        } => serde_json::json!({
+            "type": "route_decided",
+            "tier": tier.as_str(),
+            "profile": profile,
+            "confidence": confidence,
+            "auto_dispatched": auto_dispatched,
+            "reason": reason
+        }),
         AgentEvent::TurnStarted { turn } => {
             serde_json::json!({"type": "turn_started", "turn": turn})
         }
@@ -1908,6 +1936,23 @@ mod tests {
         assert_eq!(
             agent_event_json(AgentEvent::AssistantText("ready".to_string())),
             serde_json::json!({"type": "assistant_text", "text": "ready"})
+        );
+        assert_eq!(
+            agent_event_json(AgentEvent::RouteDecided {
+                tier: willdeep_core::RoutingTier::Worker,
+                profile: Some("scout".to_owned()),
+                confidence: 90,
+                auto_dispatched: true,
+                reason: "bounded read-only work".to_owned(),
+            }),
+            serde_json::json!({
+                "type": "route_decided",
+                "tier": "worker",
+                "profile": "scout",
+                "confidence": 90,
+                "auto_dispatched": true,
+                "reason": "bounded read-only work"
+            })
         );
         assert_eq!(
             agent_event_json(AgentEvent::BackgroundShellCompleted {

@@ -5,9 +5,11 @@ use async_trait::async_trait;
 
 use crate::background::BackgroundTaskRegistry;
 use crate::goal::{
-    ContinuationDecision, ContinuationRung, GoalContinuation, RoundObservation, SoftStopReason,
+    ContinuationDecision, ContinuationRung, GoalBudget, GoalContinuation, RoundObservation,
+    SoftStopReason,
 };
 use crate::provider::{Provider, ProviderError};
+use crate::routing::{RoutingGuard, RoutingTier};
 use crate::subagent::{SpawnAgentArgs, SubagentCatalog};
 use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage};
@@ -82,6 +84,15 @@ pub enum AgentEvent {
         is_error: bool,
     },
     Usage(Usage),
+    /// Deterministic routing decision made by the runtime, before provider
+    /// prompting. Deep events are emitted only after admission succeeds.
+    RouteDecided {
+        tier: RoutingTier,
+        profile: Option<String>,
+        confidence: u8,
+        auto_dispatched: bool,
+        reason: String,
+    },
     CompressionStarted {
         estimated_tokens: u64,
     },
@@ -238,6 +249,7 @@ pub struct Agent {
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
     background_tasks: Option<Arc<BackgroundTaskRegistry>>,
+    routing: Option<Arc<RoutingGuard>>,
 }
 
 impl Agent {
@@ -252,6 +264,7 @@ impl Agent {
             instruction_inbox: None,
             goal_continuation: None,
             background_tasks: None,
+            routing: None,
         }
     }
 
@@ -321,6 +334,12 @@ impl Agent {
         self
     }
 
+    /// Attach deterministic small-model routing and deep-tier admission.
+    pub fn with_routing_guard(mut self, routing: Arc<RoutingGuard>) -> Self {
+        self.routing = Some(routing);
+        self
+    }
+
     fn background_active(&self) -> bool {
         self.background_tasks
             .as_ref()
@@ -369,6 +388,12 @@ impl Agent {
                 });
             }
         }
+        if let Some(goal) = goal_from_message(&user_message.content)
+            && let Some(continuation) = &self.goal_continuation
+        {
+            continuation.activate(goal, GoalBudget::default());
+        }
+        self.apply_runtime_route(&mut user_message).await;
         messages.retain(|message| message.role != crate::types::Role::System);
         messages.insert(0, Message::system(&self.config.system_prompt));
         // The approval judge reads this as inert context: it decides whether
@@ -513,7 +538,13 @@ impl Agent {
     {
         Box::pin(async move {
             if call.name != "spawn_agent" {
-                return self.tools.execute(call).await;
+                let result = self.tools.execute(call).await;
+                if result.is_ok()
+                    && let Some(routing) = &self.routing
+                {
+                    routing.record_tool_success(&call.name);
+                }
+                return result;
             }
             let catalog = self
                 .subagents
@@ -530,22 +561,118 @@ impl Agent {
                     tool: call.name.clone(),
                     source,
                 })?;
-            let scope = catalog.write_scope(args.profile.as_deref());
+            let profile = args
+                .profile
+                .as_deref()
+                .unwrap_or("deep")
+                .trim()
+                .to_ascii_lowercase();
+            if !catalog.has_profile(&profile) {
+                return Err(ToolError::Network(format!(
+                    "subagent profile not found: {profile}"
+                )));
+            }
+            if let Some(routing) = &self.routing
+                && profile == "deep"
+            {
+                routing
+                    .authorize_deep(args.escalation.as_ref())
+                    .map_err(ToolError::Network)?;
+                self.sink
+                    .emit(AgentEvent::RouteDecided {
+                        tier: RoutingTier::Deep,
+                        profile: Some(profile.clone()),
+                        confidence: 100,
+                        auto_dispatched: false,
+                        reason: "runtime-validated escalation ticket".to_owned(),
+                    })
+                    .await;
+            }
+            let scope = catalog.write_scope(Some(&profile));
             let approved_targets = if scope.writes() {
                 let requested = args.requested_write_targets(scope);
                 if requested.is_empty() {
                     return Err(ToolError::OutsideWorkspace(
-                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for implementer, test_fixer or build_fixer".to_owned(),
+                        "a writing profile needs its files declared up front: target_file for editor, task.write_files for implementer, test_fixer or build_fixer".to_owned(),
                     ));
                 }
                 Some(self.tools.approve_subagent_write_set(&requested).await?)
             } else {
                 None
             };
+            if profile != "deep"
+                && let Some(routing) = &self.routing
+            {
+                // Only count a lower-tier attempt after its task packet and
+                // write authority have passed validation. A rejected packet
+                // must not become evidence that unlocks Deep.
+                routing.record_profile_attempt(&profile);
+            }
             catalog
                 .run(args, approved_targets)
                 .await
                 .map_err(|error| ToolError::Network(error.to_string()))
+        })
+    }
+
+    fn apply_runtime_route<'a>(
+        &'a self,
+        user_message: &'a mut Message,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // A delegated run owns another Agent. Type-erasing this edge keeps
+        // the parent's async state from recursively embedding the child's.
+        Box::pin(async move {
+            let (Some(routing), Some(catalog)) = (&self.routing, &self.subagents) else {
+                return;
+            };
+            let decision = routing.route(routing_request_from_message(&user_message.content));
+            self.sink
+                .emit(AgentEvent::RouteDecided {
+                    tier: decision.tier,
+                    profile: decision.profile.map(str::to_owned),
+                    confidence: decision.confidence,
+                    auto_dispatched: decision.auto_dispatch_read_only,
+                    reason: decision.reason.to_owned(),
+                })
+                .await;
+            let Some(profile) = decision.profile else {
+                return;
+            };
+            if !decision.auto_dispatch_read_only {
+                if let Some(steering) = decision.steering() {
+                    user_message.content.push_str("\n\n");
+                    user_message.content.push_str(&steering);
+                }
+                return;
+            }
+
+            routing.record_profile_attempt(profile);
+            let prompt = user_message.content.clone();
+            let report = catalog
+                .run(
+                    SpawnAgentArgs {
+                        prompt,
+                        label: Some(format!("runtime preflight: {profile}")),
+                        profile: Some(profile.to_owned()),
+                        run_in_background: Some(false),
+                        ..SpawnAgentArgs::default()
+                    },
+                    None,
+                )
+                .await;
+            let report = match report {
+                Ok(report) => report,
+                Err(error) => format!(
+                    "The `{profile}` preflight failed. Continue on the standard tier and do not treat this as evidence that deep is required. Error: {error}"
+                ),
+            };
+            user_message.content.push_str(&format!(
+                "\n\n<runtime-route tier=\"worker\" profile=\"{profile}\" confidence=\"{}\">\n\
+The runtime dispatched this bounded read-only preflight before the standard model. Use the report as evidence, verify citations when needed, and answer without re-reading the same material unless it is incomplete.\n\
+<worker-report>\n{report}\n</worker-report>\n\
+</runtime-route>",
+                decision.confidence
+            ));
         })
     }
 
@@ -656,6 +783,36 @@ impl Agent {
             .await;
         Ok(result)
     }
+}
+
+/// Frontends share the same explicit goal envelope. Parsing it in the core
+/// keeps Web, TUI and headless Runtime behavior identical.
+fn goal_from_message(content: &str) -> Option<String> {
+    const OPEN: &str = "<goal>";
+    const CLOSE: &str = "</goal>";
+    let start = content.find(OPEN)? + OPEN.len();
+    let rest = &content[start..];
+    let end = rest.find(CLOSE)?;
+    let goal = rest[..end].trim();
+    if goal.is_empty() || goal.len() > 16 * 1024 {
+        return None;
+    }
+    Some(goal.to_owned())
+}
+
+/// Goal frontends repeat a broad objective on every turn. Route the current
+/// request, not that repeated envelope, or one word such as "implement" in
+/// the goal would pin every later read-only question to the standard tier.
+fn routing_request_from_message(content: &str) -> &str {
+    let Some((_, tail)) = content.split_once("</goal>") else {
+        return content;
+    };
+    let tail = tail.trim_start();
+    let tail = tail
+        .strip_prefix("Continue until this goal is genuinely complete.")
+        .unwrap_or(tail)
+        .trim_start();
+    if tail.is_empty() { content } else { tail }
 }
 
 /// 裁掉任何单条超过窗口 `OVERSIZED_MESSAGE_PERCENT` 的消息的中段，保留首尾。
@@ -943,6 +1100,154 @@ mod tests {
         assert_eq!(outcome.final_text, "done");
         assert_eq!(outcome.stop_reason, AgentStopReason::Finished);
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn goal_envelope_activates_continuation_in_the_core_runtime() {
+        let provider = RecordingProvider::new(&[
+            "I have only inspected the first part.",
+            "Everything is verified. <goal-status>complete</goal-status>",
+        ]);
+        let continuation = Arc::new(GoalContinuation::new());
+        let agent = Agent::new(
+            provider.clone(),
+            registry("goal-envelope"),
+            AgentConfig {
+                max_turns: 3,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_goal_continuation(continuation.clone());
+
+        let outcome = agent
+            .run("<goal>\nship the runtime\n</goal>\nContinue until this goal is genuinely complete.\n\ninspect the queue")
+            .await
+            .expect("goal should continue until the marker");
+
+        assert_eq!(outcome.turns, 2);
+        assert_eq!(outcome.stop_reason, AgentStopReason::GoalComplete);
+        assert!(!continuation.is_active());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deep_spawn_is_refused_before_provider_work_without_a_ticket() {
+        let provider = RecordingProvider::new(&["unused"]);
+        let root =
+            std::env::temp_dir().join(format!("willdeep-deep-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let catalog = Arc::new(SubagentCatalog::new(
+            &root,
+            crate::subagent::builtin_profiles(provider.clone(), provider.clone(), 128_000),
+            Arc::new(BackgroundTaskRegistry::default()),
+        ));
+        let agent = Agent::new(
+            provider,
+            registry("deep-gate"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_subagents(catalog)
+        .with_routing_guard(Arc::new(RoutingGuard::new(Default::default())));
+        let call = ToolCall {
+            id: "deep-1".to_owned(),
+            name: "spawn_agent".to_owned(),
+            arguments: serde_json::json!({
+                "profile": "deep",
+                "prompt": "inspect everything"
+            })
+            .to_string(),
+        };
+
+        let error = agent
+            .execute_tool(&call)
+            .await
+            .expect_err("deep without a ticket must be rejected");
+
+        assert!(error.to_string().contains("deep requires escalation"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn rejected_write_packet_does_not_unlock_deep() {
+        let provider = RecordingProvider::new(&["unused"]);
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-invalid-packet-deep-gate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let catalog = Arc::new(SubagentCatalog::new(
+            &root,
+            crate::subagent::builtin_profiles(provider.clone(), provider.clone(), 128_000),
+            Arc::new(BackgroundTaskRegistry::default()),
+        ));
+        let agent = Agent::new(
+            provider,
+            registry("invalid-packet-deep-gate"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_subagents(catalog)
+        .with_routing_guard(Arc::new(RoutingGuard::new(Default::default())));
+        let invalid_implementer = ToolCall {
+            id: "implementer-invalid".to_owned(),
+            name: "spawn_agent".to_owned(),
+            arguments: serde_json::json!({
+                "profile": "implementer",
+                "prompt": "change the implementation"
+            })
+            .to_string(),
+        };
+        let deep = ToolCall {
+            id: "deep-after-invalid".to_owned(),
+            name: "spawn_agent".to_owned(),
+            arguments: serde_json::json!({
+                "profile": "deep",
+                "prompt": "inspect everything",
+                "escalation": {
+                    "reason": "cross-module invariants still conflict",
+                    "attempted_profiles": ["implementer"],
+                    "context_evidence": "twenty modules remain coupled after slicing",
+                    "why_not_decompose": "the same invariant must be proven across every module"
+                }
+            })
+            .to_string(),
+        };
+
+        let packet_error = agent
+            .execute_tool(&invalid_implementer)
+            .await
+            .expect_err("writing profile without targets must be rejected");
+        assert!(packet_error.to_string().contains("files declared up front"));
+        let deep_error = agent
+            .execute_tool(&deep)
+            .await
+            .expect_err("rejected task packet must not count as lower-tier evidence");
+        assert!(
+            deep_error
+                .to_string()
+                .contains("runtime observed neither a lower-tier worker attempt")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repeated_goal_text_does_not_poison_the_current_route() {
+        let message = "<goal>\nimplement the entire product\n</goal>\nContinue until this goal is genuinely complete.\n\n定位登录检查在哪个文件";
+        assert_eq!(
+            routing_request_from_message(message),
+            "定位登录检查在哪个文件"
+        );
     }
 
     #[tokio::test]

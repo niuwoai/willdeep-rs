@@ -35,7 +35,7 @@
 | `reader` | 阅读和总结长文件或文档 | read / list / search | 48K |
 | `log_inspector` | 解释失败日志、归类错误 | read | 32K |
 | `git_detective` | 回归定位与 commit 考古 | git log / diff / blame / status / read | 32K |
-| `deep` | 跨文件深入调查（父模型） | search / grep / read / list / git status | 继承会话 |
+| `deep` | 无法分片的跨库/超长材料调查 | search / grep / read / list / git status | 1M（需升级票据） |
 | `editor` | 修改一个明确目标文件 | read / edit | 48K |
 | `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / verifier | 256K |
 | `test_fixer` | 把失败测试修到绿（需 verifier） | read / edit / run_command | 64K |
@@ -45,13 +45,13 @@
 
 硬性约束：子 Agent **看不到父对话、不能询问用户、不能继续派生**。
 
-外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只接受 `scout` / `reader` / `deep` / `log_inspector` / `git_detective` 五种**只读** Profile，父级、Task 和 Workspace 全部由 Runtime 推导，调用方不能选择写目标。
+外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只接受 `scout` / `reader` / `log_inspector` / `git_detective` 四种 Worker 档**只读** Profile。`deep` 只能由父 Agent 提交升级票据后调用，外部接口不能绕过准入。
 
 ### Task Packet 与 Verifier
 
-`spawn_agent` 支持可选的结构化参数 `task`（不传时行为与以前完全一致）：主 Agent 把目标、已知事实、约束、相关文件和**验证命令**一次性交给 Worker，Runtime 负责把文件内容内联进 Worker 的第一条消息，并在每次尝试后亲自执行验证命令来判定成败——**Worker 不自证**。
+`spawn_agent` 支持可选的结构化参数 `task`（不传时行为与以前完全一致）：主 Agent 把目标、已知事实、约束、只读上下文 `read_files`、写权限 `write_files` 和**验证命令**一次性交给 Worker，Runtime 负责把文件内容内联进 Worker 的第一条消息，并在每次尝试后亲自执行验证命令来判定成败——**Worker 不自证**。
 
-写入型工种（`implementer` / `test_fixer` / `build_fixer`）的可改文件集就是 `task.relevant_files`，上限 16 个现有或待创建文件，越界写入一律拒绝。`smart` / `workspace-write` 继承主 Agent 的工作区写权限而免除额外审批；`strict` 仍一次审批整个集合，`read-only` 始终禁止。
+写入型工种（`implementer` / `test_fixer` / `build_fixer`）的可改文件集就是 `task.write_files`，上限 16 个现有或待创建文件，越界写入一律拒绝；`read_files` 只提供上下文。`smart` / `workspace-write` 继承主 Agent 的工作区写权限而免除额外审批；`strict` 仍一次审批整个集合，`read-only` 始终禁止。
 
 每次运行结束都会落盘一条判定（验证结果 / 尝试次数 / 起始 commit），`willdeep daemon agent <id>` 多打一行 `verdict`，`willdeep daemon agent-metrics` 汇总三个派工指标。
 
@@ -63,8 +63,7 @@
 
 ```toml
 [subagents.scout]
-provider_profile = "some-im"
-model = "glm-5"
+# some.im 下省略 provider_profile/model，自动使用 someim-32b-scout。
 max_turns = 8
 context_window = 32768      # 工种自己的窗口档位，不是会话窗口
 tool_output_limit = 4096    # 单次工具输出字节上限
@@ -73,7 +72,9 @@ timeout_seconds = 300
 max_consecutive_failures = 3
 
 [subagents.deep]
-# 省略 provider_profile/model 时继承当前会话模型
+provider_profile = "some-im"
+model = "deepseek-v4-flash"
+context_window = 1000000
 max_turns = 12
 
 [subagents.editor]
@@ -94,7 +95,7 @@ timeout_seconds = 1200
 worktree = "dedicated"
 ```
 
-Provider 为 some.im 时，除 `deep` 外所有工种的内置默认模型都是 `glm-5`，`deep` 继承父模型。
+Provider 为 some.im 时，七个托管窄工种默认使用各自的 `someim-32b-<trade>`，`implementer` 默认使用 GLM-5；`deep` 推荐显式绑定 `deepseek-v4-flash`，且无有效升级票据不会启动。
 
 > **注意**：子 Agent 从 Profile 直接构造 Provider 配置，**不继承** `--api-key` / `WILLDEEP_API_KEY`。给子 Agent 绑定独立 Profile 时必须在该 Profile 里写 `api_key` 或 `api_key_env`，见 [认证与凭据](AUTHENTICATION.md)。
 
@@ -161,7 +162,7 @@ willdeep daemon instruct-agent <agent-id> "补充要求"
 - `K` 停止运行中的后台 Child Agent，`R` 重试已结束的；
 - `Enter` 打开详情：按 Agent 过滤的最近工具时间线、Workspace Change Artifact、已有结果报告，支持键盘和鼠标滚轮浏览长内容；
 - 详情中可补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 里已有的草稿；
-- `/agent spawn scout|reader|deep|log_inspector|git_detective <task>` 在活动父会话中创建只读子 Agent。
+- `/agent spawn scout|reader|log_inspector|git_detective <task>` 在活动父会话中创建 Worker 档只读子 Agent。
 
 Agent 列表保持最小摘要，按 `Enter` 才读取受保护的单项详情。
 

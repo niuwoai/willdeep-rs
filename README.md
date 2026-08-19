@@ -20,7 +20,9 @@ willdeep --workspace . "检查当前仓库并修复测试"
 
 **改你的代码这件事，得先过你这关。** 三档审批模式，写文件、跑 Shell、调 MCP、访问网络各有独立闸门。"始终允许"只记住规范化后的完整命令，不是命令前缀——不给自己留后门。工作区策略由服务端强制，客户端无法自报可写。
 
-**子 Agent 干脏活，主上下文保持干净。** scout / reader / deep / editor 四种工种，各自绑定模型、Token 预算和熔断阈值。`editor` 在专属 Git Worktree 里改文件，改完等你审查再合并，冲突一律阻断，绝不自动合并。
+**小模型先干，主上下文保持干净。** Runtime 会把定位、阅读、日志和 Git 追溯自动派给 `someim-32b-<工种>`，普通编码由 GLM-5 控制；1M 的 `deep` 必须提交带低档尝试证据的升级票据。九种子 Agent 各自绑定窗口、Token 预算和熔断阈值，写入工种在专属 Git Worktree 中接受审查后合并。
+
+**模型路由不是焊死的。** TUI `/routing` 和 Web“模型与路由”面板都能持久修改 Root、Worker、Deep 的 Provider、模型、上下文窗口与预算；也能一键恢复 some.im 推荐映射。手改 `config.toml` 仍是一等路径，并发保存会检测冲突，不拿旧页面盖掉新配置。
 
 **看得见的进度，看不见的秘密。** 工具调用、Token、耗时、Diff 归属全部结构化上报，Diff 能精确追溯到是哪个 Turn、哪个 Agent、哪次工具调用改的。而 Prompt、命令、工具参数、输出、本地路径不会下发到 Web 前端，也不会进日志。
 
@@ -78,7 +80,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [认证与凭据](docs/AUTHENTICATION.md) — Key 解析链、登录、Token 边界
 - [some.im 集成](docs/SOMEIM_INTEGRATION.md) — 登录、视觉回退、联网搜索
 - [Runtime Daemon 与工作区](docs/RUNTIME_DAEMON.md) — 常驻控制面
-- [子 Agent 与后台任务](docs/SUBAGENTS.md) — 四种工种与 Worktree
+- [子 Agent 与后台任务](docs/SUBAGENTS.md) — 九种工种、模型路由与 Worktree
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [故障排查](docs/TROUBLESHOOTING.md) — 出问题先看这里
 

@@ -63,6 +63,24 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 - 模型选择按 Session 持久保存，并同步到 Runtime 与进程内 `/local` Agent；正在执行的轮次不会被中途换模，切换作用于下一轮对话。
 - 若 Provider 不支持模型列表接口或接口暂时不可用，仍可使用 `/model <模型名>` 直接指定。
 
+### 配置模型路由
+
+输入 `/routing` 打开持久化模型与路由面板。它与 `/model` 的边界不同：`/model`
+只切换当前 Session，`/routing` 修改 `config.toml` 中后续 Harness/子 Agent 的默认策略。
+
+| 按键 | 行为 |
+|---|---|
+| `↑` / `↓` | 选择 Root 或子 Agent 工种 |
+| `←` / `→` / `Tab` | 切换 Provider；Worker 的空 Provider 表示继承 Root |
+| `Enter` | 编辑选中行的模型 ID |
+| `Space` | 清除 Worker 的 Provider/模型覆盖，恢复 some.im 推荐托管映射或继承 Root |
+| `[` / `]` | 切换 32K、48K、64K、128K、256K、1M 上下文档位 |
+| `R` / `A` | 开关小模型路由 / 高置信度只读自动派工 |
+| `+` / `-` | 调整每个 Harness 的 Deep 调用预算 |
+| `Ctrl+S` / `Cmd+S` | 原子保存；配置已被手工修改时拒绝覆盖并要求重载 |
+
+保存不会中途替换正在运行的模型；新值从新 Harness/子 Agent 开始生效。
+
 ### 聊天与活动
 
 | 按键 | 行为 |
@@ -99,6 +117,8 @@ TUI 启动时开启鼠标捕获，退出时关闭。可用鼠标完成：
 - 在 Agent 详情中补充指令、停止、重试和查看 Worktree Diff。
 
 Diff Review 模态会独占全部鼠标事件：滚轮只浏览当前 Diff、文件列表或 Commit Preview，不会穿透并滚动底层聊天区。
+
+审批弹层把“允许一次”“始终允许”“拒绝”纵向排列。可以用 `↑` / `↓` 选择后按 `Enter`，也可以直接按 `Y` / `A` / `N`；`Esc` 等价于拒绝。每个动作整行均可用鼠标左键点击。中文输入法不需要切到英文，提交出的无关字符会被忽略，中文“是/否”也可直接确认。
 
 ### 通过 SSH 使用鼠标
 
@@ -152,6 +172,8 @@ tmux set -g mouse on
 | `/help` | 查看本地命令帮助 |
 | `/goal <目标>` | 为后续消息持续注入目标约束；`/goal off` 关闭。目标按 Core Session 持久保存，重启及切换会话/工作区后恢复 |
 | `/compress` | 立即调用当前 Provider 总结较旧历史，保留最近六条消息并保存会话。历史不足八条时不消耗模型请求 |
+| `/model [模型名]` | 查看或切换当前 Session 模型 |
+| `/routing` | 持久配置 Root、Worker、Deep 的 Provider、模型、上下文窗口和路由预算 |
 | `/mobile` | 管理手机中继，详见 [手机中继](MOBILE.md) |
 | `/webapp` | `start`（缺省）/ `stop` / `status` / `127.0.0.1:PORT`，启停或查看本地 Web App |
 | `/daemon` | `status`（缺省）/ `start` / `stop` / `upgrade`，管理真正执行命令的 Runtime。`upgrade` 会排空在途工作再交接，耗时较长但不阻塞界面 |
@@ -159,7 +181,7 @@ tmux set -g mouse on
 | `/local <任务>` | 仅本轮使用进程内 Harness |
 | `/session` | 管理、搜索、切换、Fork 或导出会话 |
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
-| `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|deep\|log_inspector\|git_detective <task>` |
+| `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|log_inspector\|git_detective <task>`；Deep 必须由父 Agent 提交升级票据 |
 | `/diff` | 打开 Diff Review Center |
 | `/skills` | 查看当前目录发现的技能 |
 | `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |

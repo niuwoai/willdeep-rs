@@ -99,6 +99,40 @@ impl McpRegistry {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|v| v.definition.clone()).collect()
     }
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+    /// Search the MCP index on demand. Full input schemas are returned only
+    /// for matching tools instead of riding in every provider request.
+    pub fn search(&self, query: Option<&str>, max_results: usize) -> String {
+        let query = query.unwrap_or_default().trim().to_ascii_lowercase();
+        let matches = self
+            .tools
+            .values()
+            .filter(|tool| {
+                query.is_empty()
+                    || format!("{} {}", tool.definition.name, tool.definition.description)
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            })
+            .take(max_results.clamp(1, 20))
+            .map(|tool| tool.definition.clone())
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return "No matching MCP tools.".to_owned();
+        }
+        let rendered = serde_json::to_string_pretty(&matches)
+            .unwrap_or_else(|_| "MCP tool index serialization failed.".to_owned());
+        const MAX_CHARS: usize = 48_000;
+        if rendered.chars().count() <= MAX_CHARS {
+            rendered
+        } else {
+            format!(
+                "{}\n[truncated; narrow the query]",
+                rendered.chars().take(MAX_CHARS).collect::<String>()
+            )
+        }
+    }
     pub fn handles(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
@@ -276,6 +310,12 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
         );
         let registry = McpRegistry::connect(&configs).await.unwrap();
         assert!(registry.handles("mcp__mock__echo"));
+        assert!(!registry.search(Some("echo"), 5).contains("inputSchema"));
+        assert!(registry.search(Some("echo"), 5).contains("parameters"));
+        assert_eq!(
+            registry.search(Some("missing"), 5),
+            "No matching MCP tools."
+        );
         let result = registry
             .call("mcp__mock__echo", json!({"text":"ping"}))
             .await

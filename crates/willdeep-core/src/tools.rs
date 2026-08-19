@@ -547,18 +547,26 @@ impl ToolRegistry {
             ),
             definition(
                 "spawn_agent",
-                "Delegate a self-contained task to a child agent with an isolated context. Prefer deployable models and the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (one file), implementer (bounded multi-file coding in 256K), test_fixer (failing tests), build_fixer (compile/type/lint errors), deep only when the work genuinely needs the parent model. Children cannot spawn more agents. Pass `task` whenever you can: a worker given relevant_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
+                "Delegate a self-contained task to a child agent with an isolated context. Prefer deployable models and the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (one file), implementer (bounded multi-file coding in 256K), test_fixer (failing tests), build_fixer (compile/type/lint errors), deep only after smaller tiers were attempted and an escalation ticket explains why decomposition cannot work. Children cannot spawn more agents. Pass `task` whenever you can: a worker given read_files, write_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
                 json!({"type":"object","properties":{
                     "prompt":{"type":"string","description":"Free-text instruction. Still required when `task` is present; keep it to what the packet does not already say."},
                     "label":{"type":"string"},
                     "profile":{"type":"string","enum":["scout","reader","deep","editor","implementer","test_fixer","build_fixer","log_inspector","git_detective"]},
                     "run_in_background":{"type":"boolean"},
                     "target_file":{"type":"string","description":"Single write target for the editor profile."},
+                    "escalation":{"type":"object","description":"Required admission ticket for the deep profile. The runtime cross-checks attempted_profiles against observed lower-tier work before spending the 1M-context budget.","properties":{
+                        "reason":{"type":"string","description":"Concrete reason the standard tier could not finish."},
+                        "attempted_profiles":{"type":"array","items":{"type":"string"},"minItems":1,"description":"Lower-tier profiles already attempted in this harness."},
+                        "context_evidence":{"type":"string","description":"Measured evidence that the task exceeds smaller windows or cannot be sharded."},
+                        "why_not_decompose":{"type":"string","description":"Why independent worker packets cannot solve the task."}
+                    },"required":["reason","attempted_profiles","context_evidence","why_not_decompose"],"additionalProperties":false},
                     "task":{"type":"object","description":"Structured task packet. Compiling one is your job, not the worker's.","properties":{
                         "goal":{"type":"string","description":"One sentence: what done looks like."},
                         "skill":{"type":"string","description":"Installed skill whose body the runtime inlines for the worker. Use for tier=worker skills instead of pasting their steps yourself."},
                         "digest_oversized":{"type":"boolean","description":"When a relevant file exceeds the worker's inline budget, digest it through the worker's own cheap model (chunked summaries, identifiers verbatim) instead of omitting it. Costs extra model calls."},
-                        "relevant_files":{"type":"array","items":{"type":"string"},"description":"Workspace-relative paths inlined into the worker's first message. For writing profiles this is also exactly the set it may modify, approved as one set."},
+                        "read_files":{"type":"array","items":{"type":"string"},"description":"Workspace-relative context files. They are inlined but never become writable merely by being readable."},
+                        "write_files":{"type":"array","items":{"type":"string"},"description":"Exact workspace-relative write allowlist for writing profiles, approved as one set. These files are also inlined when readable."},
+                        "relevant_files":{"type":"array","items":{"type":"string"},"description":"Deprecated combined read/write set retained for old callers. New packets should use read_files and write_files."},
                         "known_facts":{"type":"array","items":{"type":"string"},"description":"What you already established: failing assertion text, the commit that broke it, values observed."},
                         "constraints":{"type":"array","items":{"type":"string"},"description":"What the worker must not do (public API to keep, files to leave alone)."},
                         "verifier":{"type":"object","properties":{"command":{"type":"string"},"expected_exit_code":{"type":"integer"}},"required":["command"],"additionalProperties":false,"description":"Command the runtime runs to decide done. The worker never grades itself."},
@@ -622,7 +630,20 @@ impl ToolRegistry {
                 }),
             ),
         ];
-        tools.extend(self.mcp.definitions());
+        if !self.mcp.is_empty() {
+            tools.extend([
+                definition(
+                    "list_mcp_tools",
+                    "Search connected MCP tools on demand. Returns matching names, descriptions and input schemas without charging every turn for the full catalog.",
+                    json!({"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":20}},"additionalProperties":false}),
+                ),
+                definition(
+                    "call_mcp_tool",
+                    "Call one MCP tool found through list_mcp_tools. External side effects require approval.",
+                    json!({"type":"object","properties":{"name":{"type":"string","description":"Exact namespaced name returned by list_mcp_tools, for example mcp__github__get_issue."},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}),
+                ),
+            ]);
+        }
         if let Some(allowed) = &self.allowed_tools {
             tools.retain(|tool| allowed.contains(&tool.name));
         }
@@ -633,7 +654,7 @@ impl ToolRegistry {
         if self.approval_mode == ApprovalMode::ReadOnly
             && (matches!(
                 call.name.as_str(),
-                "run_command" | "create_file" | "edit_file" | "create_worktree"
+                "run_command" | "create_file" | "edit_file" | "create_worktree" | "call_mcp_tool"
             ) || self.mcp.handles(&call.name))
         {
             return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
@@ -641,6 +662,24 @@ impl ToolRegistry {
         match call.name.as_str() {
             "list_skills" => self.list_skills(parse(call)?),
             "read_skill" => self.read_skill(parse(call)?),
+            "list_mcp_tools" => {
+                let args: ListMcpToolsArgs = parse(call)?;
+                Ok(self
+                    .mcp
+                    .search(args.query.as_deref(), args.max_results.unwrap_or(10)))
+            }
+            "call_mcp_tool" => {
+                let args: CallMcpToolArgs = parse(call)?;
+                if !self.mcp.handles(&args.name) {
+                    return Err(ToolError::UnknownTool(args.name));
+                }
+                self.require_rememberable_approval(
+                    &format!("call MCP tool: {}", args.name),
+                    format!("mcp:{}", args.name),
+                )
+                .await?;
+                Ok(self.mcp.call(&args.name, args.arguments).await?)
+            }
             "search_files" => self.search_files(parse(call)?),
             "grep_files" => self.grep_files(parse(call)?),
             "read_file" => self.read_file(parse(call)?).await,
@@ -726,7 +765,7 @@ impl ToolRegistry {
                 .collect::<Vec<_>>();
             if !workers.is_empty() {
                 result.push_str(&format!(
-                    "\n\n<delegation-hint tier=\"worker\">\nThese skills fit a small-context worker: {}. Instead of running one inline, spawn_agent with a task packet — set task.skill to the skill name (the runtime inlines its body for the worker), task.goal to the outcome, task.relevant_files to the inputs, and task.verifier.command when the skill names a check. Your window stays free and the run gets a real verdict.\n</delegation-hint>",
+                    "\n\n<delegation-hint tier=\"worker\">\nThese skills fit a small-context worker: {}. Instead of running one inline, spawn_agent with a task packet — set task.skill to the skill name (the runtime inlines its body for the worker), task.goal to the outcome, task.read_files to context inputs, task.write_files to the exact write allowlist, and task.verifier.command when the skill names a check. Your window stays free and the run gets a real verdict.\n</delegation-hint>",
                     workers.join(", ")
                 ));
             }
@@ -2507,6 +2546,18 @@ struct ReadSkillArgs {
 }
 
 #[derive(Deserialize)]
+struct ListMcpToolsArgs {
+    query: Option<String>,
+    max_results: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct CallMcpToolArgs {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Deserialize)]
 struct GrepArgs {
     pattern: String,
     path: Option<String>,
@@ -2626,6 +2677,7 @@ struct EditArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct AllowApprover;
@@ -2638,6 +2690,68 @@ mod tests {
         ) -> ApprovalDecision {
             ApprovalDecision::AllowOnce
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_schemas_are_loaded_on_demand_through_two_fixed_tools() {
+        let script = r#"read init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}'
+read initialized
+read list
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}}'
+read call
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"pong"}]}}'
+"#;
+        let mut configs = BTreeMap::new();
+        configs.insert(
+            "mock".to_owned(),
+            crate::mcp::McpServerConfig {
+                command: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), script.to_owned()],
+                env: BTreeMap::new(),
+                startup_timeout_seconds: 5,
+                enabled: true,
+            },
+        );
+        let mcp = Arc::new(McpRegistry::connect(&configs).await.expect("connect MCP"));
+        let root =
+            std::env::temp_dir().join(format!("willdeep-mcp-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_mcp(mcp)
+            .with_approver(Arc::new(AllowApprover));
+        let names = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"list_mcp_tools".to_owned()));
+        assert!(names.contains(&"call_mcp_tool".to_owned()));
+        assert!(!names.iter().any(|name| name.starts_with("mcp__")));
+
+        let listed = registry
+            .execute(&ToolCall {
+                id: "list".to_owned(),
+                name: "list_mcp_tools".to_owned(),
+                arguments: json!({"query":"echo"}).to_string(),
+            })
+            .await
+            .expect("search MCP tools");
+        assert!(listed.contains("mcp__mock__echo"));
+        assert!(listed.contains("parameters"));
+        let called = registry
+            .execute(&ToolCall {
+                id: "call".to_owned(),
+                name: "call_mcp_tool".to_owned(),
+                arguments: json!({"name":"mcp__mock__echo","arguments":{"text":"ping"}})
+                    .to_string(),
+            })
+            .await
+            .expect("call MCP tool");
+        assert!(called.contains("pong"));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     struct AlwaysApprover(AtomicUsize);
