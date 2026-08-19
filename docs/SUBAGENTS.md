@@ -32,15 +32,16 @@
 | Profile | 用途 | 默认工具 | 窗口 |
 |---|---|---|---:|
 | `scout` | 快速定位文件、符号和调用点 | search / grep / list / read | 32K |
-| `reader` | 阅读和总结长文件或文档 | read / list / search | 32K |
-| `log_inspector` | 解释失败日志、归类错误 | read | 16K |
+| `reader` | 阅读和总结长文件或文档 | read / list / search | 48K |
+| `log_inspector` | 解释失败日志、归类错误 | read | 32K |
 | `git_detective` | 回归定位与 commit 考古 | git log / diff / blame / status / read | 32K |
 | `deep` | 跨文件深入调查（父模型） | search / grep / read / list / git status | 继承会话 |
-| `editor` | 修改一个明确目标文件 | read / edit | 32K |
+| `editor` | 修改一个明确目标文件 | read / edit | 48K |
+| `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / verifier | 256K |
 | `test_fixer` | 把失败测试修到绿（需 verifier） | read / edit / run_command | 64K |
-| `build_fixer` | 修编译 / 类型 / lint 错误（需 verifier） | read / edit / run_command | 32K |
+| `build_fixer` | 修编译 / 类型 / lint 错误（需 verifier） | read / edit / run_command | 48K |
 
-除 `deep` 外，每个工种都跑在**自己的小窗口**里，并对工具输出设了独立的字节上限——给小模型配大窗口不会让它变强，只会让它把窗口烧穿。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
+除 `deep` 外，每个工种都跑在 32K / 48K / 64K / 256K 的**可私有部署窗口档位**里，并对工具输出设了独立的字节上限。16K 档已经取消：16GB 显存可部署的 35B-A3B 级模型已经能覆盖至少 32K，继续保留 16K 只会增加路由碎片。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 硬性约束：子 Agent **看不到父对话、不能询问用户、不能继续派生**。
 
@@ -50,7 +51,7 @@
 
 `spawn_agent` 支持可选的结构化参数 `task`（不传时行为与以前完全一致）：主 Agent 把目标、已知事实、约束、相关文件和**验证命令**一次性交给 Worker，Runtime 负责把文件内容内联进 Worker 的第一条消息，并在每次尝试后亲自执行验证命令来判定成败——**Worker 不自证**。
 
-写入型工种（`test_fixer` / `build_fixer`）的可改文件集就是 `task.relevant_files`，一次审批整个集合，越界写入一律拒绝。
+写入型工种（`implementer` / `test_fixer` / `build_fixer`）的可改文件集就是 `task.relevant_files`，上限 16 个现有或待创建文件，越界写入一律拒绝。`smart` / `workspace-write` 继承主 Agent 的工作区写权限而免除额外审批；`strict` 仍一次审批整个集合，`read-only` 始终禁止。
 
 每次运行结束都会落盘一条判定（验证结果 / 尝试次数 / 起始 commit），`willdeep daemon agent <id>` 多打一行 `verdict`，`willdeep daemon agent-metrics` 汇总三个派工指标。
 
@@ -81,6 +82,16 @@ model = "glm-5"
 max_turns = 6
 # 写入型 Profile 默认使用专属可审查 Worktree
 worktree = "dedicated"
+
+[subagents.implementer]
+# 企业私有部署时绑定本地或内网的 256K Provider/Profile。
+provider_profile = "some-im"
+model = "glm-5"
+max_turns = 18
+context_window = 262144
+tool_output_limit = 16384
+timeout_seconds = 1200
+worktree = "dedicated"
 ```
 
 Provider 为 some.im 时，除 `deep` 外所有工种的内置默认模型都是 `glm-5`，`deep` 继承父模型。
@@ -91,7 +102,7 @@ Runtime 和 TUI 会显示轮次、Token 与时限策略。Root / Child Agent 的
 
 ## `editor` 与 Worktree
 
-`editor` 必须提供 `target_file`。主 Harness 会对 canonicalize 后的**现有文件**单独请求批准；批准后创建专属的 `willdeep/agent-<id>` Git Worktree，并把目标文件映射到隔离目录——子 Agent 仍然只能修改这一个文件。
+`editor` 必须提供 `target_file`。主 Harness 会按当前 Workspace 访问模式解析该文件：`smart/workspace-write` 直接继承工作区写权限，`strict` 单独请求批准；随后创建专属的 `willdeep/agent-<id>` Git Worktree，并把目标文件映射到隔离目录——子 Agent 仍然只能修改这一个文件。
 
 Worktree 在任务结束后**保留供审查，不会自动删除**。
 

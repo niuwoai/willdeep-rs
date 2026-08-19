@@ -82,6 +82,7 @@ impl Provider for AnthropicMessagesProvider {
                     (Some(input), Some(output)) => Some(input + output),
                     _ => None,
                 },
+                cache_read_tokens: usage.cache_read_input_tokens,
             }),
         })
     }
@@ -267,6 +268,7 @@ struct AnthropicResponseBlock {
 struct AnthropicUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -314,5 +316,18 @@ mod tests {
         let value = serde_json::to_value(&encoded[0]).unwrap();
         assert_eq!(value["content"][1]["type"], "image");
         assert_eq!(value["content"][1]["source"]["data"], "YWJj");
+    }
+
+    #[test]
+    fn cache_reads_are_lifted_from_the_anthropic_usage_block() {
+        let usage: AnthropicUsage = serde_json::from_str(
+            r#"{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900}"#,
+        )
+        .expect("usage");
+        assert_eq!(usage.cache_read_input_tokens, Some(900));
+
+        let silent: AnthropicUsage =
+            serde_json::from_str(r#"{"input_tokens":1200,"output_tokens":80}"#).expect("usage");
+        assert_eq!(silent.cache_read_input_tokens, None);
     }
 }

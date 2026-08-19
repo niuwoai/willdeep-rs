@@ -417,6 +417,24 @@ impl RuntimeSessionStore {
         Ok(result)
     }
 
+    pub fn update_model(&self, id: uuid::Uuid, model: String) -> Result<RuntimeSession> {
+        self.ensure_manageable(id)?;
+        let model = normalized_optional("Model", Some(model))?.context("Model is required")?;
+        let mut sessions = self.lock()?;
+        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
+        let mut core = self
+            .core
+            .load(id)
+            .with_context(|| format!("load Core Session {id}"))?;
+        core.model = Some(model.clone());
+        self.core.save(&mut core)?;
+        session.model = Some(model);
+        session.updated_at = now();
+        let result = session.clone();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(result)
+    }
+
     pub fn fork_through(
         &self,
         id: uuid::Uuid,
@@ -2392,6 +2410,38 @@ mod tests {
         let recovered = reopened.get(session.id).unwrap().unwrap();
         assert_eq!(recovered.status, RuntimeSessionStatus::Interrupted);
         assert!(recovered.active_turn_id.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn updates_idle_session_model_in_runtime_and_core_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-model-update-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let session = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace,
+                profile: Some("some-im".to_owned()),
+                model: Some("old-model".to_owned()),
+                config: None,
+                title: Some("Switch model".to_owned()),
+            })
+            .unwrap();
+
+        let updated = store
+            .update_model(session.id, "new-model".to_owned())
+            .unwrap();
+        let core = willdeep_core::SessionStore::new(&root)
+            .load(session.id)
+            .unwrap();
+
+        assert_eq!(updated.model.as_deref(), Some("new-model"));
+        assert_eq!(core.model.as_deref(), Some("new-model"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

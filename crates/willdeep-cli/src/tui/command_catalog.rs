@@ -1,6 +1,116 @@
+use unicode_width::UnicodeWidthStr;
+
 use crate::i18n::Language;
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 15] {
+/// `/help` 的正文：一行一条命令，用法与说明分列对齐。
+///
+/// 说明文案与补全菜单共用 [`command_candidates`]，两处永远不会各说各话；
+/// 用法签名单列在这里，因为补全菜单只显示命令本身。
+pub(super) fn help_text(language: Language) -> String {
+    let usages = command_usages(language);
+    let column = usages
+        .iter()
+        .map(|(usage, _)| UnicodeWidthStr::width(*usage))
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![format!(
+        "System: {}",
+        language.text(
+            "命令一览（提示词默认交给 Runtime 执行）",
+            "Commands (prompts run on the Runtime by default)",
+            "コマンド一覧（プロンプトは既定で Runtime が実行）",
+        )
+    )];
+    for (usage, description) in usages {
+        // 中文和日文占两列，补空格必须按显示宽度算，不能按字符数。
+        let padding = " ".repeat(column.saturating_sub(UnicodeWidthStr::width(usage)));
+        lines.push(format!("  {usage}{padding}  {description}"));
+    }
+    lines.push(format!(
+        "  {}",
+        language.text(
+            "提示：在提示词里写 $技能名 直接调用技能；Ctrl+B 也能开关状态栏。",
+            "Tip: write $skill-name in a prompt to invoke a skill; Ctrl+B also toggles the sidebar.",
+            "ヒント：プロンプトに $skill-name と書くとスキルを呼び出せます。Ctrl+B でもサイドバーを切替できます。",
+        )
+    ));
+    lines.join("\n")
+}
+
+/// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
+fn command_usages(language: Language) -> [(&'static str, &'static str); 16] {
+    let descriptions = command_candidates(language);
+    let usages = match language {
+        Language::ZhCn => [
+            "/help",
+            "/goal <文本>|off",
+            "/compress",
+            "/model [模型名]",
+            "/mobile [show|hide|off]",
+            "/webapp [status|start|stop|127.0.0.1:端口]",
+            "/sidebar [on|off]",
+            "/daemon [status|start|stop|upgrade]",
+            "/runtime <任务>",
+            "/local <任务>",
+            "/session <操作>",
+            "/workspace list|switch <id>",
+            "/agent instruct <id> <文本>",
+            "/diff",
+            "/skills",
+            "/clear",
+        ],
+        Language::En => [
+            "/help",
+            "/goal <text>|off",
+            "/compress",
+            "/model [model]",
+            "/mobile [show|hide|off]",
+            "/webapp [status|start|stop|127.0.0.1:PORT]",
+            "/sidebar [on|off]",
+            "/daemon [status|start|stop|upgrade]",
+            "/runtime <task>",
+            "/local <task>",
+            "/session <action>",
+            "/workspace list|switch <id>",
+            "/agent instruct <id> <text>",
+            "/diff",
+            "/skills",
+            "/clear",
+        ],
+        Language::Ja => [
+            "/help",
+            "/goal <テキスト>|off",
+            "/compress",
+            "/model [モデル名]",
+            "/mobile [show|hide|off]",
+            "/webapp [status|start|stop|127.0.0.1:ポート]",
+            "/sidebar [on|off]",
+            "/daemon [status|start|stop|upgrade]",
+            "/runtime <タスク>",
+            "/local <タスク>",
+            "/session <操作>",
+            "/workspace list|switch <id>",
+            "/agent instruct <id> <テキスト>",
+            "/diff",
+            "/skills",
+            "/clear",
+        ],
+    };
+    // 用法与说明按同一顺序声明，配错了就是把说明贴到别的命令上。
+    debug_assert!(
+        usages
+            .iter()
+            .zip(descriptions.iter())
+            .all(|(usage, (command, _))| usage
+                .split(' ')
+                .next()
+                .is_some_and(|head| head == *command)),
+        "help usages must stay aligned with command_candidates order"
+    );
+    std::array::from_fn(|index| (usages[index], descriptions[index].1))
+}
+
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 16] {
     [
         (
             "/help",
@@ -16,6 +126,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "压缩会话上下文",
                 "Compress conversation context",
                 "会話コンテキストを圧縮",
+            ),
+        ),
+        (
+            "/model",
+            language.text(
+                "列出、筛选或切换当前模型",
+                "List, filter, or switch the current model",
+                "現在のモデルを一覧・絞り込み・切替",
             ),
         ),
         (

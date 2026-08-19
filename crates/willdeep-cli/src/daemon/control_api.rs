@@ -235,6 +235,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         },
         "session.create" => session_create(state, &request),
         "session.rename" => session_rename(state, &request),
+        "session.update_model" => session_update_model(state, &request),
         "session.fork" => session_fork(state, &request),
         "session.archive" => session_archive(state, &request),
         "session.delete" => session_delete(state, &request),
@@ -546,6 +547,7 @@ const MUTATING_OPERATIONS: &[&str] = &[
     "question.answer",
     "session.create",
     "session.rename",
+    "session.update_model",
     "session.fork",
     "session.archive",
     "session.delete",
@@ -968,6 +970,19 @@ fn session_rename(state: &ServerState, request: &ApiRequest) -> ApiResult {
     state
         .events
         .append("session.renamed", format!("session_id={}", params.id))
+        .map_err(ApiFailure::internal)?;
+    json(public_session(session))
+}
+
+fn session_update_model(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::UpdateSessionModelParams>(request)?;
+    let session = state
+        .sessions
+        .update_model(params.id, params.model)
+        .map_err(|error| ApiFailure::invalid(format!("cannot update Session model: {error}")))?;
+    state
+        .events
+        .append("session.model_updated", format!("session_id={}", params.id))
         .map_err(ApiFailure::internal)?;
     json(public_session(session))
 }

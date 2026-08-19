@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
@@ -19,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -42,6 +43,7 @@ mod command_catalog;
 mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
+mod model_commands;
 mod rendering;
 mod runtime_ui;
 mod session_commands;
@@ -52,9 +54,13 @@ mod workspace_commands;
 use activity::ToolActivity;
 use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
-use command_catalog::command_candidates;
+use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use model_commands::{
+    ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
+    switch_model,
+};
 use rendering::*;
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
@@ -70,6 +76,7 @@ pub enum UiMessage {
     Finished(Result<willdeep_core::AgentOutcome, willdeep_core::AgentError>),
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
+    ModelsLoaded(std::result::Result<Vec<String>, String>),
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
 pub struct TuiSink {
@@ -112,6 +119,32 @@ impl Approver for TuiApprover {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ChatSelectionPoint {
+    row: usize,
+    column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChatSelection {
+    anchor: ChatSelectionPoint,
+    head: ChatSelectionPoint,
+}
+
+impl ChatSelection {
+    fn ordered_range(self) -> ((usize, usize), (usize, usize)) {
+        let (start, inclusive_end) = if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        };
+        (
+            (start.row, start.column),
+            (inclusive_end.row, inclusive_end.column.saturating_add(1)),
+        )
+    }
+}
+
 struct App {
     input: PromptEditor,
     transcript: Vec<String>,
@@ -138,6 +171,7 @@ struct App {
     selected_attachment: usize,
     prompt_rect: Rect,
     prompt_scroll: usize,
+    composer_expanded: bool,
     notice: Option<String>,
     goal: Option<String>,
     mobile_gateway: Option<RelayGateway>,
@@ -145,6 +179,8 @@ struct App {
     mobile_queue: VecDeque<String>,
     latest_usage: Usage,
     turn_started: Option<Instant>,
+    last_progress_at: Option<Instant>,
+    runtime_turn: bool,
     last_elapsed: Option<Duration>,
     context_window: u64,
     context_tokens: u64,
@@ -178,6 +214,10 @@ struct App {
     language: Language,
     transient_thought: Option<String>,
     selection_mode: bool,
+    native_selection_mode: bool,
+    chat_selection: Option<ChatSelection>,
+    transcript_rows: Vec<String>,
+    transcript_render_offset: usize,
     skill_selected: usize,
     skill_menu_dismissed: bool,
     command_selected: usize,
@@ -205,6 +245,13 @@ struct App {
     palette: Option<PaletteState>,
     palette_rect: Rect,
     palette_hits: Vec<(u16, usize)>,
+    session_picker: Option<SessionPickerState>,
+    session_picker_rect: Rect,
+    session_picker_hits: Vec<(u16, usize)>,
+    model_picker: Option<ModelPickerState>,
+    model_picker_rect: Rect,
+    model_picker_hits: Vec<(u16, usize)>,
+    pending_session_switch: Option<PendingSessionSwitch>,
     transcript_rect: Rect,
     command_rect: Rect,
     command_hits: Vec<(u16, usize)>,
@@ -256,6 +303,26 @@ struct PaletteItem {
     action: PaletteAction,
 }
 
+#[derive(Default)]
+struct SessionPickerState {
+    editor: PromptEditor,
+    results: Vec<willdeep_runtime_protocol::SessionSearchResult>,
+    selected: usize,
+    current_session: uuid::Uuid,
+}
+
+enum SessionPickerAction {
+    None,
+    Refresh,
+    Switch(PendingSessionSwitch),
+    Close,
+}
+
+struct PendingSessionSwitch {
+    id: String,
+    archived: bool,
+}
+
 enum PaletteAction {
     Command(String),
     Skill(String),
@@ -267,6 +334,16 @@ enum PaletteAction {
 /// A pending approval: what is being asked, whether Always Allow applies,
 /// and the channel the waiting harness is parked on.
 type ApprovalRequest = (String, bool, oneshot::Sender<ApprovalDecision>);
+pub type TuiRuntimeInputs = (
+    mpsc::UnboundedSender<UiMessage>,
+    mpsc::UnboundedReceiver<UiMessage>,
+    u64,
+    Arc<BackgroundTaskRegistry>,
+    crate::daemon::RuntimeSubmitOptions,
+    willdeep_core::provider::ProviderConfig,
+    Language,
+    crate::notify::Notifier,
+);
 
 struct AskDialog {
     request: UserQuestion,
@@ -283,14 +360,7 @@ pub async fn run(
     home: PathBuf,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
-    ui: (
-        mpsc::UnboundedSender<UiMessage>,
-        mpsc::UnboundedReceiver<UiMessage>,
-        u64,
-        Arc<BackgroundTaskRegistry>,
-        crate::daemon::RuntimeSubmitOptions,
-        Language,
-    ),
+    ui: TuiRuntimeInputs,
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -301,18 +371,21 @@ pub async fn run(
         EnableMouseCapture
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
+    ui.7.set_session(&session.id.to_string(), Some(session.title.as_str()));
     let mut runtime = TuiRuntime {
         home,
+        notifier: ui.7,
         skills,
         relay_bridge,
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
+        provider_config: ui.5,
         local_workspace: session.workspace.clone(),
         tx: ui.0,
         rx: ui.1,
     };
-    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.5).await;
+    let result = event_loop(&mut term, agent, &mut session, &store, &mut runtime, ui.6).await;
     terminal::disable_raw_mode()?;
     execute!(
         term.backend_mut(),
@@ -326,14 +399,41 @@ pub async fn run(
 
 struct TuiRuntime {
     home: PathBuf,
+    notifier: crate::notify::Notifier,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
+    provider_config: willdeep_core::provider::ProviderConfig,
     local_workspace: PathBuf,
     tx: mpsc::UnboundedSender<UiMessage>,
     rx: mpsc::UnboundedReceiver<UiMessage>,
+}
+
+impl TuiRuntime {
+    fn refresh_provider_config(&mut self) -> Result<()> {
+        let loaded = crate::config::LoadedConfig::load(self.runtime_submit.config.as_deref())?;
+        let profile_name = self
+            .runtime_submit
+            .profile
+            .clone()
+            .or_else(|| loaded.file.default_provider.clone())
+            .or_else(|| {
+                (loaded.file.providers.len() == 1)
+                    .then(|| loaded.file.providers.keys().next().cloned())
+                    .flatten()
+            });
+        let Some(profile_name) = profile_name else {
+            return Ok(());
+        };
+        let mut config = crate::provider_config_from_profile(&loaded.file, &profile_name)?;
+        if let Some(model) = &self.runtime_submit.model {
+            config.model = model.clone();
+        }
+        self.provider_config = config;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,6 +464,39 @@ fn diff_attention_action_for_key(code: KeyCode) -> Option<DiffAttentionAction> {
 fn selection_mode_exit_key(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn is_selection_copy_key(key: KeyEvent) -> bool {
+    (key.code == KeyCode::Char('c')
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER))
+        || (key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE)
+}
+
+fn quote_selected_text(value: &str) -> String {
+    value
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptLineNavigation {
+    Start,
+    End,
+}
+
+fn prompt_line_navigation_for_key(key: KeyEvent) -> Option<PromptLineNavigation> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('a') => Some(PromptLineNavigation::Start),
+        KeyCode::Char('e') => Some(PromptLineNavigation::End),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -641,6 +774,36 @@ async fn handle_diff_attention_action(
     Ok(())
 }
 
+async fn refresh_session_picker(app: &mut App, runtime: &TuiRuntime, session: &Session) {
+    let Some(picker) = app.session_picker.as_ref() else {
+        return;
+    };
+    let query = picker.editor.text().trim().to_owned();
+    let workspace = session
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| session.workspace.clone())
+        .display()
+        .to_string();
+    let mut parameters = vec![("workspace".to_owned(), workspace)];
+    if !query.is_empty() {
+        parameters.push(("q".to_owned(), query));
+    }
+    match crate::daemon::search_remote_session_results(&runtime.home, &parameters).await {
+        Ok(results) => app.set_session_picker_results(results),
+        Err(error) => {
+            app.notice = Some(format!(
+                "{}: {error}",
+                app.language.text(
+                    "搜索历史会话失败",
+                    "Historical Session search failed",
+                    "履歴セッションの検索に失敗"
+                )
+            ));
+        }
+    }
+}
+
 async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -683,9 +846,78 @@ async fn event_loop(
     );
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
+        if let Some(target) = app.pending_session_switch.take() {
+            if app.running {
+                app.notice = Some(
+                    language
+                        .text(
+                            "当前会话正在运行，结束后才能切换历史会话",
+                            "Wait for the current turn to finish before switching Sessions",
+                            "現在のターンが完了してから履歴セッションを切り替えてください",
+                        )
+                        .to_owned(),
+                );
+                continue;
+            }
+            let target_id = match uuid::Uuid::parse_str(&target.id) {
+                Ok(id) => id,
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text(
+                            "历史会话 ID 无效",
+                            "Historical Session ID is invalid",
+                            "履歴セッション ID が無効です"
+                        )
+                    ));
+                    continue;
+                }
+            };
+            let archived = if target.archived {
+                true
+            } else {
+                crate::daemon::remote_session_states(&runtime.home)
+                    .await
+                    .ok()
+                    .and_then(|states| {
+                        states
+                            .into_iter()
+                            .find(|state| state.id == target_id)
+                            .map(|state| state.archived)
+                    })
+                    .unwrap_or(false)
+            };
+            let unarchive = if archived {
+                crate::daemon::set_remote_session_archived(&runtime.home, target_id, false).await
+            } else {
+                Ok(())
+            };
+            let switched = match unarchive {
+                Ok(()) => {
+                    session_commands::switch(&mut app, session, store, runtime, &target.id).await
+                }
+                Err(error) => Err(error),
+            };
+            match switched {
+                Ok(message) => app.notice = Some(message),
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text(
+                            "切换历史会话失败",
+                            "Switch historical Session failed",
+                            "履歴セッションの切り替えに失敗"
+                        )
+                    ));
+                }
+            }
+        }
         draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
             _=refresh.tick()=>{
+                // Webhook delivery is detached; drain its failures here so a
+                // dead endpoint shows up as a notice instead of silence.
+                if let Some(error)=runtime.notifier.take_error(){app.notice=Some(format!("{}: {error}",language.text("通知 Webhook","Notification webhook","通知 Webhook")));}
                 app.background_tasks=runtime.background_tasks.snapshots();
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
@@ -693,6 +925,8 @@ async fn event_loop(
                 tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace).await{let _=tx.send(snapshot);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
+                runtime.notifier.attention_snapshot(&snapshot.attention);
+                app.observe_runtime_tasks(&snapshot.tasks,session.id);
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
                 app.runtime_agents=snapshot.agents;
@@ -705,11 +939,43 @@ async fn event_loop(
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
             event=events.next()=>if let Some(Ok(event))=event { match event {
-                Event::Paste(value)=>app.handle_paste(value),
+                Event::Paste(value)=>{
+                    if let Some(picker)=app.model_picker.as_mut() {
+                        picker.editor.insert(&value);
+                        app.refresh_model_picker_matches();
+                    } else if let Some(picker)=app.session_picker.as_mut() {
+                        picker.editor.insert(&value);
+                        refresh_session_picker(&mut app,runtime,session).await;
+                    } else {
+                        app.handle_paste(value);
+                    }
+                },
                 Event::Mouse(mouse)=>{
                     if app.question.is_some()||app.approval.is_some() {
                         if matches!(mouse.kind,MouseEventKind::Down(_)) {
                             app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
+                        }
+                        continue;
+                    }
+                    if app.model_picker.is_some() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp=>app.model_picker_scroll(-1),
+                            MouseEventKind::ScrollDown=>app.model_picker_scroll(1),
+                            MouseEventKind::Down(MouseButton::Left)=>{
+                                if let Some(model)=app.activate_model_picker_at(mouse.column,mouse.row) {
+                                    match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                        Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
+                                        Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                    }
+                                }
+                            },
+                            _=>{},
+                        }
+                        continue;
+                    }
+                    if app.session_picker.is_some() {
+                        if mouse.kind==MouseEventKind::Down(MouseButton::Left) {
+                            app.activate_session_picker_at(mouse.column,mouse.row);
                         }
                         continue;
                     }
@@ -739,6 +1005,15 @@ async fn event_loop(
                         handle_agent_detail_action(action,&mut app,runtime,language).await;
                         continue;
                     }
+                    if app.diff_review.is_none()
+                        && app.agent_detail.is_none()
+                        && app.task_detail.is_none()
+                        && app.attention_detail.is_none()
+                        && app.worktree_review.is_none()
+                        && app.handle_chat_selection_mouse(mouse)
+                    {
+                        continue;
+                    }
                     match mouse.kind {
                     MouseEventKind::Down(_)=>{
                         app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
@@ -762,17 +1037,28 @@ async fn event_loop(
                     _=>{}
                 }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
-                    if app.selection_mode {
+                    if app.native_selection_mode {
                         if selection_mode_exit_key(key) {
-                            app.selection_mode=false;
-                            execute!(term.backend_mut(),EnableMouseCapture)?;
+                            execute!(term.backend_mut(), EnableMouseCapture)?;
+                            app.exit_selection_mode();
+                            app.notice=Some(language.text("已恢复 WillDeep 鼠标操作","WillDeep mouse controls restored","WillDeep のマウス操作を復元しました").to_owned());
+                        }
+                        continue;
+                    }
+                    if app.selection_mode {
+                        if is_selection_copy_key(key) {
+                            app.copy_chat_selection();
+                        } else if key.code==KeyCode::Char('q')&&!key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER|KeyModifiers::ALT) {
+                            app.quote_chat_selection();
+                        } else if selection_mode_exit_key(key) {
+                            app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
                         }
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
-                        app.selection_mode = true;
-                        execute!(term.backend_mut(),DisableMouseCapture)?;
+                        execute!(term.backend_mut(), DisableMouseCapture)?;
+                        app.enter_native_selection_mode();
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){break;}
@@ -979,11 +1265,53 @@ async fn event_loop(
                         }
                         continue;
                     }
+                    if app.model_picker.is_some(){
+                        match app.handle_model_picker_key(key) {
+                            ModelPickerAction::None=>{},
+                            ModelPickerAction::Close=>app.model_picker=None,
+                            ModelPickerAction::Select(model)=>{
+                                match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                }
+                            },
+                        }
+                        continue;
+                    }
+                    if app.session_picker.is_some(){
+                        match app.handle_session_picker_key(key) {
+                            SessionPickerAction::None=>{},
+                            SessionPickerAction::Close=>app.session_picker=None,
+                            SessionPickerAction::Switch(target)=>{
+                                app.pending_session_switch=Some(target);
+                                app.session_picker=None;
+                            },
+                            SessionPickerAction::Refresh=>refresh_session_picker(&mut app,runtime,session).await,
+                        }
+                        continue;
+                    }
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
+                    if key.code == KeyCode::F(2) {
+                        app.toggle_composer_expanded();
+                        continue;
+                    }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('p'){
                         app.open_palette(&runtime.skills,store,session);
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('r'){
+                        if app.running {
+                            app.notice=Some(language.text(
+                                "当前会话正在运行，结束后才能切换历史会话",
+                                "Wait for the current turn to finish before switching Sessions",
+                                "現在のターンが完了してから履歴セッションを切り替えてください"
+                            ).to_owned());
+                        } else {
+                            app.open_session_picker(session.id);
+                            refresh_session_picker(&mut app,runtime,session).await;
+                        }
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('f'){
@@ -1093,6 +1421,13 @@ async fn event_loop(
                         }
                         continue;
                     }
+                    if let Some(action) = prompt_line_navigation_for_key(key) {
+                        match action {
+                            PromptLineNavigation::Start => app.edit_input(|input| input.home()),
+                            PromptLineNavigation::End => app.edit_input(|input| input.end()),
+                        }
+                        continue;
+                    }
                     if app.handle_command_key(key) || app.handle_skill_key(key, &runtime.skills) { continue; }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
@@ -1132,6 +1467,19 @@ async fn event_loop(
                                 },
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("工作区操作失败","Workspace action failed","ワークスペース操作に失敗しました")));continue;},
+                            }
+                            if let Some(model_command)=model_commands::parse(&prompt) {
+                                match model_command {
+                                    ModelCommand::List=>{
+                                        let current=session.model.clone().unwrap_or_else(||runtime.provider_config.model.clone());
+                                        request_model_list(&mut app,runtime,current);
+                                    },
+                                    ModelCommand::Switch(model)=>match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                        Ok(message)=>app.append_transcript(format!("System: {message}")),
+                                        Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
+                                    },
+                                }
+                                continue;
                             }
                             if prompt.trim()=="/compress" {dispatch_compress(&mut app,session,&agent,&runtime.tx);continue;}
                             if let Some(parsed)=daemon_commands::parse(&prompt) {
@@ -1192,7 +1540,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
-                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました").to_owned());},
+                UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens,dropped_messages})=>{app.context_tokens=estimated_tokens;let compressed=language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました");app.record_progress(if dropped_messages>0{language.pick(format!("{compressed} · 本轮请求丢弃 {dropped_messages} 条最旧消息（存档不受影响）"),format!("{compressed} · dropped {dropped_messages} oldest message(s) from this request (the archive is untouched)"),format!("{compressed} · 今回のリクエストから最も古い {dropped_messages} 件を破棄（アーカイブは無変更）"))}else{compressed.to_owned()});},
                 UiMessage::Agent(AgentEvent::BackgroundShellStarted{id})=>app.record_progress(format!("{} {id}",language.text("后台命令已启动","Background command started","バックグラウンドコマンド開始"))),
                 UiMessage::Agent(AgentEvent::BackgroundShellCompleted{id,status,..})=>app.record_progress(format!("{} {id} · {status:?}",language.text("后台命令已结束","Background command finished","バックグラウンドコマンド完了"))),
                 UiMessage::Agent(AgentEvent::SubagentStarted{id,profile,background,..})=>app.record_progress(format!("{} {} · {profile} · {}",language.text("子 Agent 已启动","Subagent started","サブエージェント開始"),id.to_string().get(..8).unwrap_or("agent"),if background{language.text("后台","background","バックグラウンド")}else{language.text("前台","foreground","フォアグラウンド")})),
@@ -1204,13 +1552,14 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::SubagentVerdict{id,verifier_passed,attempts,..})=>{if let Some(passed)=verifier_passed{app.record_progress(format!("{} {} · {} · {attempts} {}",language.text("子 Agent","Subagent","サブエージェント"),id.to_string().get(..8).unwrap_or("agent"),if passed{language.text("验证通过","verified","検証通過")}else{language.text("验证未通过","not verified","検証失敗")},language.text("次尝试","attempt(s)","回試行")));}},
                 UiMessage::Agent(AgentEvent::GoalContinuationInjected{rung})=>app.record_progress(format!("{} · {rung:?}",language.text("目标未达成 · 继续推进","Goal not met · continuing","目標未達成 · 継続します"))),
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
-                UiMessage::Approval(v,a,s)=>if app.enqueue_approval((v,a,s)){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;},
-                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
+                UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
+                UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
             },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
@@ -1251,6 +1600,7 @@ impl App {
             selected_attachment: 0,
             prompt_rect: Rect::default(),
             prompt_scroll: 0,
+            composer_expanded: false,
             notice: None,
             goal: None,
             mobile_gateway: None,
@@ -1258,6 +1608,8 @@ impl App {
             mobile_queue: VecDeque::new(),
             latest_usage: Usage::default(),
             turn_started: None,
+            last_progress_at: None,
+            runtime_turn: false,
             last_elapsed: None,
             context_window: 128_000,
             context_tokens: 0,
@@ -1285,6 +1637,10 @@ impl App {
             language,
             transient_thought: None,
             selection_mode: false,
+            native_selection_mode: false,
+            chat_selection: None,
+            transcript_rows: Vec::new(),
+            transcript_render_offset: 0,
             skill_selected: 0,
             skill_menu_dismissed: false,
             command_selected: 0,
@@ -1315,6 +1671,13 @@ impl App {
             palette: None,
             palette_rect: Rect::default(),
             palette_hits: Vec::new(),
+            session_picker: None,
+            session_picker_rect: Rect::default(),
+            session_picker_hits: Vec::new(),
+            model_picker: None,
+            model_picker_rect: Rect::default(),
+            model_picker_hits: Vec::new(),
+            pending_session_switch: None,
             transcript_rect: Rect::default(),
             command_rect: Rect::default(),
             command_hits: Vec::new(),
@@ -1326,6 +1689,10 @@ impl App {
             search_rect: Rect::default(),
         }
     }
+    fn toggle_composer_expanded(&mut self) {
+        self.composer_expanded = !self.composer_expanded;
+        self.focus = FocusPane::Prompt;
+    }
     fn load_session(&mut self, session: &Session) {
         self.transcript = transcript(&session.messages);
         if self.transcript.is_empty() {
@@ -1334,6 +1701,9 @@ impl App {
         }
         self.input = PromptEditor::default();
         self.running = false;
+        self.turn_started = None;
+        self.last_progress_at = None;
+        self.runtime_turn = false;
         self.discard_pending_approvals();
         self.discard_pending_questions();
         self.scroll_from_bottom = 0;
@@ -1342,12 +1712,21 @@ impl App {
         self.tools_expanded = false;
         self.attachments.clear();
         self.selected_attachment = 0;
+        self.composer_expanded = false;
         self.notice = None;
         self.goal = session.goal.clone();
         self.transient_thought = None;
+        self.selection_mode = false;
+        self.native_selection_mode = false;
+        self.chat_selection = None;
+        self.transcript_rows.clear();
+        self.transcript_render_offset = 0;
         self.progress_log.clear();
         self.search = None;
         self.palette = None;
+        self.session_picker = None;
+        self.model_picker = None;
+        self.pending_session_switch = None;
         self.attention_read = session.attention_read.clone();
         self.workspace = Some(session.workspace.clone());
         self.workspace_status = workspace_status(&session.workspace, self.language);
@@ -1676,7 +2055,9 @@ impl App {
                 store
                     .digests()
                     .into_iter()
-                    .filter(|candidate| candidate.id != session.id)
+                    .filter(|candidate| {
+                        candidate.id != session.id && candidate.workspace == session.workspace
+                    })
                     .take(30)
                     .map(|candidate| PaletteItem {
                         label: candidate.title,
@@ -1728,6 +2109,87 @@ impl App {
             filtered,
             selected: 0,
         });
+    }
+    fn open_session_picker(&mut self, current_session: uuid::Uuid) {
+        self.palette = None;
+        self.search = None;
+        self.session_picker = Some(SessionPickerState {
+            current_session,
+            ..Default::default()
+        });
+    }
+    fn set_session_picker_results(
+        &mut self,
+        results: Vec<willdeep_runtime_protocol::SessionSearchResult>,
+    ) {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return;
+        };
+        picker.results = results;
+        picker.selected = picker.selected.min(picker.results.len().saturating_sub(1));
+    }
+    fn handle_session_picker_key(&mut self, key: KeyEvent) -> SessionPickerAction {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return SessionPickerAction::None;
+        };
+        if key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r'))
+        {
+            return SessionPickerAction::Close;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::BackTab if !picker.results.is_empty() => {
+                picker.selected = picker
+                    .selected
+                    .checked_sub(1)
+                    .unwrap_or(picker.results.len() - 1);
+                SessionPickerAction::None
+            }
+            KeyCode::Down | KeyCode::Tab if !picker.results.is_empty() => {
+                picker.selected = (picker.selected + 1) % picker.results.len();
+                SessionPickerAction::None
+            }
+            KeyCode::Enter if !picker.results.is_empty() => {
+                let result = &picker.results[picker.selected.min(picker.results.len() - 1)];
+                SessionPickerAction::Switch(PendingSessionSwitch {
+                    id: result.id.to_string(),
+                    archived: result.status == willdeep_runtime_protocol::SessionStatus::Archived,
+                })
+            }
+            KeyCode::Left => {
+                picker.editor.left();
+                SessionPickerAction::None
+            }
+            KeyCode::Right => {
+                picker.editor.right();
+                SessionPickerAction::None
+            }
+            KeyCode::Home => {
+                picker.editor.home();
+                SessionPickerAction::None
+            }
+            KeyCode::End => {
+                picker.editor.end();
+                SessionPickerAction::None
+            }
+            KeyCode::Backspace => {
+                picker.editor.backspace();
+                SessionPickerAction::Refresh
+            }
+            KeyCode::Delete => {
+                picker.editor.delete();
+                SessionPickerAction::Refresh
+            }
+            KeyCode::Char(character)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT,
+                ) =>
+            {
+                picker.editor.insert(&character.to_string());
+                SessionPickerAction::Refresh
+            }
+            _ => SessionPickerAction::None,
+        }
     }
     fn handle_palette_key(&mut self, key: KeyEvent, registry: &BackgroundTaskRegistry) {
         if key.code == KeyCode::Esc
@@ -1814,6 +2276,7 @@ impl App {
                 let suffix = if matches!(
                     command.as_str(),
                     "/goal"
+                        | "/model"
                         | "/mobile"
                         | "/runtime"
                         | "/local"
@@ -1829,11 +2292,10 @@ impl App {
             }
             PaletteAction::Skill(identifier) => self.input.insert(&format!("${identifier} ")),
             PaletteAction::Session(id) => {
-                self.notice = Some(format!(
-                    "{}: {id}",
-                    self.language
-                        .text("当前会话", "Current session", "現在のセッション")
-                ));
+                self.pending_session_switch = Some(PendingSessionSwitch {
+                    id: id.clone(),
+                    archived: false,
+                });
             }
             PaletteAction::Task(index) => self.open_task_detail(*index, registry),
             PaletteAction::File(path) => self.input.insert(&format!("{path} ")),
@@ -1898,6 +2360,9 @@ impl App {
             return false;
         }
         let matches = self.command_matches();
+        let exact_command = command_candidates(self.language)
+            .into_iter()
+            .any(|(command, _)| self.input.text().trim() == command);
         match key.code {
             KeyCode::Esc => {
                 self.command_menu_dismissed = true;
@@ -1914,6 +2379,7 @@ impl App {
                 self.command_selected = (self.command_selected + 1) % matches.len();
                 true
             }
+            KeyCode::Enter if exact_command => false,
             KeyCode::Tab | KeyCode::Enter
                 if !matches.is_empty()
                     && !key
@@ -2002,10 +2468,64 @@ impl App {
         }
     }
     fn finish_turn(&mut self) {
-        self.last_elapsed = self.turn_started.take().map(|value| value.elapsed());
+        if let Some(started) = self.turn_started.take() {
+            self.last_elapsed = Some(started.elapsed());
+        }
         self.running = false;
+        self.last_progress_at = None;
+        self.runtime_turn = false;
         self.transient_thought = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
+    }
+
+    fn begin_turn(&mut self, runtime_turn: bool, initial_progress: String) {
+        let now = Instant::now();
+        self.running = true;
+        self.runtime_turn = runtime_turn;
+        self.turn_started = Some(now);
+        self.last_progress_at = Some(now);
+        self.last_elapsed = None;
+        self.progress_log.clear();
+        self.record_progress(initial_progress);
+    }
+
+    fn ensure_runtime_turn(&mut self) {
+        if self.running {
+            self.runtime_turn = true;
+            return;
+        }
+        self.tools.reset();
+        self.begin_turn(
+            true,
+            self.language
+                .text(
+                    "已重新连接 Runtime · 正在恢复进度",
+                    "Runtime reconnected · restoring progress",
+                    "Runtime に再接続 · 進捗を復元中",
+                )
+                .to_owned(),
+        );
+    }
+
+    fn observe_runtime_tasks(
+        &mut self,
+        tasks: &[crate::daemon::tui_bridge::RemoteTask],
+        session_id: uuid::Uuid,
+    ) {
+        let has_active_task = tasks.iter().any(|task| {
+            task.session_id == Some(session_id)
+                && matches!(
+                    task.status,
+                    willdeep_runtime_protocol::TaskStatus::Queued
+                        | willdeep_runtime_protocol::TaskStatus::Running
+                        | willdeep_runtime_protocol::TaskStatus::Cancelling
+                        | willdeep_runtime_protocol::TaskStatus::WaitingApproval
+                        | willdeep_runtime_protocol::TaskStatus::WaitingAnswer
+                )
+        });
+        if has_active_task && !self.running {
+            self.ensure_runtime_turn();
+        }
     }
     /// The Runtime's version when it differs from this binary's. The TUI is
     /// only a front end — a daemon started days ago keeps executing tools
@@ -2151,6 +2671,7 @@ impl App {
     }
 
     fn record_progress(&mut self, value: String) {
+        self.last_progress_at = Some(Instant::now());
         self.activity_line = value.clone();
         let elapsed = self
             .turn_started
@@ -2161,6 +2682,22 @@ impl App {
         while self.progress_log.len() > 12 {
             self.progress_log.pop_front();
         }
+    }
+
+    fn working_summary(&self) -> Option<String> {
+        let started = self.turn_started?;
+        let elapsed = started.elapsed();
+        let idle = self
+            .last_progress_at
+            .map(|progress| progress.elapsed())
+            .unwrap_or(elapsed);
+        Some(format_working_summary(
+            self.language,
+            self.runtime_turn,
+            &self.activity_line,
+            elapsed,
+            idle,
+        ))
     }
     fn handle_question_key(&mut self, key: KeyEvent) {
         let Some(dialog) = self.question.as_mut() else {
@@ -2298,6 +2835,222 @@ impl App {
             Err(e) => self.notice = Some(format!("Clipboard image unavailable: {e}")),
         }
     }
+
+    fn transcript_selection_point(
+        &self,
+        x: u16,
+        y: u16,
+        clamp_to_viewport: bool,
+    ) -> Option<ChatSelectionPoint> {
+        if self.transcript_rows.is_empty()
+            || self.transcript_rect.width < 3
+            || self.transcript_rect.height < 3
+        {
+            return None;
+        }
+        let left = self.transcript_rect.x.saturating_add(1);
+        let right = self.transcript_rect.right().saturating_sub(2);
+        let top = self.transcript_rect.y.saturating_add(1);
+        let bottom = self.transcript_rect.bottom().saturating_sub(2);
+        if !clamp_to_viewport && (x < left || x > right || y < top || y > bottom) {
+            return None;
+        }
+        let visible_row = y.clamp(top, bottom).saturating_sub(top) as usize;
+        let row = self
+            .transcript_render_offset
+            .saturating_add(visible_row)
+            .min(self.transcript_rows.len().saturating_sub(1));
+        let row_width = UnicodeWidthStr::width(self.transcript_rows[row].as_str());
+        let column = x
+            .clamp(left, right)
+            .saturating_sub(left)
+            .min(row_width.saturating_sub(1).min(u16::MAX as usize) as u16)
+            as usize;
+        Some(ChatSelectionPoint { row, column })
+    }
+
+    fn handle_chat_selection_mouse(&mut self, mouse: MouseEvent) -> bool {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(point) = self.transcript_selection_point(mouse.column, mouse.row, false)
+                else {
+                    return self.selection_mode;
+                };
+                self.chat_selection = Some(ChatSelection {
+                    anchor: point,
+                    head: point,
+                });
+                self.focus = FocusPane::Chat;
+                self.selection_mode
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(mut selection) = self.chat_selection else {
+                    return false;
+                };
+                let Some(point) = self.transcript_selection_point(mouse.column, mouse.row, true)
+                else {
+                    return false;
+                };
+                selection.head = point;
+                self.chat_selection = Some(selection);
+                self.selection_mode = true;
+                self.native_selection_mode = false;
+                self.focus = FocusPane::Chat;
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.chat_selection.is_some() => {
+                if !self.selection_mode {
+                    self.chat_selection = None;
+                    return false;
+                }
+                if let Some(point) = self.transcript_selection_point(mouse.column, mouse.row, true)
+                    && let Some(selection) = self.chat_selection.as_mut()
+                {
+                    selection.head = point;
+                }
+                self.copy_chat_selection();
+                true
+            }
+            MouseEventKind::ScrollUp if self.selection_mode => {
+                self.scroll_up(3);
+                true
+            }
+            MouseEventKind::ScrollDown if self.selection_mode => {
+                self.scroll_down(3);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn enter_native_selection_mode(&mut self) {
+        self.selection_mode = true;
+        self.native_selection_mode = true;
+        self.chat_selection = None;
+        self.focus = FocusPane::Chat;
+    }
+
+    fn exit_selection_mode(&mut self) {
+        self.selection_mode = false;
+        self.native_selection_mode = false;
+        self.chat_selection = None;
+    }
+
+    fn selected_chat_text(&self) -> String {
+        let Some(selection) = self.chat_selection else {
+            return String::new();
+        };
+        let (start, end) = selection.ordered_range();
+        selected_text(&self.transcript_rows, start, end)
+    }
+
+    fn copy_chat_selection(&mut self) {
+        let value = self.selected_chat_text();
+        if value.is_empty() {
+            self.notice = Some(
+                self.language
+                    .text(
+                        "请先在聊天区拖动选择文字",
+                        "Drag to select chat text first",
+                        "先にチャット内の文字をドラッグ選択してください",
+                    )
+                    .to_owned(),
+            );
+            return;
+        }
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(value)) {
+            Ok(()) => {
+                self.notice = Some(
+                    self.language
+                        .text(
+                            "已复制所选文字",
+                            "Selected text copied",
+                            "選択した文字をコピーしました",
+                        )
+                        .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.notice = Some(format!(
+                    "{}: {error}",
+                    self.language.text(
+                        "复制到剪贴板失败",
+                        "Copy to clipboard failed",
+                        "クリップボードへのコピーに失敗"
+                    )
+                ));
+            }
+        }
+    }
+
+    fn quote_chat_selection(&mut self) {
+        let value = self.selected_chat_text();
+        if value.is_empty() {
+            self.notice = Some(
+                self.language
+                    .text(
+                        "请先在聊天区拖动选择文字",
+                        "Drag to select chat text first",
+                        "先にチャット内の文字をドラッグ選択してください",
+                    )
+                    .to_owned(),
+            );
+            return;
+        }
+        if !self.input.is_empty() {
+            self.input.insert("\n\n");
+        }
+        self.input.insert(&quote_selected_text(&value));
+        self.selection_mode = false;
+        self.native_selection_mode = false;
+        self.chat_selection = None;
+        self.focus = FocusPane::Prompt;
+        self.notice = Some(
+            self.language
+                .text(
+                    "已引用到输入框",
+                    "Selection quoted into the prompt",
+                    "選択範囲を入力欄に引用しました",
+                )
+                .to_owned(),
+        );
+    }
+
+    fn activate_session_picker_at(&mut self, x: u16, y: u16) -> bool {
+        if !self.session_picker_rect.contains((x, y).into()) {
+            return false;
+        }
+        if y == self.session_picker_rect.y.saturating_add(1) {
+            if let Some(picker) = self.session_picker.as_mut() {
+                picker.editor.set_cursor_visual(
+                    0,
+                    x.saturating_sub(self.session_picker_rect.x + 3) as usize,
+                    self.session_picker_rect.width.saturating_sub(4).max(1) as usize,
+                );
+            }
+            return true;
+        }
+        let Some(position) = self
+            .session_picker_hits
+            .iter()
+            .find_map(|(row, position)| (*row == y).then_some(*position))
+        else {
+            return true;
+        };
+        let Some(picker) = self.session_picker.as_mut() else {
+            return true;
+        };
+        picker.selected = position.min(picker.results.len().saturating_sub(1));
+        if let Some(result) = picker.results.get(picker.selected) {
+            self.pending_session_switch = Some(PendingSessionSwitch {
+                id: result.id.to_string(),
+                archived: result.status == willdeep_runtime_protocol::SessionStatus::Archived,
+            });
+            self.session_picker = None;
+        }
+        true
+    }
+
     fn handle_mouse(
         &mut self,
         x: u16,
@@ -2375,7 +3128,7 @@ impl App {
                 self.command_hits.iter().find(|(row, _)| *row == y).copied()
             {
                 self.command_selected = selected;
-                self.handle_command_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                self.handle_command_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             }
         } else if self.skill_rect.contains((x, y).into()) {
             if let Some((_, selected)) = self.skill_hits.iter().find(|(row, _)| *row == y).copied()
@@ -2428,6 +3181,7 @@ impl App {
                 | "/diff"
                 | "/local"
                 | "/mobile"
+                | "/model"
                 | "/runtime"
                 | "/session"
                 | "/webapp"
@@ -2436,10 +3190,7 @@ impl App {
             return false;
         }
         match command {
-            "/help" => self.append_transcript(
-                "System: prompts use Runtime by default · /local <task> · /goal <text>|off · /compress · /sidebar [on|off] (status sidebar, hidden by default; Ctrl+B too) · /daemon [status|start|stop|upgrade] · /webapp [status|start|stop|127.0.0.1:PORT] · /runtime <task> · /session <action> · /workspace list|switch <id> · /agent instruct <id> <text> · /mobile [show|hide|off] · /skills · /clear · /help · use $skill-name in prompts"
-                    .to_owned(),
-            ),
+            "/help" => self.append_transcript(help_text(self.language)),
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
                 self.goal = None;
                 self.append_transcript("System: Goal mode disabled".to_owned());
@@ -2633,6 +3384,65 @@ fn encode_clipboard_image(width: usize, height: usize, bytes: Vec<u8>) -> Result
     })
 }
 
+const PROGRESS_WAITING_AFTER: Duration = Duration::from_secs(8);
+const PROGRESS_STALE_AFTER: Duration = Duration::from_secs(30);
+const PROGRESS_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+fn progress_spinner(elapsed: Duration) -> &'static str {
+    let index = elapsed.as_secs() as usize % PROGRESS_SPINNER.len();
+    PROGRESS_SPINNER[index]
+}
+
+fn format_working_summary(
+    language: Language,
+    runtime_turn: bool,
+    activity_line: &str,
+    elapsed: Duration,
+    idle: Duration,
+) -> String {
+    let phase = if idle >= PROGRESS_STALE_AFTER {
+        format!(
+            "{} {:.0}s",
+            language.text(
+                "暂未收到新事件 · 已等待",
+                "No new event yet · waiting",
+                "新しいイベントなし · 待機"
+            ),
+            idle.as_secs_f32()
+        )
+    } else if idle >= PROGRESS_WAITING_AFTER {
+        language
+            .text(
+                if runtime_turn {
+                    "等待 Runtime / 模型返回"
+                } else {
+                    "等待模型 / 工具返回"
+                },
+                if runtime_turn {
+                    "Waiting for Runtime / model"
+                } else {
+                    "Waiting for model / tool"
+                },
+                if runtime_turn {
+                    "Runtime / モデルの応答待ち"
+                } else {
+                    "モデル / ツールの応答待ち"
+                },
+            )
+            .to_owned()
+    } else if activity_line.is_empty() {
+        language.text("正在处理", "Working", "処理中").to_owned()
+    } else {
+        activity_line.to_owned()
+    };
+    format!(
+        "{} {phase} · {} {:.1}s",
+        progress_spinner(elapsed),
+        language.text("已运行", "elapsed", "経過"),
+        elapsed.as_secs_f32()
+    )
+}
+
 fn draw(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -2640,7 +3450,7 @@ fn draw(
 ) -> Result<()> {
     term.draw(|f| {
         app.sidebar_wide = f.area().width >= 110;
-        let wide_sidebar = app.sidebar_visible && app.sidebar_wide;
+        let wide_sidebar = app.sidebar_visible && app.sidebar_wide && !app.composer_expanded;
         let columns = if wide_sidebar {
             Layout::default()
                 .direction(Direction::Horizontal)
@@ -2653,26 +3463,32 @@ fn draw(
                 .split(f.area())
         };
         let canvas = columns[0];
-        let activity = if app.tools_expanded && app.tools.requested > 0 {
+        let activity = if app.composer_expanded {
+            0
+        } else if app.tools_expanded && app.tools.requested > 0 {
             8
         } else if app.running {
             5
         } else {
             3
         };
-        let attach = if app.attachments.is_empty() { 0 } else { 3 };
+        let attach = if app.composer_expanded || app.attachments.is_empty() {
+            0
+        } else {
+            3
+        };
         let input_width = canvas.width.saturating_sub(2).max(1) as usize;
-        let input_lines = visual_lines(app.input.text(), input_width).clamp(3, 6);
+        let input_lines = app.input.visual_line_count(input_width).clamp(3, 6);
         let input_height = (input_lines + 2) as u16;
+        let constraints = composer_layout_constraints(
+            app.composer_expanded,
+            activity,
+            attach,
+            input_height,
+        );
         let areas = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(activity),
-                Constraint::Length(attach),
-                Constraint::Length(input_height),
-                Constraint::Length(1),
-            ])
+            .constraints(constraints)
             .split(canvas);
         let mut visible_transcript = app.transcript.clone();
         if let Some(thought) = &app.transient_thought {
@@ -2691,12 +3507,20 @@ fn draw(
         let offset = max
             .saturating_sub(app.scroll_from_bottom)
             .min(u16::MAX as usize) as u16;
-        let title = if app.selection_mode {
+        let mut title = if app.native_selection_mode {
             app.language
                 .text(
-                    "WillDeep · 拖动选择文字 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
-                    "WillDeep · drag to select · Cmd+C / Ctrl+Shift+C copy · Esc exits",
-                    "WillDeep · ドラッグ選択 · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
+                    "WillDeep · 终端原生选择 · 拖选后右键或 Cmd+C 复制 · Esc 退出",
+                    "WillDeep · native terminal selection · drag, then right-click or Cmd+C · Esc exits",
+                    "WillDeep · 端末の標準選択 · ドラッグ後に右クリック / Cmd+C · Esc 終了",
+                )
+                .to_owned()
+        } else if app.selection_mode {
+            app.language
+                .text(
+                    "WillDeep · 拖动选择 · Ctrl/Cmd+C 或 Y 复制 · Q 引用 · Esc 退出",
+                    "WillDeep · drag to select · Ctrl/Cmd+C or Y copy · Q quote · Esc exits",
+                    "WillDeep · ドラッグ選択 · Ctrl/Cmd+C / Y コピー · Q 引用 · Esc 終了",
                 )
                 .to_owned()
         } else if app.follow_bottom {
@@ -2718,12 +3542,36 @@ fn draw(
                 app.scroll_from_bottom
             )
         };
+        if app.running
+            && let Some(started) = app.turn_started
+        {
+            let elapsed = started.elapsed();
+            title.push_str(&format!(
+                " · {} {} {:.0}s",
+                progress_spinner(elapsed),
+                app.language.text("工作中", "working", "作業中"),
+                elapsed.as_secs_f32()
+            ));
+        }
         let search_query = app
             .search
             .as_ref()
             .map(|search| search.editor.text().trim())
             .filter(|query| !query.trim().is_empty());
-        let colored = colored_transcript(&visible_transcript, search_query);
+        let mut colored = wrap_styled_text(
+            colored_transcript_at_width(
+                &visible_transcript,
+                search_query,
+                app.transcript_width,
+            ),
+            app.transcript_width,
+        );
+        app.transcript_rows = text_rows(&colored);
+        app.transcript_render_offset = offset as usize;
+        if let Some(selection) = app.chat_selection {
+            let (start, end) = selection.ordered_range();
+            highlight_text_selection(&mut colored, start, end);
+        }
         f.render_widget(
             Paragraph::new(colored)
                 .block(
@@ -2736,36 +3584,46 @@ fn draw(
                             Color::Blue
                         })),
                 )
-                .scroll((offset, 0))
-                .wrap(Wrap { trim: false }),
+                .scroll((offset, 0)),
             areas[0],
         );
         if activity > 0 {
             app.activity_rect = areas[1];
             let text = if app.tools_expanded {
-                format!(
-                    "{} · {}\n{}",
+                let mut lines = Vec::new();
+                if let Some(summary) = app.working_summary() {
+                    lines.push(summary);
+                }
+                lines.push(format!(
+                    "{} · {}",
                     app.activity_line,
-                    app.tools.summary(app.language),
+                    app.tools.summary(app.language)
+                ));
+                lines.extend(
                     app.tools
                         .details
                         .iter()
                         .rev()
-                        .take(5)
+                        .take(4)
                         .rev()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
-            } else if app.running {
-                app.progress_log
+                        .cloned(),
+                );
+                lines.join("\n")
+            } else if let Some(summary) = app.working_summary() {
+                let history = app
+                    .progress_log
                     .iter()
                     .rev()
-                    .take(3)
+                    .take(2)
                     .rev()
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join("\n")
+                    .join("\n");
+                if history.is_empty() {
+                    summary
+                } else {
+                    format!("{summary}\n{history}")
+                }
             } else if app.tools.requested == 0 {
                 app.activity_line.clone()
             } else {
@@ -2843,16 +3701,25 @@ fn draw(
         let (row, col) = app.input.cursor_visual(width);
         let visible = areas[3].height.saturating_sub(2).max(1) as usize;
         app.prompt_scroll = row.saturating_sub(visible - 1);
+        let wrapped_input = app.input.wrapped_text(width);
         f.render_widget(
-            Paragraph::new(app.input.text())
+            Paragraph::new(wrapped_input)
                 .block(
                     Block::default()
                         .title(if app.focus == FocusPane::Prompt {
-                            app.language.text(
-                                "输入 [焦点] · Shift/Alt+Enter 换行",
-                                "Prompt [focused] · Shift/Alt+Enter newline",
-                                "入力 [フォーカス] · Shift/Alt+Enter で改行",
-                            )
+                            if app.composer_expanded {
+                                app.language.text(
+                                    "输入 [大空间] · F2 恢复 · Shift/Alt+Enter 换行",
+                                    "Prompt [expanded] · F2 restore · Shift/Alt+Enter newline",
+                                    "入力 [拡大] · F2 で戻す · Shift/Alt+Enter で改行",
+                                )
+                            } else {
+                                app.language.text(
+                                    "输入 [焦点] · F2 展开 · Shift/Alt+Enter 换行",
+                                    "Prompt [focused] · F2 expand · Shift/Alt+Enter newline",
+                                    "入力 [フォーカス] · F2 で拡大 · Shift/Alt+Enter で改行",
+                                )
+                            }
                         } else {
                             app.language.text("输入", "Prompt", "入力")
                         })
@@ -2863,8 +3730,11 @@ fn draw(
                             Color::DarkGray
                         })),
                 )
-                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0))
-                .wrap(Wrap { trim: false }),
+                // Same cyan the transcript gives `You:` lines, so what you are
+                // typing and what you already said read as one voice instead of
+                // falling back to the terminal's default foreground.
+                .style(Style::default().fg(Color::Cyan))
+                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0)),
             areas[3],
         );
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
@@ -2872,19 +3742,41 @@ fn draw(
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
-        let status = if app.selection_mode {
-            app.language
-                .text(
-                    "文本选择模式 · 鼠标拖选 · Cmd+C / Ctrl+Shift+C 复制 · Esc 退出",
-                    "Text selection · drag · Cmd+C / Ctrl+Shift+C copy · Esc exits",
-                    "テキスト選択 · ドラッグ · Cmd+C / Ctrl+Shift+C コピー · Esc 終了",
-                )
-                .to_owned()
+        let status = if app.native_selection_mode {
+            app.notice.take().unwrap_or_else(|| {
+                app.language
+                    .text(
+                        "终端原生选择 · 拖选后可用右键复制 · Esc 恢复 WillDeep 鼠标操作",
+                        "Native terminal selection · drag, then right-click to copy · Esc restores WillDeep mouse controls",
+                        "端末の標準選択 · ドラッグ後に右クリックでコピー · Esc でマウス操作を復元",
+                    )
+                    .to_owned()
+            })
+        } else if app.selection_mode {
+            app.notice.take().unwrap_or_else(|| {
+                app.language
+                    .text(
+                        "文本选择模式 · 鼠标拖选 · Ctrl/Cmd+C 或 Y 复制 · Q 引用 · Esc 退出",
+                        "Text selection · drag · Ctrl/Cmd+C or Y copy · Q quote · Esc exits",
+                        "テキスト選択 · ドラッグ · Ctrl/Cmd+C / Y コピー · Q 引用 · Esc 終了",
+                    )
+                    .to_owned()
+            })
         } else {
             app.notice.take().unwrap_or_else(|| {
-            let input = app.latest_usage.input_tokens.unwrap_or(0);
-            let output = app.latest_usage.output_tokens.unwrap_or(0);
-            let context_tokens = app.context_tokens.max(input);
+            let input_tokens = app.latest_usage.input_tokens.unwrap_or(0);
+            let output_tokens = app.latest_usage.output_tokens.unwrap_or(0);
+            let input = format_token_count(input_tokens);
+            let output = format_token_count(output_tokens);
+            let cache = cache_hit_rate(&app.latest_usage)
+                .map(|rate| {
+                    format!(
+                        " · {} {rate:.2}%",
+                        app.language.text("缓存", "cache", "キャッシュ")
+                    )
+                })
+                .unwrap_or_default();
+            let context_tokens = app.context_tokens.max(input_tokens);
             let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
             let elapsed = app
                 .turn_started
@@ -2894,8 +3786,8 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · Ctrl+S {} · F1",
-                    app.language.text("运行中", "Running", "実行中"),
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · Ctrl+S {} · F1",
+                    app.working_summary().unwrap_or_else(|| app.language.text("运行中", "Running", "実行中").to_owned()),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
@@ -2904,7 +3796,7 @@ fn draw(
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
@@ -2997,6 +3889,90 @@ fn draw(
                 f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
             }
         }
+        app.session_picker_rect = Rect::default();
+        app.session_picker_hits.clear();
+        if let Some(picker) = &app.session_picker {
+            let width = f.area().width.min(100);
+            let height = f
+                .area()
+                .height
+                .min((picker.results.len().min(16) as u16 + 3).max(7));
+            let popup = centered_rect(width, height, f.area());
+            app.session_picker_rect = popup;
+            let visible = popup.height.saturating_sub(3).max(1) as usize;
+            let start = picker.selected.saturating_sub(visible - 1);
+            let mut lines = vec![Line::styled(
+                format!("› {}", picker.editor.text()),
+                Style::default().fg(Color::Yellow),
+            )];
+            if picker.results.is_empty() {
+                lines.push(Line::styled(
+                    app.language.text(
+                        "没有匹配的历史会话",
+                        "No historical Sessions match",
+                        "一致する履歴セッションがありません",
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                for (position, result) in
+                    picker.results.iter().enumerate().skip(start).take(visible)
+                {
+                    let selected = position == picker.selected;
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else if result.id == picker.current_session {
+                        Style::default().fg(Color::LightGreen)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    lines.push(Line::styled(
+                        session_picker_result_line(
+                            result,
+                            result.id == picker.current_session,
+                            app.language,
+                            selected,
+                        ),
+                        style,
+                    ));
+                    app.session_picker_hits
+                        .push((popup.y + 2 + (position - start) as u16, position));
+                }
+            }
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .title(format!(
+                            "{} · {}/{} · ↑/↓/Tab · Enter · Esc",
+                            app.language.text(
+                                "历史会话（当前工作区）",
+                                "Session history (current Workspace)",
+                                "履歴セッション（現在のワークスペース）"
+                            ),
+                            if picker.results.is_empty() {
+                                0
+                            } else {
+                                picker.selected + 1
+                            },
+                            picker.results.len()
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::LightCyan)),
+                ),
+                popup,
+            );
+            if popup.width > 3 {
+                let cursor = UnicodeWidthStr::width(picker.editor.text())
+                    .min(popup.width.saturating_sub(4) as usize)
+                    as u16;
+                f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
+            }
+        }
+        render_model_picker(f, app);
         app.search_rect = Rect::default();
         if let Some(search) = &app.search {
             let width = f.area().width.min(72);
@@ -3348,20 +4324,20 @@ fn draw(
         app.approval_rect = Rect::default();
         if let Some((description, always, _)) = &app.approval {
             let content = approval_content(description, *always, app.language);
-            let popup = centered_rect(f.area().width.min(76), 9.min(f.area().height), f.area());
+            let popup = centered_rect(modal_width(f.area()), 9.min(f.area().height), f.area());
             app.approval_rect = popup;
-            f.render_widget(Clear, popup);
+            paint_modal_halo(f, popup);
             f.render_widget(
                 Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(approval_title(app.language, app.approval_queue.len()))
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Yellow)),
-                    )
+                    .block(modal_block(
+                        approval_title(app.language, app.approval_queue.len()),
+                        Color::LightYellow,
+                    ))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
+            let halo = modal_halo(popup, f.area());
+            seal_modal_background(f.buffer_mut(), halo);
         }
         app.question_rect = Rect::default();
         app.question_hits.clear();
@@ -3410,8 +4386,9 @@ fn draw(
                 dialog.answer.text(),
                 help
             );
-            let popup_width = f.area().width.min(84);
-            let content_width = popup_width.saturating_sub(2).max(1) as usize;
+            let popup_width = modal_width(f.area());
+            // Borders take 2 columns, the block's horizontal padding another 2.
+            let content_width = popup_width.saturating_sub(4).max(1) as usize;
             let height = (visual_lines(&content, content_width) as u16 + 2)
                 .min(f.area().height)
                 .max(8);
@@ -3430,29 +4407,168 @@ fn draw(
                     )
                 })
                 .collect();
-            f.render_widget(Clear, popup);
+            paint_modal_halo(f, popup);
             f.render_widget(
-                Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .title(queued_title(
-                                app.language.text(
-                                    "智能体提问",
-                                    "Question from Agent",
-                                    "エージェントからの質問",
-                                ),
-                                app.language,
-                                app.question_queue.len(),
-                            ))
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Cyan)),
-                    )
+                Paragraph::new(question_lines(dialog, &content))
+                    .block(modal_block(
+                        queued_title(
+                            app.language.text(
+                                "智能体提问",
+                                "Question from Agent",
+                                "エージェントからの質問",
+                            ),
+                            app.language,
+                            app.question_queue.len(),
+                        ),
+                        Color::LightCyan,
+                    ))
                     .wrap(Wrap { trim: false }),
                 popup,
             );
+            let halo = modal_halo(popup, f.area());
+            seal_modal_background(f.buffer_mut(), halo);
         }
     })?;
     Ok(())
+}
+
+/// Styles the question modal's rows: bold question, a highlight bar on the row
+/// the cursor is on, the free-text field picked out, and the key hints dimmed.
+///
+/// Takes the already-assembled `content` rather than rebuilding the text, so the
+/// styled rows cannot drift from the string the height and mouse-row math use.
+fn question_lines(dialog: &AskDialog, content: &str) -> Vec<Line<'static>> {
+    let question_rows = dialog.request.question.split('\n').count();
+    let first_option = question_rows + 1; // one blank line after the question
+    let after_options = first_option + dialog.request.options.len();
+    let other_answer_row = after_options + 1; // one blank line after the options
+    content
+        .split('\n')
+        .enumerate()
+        .map(|(index, row)| {
+            let style = if index < question_rows {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if (first_option..after_options).contains(&index) {
+                if index - first_option == dialog.selected {
+                    Style::default()
+                        .bg(Color::LightCyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }
+            } else if index == other_answer_row {
+                Style::default().fg(Color::LightYellow)
+            } else if index > other_answer_row {
+                Style::default().fg(Color::Gray)
+            } else {
+                Style::default()
+            };
+            Line::styled(row.to_owned(), style)
+        })
+        .collect()
+}
+
+/// The panel colours shared by the approval and question modals. One identity
+/// for both — they are the same class of thing, a gate waiting on the human —
+/// with the accent left to the caller.
+const MODAL_PANEL: Style = Style::new().bg(Color::Blue).fg(Color::White);
+
+/// How wide a modal gets. Deliberately most of the terminal: a narrow centered
+/// popup leaves transcript text sitting to either side on the same rows, which
+/// is what made the dialog read as tangled with the chat instead of as its own
+/// region.
+fn modal_width(area: Rect) -> u16 {
+    area.width.saturating_sub(8).clamp(40, 110).min(area.width)
+}
+
+/// The one-cell ring around `popup`, clamped to `area`.
+fn modal_halo(popup: Rect, area: Rect) -> Rect {
+    let x = popup.x.saturating_sub(1);
+    let y = popup.y.saturating_sub(1);
+    Rect {
+        x,
+        y,
+        width: popup
+            .width
+            .saturating_add(2)
+            .min(area.width.saturating_sub(x)),
+        height: popup
+            .height
+            .saturating_add(2)
+            .min(area.height.saturating_sub(y)),
+    }
+}
+
+/// Paints the ring in panel colour, so the modal reads as a raised,
+/// self-contained block rather than text floating over the chat.
+fn paint_modal_halo(f: &mut ratatui::Frame<'_>, popup: Rect) {
+    let halo = modal_halo(popup, f.area());
+    f.render_widget(Clear, halo);
+    f.render_widget(Block::default().style(MODAL_PANEL), halo);
+}
+
+/// Re-applies the panel background over `area` once its contents are drawn.
+///
+/// Necessary because `Buffer::set_stringn` calls `Cell::reset` on the trailing
+/// cell of every double-width grapheme, which knocks the background back to the
+/// terminal default. A Chinese title or option label therefore punches
+/// transparent holes in an otherwise solid panel. This pass only touches
+/// colours, never symbols, so borders, text and the cursor-row highlight all
+/// survive — only the missing background is filled back in.
+fn seal_modal_background(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+    let area = area.intersection(*buffer.area());
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buffer[(x, y)];
+            if cell.bg == Color::Reset {
+                cell.bg = Color::Blue;
+            }
+        }
+    }
+}
+
+/// Chrome for a modal panel: thick accent border, bold title, and horizontal
+/// padding only — vertical padding would shift the option rows that
+/// [`question_option_row`] uses for mouse hit-testing.
+fn modal_block(title: String, accent: Color) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(accent))
+        .style(MODAL_PANEL)
+        .padding(Padding::horizontal(1))
+}
+
+fn composer_layout_constraints(
+    expanded: bool,
+    activity: u16,
+    attachments: u16,
+    input_height: u16,
+) -> [Constraint; 5] {
+    if expanded {
+        [
+            Constraint::Length(0),
+            Constraint::Length(0),
+            Constraint::Length(0),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ]
+    } else {
+        [
+            Constraint::Min(4),
+            Constraint::Length(activity),
+            Constraint::Length(attachments),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ]
+    }
 }
 
 fn workspace_status(workspace: &std::path::Path, language: Language) -> String {
@@ -3572,6 +4688,53 @@ fn approval_content(description: &str, always: bool, language: Language) -> Vec<
     content
 }
 
+fn session_picker_result_line(
+    result: &willdeep_runtime_protocol::SessionSearchResult,
+    current: bool,
+    language: Language,
+    selected: bool,
+) -> String {
+    let marker = if selected { "▶" } else { " " };
+    let current = if current {
+        format!(" [{}]", language.text("当前", "current", "現在"))
+    } else {
+        String::new()
+    };
+    let title = result.title.replace(['\r', '\n'], " ");
+    let snippet = result
+        .snippet
+        .as_deref()
+        .map(|value| value.replace(['\r', '\n'], " "))
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" · {value}"))
+        .unwrap_or_default();
+    let short_id = result.id.simple().to_string();
+    format!(
+        "{marker} {title}{current} · {} · {} · {} {}{snippet}",
+        &short_id[..8],
+        session_status_label(result.status, language),
+        result.message_count,
+        language.text("条消息", "messages", "件のメッセージ")
+    )
+}
+
+fn session_status_label(
+    status: willdeep_runtime_protocol::SessionStatus,
+    language: Language,
+) -> &'static str {
+    use willdeep_runtime_protocol::SessionStatus;
+    match status {
+        SessionStatus::Idle => language.text("空闲", "idle", "待機中"),
+        SessionStatus::Queued => language.text("排队中", "queued", "待機列"),
+        SessionStatus::Running => language.text("运行中", "running", "実行中"),
+        SessionStatus::WaitingApproval => language.text("等待审批", "waiting approval", "承認待ち"),
+        SessionStatus::WaitingAnswer => language.text("等待回答", "waiting answer", "回答待ち"),
+        SessionStatus::Failed => language.text("失败", "failed", "失敗"),
+        SessionStatus::Interrupted => language.text("已中断", "interrupted", "中断"),
+        SessionStatus::Archived => language.text("已归档", "archived", "アーカイブ済み"),
+    }
+}
+
 fn fuzzy_score(query: &str, value: &str) -> Option<usize> {
     if query.is_empty() {
         return Some(0);
@@ -3682,13 +4845,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+R 搜索历史会话并继续\n  Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  F2 展开/恢复大输入空间         Ctrl+A/E 行首/行尾\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  直接拖动选择聊天文字           Ctrl/Cmd+C 或 Y 复制，Q 引用\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette                Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette     Ctrl+R Search and continue a historical Session\n  Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  F2 Expand/restore composer Ctrl+A/E Line start/end\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Drag to select chat text   Ctrl/Cmd+C or Y copy, Q quote\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R 履歴セッションを検索して再開\n  Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }

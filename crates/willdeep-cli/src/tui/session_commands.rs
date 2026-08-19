@@ -152,7 +152,7 @@ pub(super) fn parse_fork_options(arguments: &str) -> Result<ForkOptions> {
     Ok(options)
 }
 
-async fn switch(
+pub(super) async fn switch(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,
@@ -186,6 +186,7 @@ async fn switch(
     runtime.runtime_submit.profile = target.profile.clone();
     runtime.runtime_submit.model = target.model.clone();
     runtime.runtime_submit.config = target.config.clone();
+    let _ = runtime.refresh_provider_config();
     app.load_session(&target);
     runtime.relay_bridge.set_session(target.id.to_string());
     *session = target;

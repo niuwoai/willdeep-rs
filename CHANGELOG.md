@@ -1,5 +1,187 @@
 # Changelog
 
+## [0.36.0-rc1] - 2026-08-19
+
+### Added
+- **状态栏显示提示词缓存命中率。** 新增 `缓存 xx.xx%`（命中输入 Token ÷ 输入 Token），四种网关方言的字段都会解析：Anthropic `cache_read_input_tokens`、OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`。Provider 不上报缓存数据时整段隐藏，不把「未知」显示成 `0.00%`。
+- **状态栏 Token 改用 K/M 单位，保留两位小数**（`1.23K`、`4.56M`）。千以下原样显示；四舍五入会越过 `1000.00K` 的数值直接进位成 `M`。
+- **自动压缩补齐三道防线：** 90% 逃生水位（越过即无视 16 条门槛照压，并按历史长度收缩保留区）、单条消息超过窗口 25% 就地裁掉中段（纯字符串处理，不花 Provider 调用）、95% 天花板兜底（摘要后仍超窗则从保留区头部继续丢，至少保住首条、摘要与最近一轮问答）。此前少数几条巨型工具输出凑不够 16 条门槛，会带着必然超窗的请求直冲 Provider。
+- 首屏欢迎语补充 `/help` 与 `/model` 指引。
+
+### Changed
+- **`/help` 改为按当前语言输出的多行命令表。** 此前是一行写死的英文长串：中文与日文界面看不懂，终端里也糊成一坨。说明文案与补全菜单共用同一份目录，用法签名的占位符随语言走。
+- 在途自动压缩的触发水位由配置窗口的 80% 下调至 75%。
+- 压缩相关阈值全部抽为具名常量（`AUTO_COMPRESSION_TRIGGER_PERCENT` / `_ESCAPE_PERCENT` / `_CEILING_PERCENT` / `_KEEP_RECENT` / `_MIN_MESSAGES` / `_MIN_TAIL`、`OVERSIZED_MESSAGE_PERCENT`）。
+- `Usage` 新增 `cache_read_tokens`，`AgentEvent::CompressionCompleted` 新增 `dropped_messages`；Runtime JSON 事件与 TUI 提示同步透传，兜底丢弃不再是静默行为。
+- `Language` 新增 `pick`，供需要插值的文案取值。
+
+### Tests
+- 新增压缩水位回归测试四则：75% 触发线、短历史逃生压缩、超大单条消息就地裁剪且不额外调用 Provider、保留区超窗时丢弃并如实上报条数。
+- 新增 `/help` 本地化与逐行排版回归测试，锁定旧的英文长串不再出现。
+- 新增 Token K/M 格式化与缓存命中率回归测试（区分「Provider 未上报」与「确实零命中」）。
+- 新增三种网关缓存字段解析测试。
+
+## [0.35.0-rc3] - 2026-08-18
+
+### Fixed
+- 修复 TUI `Ctrl+S` 仅切换界面提示、未真正关闭终端鼠标捕获，导致终端原生右键“复制”仍不可用的问题。
+- WillDeep 内部拖选现在会在松开鼠标时自动写入系统剪贴板，并保留 `Cmd/Ctrl+C`、`Y` 手动复制与 `Q` 引用。
+
+### Tests
+- 新增终端原生选择模式进入、清理内部选区和退出状态的回归测试。
+
+## [0.35.0-rc2] - 2026-08-18
+
+### Fixed
+- 修复 TUI 中精确输入 `/model`、`/compress`、`/diff`、`/session` 等斜杠命令后，第一次 `Enter` 只关闭补全菜单、需要第二次 `Enter` 才执行的问题；前缀输入仍可用 `Enter` 或 `Tab` 补全。
+
+### Tests
+- 新增精确斜杠命令单次 `Enter` 直接进入执行链的回归测试。
+
+## [0.35.0-rc1] - 2026-08-18
+
+### Added
+- **TUI 新增 `/model [模型名]`。** `/model qwen3-coder` 直接切换当前 Session 后续对话使用的模型；裸 `/model` 从当前 Provider 的 `/v1/models` 获取完整列表，打开支持模糊筛选、方向键/Tab、PageUp/PageDown、鼠标滚轮和点击选择的可滚动面板。列表获取失败时保留明确错误，并提示仍可直接输入模型名。
+- Provider Core 新增兼容 OpenAI 常见 `data`、`models` 与根数组响应的模型列表解析；Runtime Protocol/Client 新增类型化 `session.update_model` 操作。
+
+### Changed
+- 模型切换会同步 Core Session、Runtime Session、后续 Runtime Turn 与进程内 `/local` Agent，不再出现界面显示新模型、实际请求仍走旧模型的假切换。
+
+### Tests
+- 新增模型列表兼容解析、命令解析、长列表筛选与翻页导航、Runtime/Core Session 模型一致性和公开协议参数回归测试。
+
+## [0.34.0-rc4] - 2026-08-18
+
+### Fixed
+- **浅色终端主题下，侧栏“需要你处理”和“Runtime 智能体”等分组标题不再淡到几乎不可见。** 这些标题此前显式使用 ANSI `Gray`，实际颜色完全取决于终端调色板，在浅色主题中可能与背景过于接近。现在改为继承终端默认前景色并加粗，兼容浅色、深色及自定义主题，同时保留清晰的分组层级。
+
+### Tests
+- 新增侧栏分组标题样式回归测试，锁定“使用终端默认前景色、加粗且不降亮度”的可读性约束。
+
+## [0.34.0-rc3] - 2026-08-17
+
+### Fixed
+- **聊天区文字颜色回归：`You:` / `Error:` 等整片文案退回终端默认色（浅色主题下就是黑的）。** rc1 新增的 `wrap_styled_text` 在把行摊平成字符时只读 span 样式，而 `colored_transcript_at_width` 用的是 `Line::styled`——ratatui 把颜色记在行级 `style` 上、span 保持无样式，于是整套 transcript 配色被丢弃。助手 Markdown 因为用显式 `Span::styled` 才幸存，这也是现象看起来"只有一部分变黑"的原因。现在摊平时会把行级样式 patch 进每个字符。
+- **Composer 里正在输入的文字也没有前景色**，同样落到终端默认色。现在与 transcript 中 `You:` 同为青色，输入与已说出的话是同一种"声音"。
+- **中文标题会在弹窗背景上打出透明洞。** `Buffer::set_stringn` 对每个双宽字形的后续单元格调用 `Cell::reset`，把背景打回终端默认色。渲染完成后补一遍背景（只改颜色不动字符），边框、文本与高亮条均不受影响。
+
+### Changed
+- **智能体提问与审批弹窗改为相对独立、醒目的面板。** 实心蓝底白字、加粗厚边框、标题反白；提问弹窗中光标所在选项有高亮条，自由输入行单独着色，快捷键提示压暗。弹窗四周加一圈同色光晕，读起来是一块浮起的独立区域，而不是浮在聊天上的文字。
+- 弹窗宽度从固定 84 列改为占据终端大部（两侧各留 4 列，上限 110 列）。此前窄弹窗居中，两侧同一行仍露出聊天内容，这正是它看起来与聊天纠缠在一起的原因。
+
+### Tests
+- 颜色回归测试已反向验证：退回"只读 span 样式"后精准失败（拿到 `[None]`，即无颜色）。
+- 弹窗不透明性用真实 `Buffer` 渲染验证，并显式断言"补背景之前中文宽字形确实留下空洞"这一前提，再断言补完后面板与光晕每个单元格都带面板底色、且底下的聊天文字不再透出。
+
+## [0.34.0-rc2] - 2026-08-17
+
+### Fixed
+- **headless 模式的通知 Webhook 此前根本发不出去。** 投递是 detach 出去的，而 `execute_noninteractive` 返回后进程立即退出，tokio 运行时一析构就把还没跑的 task 丢掉——请求连离开 socket 的机会都没有，15 秒超时形同虚设。新增 `Notifier::flush()`，headless 路径在返回前等待已启动的投递（上限 6 秒，短于请求超时，不让一个通知拖慢 `willdeep run` 退出）。
+- **运行时快照路径只会发出会话里第一条待处理事项，之后永久静默。** 去重键原先只用 `AttentionItem.id`，而 daemon 侧的审批与提问由 `AttentionItem::approval()` / `question()` 构造，id 是常量 `approval:current` / `question:current`。现在改为真正的电平转边沿：键含状态与内容指纹，且条目离开快照即遗忘——一次审批关闭正是下一次能再次触发的前提。
+- **`attention_kind` 不再用 `Debug` 输出当线上取值。** 原先 `format!("{:?}", source).to_lowercase()` 产出 `diffreview`，既不是 snake_case 也不是接收端认得的形式，而且枚举改名会静默改变报文。改为显式 `match`，取值为 `diff_review` / `background_shell` 等。
+- **headless 下的投递失败不再静默丢弃。** `take_error()` 此前只有 TUI 会 drain，headless 配错地址是纯静默。现在 headless 在 flush 后 drain 并写 stderr，stdout 保持干净以兼容 `--output json`。
+
+### Notes
+- `attention_kind` 的语义与 macOS 端仍有已知差异：app 的 `AgentToolApprovalNotifier` 在该字段填**工具名**，而 CLI 的审批边界只能拿到本地化的人话描述（`"run command: …"`），只能如实上报来源分类。从人话反推工具名会在语言切换时失效，故不做。
+
+### Tests
+- 两个回归测试均已反向验证：把修复退回原逻辑后精准失败（去重退回纯 id 时第二次审批消失、flush 空操作时零投递），修复在位时通过。另补 `source_label` 线上取值锁定与开启/关闭 gate 的状态迁移测试。
+
+## [0.34.0-rc1] - 2026-08-17
+
+### Added
+- **TUI 新增 `Ctrl+R` 历史会话搜索。** 搜索范围限定为当前 Workspace，可按会话标题或聊天消息正文筛选；结果展示会话状态、消息数和命中摘要，支持方向键/Tab 选择，并以 Enter 或鼠标点击直接进入继续。
+- 历史会话选择器会标记当前会话；目标已归档时先自动恢复为可继续状态。切换前保存当前会话的已读状态与 Runtime 事件游标，进入后恢复目标会话的聊天记录、Goal、Provider Profile、模型和配置。
+
+### Changed
+- `Ctrl+P` 命令面板中的会话条目现在只列当前 Workspace，并从“仅显示会话 ID”改为可直接切换。
+
+### Tests
+- 新增中文搜索输入、结果循环导航、归档会话选择、消息摘要单行化和切换状态回归测试。
+
+## [0.33.0-rc1] - 2026-08-17
+
+### Added
+- 新增 256K `implementer` 子 Agent，面向企业私有部署承担最多 16 个声明路径的日常多文件功能、重构和新文件实现；可选 verifier 存在时只允许执行该验证命令。
+- 写入文件集支持预先声明尚不存在的目标路径，Worker 可在白名单内创建新文件，仍受工作区隔离、文件集互斥和越界拒绝保护。
+
+### Changed
+- 小模型路由目标从“降低调用成本”升级为“私有部署和数据不出公网优先”；系统提示默认尝试可部署的 32K / 48K / 64K / 256K 工种，只有无法有界拆分的任务才使用 `deep` / 父模型。
+- 取消 16K 档：`log_inspector` 提升到 32K，`reader`、`editor`、`build_fixer` 使用 48K，`test_fixer` 保持 64K，`implementer` 使用 256K。
+- `smart` / `workspace-write` 下的写入型 Worker 继承主 Agent 的工作区写权限，不再为基础文件编辑追加审批；`strict` 仍审批完整文件集，`read-only` 仍禁止写入。
+
+### Tests
+- 新增 Worker 工作区写权限继承、Strict 审批保留、声明路径新文件创建和 32K～256K 档位约束测试。
+
+## [0.32.0-rc1] - 2026-08-17
+
+### Added
+- **TUI 聊天区支持真正的内建文字选择。** 直接鼠标拖动即可按屏幕上的 Unicode 可视列选择并高亮文字，不再通过 `Ctrl+S` 关闭鼠标捕获、依赖终端软件代劳；中文双列字符、跨行选区、滚动偏移和 Markdown 样式共用同一份预换行布局。
+- 选中后可用 `Ctrl/Cmd+C` 或 `Y` 复制到系统剪贴板；按 `Q` 会把选区逐行加上 `> `，以 Markdown 引用形式插入 Composer，已有草稿不会被覆盖。`Ctrl+S` 仍可显式进入/退出选择模式。
+
+### Tests
+- 新增 Unicode 可视列截取、样式保持换行、选区高亮、鼠标拖选、复制快捷键与 Markdown 引用格式回归测试；完整 Rust 回归 233 个通过、1 个公网 relay 用例按设计忽略，另有 8 个 headless/runtime 集成测试通过。
+
+## [0.31.0-rc1] - 2026-08-17
+
+### Added
+- **TUI Composer 支持 `F2` 临时展开为终端大输入空间。** 展开时聊天、活动、附件和侧栏暂时让位，再按一次恢复原布局；草稿、光标与滚动位置保持不变，快捷键标题和中英日帮助同步更新。
+- **TUI Markdown 支持 GFM 管道表格。** 表头、分隔线和数据行会按 Unicode 显示宽度对齐，中文按双列计算；窄终端内按列宽换行，表格单元格里的 `<br>` 会形成真实多行内容。
+- **TUI 运行态现在会持续“报平安”。** 聊天标题、活动区和底部状态栏同步显示动态指示、当前阶段与累计耗时；8 秒没有新进展时明确显示正在等待 Runtime/模型，30 秒没有事件时如实提示“暂未收到新事件”，不再让用户靠猜测判断是否卡死。
+
+### Fixed
+- **修复 Composer 换行后继续输入会在上一行逐字覆盖。** 旧实现由编辑器按字符硬换行计算光标，Ratatui 却按单词规则二次换行，显示行与写入坐标会分叉。现在文本、滚动、鼠标定位和光标共用同一份 Unicode 可视行，长中文与精确占满一行的边界也保持一致。
+- **TUI 不再原样显示 `<br>` / `<br/>` / `<br />`。** 非代码块中的这些 HTML 换行标记（含大小写形式）统一渲染为终端换行。
+- Composer 接受终端标准的 `Ctrl+A` / `Ctrl+E` 行首、行尾控制字节，兼容终端把自定义行导航快捷键转换为控制序列的行为；`Ctrl+F` 仍保留为聊天搜索。
+- **修复 Runtime 工作时底部仍显示“就绪”。** Runtime 提交成功后立即进入运行态，进度事件持续刷新最近活动时间，完成、失败、中断和取消都会统一收尾；TUI 重连时也会从当前会话的活跃 Runtime Task 恢复运行提示。
+
+### Tests
+- 新增中文软换行、精确列宽边界、多行 Composer 展开/恢复与终端占位、HTML 换行、窄屏 GFM 表格、行导航控制字节、Runtime 运行态收尾、静默阶段提示与重连恢复回归测试；完整 Rust 回归 229 个通过、1 个公网 relay 用例按设计忽略，另有 8 个 headless/runtime 集成测试通过。
+
+## [0.30.0-rc2] - 2026-08-17
+
+### Fixed
+- **Webhook 报文改用 macOS 端既有的 `willdeep.webhook.v1` 契约。** rc1 里的 payload 是我自己拟的，与 WillDeep.app 的 `AgentAttentionWebhookEvent`（`Xedit/AgentAttentionSettings.swift`）字段完全对不上，同一个接收端没法用一套解析同时吃两端的事件。现在逐字段对齐：`schema_version` / `source` / `event` / `type` / `hook_event_name` / `occurred_at` / `application` / `app_version` / `runtime_id` / `session_id` / `thread-id` / `session_title` / `executor` / `executor_kind` / `status` / `task_id` / `attention_kind` / `notification_type` / `message` / `summary`。
+- **补齐 app 的四个路由请求头**：`X-Agent-Source`、`X-Agent-Executor`、`X-Webhook-Schema`、`X-Agent-Event`，并把 `User-Agent` 改成 `some.im/WillDeep-<版本> (willdeep-cli)`。app 的 `AgentWebhookFormatDetector` 先看请求头再看 body，这些值决定它把事件判成哪家；缺了就只能靠 body 猜。
+- **`status` 改用 app 的 `AgentToolCallStatus` 词汇**（`pendingApproval` / `awaitingUserAnswer` / `succeeded` 等），因为两端都由这个字符串推导 `notification_type`（`permission_prompt` / `elicitation_dialog` / `idle_prompt`），拼写必须逐字一致。
+- 请求超时从 5 秒改为 15 秒，与 app 的 `URLSessionConfiguration.timeoutIntervalForRequest` 对齐。
+
+### Changed
+- CLI 通过 `executor = "willdeep-cli"` 表明身份。app 的检测器会把任何含 "willdeep" 的 executor 归到 `willdeep` 厂商，所以 `executor_kind` 仍是 `willdeep`——既能被正确识别，又能让接收端区分是 CLI 还是 app 发的。
+- `willdeep_core::format_iso8601` 改为公开。`occurred_at` 与 Xedit 桥接用的是同一种 ISO8601 UTC 表示，复用同一个实现才能保证两端逐字一致。
+
+### Tests
+- 新增两个契约测试对着 `Xedit/AgentAttentionSettings.swift` 锁死信封与 `notification_type` 分桶规则（对应 Swift 侧的 `webhookCompatibilityEnvelope`）；端到端测试同时断言四个路由请求头与 body 字段。
+
+## [0.30.0-rc1] - 2026-08-17
+
+### Added
+- **通知 Webhook 真正会发了。** 此前 `[notifications]` 只是存下来校验一遍，没有任何投递代码。新增 `notify` 模块，在两类时机 POST 到配置的地址：任务完成（TUI turn 结束、headless run 结束）、需要人处理（审批、提问、运行时快照里的 NeedsYou 条目）。两个开关 `webhook_on_task_completed` / `webhook_on_attention_required` 分别生效，默认都开。
+- **`willdeep doctor` 新增 notifications 检查项**，显示 Webhook 是否启用以及两个事件开关状态。**不打印 URL 本身**——Webhook 地址可能在 path 或 query 里带 token，而 doctor 报告会被打进可分享的诊断包。
+
+### Security
+- Webhook payload 刻意保持扁平且不含会话正文：只有事件类型、客户端名与版本、workspace 路径、session id、标题、截断到 400 字符的 detail、状态。这样即便地址指向远端也不会把 transcript 带出去。
+
+### Notes
+- 投递是旁路：detach 执行、5 秒超时、不重试，任何失败都不会打断 agent。失败不静默吞掉——记录后由 TUI 在下一个刷新 tick 显示为 notice。
+- 运行时快照是 level-triggered（同一个未处理的 gate 每秒都会重现），按条目 id 去重，只在首次出现时发一次；审批/提问是 edge-triggered，不去重。
+
+### Tests
+- 起真实 axum 本地监听端点做端到端投递验证，断言 payload 字段；另覆盖禁用态静默、URL 不可用降级、逐事件开关、去重、截断与不落 transcript、无 runtime 与投递失败时的错误记录。
+
+## [0.29.0-rc2] - 2026-08-17
+
+### Fixed
+- **`[notifications]`不再拒绝未知字段。** 该段是 WillDeep.app 与 CLI 共读同一份 `~/.willdeep/config.toml` 的唯一交叉点，此前的 `deny_unknown_fields` 会让 app 每加一个新字段就把未升级的 CLI 整个配置解析打挂，等于把两端发版节奏焊死。现在该段忽略未知键；其余配置段仍然严格拒绝拼写错误。
+
+## [0.29.0-rc1] - 2026-08-17
+
+### Added
+- **与 macOS WillDeep 共用通知配置 Schema。** `~/.willdeep/config.toml` 新增 `[notifications]`，兼容系统/自定义声音元数据、Webhook 地址以及“任务完成 / 等待用户处理”事件开关。Webhook 地址按普通本地偏好保存，不进入 Keychain；启用时必须是带主机的 HTTP(S) URL。
+
+### Tests
+- 示例配置与 macOS Schema 字段同步，并覆盖本地 HTTP Webhook 与非网络 URL 拒绝规则。
+
 ## [0.28.0-rc1] - 2026-08-16
 
 > 本版主题：把 model-tiers.v1 的三个「⏳ 未做」做完——**派工不再靠模型自觉，降级不再靠人手动编排**。

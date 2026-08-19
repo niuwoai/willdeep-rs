@@ -104,6 +104,10 @@ pub(crate) struct BuiltHarness {
     pub skills: Arc<willdeep_core::SkillCatalog>,
     pub background_tasks: Arc<BackgroundTaskRegistry>,
     pub context_window: u64,
+    pub provider_config: ProviderConfig,
+    /// Built here so every frontend — TUI, headless run, runtime — shares one
+    /// dispatcher and one set of `[notifications]` switches.
+    pub notifier: crate::notify::Notifier,
     _command_watcher: Option<AgentCommandWatcher>,
 }
 
@@ -294,6 +298,27 @@ pub(crate) async fn execute_noninteractive(
             session.messages = outcome.messages.clone();
             store.save(session)?;
         }
+    }
+    // A headless run is exactly the case where nobody is watching the
+    // terminal, so this is the ping that matters most — and the one that has to
+    // be awaited: this function returns straight into process teardown, and a
+    // detached delivery is dropped along with the runtime.
+    built
+        .notifier
+        .set_session(&session.id.to_string(), Some(session.title.as_str()));
+    built.notifier.task_completed(outcome.final_text.as_str());
+    built.notifier.flush().await;
+    if let Some(error) = built.notifier.take_error() {
+        // There is no TUI notice line on this path, so stderr is the only way
+        // the failure is not swallowed. stdout stays clean for --output json.
+        eprintln!(
+            "{}: {error}",
+            language.text(
+                "通知 Webhook 投递失败",
+                "Notification webhook delivery failed",
+                "通知 Webhook の送信に失敗しました"
+            )
+        );
     }
     Ok(HarnessOutcome {
         final_text: outcome.final_text,
@@ -644,12 +669,15 @@ pub(crate) async fn build(
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
+    let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
         agent: Arc::new(agent),
         workspace,
         skills,
         background_tasks,
         context_window,
+        provider_config: parent_provider_config,
+        notifier,
         _command_watcher: command_watcher,
     })
 }

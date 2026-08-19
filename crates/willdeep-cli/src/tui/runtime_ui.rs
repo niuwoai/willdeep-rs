@@ -63,6 +63,17 @@ pub(super) async fn submit_turn(
     store.save(session)?;
     crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
         .await?;
+    app.tools.reset();
+    app.begin_turn(
+        true,
+        app.language
+            .text(
+                "已提交 Runtime · 等待开始处理",
+                "Submitted to Runtime · waiting to start",
+                "Runtime に送信済み · 開始待ち",
+            )
+            .to_owned(),
+    );
     Ok(())
 }
 
@@ -110,7 +121,25 @@ fn apply_runtime_event(
 ) -> Option<Message> {
     match event.kind.as_str() {
         "task.output" => return apply_runtime_output(app, &event.message),
+        "task.queued" | "task.started" => {
+            app.ensure_runtime_turn();
+            app.record_progress(
+                app.language
+                    .text(
+                        "Runtime 已接收 · 正在启动",
+                        "Runtime accepted · starting",
+                        "Runtime が受信 · 起動中",
+                    )
+                    .to_owned(),
+            );
+        }
         "task.waiting_approval" => {
+            app.ensure_runtime_turn();
+            app.record_progress(
+                app.language
+                    .text("等待你的审批", "Waiting for your approval", "承認待ち")
+                    .to_owned(),
+            );
             app.notice = Some(
                 app.language
                     .text(
@@ -122,6 +151,12 @@ fn apply_runtime_event(
             );
         }
         "task.waiting_answer" => {
+            app.ensure_runtime_turn();
+            app.record_progress(
+                app.language
+                    .text("等待你的回答", "Waiting for your answer", "回答待ち")
+                    .to_owned(),
+            );
             app.notice = Some(
                 app.language
                     .text(
@@ -132,22 +167,40 @@ fn apply_runtime_event(
                     .to_owned(),
             );
         }
-        "task.failed" => app.append_transcript(format!(
-            "Error: {}",
-            app.language.text(
-                "Runtime 任务失败",
-                "Runtime task failed",
-                "Runtime タスクが失敗しました"
-            )
-        )),
-        "task.cancelled" => app.append_transcript(format!(
-            "System: {}",
-            app.language.text(
-                "Runtime 任务已取消",
-                "Runtime task cancelled",
-                "Runtime タスクをキャンセルしました"
-            )
-        )),
+        "task.completed" | "turn.completed" => app.finish_turn(),
+        "task.failed" => {
+            app.append_transcript(format!(
+                "Error: {}",
+                app.language.text(
+                    "Runtime 任务失败",
+                    "Runtime task failed",
+                    "Runtime タスクが失敗しました"
+                )
+            ));
+            app.finish_turn();
+        }
+        "task.interrupted" => {
+            app.append_transcript(format!(
+                "Error: {}",
+                app.language.text(
+                    "Runtime 任务已中断",
+                    "Runtime task was interrupted",
+                    "Runtime タスクが中断しました"
+                )
+            ));
+            app.finish_turn();
+        }
+        "task.cancelled" => {
+            app.append_transcript(format!(
+                "System: {}",
+                app.language.text(
+                    "Runtime 任务已取消",
+                    "Runtime task cancelled",
+                    "Runtime タスクをキャンセルしました"
+                )
+            ));
+            app.finish_turn();
+        }
         _ => {}
     }
     None
@@ -158,7 +211,11 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return None;
     };
-    match value.get("type").and_then(|value| value.as_str()) {
+    let output_type = value.get("type").and_then(|value| value.as_str());
+    if output_type != Some("completed") {
+        app.ensure_runtime_turn();
+    }
+    match output_type {
         Some("turn_started") => {
             if let Some(turn) = value.get("turn").and_then(|value| value.as_u64()) {
                 app.record_progress(format!(
@@ -198,6 +255,9 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                 input_tokens: value.get("input_tokens").and_then(|value| value.as_u64()),
                 output_tokens: value.get("output_tokens").and_then(|value| value.as_u64()),
                 total_tokens: value.get("total_tokens").and_then(|value| value.as_u64()),
+                cache_read_tokens: value
+                    .get("cache_read_tokens")
+                    .and_then(|value| value.as_u64()),
             };
             app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
         }
@@ -269,8 +329,10 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         Some("completed") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
                 app.append_transcript(format!("WillDeep: {text}"));
+                app.finish_turn();
                 return Some(Message::assistant(text, Vec::new()));
             }
+            app.finish_turn();
         }
         _ => {}
     }

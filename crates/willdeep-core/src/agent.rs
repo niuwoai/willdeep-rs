@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 
@@ -11,6 +11,29 @@ use crate::provider::{Provider, ProviderError};
 use crate::subagent::{SpawnAgentArgs, SubagentCatalog};
 use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage};
+
+/// 在途自动压缩的触发水位：请求估算达到窗口的这个百分比即开始摘要旧历史。
+const AUTO_COMPRESSION_TRIGGER_PERCENT: u64 = 75;
+/// 逃生水位。越过它说明下一次请求随时可能被 Provider 拒收，此时无视
+/// `AUTO_COMPRESSION_MIN_MESSAGES`，哪怕只有几条消息也要压——少数几条
+/// 巨型工具输出就能撑爆窗口，而它们恰恰凑不够常规条数门槛。
+const AUTO_COMPRESSION_ESCAPE_PERCENT: u64 = 90;
+/// 摘要之后仍越过这条天花板，就从保留区头部继续丢，直到降下来。
+const AUTO_COMPRESSION_CEILING_PERCENT: u64 = 95;
+/// 单条消息允许占用的窗口比例。超过就地裁掉中段——超大消息通常是刚读进来
+/// 的文件或工具输出，正躺在摘要够不着的保留区里，只摘要旧历史治不了它。
+const OVERSIZED_MESSAGE_PERCENT: u64 = 25;
+/// 自动压缩保留在摘要之后的最近消息条数。
+const AUTO_COMPRESSION_KEEP_RECENT: usize = 10;
+/// 自动压缩要求的最小消息条数。低于该值时，可摘要区不足 5 条，
+/// 摘要省下的 token 抵不过一次 Provider 调用。
+const AUTO_COMPRESSION_MIN_MESSAGES: usize = 16;
+/// 兜底丢弃时必须保住的尾部消息条数：再挤也要留下最近一轮问答。
+const AUTO_COMPRESSION_MIN_TAIL: usize = 2;
+/// 裁剪超大消息时保留在头部的比例，其余额度留给尾部——报错和断言通常在末尾。
+const OVERSIZED_HEAD_PERCENT: usize = 60;
+/// token 粗估用的字符密度。真实分词器另说，这里只需要一个稳定的保守刻度。
+const CHARS_PER_TOKEN: u64 = 4;
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -64,6 +87,9 @@ pub enum AgentEvent {
     },
     CompressionCompleted {
         estimated_tokens: u64,
+        /// 摘要之后仍超窗时，从保留区头部丢掉的消息条数。丢弃只影响本次
+        /// 请求视图，会话存档不受影响，但用户有权知道模型少看了几条。
+        dropped_messages: usize,
     },
     BackgroundShellStarted {
         id: String,
@@ -203,7 +229,7 @@ pub enum AgentError {
 }
 
 pub struct Agent {
-    provider: Arc<dyn Provider>,
+    provider: RwLock<Arc<dyn Provider>>,
     tools: ToolRegistry,
     config: AgentConfig,
     sink: Arc<dyn EventSink>,
@@ -217,7 +243,7 @@ pub struct Agent {
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self {
-            provider,
+            provider: RwLock::new(provider),
             tools,
             config,
             sink: Arc::new(NoopSink),
@@ -227,6 +253,29 @@ impl Agent {
             goal_continuation: None,
             background_tasks: None,
         }
+    }
+
+    /// Switch future completions to another model without rebuilding the
+    /// Agent's tools, approvals, subagents, or event sinks.
+    pub fn set_model(&self, model: &str) -> Result<(), ProviderError> {
+        let configured = self
+            .provider
+            .read()
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))?
+            .with_model(model)?;
+        *self
+            .provider
+            .write()
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))? =
+            configured;
+        Ok(())
+    }
+
+    fn provider(&self) -> Result<Arc<dyn Provider>, ProviderError> {
+        self.provider
+            .read()
+            .map(|provider| provider.clone())
+            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))
     }
 
     pub fn with_image_fallback(
@@ -337,7 +386,7 @@ impl Agent {
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
             let completion = self
-                .provider
+                .provider()?
                 .complete(&request_messages, &definitions)
                 .await?;
             if let Some(usage) = completion.usage {
@@ -486,7 +535,7 @@ impl Agent {
                 let requested = args.requested_write_targets(scope);
                 if requested.is_empty() {
                     return Err(ToolError::OutsideWorkspace(
-                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for test_fixer or build_fixer".to_owned(),
+                        "a writing profile needs its files declared up front: target_file for editor, task.relevant_files for implementer, test_fixer or build_fixer".to_owned(),
                     ));
                 }
                 Some(self.tools.approve_subagent_write_set(&requested).await?)
@@ -526,7 +575,7 @@ impl Agent {
         let request = Message::user(format!(
             "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
         ));
-        let summary = self.provider.complete(&[request], &[]).await?.content;
+        let summary = self.provider()?.complete(&[request], &[]).await?.content;
         let recent = history.split_off(split);
         let mut compressed = vec![Message::user(format!(
             "<context-summary>\n{summary}\n</context-summary>"
@@ -535,6 +584,7 @@ impl Agent {
         self.sink
             .emit(AgentEvent::CompressionCompleted {
                 estimated_tokens: estimate_tokens(&compressed),
+                dropped_messages: 0,
             })
             .await;
         Ok(compressed)
@@ -545,11 +595,27 @@ impl Agent {
         messages: &[Message],
         cache: &mut Option<(usize, String)>,
     ) -> Result<Vec<Message>, AgentError> {
+        let window = self.config.context_window;
+        // 先做不花模型钱的裁剪。裁完往往就落回水位以下，连摘要都省了。
+        let clamped = clamp_oversized_messages(messages, window);
+        let messages: &[Message] = clamped.as_deref().unwrap_or(messages);
         let estimated = estimate_tokens(messages);
-        if estimated < self.config.context_window.saturating_mul(80) / 100 || messages.len() < 16 {
+        if estimated < window.saturating_mul(AUTO_COMPRESSION_TRIGGER_PERCENT) / 100 {
             return Ok(messages.to_vec());
         }
-        let mut split = messages.len().saturating_sub(10);
+        let urgent = estimated >= window.saturating_mul(AUTO_COMPRESSION_ESCAPE_PERCENT) / 100;
+        if !urgent && messages.len() < AUTO_COMPRESSION_MIN_MESSAGES {
+            return Ok(messages.to_vec());
+        }
+        // 逃生状态下按历史长度收缩保留区，否则 `len - 10` 会退化成 0，
+        // 切不出摘要区，压缩等于没发生。
+        let keep = if urgent {
+            AUTO_COMPRESSION_KEEP_RECENT
+                .min(messages.len().saturating_sub(AUTO_COMPRESSION_MIN_TAIL + 1))
+        } else {
+            AUTO_COMPRESSION_KEEP_RECENT
+        };
+        let mut split = messages.len().saturating_sub(keep);
         while split < messages.len() && messages[split].role != crate::types::Role::User {
             split += 1;
         }
@@ -570,7 +636,7 @@ impl Agent {
             let request = Message::user(format!(
                 "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
             ));
-            let summary = self.provider.complete(&[request], &[]).await?.content;
+            let summary = self.provider()?.complete(&[request], &[]).await?.content;
             *cache = Some((split, summary));
         }
         let mut result = vec![messages[0].clone()];
@@ -579,20 +645,84 @@ impl Agent {
             cache.as_ref().unwrap().1
         )));
         result.extend_from_slice(&messages[split..]);
+        // 摘要只吃 `[1..split]`。保留区自己就超窗时，摘要救不了场，
+        // 与其把一个必被拒收的请求发出去，不如从保留区头部继续丢。
+        let dropped_messages = drop_until_under_ceiling(&mut result, window);
         self.sink
             .emit(AgentEvent::CompressionCompleted {
                 estimated_tokens: estimate_tokens(&result),
+                dropped_messages,
             })
             .await;
         Ok(result)
     }
 }
 
+/// 裁掉任何单条超过窗口 `OVERSIZED_MESSAGE_PERCENT` 的消息的中段，保留首尾。
+/// 没有消息越界时返回 `None`，让调用方省掉一次整表克隆。
+///
+/// 纯字符串处理，不花 Provider 调用——这类消息几乎总是工具输出，
+/// 摘要它们的成本比它们本身还贵。
+fn clamp_oversized_messages(messages: &[Message], window: u64) -> Option<Vec<Message>> {
+    let budget_chars = usize::try_from(
+        window
+            .saturating_mul(OVERSIZED_MESSAGE_PERCENT)
+            .saturating_div(100)
+            .saturating_mul(CHARS_PER_TOKEN),
+    )
+    .unwrap_or(usize::MAX);
+    if budget_chars == 0 {
+        return None;
+    }
+    if !messages
+        .iter()
+        .any(|message| message.content.chars().count() > budget_chars)
+    {
+        return None;
+    }
+    Some(
+        messages
+            .iter()
+            .map(|message| {
+                let length = message.content.chars().count();
+                if length <= budget_chars {
+                    return message.clone();
+                }
+                let head = budget_chars * OVERSIZED_HEAD_PERCENT / 100;
+                let tail = budget_chars.saturating_sub(head);
+                let head_text: String = message.content.chars().take(head).collect();
+                let tail_text: String = message.content.chars().skip(length - tail).collect();
+                let elided = length - head - tail;
+                let mut clamped = message.clone();
+                clamped.content = format!(
+                    "{head_text}\n… [{elided} chars elided by context compaction] …\n{tail_text}"
+                );
+                clamped
+            })
+            .collect(),
+    )
+}
+
+/// 从保留区头部丢消息，直到估算降到窗口 `AUTO_COMPRESSION_CEILING_PERCENT`
+/// 以下。首条消息与摘要永远保留，尾部至少留 `AUTO_COMPRESSION_MIN_TAIL` 条。
+/// 返回实际丢弃的条数。
+fn drop_until_under_ceiling(messages: &mut Vec<Message>, window: u64) -> usize {
+    let ceiling = window.saturating_mul(AUTO_COMPRESSION_CEILING_PERCENT) / 100;
+    // 索引 0 是首条消息，索引 1 是摘要；保留区从 2 开始。
+    let floor = 2 + AUTO_COMPRESSION_MIN_TAIL;
+    let mut dropped = 0;
+    while messages.len() > floor && estimate_tokens(messages) > ceiling {
+        messages.remove(2);
+        dropped += 1;
+    }
+    dropped
+}
+
 fn estimate_tokens(messages: &[Message]) -> u64 {
     messages
         .iter()
         .map(|message| {
-            message.content.chars().count() as u64 / 4
+            message.content.chars().count() as u64 / CHARS_PER_TOKEN
                 + 8
                 + message
                     .attachments
@@ -671,6 +801,7 @@ mod tests {
                     input_tokens: Some(800),
                     output_tokens: Some(300),
                     total_tokens: Some(1_100),
+                    cache_read_tokens: None,
                 }),
             })
         }
@@ -707,6 +838,18 @@ mod tests {
                 finish_reason: Some("stop".to_owned()),
                 usage: None,
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<AgentEvent>>,
+    }
+
+    #[async_trait]
+    impl EventSink for RecordingSink {
+        async fn emit(&self, event: AgentEvent) {
+            self.events.lock().expect("events").push(event);
         }
     }
 
@@ -951,6 +1094,205 @@ mod tests {
                 .any(|message| message.content.contains("<context-summary>"))
         );
         assert!(outcome.messages.len() >= 21);
+    }
+
+    /// 锁定 75% 触发线：构造一段估算落在窗口 75%~80% 之间的历史，
+    /// 它在旧的 80% 水位下不会压缩，在当前水位下必须压缩。
+    #[tokio::test]
+    async fn compression_triggers_at_seventy_five_percent_of_window() {
+        let provider = RecordingProvider::new(&["compact summary", "final"]);
+        let window = 1_000_u64;
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-threshold"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: window,
+                token_budget: None,
+            },
+        );
+        let history = (0..18)
+            .map(|index| {
+                let body = format!("{}{index:03}", "x".repeat(137));
+                if index % 2 == 0 {
+                    Message::user(body)
+                } else {
+                    Message::assistant(body, Vec::new())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut request_view = history.clone();
+        request_view.push(Message::user("continue"));
+        let estimated = estimate_tokens(&request_view);
+        assert!(
+            estimated >= window * 75 / 100 && estimated < window * 80 / 100,
+            "fixture must sit between the old and new trigger, got {estimated}"
+        );
+
+        let outcome = agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains("<context-summary>"))
+        );
+        assert!(outcome.messages.len() >= 21);
+    }
+
+    /// 少数几条巨型消息凑不够 16 条门槛，但已经贴着窗口。逃生水位必须让
+    /// 压缩照常发生，否则这一轮请求直接被 Provider 拒收。
+    #[tokio::test]
+    async fn a_short_but_nearly_full_history_still_compresses() {
+        let provider = RecordingProvider::new(&["compact summary", "final"]);
+        let window = 1_000_u64;
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-escape"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: window,
+                token_budget: None,
+            },
+        );
+        let history = (0..8)
+            .map(|index| {
+                let body = format!("{}{index:03}", "y".repeat(417));
+                if index % 2 == 0 {
+                    Message::user(body)
+                } else {
+                    Message::assistant(body, Vec::new())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut request_view = history.clone();
+        request_view.push(Message::user("continue"));
+        assert!(
+            request_view.len() < AUTO_COMPRESSION_MIN_MESSAGES,
+            "fixture must stay under the regular message-count gate"
+        );
+        assert!(
+            estimate_tokens(&request_view) >= window * AUTO_COMPRESSION_ESCAPE_PERCENT / 100,
+            "fixture must sit above the escape watermark"
+        );
+
+        agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2, "the summary request must have happened");
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains("<context-summary>"))
+        );
+    }
+
+    /// 超大消息通常是刚读进来的文件，就躺在摘要够不着的保留区里。
+    /// 它必须被就地裁剪，而且不能白白烧一次 Provider 调用。
+    #[tokio::test]
+    async fn an_oversized_message_is_clamped_in_place_without_a_summary_call() {
+        let provider = RecordingProvider::new(&["final"]);
+        let window = 1_000_u64;
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-oversized"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: window,
+                token_budget: None,
+            },
+        );
+        let history = vec![Message::user(format!("HEAD{}TAIL", "z".repeat(5_000)))];
+
+        agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1, "clamping must not cost a summary call");
+        let clamped = requests[0]
+            .iter()
+            .find(|message| message.content.contains("elided by context compaction"))
+            .expect("oversized message must be clamped");
+        assert!(clamped.content.starts_with("HEAD"));
+        assert!(clamped.content.ends_with("TAIL"));
+        assert!(
+            estimate_tokens(&requests[0]) < window * AUTO_COMPRESSION_TRIGGER_PERCENT / 100,
+            "clamping alone should bring the request back under the trigger"
+        );
+    }
+
+    /// 保留区自己就撑爆窗口时，摘要救不了场：必须继续丢，并且如实汇报丢了几条。
+    #[tokio::test]
+    async fn an_oversized_keep_window_drops_messages_and_reports_how_many() {
+        let provider = RecordingProvider::new(&["compact summary", "final"]);
+        let sink = Arc::new(RecordingSink::default());
+        let window = 1_000_u64;
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-ceiling"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: window,
+                token_budget: None,
+            },
+        )
+        .with_event_sink(sink.clone());
+        let history = (0..20)
+            .map(|index| {
+                let body = format!("{}{index:03}", "w".repeat(797));
+                if index % 2 == 0 {
+                    Message::user(body)
+                } else {
+                    Message::assistant(body, Vec::new())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+
+        let dropped = sink
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::CompressionCompleted {
+                    dropped_messages, ..
+                } => Some(*dropped_messages),
+                _ => None,
+            })
+            .expect("a compression must have completed");
+        assert!(dropped > 0, "an over-full keep window must shed messages");
+
+        let requests = provider.requests.lock().expect("requests");
+        let sent = &requests[1];
+        assert!(
+            sent.len() >= 2 + AUTO_COMPRESSION_MIN_TAIL,
+            "the first message, the summary, and the last exchange must survive"
+        );
+        assert!(
+            estimate_tokens(sent) <= window * AUTO_COMPRESSION_CEILING_PERCENT / 100,
+            "the request must end up under the ceiling"
+        );
+        assert!(
+            sent.iter()
+                .any(|message| message.content.contains("<context-summary>"))
+        );
     }
 
     #[tokio::test]

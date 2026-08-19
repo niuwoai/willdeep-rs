@@ -260,6 +260,13 @@ pub struct RenameSessionParams {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct UpdateSessionModelParams {
+    pub id: uuid::Uuid,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ForkSessionParams {
     pub id: uuid::Uuid,
     pub title: Option<String>,
@@ -1048,6 +1055,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "session.search",
     "session.get",
     "session.rename",
+    "session.update_model",
     "session.fork",
     "session.archive",
     "session.delete",
@@ -1675,6 +1683,17 @@ mod tests {
                 .unwrap(),
             rename
         );
+        let update_model = UpdateSessionModelParams {
+            id,
+            model: "qwen3-coder".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_value::<UpdateSessionModelParams>(
+                serde_json::to_value(&update_model).unwrap()
+            )
+            .unwrap(),
+            update_model
+        );
         assert!(
             serde_json::from_value::<DeleteSessionParams>(serde_json::json!({
                 "id": id,
@@ -1686,6 +1705,7 @@ mod tests {
         for operation in [
             "session.create",
             "session.rename",
+            "session.update_model",
             "session.fork",
             "session.archive",
             "session.delete",

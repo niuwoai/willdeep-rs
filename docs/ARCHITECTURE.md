@@ -84,7 +84,16 @@ TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 
 
 ### 上下文与网络工具
 
-Provider Profile 可声明 `context_window`。请求估算达到窗口约 80% 且历史足够长时，Agent 使用当前 Provider 总结较旧历史，构造临时请求视图；自动压缩仍保存完整消息。用户执行 `/compress` 时则显式生成摘要、保留最近六条消息并原子保存精简后的会话。TUI 展示最近一次 Provider Usage、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
+Provider Profile 可声明 `context_window`。在途自动压缩按四道水位工作，全部只作用于临时请求视图，会话存档始终保留完整消息：
+
+| 水位 | 常量 | 行为 |
+| --- | --- | --- |
+| 单条 25% | `OVERSIZED_MESSAGE_PERCENT` | 任何单条消息超过窗口该比例即就地裁掉中段、保留首尾。纯字符串处理，不花 Provider 调用——超大消息通常是刚读进来的文件，正躺在摘要够不着的保留区里 |
+| 75% | `AUTO_COMPRESSION_TRIGGER_PERCENT` | 历史不少于 16 条时，用当前 Provider 总结较旧历史，保留首条消息、摘要和最近 10 条 |
+| 90% | `AUTO_COMPRESSION_ESCAPE_PERCENT` | 逃生水位：无视 16 条门槛照常压缩，并按历史长度收缩保留区。少数几条巨型消息凑不够条数门槛却足以撑爆窗口 |
+| 95% | `AUTO_COMPRESSION_CEILING_PERCENT` | 摘要后仍超窗时从保留区头部继续丢，至少保住首条、摘要和最近一轮问答；丢弃条数通过 `CompressionCompleted.dropped_messages` 如实上报 |
+
+用户执行 `/compress` 时则显式生成摘要、保留最近六条消息并原子保存精简后的会话。TUI 展示最近一次 Provider Usage、缓存命中率、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
 
 `web_search` 调用同一 some.im Origin 的 `/api/v1/customer/web-search`。`web_fetch` 只接受 HTTP(S) 公网目标，在请求前及每次重定向时解析 DNS，并拒绝私网、回环、链路本地和文档保留地址。客户端自行处理最多 8 次跳转：同 hostname 自动跟随，跨 hostname 重新审批，HTTPS→HTTP 降级拒绝；最终响应限制为 3 MiB 和最多 100,000 字符。两项网络工具的初始访问在所有审批模式下都逐次审批。
 
@@ -98,9 +107,9 @@ Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。
 
 `BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
 
-`SubagentCatalog` 内置 scout、reader、log_inspector、git_detective、deep、editor、test_fixer、build_fixer。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。
+`SubagentCatalog` 内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。
 
-除 `deep` 外的工种运行在自己的小上下文档位（16K / 32K / 64K）并各自限制工具输出字节数——**窗口纪律由客户端执行**，不依赖模型自觉。`deep` 是刻意的例外，它跑父模型并继承会话窗口。
+除 `deep` 外的工种运行在可私有部署的 32K / 48K / 64K / 256K 档位并各自限制工具输出字节数——**窗口纪律由客户端执行**，不依赖模型自觉。16K 已取消；`implementer` 是 256K 日常多文件编码主力，`deep` 只在任务确实无法有界拆分时跑父模型并继承会话窗口。
 
 `spawn_agent` 的可选 `task` 参数是 Task Packet：目标、已知事实、约束、相关文件与 verifier 命令。Runtime 按窗口档位把相关文件内联进 Worker 首条消息，并在每次尝试后**由 Runtime 自己执行** verifier 命令来判定成败——退出码是唯一裁决，模型的自述不是。失败输出经纯 Rust 的确定性消化（失败聚焦段 + 尾部，断言原文逐字保留）后回灌下一次尝试；尝试打满即判运行失败并要求升档。verifier 命令过与 `run_command` 同一条门禁链：静态只读放行、破坏性形状直接拒绝、其余交 AI 判官；判官缺席时拒绝，因为子 Agent 没有审批 UI 可回退。
 

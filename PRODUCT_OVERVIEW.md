@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-16 | 当前版本：v0.28.0-rc1
+> 最后更新：2026-08-18 | 当前版本：v0.35.0-rc3
 
 ## 项目简介
 
@@ -8,6 +8,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 
 ## 核心功能
 
+- 与 macOS WillDeep 共用 `~/.willdeep/config.toml` 的 `[notifications]` Schema：保留桌面通知声音设置，校验本地或远程 HTTP(S) Webhook 地址，并在「任务完成」「需要人处理」两类时机实际投递 Webhook；投递为旁路，失败不影响 agent；Webhook 地址按普通个人偏好落盘，不使用 Keychain；
 - Chat Completions、Responses、Anthropic Messages 三协议；
 - some.im 与 BYOK Provider；
 - 文件搜索、读取、创建和精确编辑；
@@ -21,6 +22,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 顶层 `willdeep session list/get/turns/stop` 查询持久会话并精确停止其 active Turn；
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
 - TOML 多 Provider Profile 与安全凭据引用；
+- TUI 支持 `/model <模型名>` 直接切换当前 Session 模型；裸 `/model` 从 Provider `/v1/models` 获取模型，提供模糊筛选、键盘翻页、鼠标滚动和点击选择，并同步 Runtime 与进程内 Agent；
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
@@ -35,12 +37,13 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Ratatui 多轮 TUI、可滚动聊天记录、可点击聚焦并展开/收起的聚合工具活动和界面内审批；
 - TUI 侧边栏右下角以低对比度常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
 - 空白新会话的即时工作区欢迎引导；
-- 多行 Prompt 编辑、鼠标光标定位、文本粘贴附件和可删除图片附件；
+- 多行 Prompt 编辑使用同一套 Unicode 单元格规则完成换行、滚动、鼠标定位与光标渲染；支持 F2 临时展开为终端大输入空间，并保留文本粘贴附件和可删除图片附件；
+- TUI 聊天区内建 Unicode 可视列选择：可直接鼠标拖选并高亮，使用 Ctrl/Cmd+C 或 Y 复制到系统剪贴板，使用 Q 将选区以 Markdown 引用格式送入 Composer，不依赖终端软件的原生选择实现；
 - TUI 与 Web 的简体中文、英语、日语界面及持久语言偏好；
-- TUI 临时单行思考摘要，以及 Web 单行工作状态、逐轮工具轨迹与停止生成；
+- TUI 临时单行思考摘要，以及聊天标题、活动区和底部状态栏一致的动态运行指示、当前阶段、累计耗时、无新事件等待提示与 Runtime 重连恢复；Web 提供单行工作状态、逐轮工具轨迹与停止生成；
 - Web 聊天消息、工具轨迹和思考状态使用紧凑垂直节奏；Composer 聚焦只显示单一外框，内部 Textarea 不重复绘制 focus-visible 轮廓；
 - Rust CLI 构建显式跟踪 `web/dist`，前端产物变化会触发二进制重新嵌入，Debug 与 Release 不会静默沿用旧 Web UI；
-- Web/TUI 独立聊天历史滚动与 TUI 常用 Markdown 终端渲染；
+- Web/TUI 独立聊天历史滚动；TUI 支持常用 Markdown、HTML `<br>` 终端换行和按中文显示宽度对齐、窄屏单元格换行的 GFM 表格；
 - Rust Runtime Client 为全部公开 Runtime 操作提供类型化方法；Runtime 状态、Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff 与 Worktree 控制复用同一协议 DTO，并通过本地 Socket 往返测试约束操作名、Token、幂等 Request ID 与响应解码；
 - 统一 `agent.spawn` API 与 Rust Client 可在活跃 Session 中创建稳定 ID 的后台只读子 Agent，并通过 `agent.wait` 观察完成；父级、Task 和 Workspace 均由服务端推导，外部调用不能选择写目标；
 - Web Runtime 侧栏按当前 Workspace 展示 Agent、后台 Task、待审批/回答、关注项、Tool 与 Artifact 摘要；进行中与最近五分钟完成的 Task 可查看状态、Profile、耗时、退出码、失败域和归属时间线，Workspace、Prompt、命令、参数、输出、报告、路径、模型、配置、PID 和内部错误不会下发；
@@ -51,10 +54,11 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Rust Runtime Client 覆盖 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销，TUI Diff Center 直接复用；
 - Worktree Review、Merge、Audit、Quarantine 已进入统一 API 和 Rust Client，精确 Review/Snapshot ID 与确认字段继续约束写操作；
 - 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
-- TUI 状态行常驻 `Ctrl+S 选择` 入口，可在完整输出区使用终端原生拖选与复制，并以 `Esc` 恢复鼠标交互；
+- TUI 状态行常驻 `Ctrl+S 选择` 入口；聊天区也可直接拖动进入内建选区，以 `Ctrl/Cmd+C` 或 `Y` 复制、`Q` 引用，并以 `Esc` 返回普通交互；
 - TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建只读 Scout、Reader、Deep 子 Agent；
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
+- TUI `Ctrl+R` 可按标题或消息内容搜索当前 Workspace 的历史会话，展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
 - TUI Prompt、聊天区、活动区和状态栏四态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；
@@ -143,12 +147,12 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - `rg` 优先、内置扫描兜底的跨平台文件搜索；
 - some.im 纯文本模型的 `qwen3-vl-plus` 图片描述降级链路；
 - 受审批保护的网页搜索和公网网页正文读取；
-- 上下文用量、Token、耗时、自动摘要压缩及宽屏后台状态侧栏。
+- 上下文用量、Token（K/M 两位小数）、缓存命中率、耗时、自动摘要压缩及宽屏后台状态侧栏。
 - `/compress` 手动压缩当前会话上下文并立即保存；
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
-- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、test_fixer、build_fixer 八个工种，各自跑在自己的小上下文档位并支持独立模型绑定；
+- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer 九个工种；默认优先使用可私有部署的 32K / 48K / 64K / 256K 档位，支持为企业内网或离线环境独立绑定模型；
 - Task Packet 结构化派工（目标 / 已知事实 / 约束 / 相关文件内联 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
-- 写入型工种的文件集写通道：一次审批整个集合、越界拒绝并给出扩权路径、运行中文件集互斥；
+- 写入型工种的文件集写通道：最多声明 16 个现有或待创建文件，`smart/workspace-write` 继承主 Agent 工作区写权限，`strict` 一次审批整个集合，越界拒绝并给出扩权路径，运行中文件集互斥；
 - 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；
 - 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Skill Coverage、Worker Verified Success 与 Escalation Rate 三个指标，「未验证」是独立于通过与失败的第三种答案；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；

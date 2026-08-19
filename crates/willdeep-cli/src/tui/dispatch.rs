@@ -18,11 +18,9 @@ pub(super) fn dispatch_prompt(
             None => continuation.clear(),
         }
     }
-    app.running = true;
-    app.turn_started = Some(Instant::now());
     app.tools.reset();
-    app.progress_log.clear();
-    app.record_progress(
+    app.begin_turn(
+        false,
         app.language
             .text(
                 "正在思考 · 理解你的请求",
@@ -56,10 +54,7 @@ pub(super) fn dispatch_compress(
     agent: &Arc<Agent>,
     tx: &mpsc::UnboundedSender<UiMessage>,
 ) {
-    app.running = true;
-    app.turn_started = Some(Instant::now());
-    app.progress_log.clear();
-    app.record_progress("Compressing context".to_owned());
+    app.begin_turn(false, "Compressing context".to_owned());
     let history = session.messages.clone();
     let agent = agent.clone();
     let tx = tx.clone();
@@ -76,10 +71,7 @@ pub(super) fn dispatch_notification(
     tx: &mpsc::UnboundedSender<UiMessage>,
     notice: String,
 ) -> Result<()> {
-    app.running = true;
-    app.turn_started = Some(Instant::now());
-    app.progress_log.clear();
-    app.record_progress("Handling background result".to_owned());
+    app.begin_turn(false, "Handling background result".to_owned());
     let history = session.messages.clone();
     let message = Message::user(notice);
     session.messages.push(message.clone());

@@ -21,6 +21,7 @@ mod harness;
 mod i18n;
 mod integrations;
 mod mobile;
+mod notify;
 mod onboarding;
 mod projects;
 mod tui;
@@ -657,7 +658,9 @@ async fn run() -> Result<()> {
                     model: cli.model.clone(),
                     config: Some(cli.config.clone().unwrap_or(config::default_config_path()?)),
                 },
+                built.provider_config.clone(),
                 language,
+                built.notifier.clone(),
             ),
         )
         .await;
@@ -894,7 +897,10 @@ fn resolve_base(
     }
 }
 
-fn provider_config_from_profile(file: &config::ConfigFile, name: &str) -> Result<ProviderConfig> {
+pub(crate) fn provider_config_from_profile(
+    file: &config::ConfigFile,
+    name: &str,
+) -> Result<ProviderConfig> {
     let profile = file
         .providers
         .get(name)
@@ -1307,8 +1313,17 @@ impl EventSink for TerminalSink {
             AgentEvent::CompressionStarted { estimated_tokens } => {
                 eprintln!("[context] compressing approximately {estimated_tokens} tokens");
             }
-            AgentEvent::CompressionCompleted { estimated_tokens } => {
-                eprintln!("[context] compressed to approximately {estimated_tokens} tokens");
+            AgentEvent::CompressionCompleted {
+                estimated_tokens,
+                dropped_messages,
+            } => {
+                if dropped_messages > 0 {
+                    eprintln!(
+                        "[context] compressed to approximately {estimated_tokens} tokens, dropped {dropped_messages} message(s) from the request view"
+                    );
+                } else {
+                    eprintln!("[context] compressed to approximately {estimated_tokens} tokens");
+                }
             }
             AgentEvent::BackgroundShellStarted { id } => {
                 eprintln!("[background] started id={id}");
@@ -1391,15 +1406,20 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "type": "usage",
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
-            "total_tokens": usage.total_tokens
+            "total_tokens": usage.total_tokens,
+            "cache_read_tokens": usage.cache_read_tokens
         }),
         AgentEvent::CompressionStarted { estimated_tokens } => serde_json::json!({
             "type": "compression_started",
             "estimated_tokens": estimated_tokens
         }),
-        AgentEvent::CompressionCompleted { estimated_tokens } => serde_json::json!({
+        AgentEvent::CompressionCompleted {
+            estimated_tokens,
+            dropped_messages,
+        } => serde_json::json!({
             "type": "compression_completed",
-            "estimated_tokens": estimated_tokens
+            "estimated_tokens": estimated_tokens,
+            "dropped_messages": dropped_messages
         }),
         AgentEvent::BackgroundShellStarted { id } => serde_json::json!({
             "type": "background_shell_started",

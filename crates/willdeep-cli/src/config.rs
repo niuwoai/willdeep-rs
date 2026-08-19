@@ -111,6 +111,12 @@ pub struct ConfigFile {
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub skills: SkillSettings,
+    /// Cross-client attention delivery settings shared with WillDeep.app.
+    /// The CLI accepts the full section even when only webhook fields are
+    /// relevant on a headless machine; desktop-only sound fields remain
+    /// harmless metadata.
+    #[serde(default)]
+    pub notifications: NotificationSettings,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -132,6 +138,24 @@ pub struct AgentSettings {
 pub struct SkillSettings {
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+}
+
+/// Deliberately *not* `deny_unknown_fields`: this is the one section both
+/// WillDeep.app and the CLI read out of the same file. Rejecting unknown keys
+/// would mean the app cannot add a field without breaking every CLI that has
+/// not been upgraded yet, which would weld the two release trains together.
+/// Unknown keys here are ignored; the CLI never rewrites the file, so nothing
+/// is lost on the way back out.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)] // Sound fields belong to the desktop client; the CLI only carries them.
+pub struct NotificationSettings {
+    pub sound: Option<String>,
+    pub custom_sound_file: Option<String>,
+    pub custom_sound_display_name: Option<String>,
+    pub webhook_enabled: Option<bool>,
+    pub webhook_url: Option<String>,
+    pub webhook_on_task_completed: Option<bool>,
+    pub webhook_on_attention_required: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -245,6 +269,20 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         bail!("agent.max_turns must be between 1 and 100");
     }
     crate::i18n::Language::parse(file.agent.language.as_deref())?;
+    if file.notifications.webhook_enabled.unwrap_or(false) {
+        let webhook_url = file
+            .notifications
+            .webhook_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("notifications.webhook_url is required when webhook_enabled is true")?;
+        let parsed = reqwest::Url::parse(webhook_url)
+            .context("notifications.webhook_url must be a valid URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            bail!("notifications.webhook_url must use http or https");
+        }
+    }
     for (name, provider) in &file.providers {
         if provider.api_key.as_deref().is_some_and(str::is_empty) {
             bail!("providers.{name}.api_key cannot be empty");
@@ -263,6 +301,7 @@ fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
                 | "reader"
                 | "deep"
                 | "editor"
+                | "implementer"
                 | "test_fixer"
                 | "build_fixer"
                 | "log_inspector"
@@ -442,6 +481,72 @@ base_url = "https://example.com/v1"
             .expect("parse config.example.toml");
         assert_eq!(parsed.mcp_servers.len(), 1);
         assert_eq!(parsed.providers.len(), 3);
+        assert_eq!(
+            parsed.notifications.sound.as_deref(),
+            Some("system-default")
+        );
+        assert_eq!(
+            parsed.notifications.webhook_url.as_deref(),
+            Some("http://127.0.0.1:8787/willdeep")
+        );
+    }
+
+    #[test]
+    fn notification_schema_matches_the_macos_app() {
+        let parsed: ConfigFile = toml::from_str(
+            r#"
+version = 1
+
+[notifications]
+sound = "custom"
+custom_sound_file = "WillDeep-Custom-Alert.mp3"
+custom_sound_display_name = "message.mp3"
+webhook_enabled = true
+webhook_url = "http://127.0.0.1:8787/willdeep"
+webhook_on_task_completed = true
+webhook_on_attention_required = false
+"#,
+        )
+        .expect("parse shared notifications section");
+
+        validate(&parsed, Path::new("config.toml")).expect("validate local webhook");
+        assert_eq!(parsed.notifications.sound.as_deref(), Some("custom"));
+        assert_eq!(parsed.notifications.webhook_enabled, Some(true));
+        assert_eq!(
+            parsed.notifications.webhook_on_attention_required,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn notifications_tolerate_fields_only_the_desktop_app_knows() {
+        // WillDeep.app must be able to ship a new key into the shared file
+        // without bricking every CLI that has not been upgraded yet.
+        let parsed: ConfigFile = toml::from_str(
+            "version = 1\n[notifications]\nsound = \"custom\"\nwebhook_retry_count = 3\n",
+        )
+        .expect("ignore unknown desktop-only fields");
+
+        assert_eq!(parsed.notifications.sound.as_deref(), Some("custom"));
+        validate(&parsed, Path::new("config.toml")).expect("unknown fields stay valid");
+    }
+
+    #[test]
+    fn unknown_keys_outside_notifications_are_still_rejected() {
+        let error = toml::from_str::<ConfigFile>("version = 1\nnot_a_real_key = true\n")
+            .expect_err("top-level typos must still fail loudly");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn enabled_webhook_rejects_non_http_urls() {
+        let parsed: ConfigFile = toml::from_str(
+            "version = 1\n[notifications]\nwebhook_enabled = true\nwebhook_url = \"file:///tmp/hook\"\n",
+        )
+        .expect("parse notifications section");
+
+        let error = validate(&parsed, Path::new("config.toml")).expect_err("reject file URL");
+        assert!(error.to_string().contains("must use http or https"));
     }
 
     #[test]

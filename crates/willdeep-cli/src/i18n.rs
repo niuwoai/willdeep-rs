@@ -28,6 +28,15 @@ impl Language {
             Self::Ja => ja,
         }
     }
+
+    /// `text` 的取值版：文案需要插值时用它，三个候选都已构造完毕，只挑一个。
+    pub fn pick<T>(self, zh: T, en: T, ja: T) -> T {
+        match self {
+            Self::ZhCn => zh,
+            Self::En => en,
+            Self::Ja => ja,
+        }
+    }
 }
 
 #[cfg(test)]

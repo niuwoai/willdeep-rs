@@ -68,6 +68,12 @@ impl PromptEditor {
     pub fn cursor_visual(&self, width: usize) -> (usize, usize) {
         visual_position(&self.text, self.cursor, width)
     }
+    pub fn wrapped_text(&self, width: usize) -> String {
+        visual_rows(&self.text, width).join("\n")
+    }
+    pub fn visual_line_count(&self, width: usize) -> usize {
+        visual_rows(&self.text, width).len()
+    }
     pub fn marker_query(&self, marker: char) -> Option<(usize, &str)> {
         let prefix = &self.text[..self.cursor];
         let start = prefix
@@ -154,6 +160,33 @@ fn byte_at_visual(text: &str, target_row: usize, target_column: usize, width: us
     text.len()
 }
 
+fn visual_rows(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut column = 0;
+    for character in text.chars() {
+        if character == '\n' {
+            rows.push(std::mem::take(&mut row));
+            column = 0;
+            continue;
+        }
+        let size = UnicodeWidthChar::width(character).unwrap_or(0);
+        if column + size > width {
+            rows.push(std::mem::take(&mut row));
+            column = 0;
+        }
+        row.push(character);
+        column += size;
+        if column >= width {
+            rows.push(std::mem::take(&mut row));
+            column = 0;
+        }
+    }
+    rows.push(row);
+    rows
+}
+
 pub struct DraftAttachment {
     pub message: MessageAttachment,
 }
@@ -211,6 +244,23 @@ mod tests {
         e.set_cursor_visual(0, 2, 10);
         e.insert("X");
         assert_eq!(e.text(), "中X文ab");
+    }
+    #[test]
+    fn wraps_cjk_with_the_same_rows_used_by_the_cursor() {
+        let mut editor = PromptEditor::default();
+        editor.insert("甲乙丙丁\n最后一行");
+
+        assert_eq!(editor.wrapped_text(6), "甲乙丙\n丁\n最后一\n行");
+        assert_eq!(editor.visual_line_count(6), 4);
+        assert_eq!(editor.cursor_visual(6), (3, 2));
+    }
+    #[test]
+    fn keeps_a_trailing_cursor_row_after_an_exact_width_wrap() {
+        let mut editor = PromptEditor::default();
+        editor.insert("中文");
+
+        assert_eq!(editor.wrapped_text(4), "中文\n");
+        assert_eq!(editor.cursor_visual(4), (1, 0));
     }
     #[test]
     fn finds_and_replaces_marker_query_at_cursor() {

@@ -136,6 +136,7 @@ async fn switch(
     runtime.runtime_submit.profile = workspace.provider_profile.clone();
     runtime.runtime_submit.model = target.model.clone();
     runtime.runtime_submit.config = target.config.clone();
+    let _ = runtime.refresh_provider_config();
     runtime.skills =
         Arc::new(SkillCatalog::discover(&workspace.root, &[]).allow_only(&workspace.skills));
     app.load_session(&target);
