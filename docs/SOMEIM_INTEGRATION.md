@@ -115,6 +115,10 @@ vision_model = "qwen3-vl-plus"
 
 Provider 为 some.im 时，七个托管窄工种自动绑定各自的 `someim-32b-<trade>`，未托管工种回落 `glm-5`；`implementer` 使用 GLM-5，`deep` 推荐显式绑定 `deepseek-v4-flash`。可以在 `[subagents.*]` 中显式覆盖，见 [子 Agent 与后台任务](SUBAGENTS.md)。
 
+## 上下文压缩模型
+
+Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。其它 Provider 未配置时维持旧行为（会话模型 + 行内指令）。
+
 ## 错误脱敏
 
 Provider 返回的错误体在进入日志或界面前会替换 `Bearer `、`sk-`、`api_key":"` 三类标记以及 Key 原文为 `[REDACTED]`，并截断到 8 KB。

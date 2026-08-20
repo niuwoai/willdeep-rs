@@ -245,6 +245,10 @@ pub struct Agent {
     config: AgentConfig,
     sink: Arc<dyn EventSink>,
     image_fallback: Option<(Arc<dyn Provider>, String)>,
+    /// 上下文压缩的专用 Provider。bool 为真表示压缩指令由网关托管
+    /// （some.im 的 someim-32b-compressor，服务端 replace 注入），
+    /// 摘要请求只发裸转录；为假时仍携带行内压缩指令。
+    compressor: Option<(Arc<dyn Provider>, bool)>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
@@ -260,6 +264,7 @@ impl Agent {
             config,
             sink: Arc::new(NoopSink),
             image_fallback: None,
+            compressor: None,
             subagents: None,
             instruction_inbox: None,
             goal_continuation: None,
@@ -297,6 +302,16 @@ impl Agent {
         label: impl Into<String>,
     ) -> Self {
         self.image_fallback = Some((provider, label.into()));
+        self
+    }
+
+    /// Bind a dedicated provider for context-compression summaries. With
+    /// `hosted_prompt` the fixed compression instruction lives on the some.im
+    /// gateway (`someim-32b-compressor`, injected in replace mode) and the
+    /// client sends only the bare transcript; without it the inline
+    /// instruction is kept so a custom model never loses its task description.
+    pub fn with_compressor(mut self, provider: Arc<dyn Provider>, hosted_prompt: bool) -> Self {
+        self.compressor = Some((provider, hosted_prompt));
         self
     }
 
@@ -699,10 +714,7 @@ The runtime dispatched this bounded read-only preflight before the standard mode
             .map(|message| format!("{:?}: {}", message.role, message.content))
             .collect::<Vec<_>>()
             .join("\n");
-        let request = Message::user(format!(
-            "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
-        ));
-        let summary = self.provider()?.complete(&[request], &[]).await?.content;
+        let summary = self.summarize_history(source).await?;
         let recent = history.split_off(split);
         let mut compressed = vec![Message::user(format!(
             "<context-summary>\n{summary}\n</context-summary>"
@@ -760,10 +772,7 @@ The runtime dispatched this bounded read-only preflight before the standard mode
                 .map(|message| format!("{:?}: {}", message.role, message.content))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let request = Message::user(format!(
-                "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
-            ));
-            let summary = self.provider()?.complete(&[request], &[]).await?.content;
+            let summary = self.summarize_history(source).await?;
             *cache = Some((split, summary));
         }
         let mut result = vec![messages[0].clone()];
@@ -782,6 +791,24 @@ The runtime dispatched this bounded read-only preflight before the standard mode
             })
             .await;
         Ok(result)
+    }
+
+    /// 手动 `/compress` 与自动压缩共用的摘要调用，禁止再各写一份指令。
+    /// 绑定了压缩 Provider 时用它（托管模式只发裸转录，固定指令由网关
+    /// 注入）；未绑定时沿用会话模型 + 行内指令。
+    async fn summarize_history(&self, source: String) -> Result<String, AgentError> {
+        let (provider, hosted_prompt) = match &self.compressor {
+            Some((provider, hosted)) => (provider.clone(), *hosted),
+            None => (self.provider()?, false),
+        };
+        let request = if hosted_prompt {
+            Message::user(source)
+        } else {
+            Message::user(format!(
+                "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
+            ))
+        };
+        Ok(provider.complete(&[request], &[]).await?.content)
     }
 }
 
@@ -1399,6 +1426,101 @@ mod tests {
                 .any(|message| message.content.contains("<context-summary>"))
         );
         assert!(outcome.messages.len() >= 21);
+    }
+
+    /// some.im 托管压缩：绑定 compressor 后，摘要请求必须打到压缩 Provider
+    /// 且只发裸转录（固定指令由网关 replace 注入，客户端不得再携带一份），
+    /// 会话 Provider 只收到压缩后的正式请求。
+    #[tokio::test]
+    async fn compression_uses_bound_compressor_and_sends_bare_transcript() {
+        let provider = RecordingProvider::new(&["final"]);
+        let compressor = RecordingProvider::new(&["compact summary"]);
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-hosted"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 200,
+                token_budget: None,
+            },
+        )
+        .with_compressor(compressor.clone(), true);
+        let history = (0..18)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Message::user(format!("older user message {index} with enough detail"))
+                } else {
+                    Message::assistant(
+                        format!("older assistant message {index} with enough detail"),
+                        Vec::new(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+        let compressor_requests = compressor.requests.lock().expect("compressor requests");
+        assert_eq!(compressor_requests.len(), 1);
+        assert_eq!(compressor_requests[0].len(), 1);
+        let summary_request = &compressor_requests[0][0];
+        assert!(
+            !summary_request.content.contains("Summarize this older"),
+            "hosted mode must not carry the inline instruction: {}",
+            summary_request.content
+        );
+        assert!(summary_request.content.contains("older user message"));
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1, "session provider must not see the summary call");
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| message.content.contains("<context-summary>"))
+        );
+        assert!(outcome.messages.len() >= 21);
+    }
+
+    /// 非托管 compressor：换模型但指令仍随请求走，任务描述不丢。
+    #[tokio::test]
+    async fn compression_with_unhosted_compressor_keeps_inline_instruction() {
+        let provider = RecordingProvider::new(&["final"]);
+        let compressor = RecordingProvider::new(&["compact summary"]);
+        let agent = Agent::new(
+            provider.clone(),
+            registry("compression-unhosted"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 200,
+                token_budget: None,
+            },
+        )
+        .with_compressor(compressor.clone(), false);
+        let history = (0..18)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Message::user(format!("older user message {index} with enough detail"))
+                } else {
+                    Message::assistant(
+                        format!("older assistant message {index} with enough detail"),
+                        Vec::new(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+
+        agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("run");
+        let compressor_requests = compressor.requests.lock().expect("compressor requests");
+        assert_eq!(compressor_requests.len(), 1);
+        assert!(compressor_requests[0][0]
+            .content
+            .contains("Summarize this older"));
     }
 
     /// 锁定 75% 触发线：构造一段估算落在窗口 75%~80% 之间的历史，

@@ -41,6 +41,16 @@ fn default_judge_model(kind: ProviderKind, session_model: &str) -> String {
     }
 }
 
+/// The context compressor's model when `[agent] compressor_model` is unset.
+///
+/// Compression re-sends the whole older history in one request — the largest
+/// single fixed cost in the loop. On some.im it goes to the gateway-hosted
+/// `someim-32b-compressor` (flash-tier pricing; the fixed compression prompt
+/// is injected server-side in replace mode, see muchtoken
+/// docs/someim-32b-compressor.md). Every other provider keeps the session
+/// model with the inline instruction.
+const SOMEIM_CONTEXT_COMPRESSOR_MODEL: &str = "someim-32b-compressor";
+
 /// Append one approval decision to `~/.willdeep/approvals.jsonl`. This is the
 /// audit trail for "why did that command run without asking me" — and the
 /// raw material for tuning the static rules. Best-effort: a logging failure
@@ -677,6 +687,23 @@ pub(crate) async fn build(
     }
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
+    }
+    // 压缩摘要模型：some.im 默认绑网关托管的 someim-32b-compressor，
+    // `[agent] compressor_model` 可覆盖。只有恰好绑到托管模型时才省掉
+    // 行内指令（hosted_prompt）——覆盖成别的模型时指令必须跟着请求走，
+    // 否则压缩调用没有任务描述。其它 provider 未配置时维持会话模型。
+    let compressor_model = loaded.file.agent.compressor_model.clone().or_else(|| {
+        (kind == ProviderKind::SomeIm).then(|| SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned())
+    });
+    if let Some(compressor_model) = compressor_model {
+        let hosted_prompt =
+            kind == ProviderKind::SomeIm && compressor_model == SOMEIM_CONTEXT_COMPRESSOR_MODEL;
+        let mut compressor_config = parent_provider_config.clone();
+        compressor_config.model = compressor_model;
+        agent = agent.with_compressor(
+            build_provider(compressor_config).context("initialize context compressor provider")?,
+            hosted_prompt,
+        );
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
