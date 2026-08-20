@@ -131,6 +131,10 @@ pub struct AgentSettings {
     pub safety_judge: Option<bool>,
     /// Model used for the judge. Defaults to the profile's cheap model.
     pub judge_model: Option<String>,
+    /// Model used for context-compression summaries. On some.im defaults to
+    /// the gateway-hosted `someim-32b-compressor`; elsewhere defaults to the
+    /// session model with the inline instruction.
+    pub compressor_model: Option<String>,
     /// Deterministic worker/standard/deep routing. Defaults to enabled.
     pub small_model_routing: Option<bool>,
     /// Dispatch high-confidence read-only requests before the root model sees

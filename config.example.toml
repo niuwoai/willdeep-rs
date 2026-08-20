@@ -9,6 +9,7 @@ language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--l
 # 关掉判官，所有拿不准的命令都会直接弹审批卡。
 safety_judge = true
 # judge_model = "someim-security-guard" # some.im 默认走网关托管的安全策略；其它 provider 默认取会话模型
+# compressor_model = "someim-32b-compressor" # 上下文压缩模型；some.im 默认走网关托管压缩（固定指令服务端注入），其它 provider 默认取会话模型
 small_model_routing = true
 auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1

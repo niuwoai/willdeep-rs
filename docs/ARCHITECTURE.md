@@ -89,7 +89,7 @@ Provider Profile 可声明 `context_window`。在途自动压缩按四道水位�
 | 水位 | 常量 | 行为 |
 | --- | --- | --- |
 | 单条 25% | `OVERSIZED_MESSAGE_PERCENT` | 任何单条消息超过窗口该比例即就地裁掉中段、保留首尾。纯字符串处理，不花 Provider 调用——超大消息通常是刚读进来的文件，正躺在摘要够不着的保留区里 |
-| 75% | `AUTO_COMPRESSION_TRIGGER_PERCENT` | 历史不少于 16 条时，用当前 Provider 总结较旧历史，保留首条消息、摘要和最近 10 条 |
+| 75% | `AUTO_COMPRESSION_TRIGGER_PERCENT` | 历史不少于 16 条时，用压缩 Provider（some.im 默认网关托管的 `someim-32b-compressor`，固定压缩指令由服务端注入；其它 Provider 为当前会话模型 + 行内指令）总结较旧历史，保留首条消息、摘要和最近 10 条 |
 | 90% | `AUTO_COMPRESSION_ESCAPE_PERCENT` | 逃生水位：无视 16 条门槛照常压缩，并按历史长度收缩保留区。少数几条巨型消息凑不够条数门槛却足以撑爆窗口 |
 | 95% | `AUTO_COMPRESSION_CEILING_PERCENT` | 摘要后仍超窗时从保留区头部继续丢，至少保住首条、摘要和最近一轮问答；丢弃条数通过 `CompressionCompleted.dropped_messages` 如实上报 |
 

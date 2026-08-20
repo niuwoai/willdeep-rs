@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.39.0-rc1] - 2026-08-20
+
+### Added
+- **上下文压缩改走网关托管的 `someim-32b-compressor`。** Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用自动绑定该虚拟模型（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入（见 muchtoken `docs/someim-32b-compressor.md`），客户端只发裸转录。压缩此前跑在会话主模型上、把整段旧历史按主模型价格重发一遍，是循环里最大的单笔固定开销。
+- 新增 `[agent] compressor_model` 配置：覆盖压缩模型；覆盖成非托管模型时行内压缩指令仍随请求携带，压缩调用不会失去任务描述。其它 Provider 未配置时维持旧行为（会话模型 + 行内指令）。
+
+### Changed
+- 手动与自动两条压缩路径此前各自内联同一句压缩指令（字节级重复两份），收敛为 `Agent::summarize_history` 单一入口，防止漂移。
+
+### Tests
+- 新增托管压缩回归：摘要请求必须打到压缩 Provider 且不携带行内指令、会话 Provider 只见正式请求；非托管 compressor 必须保留行内指令。
+
 ## [0.38.0-rc2] - 2026-08-19
 
 ### Fixed
