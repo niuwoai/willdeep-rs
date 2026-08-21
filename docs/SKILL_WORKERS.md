@@ -205,7 +205,7 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | 冲突文件集 | 排队 | 拒绝并点名 | 有意分歧（见上文） |
 | 只读工种引用抽查 | ✅ 1.264.0-rc1 回流 | ✅ 本版新增 | **已对齐**（Xedit 侧第四个指标 Citation Accuracy） |
 | 实弹靶场 | ✅ 1.264.0-rc1 回流（5 样本） | ✅ 12 样本 | **已对齐**（样本各按语言，判定纪律逐字一致） |
-| `security_guard` / `judge` 工种 | ✅ | ❌ 无 | 分歧：网关侧这两个虚拟模型**实测未配置**（`model_not_configured`），rs 的判官走既有 `someim-security-guard`，等服务端补齐再对齐 |
+| `security_guard` / `judge` 工种 | ✅ 有工种，但 1.282.0-rc8 起不再声称托管 | ❌ 无 | **已对齐**：网关侧这两个 Worker 虚拟模型 2026-08-21 复测仍返回 `model_not_configured`，Xedit 已把它们移出 `hostedTradeIDs`，职能段改由客户端自带。两端托管名单同为七项。rs 的判官走既有 `someim-security-guard`（主循环档，在线，与 Worker 档同名但不同信任边界），不受影响 |
 | `reviewer` / `ops_runner` / `terminal_operator` | ✅ | ❌ 无 | 缺口：前两个可移植（虚拟模型同样未配置），`terminal_operator` 驾驶的是 App 侧栏终端，CLI 无对应物，**不打算做** |
 | Workflow 步骤绑工种 | ✅ 派工率第一刀 | ❌ 无 workflow 引擎 | 结构性差异，rs 侧对应抓手是 Goal Teams |
 | 沙箱档（seatbelt / 凭证档） | ✅ | ❌ 无 seatbelt | 平台差异 |
