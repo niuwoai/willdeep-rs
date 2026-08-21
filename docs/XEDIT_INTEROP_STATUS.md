@@ -1,7 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
-> 勘察日期：2026-08-21（同日完成建议路径全部三步并回写）| rs：0.39.0-rc3 |
-> Xedit：1.283.0-rc2。
+> 勘察日期：2026-08-21（同日完成建议路径三步 + 运行时层阶段一并回写）|
+> rs：0.39.0-rc3 | Xedit：1.284.0-rc1。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -10,16 +10,16 @@
 
 ## 一句话结论
 
-两端是**「文件层共享 + 契约层对齐 + 运行时层刚起步」**的三段式：前两层实打实
+两端是**「文件层共享 + 契约层对齐 + 运行时层只读打通」**的三段式：前两层实打实
 在运转且有单测/fixture 锁定，2026-08-21 起审批规则也进入共享面（用户可感知
-的第一个联动）；第三层 Swift 已能解码 rs 的公共协议对象，但尚未接传输——
-四阶段替换计划的阶段一「只读观察」是下一个价值最大的动作。
+的第一个联动）；第三层同日完成四阶段替换计划的阶段一——Swift 已能经 Unix
+socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍未接。
 
 ## 双端画像（2026-08-21）
 
 | 项 | willdeep-rs | Xedit |
 |---|---|---|
-| 版本 | 0.39.0-rc3 | 1.283.0-rc2 |
+| 版本 | 0.39.0-rc3 | 1.284.0-rc1 |
 | 规模 | ~60K 行 Rust / 4 crate | ~252K 行 Swift（主应用 481 文件） |
 | 工具数 | 21+2 | 164（`Xedit/AgentToolRegistry.swift`） |
 | 系统提示词 | `STABLE_CONTRACT` ~4.5KB | 稳定前缀 ~30KB（v29，`AgentContextBuilder.swift`） |
@@ -57,23 +57,40 @@ Provider 库 + Keychain，不读明文 TOML）。
 - 指标与纪律双向回流：Xedit 的 Citation Audit、实弹靶场自 rs 回流；rs 的
   安全分类器、审批语义自 Xedit 移植。
 
-## 运行时层：第零步已迈出
+## 运行时层：阶段一（只读观察）已打通
 
-- **2026-08-21 进展**：Xedit 1.283.0-rc1 新增 `WillDeepRuntimeProtocol.swift`
-  ——统一响应信封加十一类公共对象与四类控制结果的 Codable 解码器，配
-  `WillDeepRuntimeProtocolTests`（4 项）。**只解码，不连传输、不改行为、不
-  依赖运行中的 daemon**，四阶段计划的「阶段一：只读观察」现在可以直接建在
-  这批类型上。契约夹具逐字复制进 `XeditTests/Fixtures/`，并有一条与本仓
-  源文件的字节比对（两仓同时存在时比对，缺失时跳过）。
-  解码器放在 App target 而非测试 target：契约测试若只跑测试专用结构体，
-  证明的仅仅是测试能编译。
-- **仍未接入**：传输层。Xedit 连 daemon 走的仍是 Go `willdeep-agent` 的
-  `/v1/fs/*` 远端工具后端，与 rs 控制面（`/v1/api`、`control.sock`）无关
-  （Xedit `docs/GOAL_TEAMS_ROLES_DESIGN.md:35` 有权威说明）。请求编码
-  （`agent.spawn` 等写方向）也刻意留到真正发起调用的那一阶段——现在加等于
-  交付一个没跑过的写入器。
-- **已就绪未用**：类型化 `willdeep-runtime-client`、四阶段"Swift Harness
-  替换"计划（`CLI_TUI_RUNTIME_ROADMAP.md` §1.0 迁移门槛、§7.14 验收）。
+2026-08-21 两步落地，Swift 侧现在能真的连上本机 Runtime 并读出结构化状态：
+
+- **第零步（Xedit 1.283.0-rc1）**：`WillDeepRuntimeProtocol.swift` ——
+  统一响应信封加十一类公共对象与四类控制结果的 Codable 解码器，配 4 项
+  fixture 契约测试。只解码，不连传输。解码器放在 App target 而非测试
+  target：契约测试若只跑测试专用结构体，证明的仅仅是测试能编译。
+- **阶段一（Xedit 1.284.0-rc1）**：`WillDeepRuntimeTransport`（发现 + 传输）
+  与 `WillDeepRuntimeClient`（只读操作），12 项测试，其中一条**真打本机
+  daemon**（无 daemon 时跳过）。
+
+四条设计取舍值得记下来，改这块之前先看：
+
+1. **优先 Unix socket，回环 TCP 仅作回退。** 本文档 §2 明写本机客户端应优先
+   连 Runtime 目录内 `0600` 的 socket，而 `URLSession` 拨不了 unix socket。
+   Xedit 因此手写了一个极小的 HTTP/1.1 客户端（一个 POST、一个 JSON body、
+   `Content-Length` 响应）。socket 的文件权限是真实访问边界，不是风格问题：
+   为省事改用 TCP，等于该 App 成为唯一无视协议传输偏好的客户端。Runtime
+   不会发的东西（chunked、keep-alive 复用、重定向）一律明确报错而非半懂。
+2. **`daemon.json` 当不可信输入。** `address` 只接受回环地址——被篡改的状态
+   文件不能把 App 的 token 引向另一台主机。
+3. **「只读」是代码强制，不是约定。** Runtime 有 54 个操作，其中不乏
+   `session.delete`、`turn.submit`、`agent.spawn`。客户端持一份**字面量**
+   只读白名单并在发出任何字节前拒绝其余操作；靠"凡是 `.list` 结尾"推导的
+   白名单，早晚会放进下一个长得像读、实则有副作用的操作。
+4. **端到端测试必须证明自己没被跳过。** 那条真打 daemon 的测试写了跳过分支
+   （开发机没 daemon 不算客户端缺陷），因此上线前用临时诊断版验证过它确实
+   走通了发现与连接两步——一条永远在跳过的端到端测试比没有更糟。
+
+**仍未接入**：写方向（`agent.spawn` 等请求编码）刻意留到真正发起调用的阶段，
+现在加等于交付一个没跑过的写入器；事件流（SSE / NDJSON 游标续传）也未接。
+Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工具后端，
+与本 Runtime 控制面无关（Xedit `docs/GOAL_TEAMS_ROLES_DESIGN.md:35`）。
 
 ## 网关实况（2026-08-21 逐档实弹探活）
 
@@ -166,6 +183,14 @@ Foundation `JSONEncoder` 输出的逐字节捕获——两空格缩进、正斜�
 2. ~~**Swift 第零步**：用 rs 的 `public-api-v1.json` 建 decoder contract
    test~~ ✅ 已完成（1.283.0-rc1）。
 3. ~~**审批存储收敛**~~ ✅ 已完成（1.283.0-rc2 + 0.39.0-rc3），见上节。
+4. ~~**阶段一：Swift 只读观察 Runtime**~~ ✅ 已完成（1.284.0-rc1）。
+5. **下一步候选**（按价值排序，未开工）：
+   - **事件流**：Swift 接 SSE 或 NDJSON 并按 `sequence` 游标续传，观察面板
+     才能实时跳动而不是靠轮询；
+   - **UI 落地**：把只读快照接进 Xedit 界面（Agent 树 / 任务 / 待处理项），
+     现在客户端有了但没人看得见；
+   - **阶段二：会话与审批双读校验**（`CLI_TUI_RUNTIME_ROADMAP.md` §1.0），
+     即同一份状态两侧各读一遍并比对，为后续写方向接管铺路。
 4. **会话单向变双向**：rs 已读 Swift 会话；反向为空白。Swift/Rust 共享
    会话 schema 稳定后开双向原地写入（rs 已知问题清单既有条目）。
 5. **中期锚点不变**：按路线图让 rs 内核成为唯一 Harness，Xedit 退成
