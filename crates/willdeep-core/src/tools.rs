@@ -305,15 +305,27 @@ impl ToolRegistry {
                 )));
             }
         }
-        let rules = if path.exists() {
+        let stored = if path.exists() {
             serde_json::from_str::<Vec<String>>(&std::fs::read_to_string(&path)?).map_err(
                 |error| ToolError::Network(format!("invalid always-allow store: {error}")),
             )?
         } else {
             Vec::new()
         };
-        self.always_allowed = Arc::new(Mutex::new(rules.into_iter().collect()));
+        // Rules minted before the credential guard can still be sitting in the
+        // file with a secret inside them. Drop them on load and rewrite, so the
+        // exposure ends at the next start rather than waiting for someone to
+        // read a file whose whole purpose is to stop being read. They are dead
+        // weight regardless: `command_signature` no longer mints a signature
+        // that could match them.
+        let (kept, dropped): (Vec<String>, Vec<String>) = stored
+            .into_iter()
+            .partition(|rule| !rule_carries_credentials(rule));
+        self.always_allowed = Arc::new(Mutex::new(kept.into_iter().collect()));
         self.always_allow_path = Some(path);
+        if !dropped.is_empty() {
+            self.persist_always_allowed()?;
+        }
         Ok(self)
     }
     pub fn with_allowed_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
@@ -2114,6 +2126,8 @@ fn truncate_line(line: &str, max_chars: usize) -> String {
     value
 }
 
+const COMMAND_SIGNATURE_PREFIX: &str = "command-exact:";
+
 fn command_signature(command: &str) -> Option<String> {
     if command
         .chars()
@@ -2122,7 +2136,31 @@ fn command_signature(command: &str) -> Option<String> {
         return None;
     }
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!normalized.is_empty()).then(|| format!("command-exact:{normalized}"))
+    if normalized.is_empty() || command_carries_credentials(&normalized) {
+        return None;
+    }
+    Some(format!("{COMMAND_SIGNATURE_PREFIX}{normalized}"))
+}
+
+/// A remembered rule is the command verbatim, so a command carrying an inline
+/// credential would park that secret in `always-allow.json` until someone
+/// notices — and nobody audits a file whose whole job is to stop asking. Such
+/// commands stay one-shot approvals: the operator can still run them, they
+/// just never become a stored rule.
+///
+/// Reuses the judge's redactor rather than a second marker list, so both
+/// paths recognise the same shapes and cannot drift apart. `command` must
+/// already be whitespace-normalized, since the redactor normalizes too.
+fn command_carries_credentials(command: &str) -> bool {
+    crate::judge::redact_credentials(command) != command
+}
+
+fn rule_carries_credentials(rule: &str) -> bool {
+    command_carries_credentials(
+        rule.strip_prefix(COMMAND_SIGNATURE_PREFIX)
+            .unwrap_or(rule)
+            .trim(),
+    )
 }
 
 fn verification_status(status: &BackgroundTaskStatus) -> VerificationStatus {
@@ -3592,6 +3630,69 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
             Some("command-exact:cargo test --all")
         );
         assert_eq!(command_signature("cargo test && deploy"), None);
+    }
+
+    /// A stored rule is the command verbatim. If a command carrying a key
+    /// could be remembered, the key would live in `always-allow.json`
+    /// indefinitely — so such commands are approvable but never rememberable.
+    #[test]
+    fn commands_carrying_credentials_are_never_rememberable() {
+        for command in [
+            "MODEL_API_KEY=sk_live_0123456789abcdef ruby scripts/probe.rb",
+            "curl -H Authorization: Bearer sk-0123456789abcdef https://example.com",
+            "mysql --password hunter2 -e select 1",
+            "deploy --token ghp_0123456789abcdef",
+        ] {
+            assert_eq!(
+                command_signature(command),
+                None,
+                "credential-bearing command must not mint a rule: {command}"
+            );
+        }
+        // The guard must not swallow ordinary commands that merely mention a
+        // key-shaped word without a value.
+        assert_eq!(
+            command_signature("grep -r api_key src").as_deref(),
+            Some("command-exact:grep -r api_key src")
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_rules_are_pruned_from_an_existing_store_on_load() {
+        let root = workspace("always-allow-prune");
+        let store = root.join("rules.json");
+        let leaked = "command-exact:API_KEY=sk_live_0123456789abcdef ruby probe.rb";
+        let clean = "command-exact:cargo test";
+        std::fs::write(
+            &store,
+            serde_json::to_vec(&vec![leaked.to_owned(), clean.to_owned()]).expect("encode"),
+        )
+        .expect("seed store");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+        }
+
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_always_allow_store(store.clone())
+            .expect("store");
+        let rules = registry
+            .always_allowed
+            .lock()
+            .expect("always allow rules")
+            .clone();
+        assert!(rules.contains(clean), "clean rule must survive");
+        assert!(!rules.contains(leaked), "leaked rule must be dropped");
+
+        // The rewrite is the point: the secret must be gone from disk, not
+        // merely ignored in memory.
+        let on_disk = std::fs::read_to_string(&store).expect("read store");
+        assert!(!on_disk.contains("sk_live_0123456789abcdef"));
+        assert!(on_disk.contains("cargo test"));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     /// The old hard-coded `cargo test | grep` carve-out is gone; the general
