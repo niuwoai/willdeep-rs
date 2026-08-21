@@ -3657,6 +3657,65 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
         );
     }
 
+    /// The macOS app writes into this same file (`AgentSharedAlwaysAllowStore`),
+    /// and Foundation's `JSONEncoder` does not spell JSON the way `serde_json`
+    /// does: it pretty-prints with two spaces and escapes forward slashes as
+    /// `\/`. Both are legal JSON, but "legal" is not the same as "we checked".
+    /// The bytes below are a verbatim capture of that encoder's output.
+    ///
+    /// The second half is the part that actually matters: a rule minted by the
+    /// app must equal the signature minted here. Two normalizations that agree
+    /// on the format but disagree on the string would leave both apps writing
+    /// rules the other can never match — a shared file that shares nothing.
+    #[tokio::test]
+    async fn a_store_written_by_the_macos_app_loads_and_matches_here() {
+        let root = workspace("always-allow-swift");
+        let store = root.join("rules.json");
+        let swift_encoded = "[\n  \"command-exact:cargo test --all\",\n  \
+             \"command-exact:git push origin main\",\n  \
+             \"command-exact:ls \\/tmp\\/data\"\n]";
+        std::fs::write(&store, swift_encoded).expect("seed store");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+        }
+
+        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
+        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .expect("registry")
+            .with_approver(approver.clone())
+            .with_always_allow_store(store)
+            .expect("app-written store must load");
+
+        // `\/` has to arrive as `/`, or the escaped rules silently never match.
+        let signature = command_signature("ls  /tmp/data").expect("signature");
+        assert_eq!(signature, "command-exact:ls /tmp/data");
+        registry
+            .require_rememberable_approval("run ls", signature)
+            .await
+            .expect("rule pinned by the app is honored here");
+        assert_eq!(
+            approver.0.load(Ordering::SeqCst),
+            0,
+            "the operator already approved this in the other app; asking again is the bug"
+        );
+
+        // A wider command in the same family is a different rule: the app pins
+        // families locally but publishes only the exact command, so nothing
+        // here may widen beyond what was approved.
+        registry
+            .require_rememberable_approval(
+                "run cargo",
+                command_signature("cargo test --all -- --nocapture").expect("signature"),
+            )
+            .await
+            .expect("approved");
+        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[tokio::test]
     async fn credential_rules_are_pruned_from_an_existing_store_on_load() {
         let root = workspace("always-allow-prune");
