@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.39.0-rc2] - 2026-08-21
+
+### Fixed
+- **带凭据的命令不再能被记成「始终允许」规则。** 规则存的是命令原文，所以一条 `API_KEY=… ruby probe.rb` 被记住之后，那个 Key 就在 `~/.willdeep/always-allow.json` 里长住了——而这个文件的职能恰恰是「以后别再问」，没人会去读它。现在这类命令仍可审批执行，但不再提供「始终允许」选项（`command_signature` 对其返回 `None`，两个调用点同时收口）。判定复用 `judge::redact_credentials`，不新建第二份标记表：覆盖 `KEY=value` 赋值、`--password value` 参数、`Authorization: Bearer` 头和裸 `sk-` / `ghp_` / `xoxb-` 令牌。
+- **启动时清理存量泄漏规则。** 旧版本写进去的含凭据规则在加载时丢弃并立即回写文件，不等人去翻。这些规则本来也已失效——新的 `command_signature` 不会再生成能匹配它们的签名。
+
+### Tests
+- 新增两项：四种凭据形态（环境变量赋值、Bearer 头、`--password`、裸 token）一律不可记忆，而仅提及 `api_key` 字样却不带值的普通命令仍可记忆；存量存储加载后泄漏规则从内存与磁盘同时消失、干净规则原样保留。
+
+### Notes
+- 网关实测（2026-08-21）：`someim-32b-compressor` 当前上游为 `inclusionai/ling-3.0-flash`，`someim-security-guard` 为 `stealth/ox-alpha`，均与文档记载的上游不同。虚拟模型的意义就是客户端不关心上游，故不改代码，仅在此备案。
+
 ## [0.39.0-rc1] - 2026-08-20
 
 ### Added
