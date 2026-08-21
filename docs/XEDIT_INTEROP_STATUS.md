@@ -1,6 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
-> 勘察日期：2026-08-21（同日完成前两步并回写）| rs：0.39.0-rc2 | Xedit：1.283.0-rc1。
+> 勘察日期：2026-08-21（同日完成建议路径全部三步并回写）| rs：0.39.0-rc3 |
+> Xedit：1.283.0-rc2。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -9,16 +10,16 @@
 
 ## 一句话结论
 
-两端当前是**「文件层共享 + 契约层对齐 + 运行时层零耦合」**的三段式：前两层
-实打实在运转且有单测/fixture 锁定；第三层（Swift 接入 rs Runtime 控制面）
-协议、fixture、四阶段路线图全部就绪，Swift 侧接入代码为零——这是准备最充分、
-价值最大的联动潜力点。
+两端是**「文件层共享 + 契约层对齐 + 运行时层刚起步」**的三段式：前两层实打实
+在运转且有单测/fixture 锁定，2026-08-21 起审批规则也进入共享面（用户可感知
+的第一个联动）；第三层 Swift 已能解码 rs 的公共协议对象，但尚未接传输——
+四阶段替换计划的阶段一「只读观察」是下一个价值最大的动作。
 
 ## 双端画像（2026-08-21）
 
 | 项 | willdeep-rs | Xedit |
 |---|---|---|
-| 版本 | 0.39.0-rc1 | 1.282.0-rc6 |
+| 版本 | 0.39.0-rc3 | 1.283.0-rc2 |
 | 规模 | ~60K 行 Rust / 4 crate | ~252K 行 Swift（主应用 481 文件） |
 | 工具数 | 21+2 | 164（`Xedit/AgentToolRegistry.swift`） |
 | 系统提示词 | `STABLE_CONTRACT` ~4.5KB | 稳定前缀 ~30KB（v29，`AgentContextBuilder.swift`） |
@@ -37,6 +38,7 @@
 | Task Packet 字段 | 近乎字段级同构 | `subagent.rs:143-178` | `AgentSubagentTaskPacket.swift:19-66` |
 | 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件 | `session.rs:472-572` | Xedit 不读 `~/.willdeep/sessions` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
+| `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |
 | 判官模型 `someim-security-guard` | 同名 | `harness.rs:26` | `AgentModels.swift` |
 | `mobile-gateway.v1` | 协议版本共用，room/token 独立 | `mobile.rs`、`AUTHENTICATION.md:133` | `MobileGatewayCoordinator.swift` |
@@ -101,13 +103,9 @@ Provider 库 + Keychain，不读明文 TOML）。
    *更正*：本文初版称 Xedit"同仓两名、命名冲突"——**该判断有误**。
    `someim-security-guard` 与 `someim-32b-security-guard` 是有意并存的两个
    模型，信任边界不同（见上一节），不应合并。
-2. **审批存储两套**：Xedit Always Allow 存 UserDefaults，rs 写
-   `~/.willdeep/always-allow.json` + `approvals.jsonl`，互不可见——App 里
-   点过"始终允许"的命令 CLI 还会再问。rs `ARCHITECTURE.md` 已预留"替换规则
-   存储适配器"收敛路径。
-   **前置条件已补齐**：rs 0.39.0-rc2 起，带凭据的命令不再能记成规则，加载时
-   还会清理存量泄漏规则。共享这个文件之前必须先有这道闸——否则等于把凭据
-   扩散到第二个 App 的存储与同步面。
+2. ~~**审批存储两套**~~ ✅ **已收敛（2026-08-21，Xedit 1.283.0-rc2 +
+   rs 0.39.0-rc3）**：两端现在读写同一个 `~/.willdeep/always-allow.json`。
+   语义见下节；`approvals.jsonl`（审计日志）仍是 rs 独有，不共享。
 3. **`task.digest_oversized` 缺口**：rs 有（air-gapped 分片消化，0.28.0-rc1），
    Xedit 无——而这恰是三档战略在 S+M 机房的降级关键。
 4. **canonical 文档互引用硬编码绝对路径**（如 `~/Sites/Xedit`）：换机器或
@@ -129,14 +127,45 @@ Provider 库 + Keychain，不读明文 TOML）。
 对照表人肉维持。当前"协议先行、不定融合时间表"的基调正确，但有保质期——
 对照表规模再翻倍就管不住了。
 
+## 共享 always-allow 的语义（2026-08-21 落地）
+
+两端的规则模型本就不同，共享时**没有**把它们合并成一种，而是选了一个双方
+都能安全表达的交集：
+
+| | Xedit | rs |
+|---|---|---|
+| 本地规则模型 | 命令族（`git push` 覆盖整族） | 精确命令（字符串相等） |
+| 写入共享文件 | 用户批准的**那条精确命令** | 同左（本来就是精确命令） |
+| 读取共享文件 | 认 `command-exact:` 规则 | 同左 |
+
+**共享货币是「人真正看过并批准的那条精确命令」。** 理由是方向性的：把宽的
+（族）共享过去等于偷改另一侧的政策——rs 用户只被问过「记住这一条命令」，
+不该因此自动放行整族；而精确命令是任何包含它的族的子集，两个方向都不放宽
+任何一侧的权限模型。Xedit 点击「始终允许」时仍照旧存自己的族规则，**另外**
+发布一条 `command-exact:`。
+
+三条硬约束（任一违反都会伤到另一侧，不只是本特性失效）：
+
+1. **文件必须 0600**。rs 的 `with_always_allow_store` 见到 group/other 位会
+   拒绝整个存储并报错，弄坏的是每一次 CLI 运行。Xedit 走 0600 临时文件 +
+   原子替换，并在替换后重新断言 mode。
+2. **带凭据的命令永不写入**。rs 0.39.0-rc2 起不再铸这类规则并清理存量；
+   若 Xedit 照写，泄漏只会换个进程重现。该闸门实现在共享存储自身，因为它
+   是共享文件的不变量，不属于任一 App 的审批 UI。
+3. **只铸对方也会铸的签名**，并且**写前重读合并、看不懂的规则原样保留**。
+   两个进程共用一个文件，盲写会丢掉对方新增的规则。
+
+双向契约测试各在一侧：Xedit `AgentSharedAlwaysAllowStoreTests`（8 项）、
+rs `a_store_written_by_the_macos_app_loads_and_matches_here`（后者用的是
+Foundation `JSONEncoder` 输出的逐字节捕获——两空格缩进、正斜杠转义成
+`\/`，都是合法 JSON，但「合法」不等于「验过」）。
+
 ## 建议路径（按序）
 
 1. ~~**修漂移 1**：Xedit 托管白名单对齐 7 项~~ ✅ 已完成（1.282.0-rc8）。
 2. ~~**Swift 第零步**：用 rs 的 `public-api-v1.json` 建 decoder contract
    test~~ ✅ 已完成（1.283.0-rc1）。
-3. **审批存储收敛**（下一步）：Xedit 换成读写 `~/.willdeep/always-allow.json`
-   的适配器，双端"始终允许"互认——用户可感知的第一个联动体验。凭据闸门
-   已由 rs 0.39.0-rc2 补齐，可以动了。
+3. ~~**审批存储收敛**~~ ✅ 已完成（1.283.0-rc2 + 0.39.0-rc3），见上节。
 4. **会话单向变双向**：rs 已读 Swift 会话；反向为空白。Swift/Rust 共享
    会话 schema 稳定后开双向原地写入（rs 已知问题清单既有条目）。
 5. **中期锚点不变**：按路线图让 rs 内核成为唯一 Harness，Xedit 退成
