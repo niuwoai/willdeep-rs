@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-19 | 当前版本：v0.38.0-rc2
+> 最后更新：2026-08-22 | 当前版本：v0.40.0-rc1
 
 ## 项目简介
 
@@ -59,7 +59,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建 Scout、Reader、Log Inspector、Git Detective 四种 Worker 档只读子 Agent；
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
-- TUI `Ctrl+R` 可按标题或消息内容搜索当前 Workspace 的历史会话，展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
+- TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
 - TUI Prompt、聊天区、活动区和状态栏四态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；

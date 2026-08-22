@@ -140,7 +140,7 @@ Rename、Fork、Archive 和 Delete **只允许在没有活跃或排队 Turn 时�
 
 Fork 复制 Core 消息快照并创建新的 Session / Root Agent，不复制旧的 Turn、Task、Interaction、事件游标或 Inbox 已读状态。`--through-turn` 可以精确保留到某个已完成 Turn 并同时切换推理配置。
 
-TUI 对应命令：`/session fork --through <TURN_ID> --profile <P> --model <M> [名称]`、`/session search --workspace/--status/--profile/--model/--after/--before`、`/session switch <SESSION_ID>`。
+TUI 对应命令：`/session fork --through <TURN_ID> --profile <P> --model <M> [名称]`、`/history [关键词]` 或 `/session search [关键词] [--workspace/--status/--profile/--model/--after/--before]`（两者打开同一个历史会话面板，选中即进入）、`/session switch <SESSION_ID>`。
 
 Export **不包含**队列私密 Prompt、Runtime Token 或 Provider 凭据。Delete 必须显式 `--yes`。
 

@@ -1109,7 +1109,7 @@ mod tests {
         let current_id = uuid::Uuid::new_v4();
         let target_id = uuid::Uuid::new_v4();
         let mut app = App::new(Vec::new(), Language::ZhCn);
-        app.open_session_picker(current_id);
+        app.open_session_picker(current_id, SessionPickerRequest::default());
 
         assert!(matches!(
             app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('登'), KeyModifiers::NONE)),
@@ -1154,6 +1154,133 @@ mod tests {
         }
     }
     #[test]
+    fn history_and_session_search_commands_open_the_same_panel() {
+        // `/history` 不带参数：面板列最近会话，输入框留空。
+        let bare = parse_session_picker_command("/history")
+            .unwrap()
+            .expect("/history opens the panel");
+        assert!(bare.query.is_empty());
+        assert!(bare.filters.is_empty());
+
+        // `/session search` 带关键词与过滤器：关键词进输入框，过滤器随刷新走。
+        let searched = parse_session_picker_command("/session search --status archived 登录设计")
+            .unwrap()
+            .expect("/session search opens the panel");
+        assert_eq!(searched.query, "登录设计");
+        assert_eq!(
+            searched.filters,
+            vec![("status".to_owned(), "archived".to_owned())]
+        );
+
+        // 两条命令进的是同一个面板，初始状态各按各的参数落位。
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(uuid::Uuid::new_v4(), searched);
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.editor.text(), "登录设计");
+        assert_eq!(
+            picker.filters,
+            vec![("status".to_owned(), "archived".to_owned())]
+        );
+
+        // 不归它管的提示词必须原样放行，否则 `/session switch` 之类会被吞掉。
+        assert!(
+            parse_session_picker_command("/session switch 0")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_session_picker_command("/historian")
+                .unwrap()
+                .is_none()
+        );
+        // 多打一个空格不该变成另一条命令。
+        assert_eq!(
+            parse_session_picker_command("/session  search  登录")
+                .unwrap()
+                .expect("extra spaces still open the panel")
+                .query,
+            "登录"
+        );
+        assert!(
+            parse_session_picker_command("讲讲 /history")
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_session_picker_command("/history --wat x").is_err());
+    }
+    #[test]
+    fn session_picker_keeps_only_the_twenty_most_recent_results() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(uuid::Uuid::new_v4(), SessionPickerRequest::default());
+
+        app.set_session_picker_results(recent_session_results(25));
+
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.results.len(), 20);
+        // Runtime 已按更新时间倒序，截断只能砍掉尾巴，不能改动顺序。
+        assert_eq!(picker.results.first().unwrap().title, "会话 0");
+        assert_eq!(picker.results.last().unwrap().title, "会话 19");
+        assert!(picker.truncated, "被截断时标题要显示 20+");
+    }
+    #[cfg(test)]
+    fn recent_session_results(count: u64) -> Vec<willdeep_runtime_protocol::SessionSearchResult> {
+        (0..count)
+            .map(|index| willdeep_runtime_protocol::SessionSearchResult {
+                id: uuid::Uuid::new_v4(),
+                title: format!("会话 {index}"),
+                workspace: Some("/workspace".to_owned()),
+                status: willdeep_runtime_protocol::SessionStatus::Idle,
+                profile: None,
+                model: None,
+                updated_at: 100 - index,
+                message_count: 1,
+                snippet: None,
+            })
+            .collect()
+    }
+    #[test]
+    fn session_picker_panel_renders_rows_and_click_enters_that_session() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(uuid::Uuid::new_v4(), SessionPickerRequest::default());
+        let mut results = recent_session_results(25);
+        let target = results[1].id;
+        results[1].title = "登录设计".to_owned();
+        app.set_session_picker_results(results);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| session_picker_ui::render_session_picker(frame, &mut app))
+            .unwrap();
+        // 双宽字符在缓冲区里占两格，第二格是空白；比对前先把空格抹掉。
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "");
+
+        assert!(rendered.contains("历史会话（当前工作区）"), "{rendered}");
+        // 25 条只留 20 条，标题必须写成 20+ 而不是谎称一共 20 条。
+        assert!(rendered.contains("1/20+"), "标题缺少截断标记: {rendered}");
+        assert!(
+            rendered.contains("▶会话0"),
+            "首行未选中或未渲染: {rendered}"
+        );
+        assert!(rendered.contains("登录设计"));
+
+        // 点第二行 = 进那条会话：面板关闭，切换请求排给事件循环。
+        let (row, _) = app.session_picker_hits[1];
+        assert!(app.activate_session_picker_at(app.session_picker_rect.x + 2, row));
+        assert_eq!(
+            app.pending_session_switch.as_ref().unwrap().id,
+            target.to_string()
+        );
+        assert!(app.session_picker.is_none());
+    }
+    #[test]
     fn session_picker_result_includes_content_snippet_without_embedded_lines() {
         let result = willdeep_runtime_protocol::SessionSearchResult {
             id: uuid::Uuid::new_v4(),
@@ -1167,7 +1294,8 @@ mod tests {
             snippet: Some("RBAC\n数据权限".to_owned()),
         };
 
-        let line = session_picker_result_line(&result, true, Language::ZhCn, true);
+        let line =
+            session_picker_ui::session_picker_result_line(&result, true, Language::ZhCn, true);
 
         assert!(line.contains("SSO 设计"));
         assert!(line.contains("RBAC 数据权限"));
@@ -2548,11 +2676,15 @@ mod tests {
     #[test]
     fn command_completion_offers_the_runtime_controls() {
         let matches = command_catalog::command_candidates(Language::En);
-        for command in ["/daemon", "/model", "/webapp"] {
+        for command in ["/daemon", "/history", "/model", "/webapp"] {
             assert!(
                 matches.iter().any(|(name, _)| *name == command),
                 "{command} missing from the completion catalog"
             );
+        }
+        // help_text 内部断言用法签名与说明一一对齐；漏改一边会把说明贴到别的命令上。
+        for language in [Language::ZhCn, Language::En, Language::Ja] {
+            assert!(command_catalog::help_text(language).contains("/history"));
         }
     }
 

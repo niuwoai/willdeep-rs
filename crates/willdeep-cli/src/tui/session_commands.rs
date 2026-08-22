@@ -1,5 +1,38 @@
 use super::*;
 
+/// 打开历史会话面板所需的初始状态：关键词进输入框，其余过滤器随每次刷新一起发。
+#[derive(Default)]
+pub(super) struct SessionPickerRequest {
+    pub(super) query: String,
+    pub(super) filters: Vec<(String, String)>,
+}
+
+/// `/history` 与 `/session search` 都落到同一个面板：前者列当前工作区最近的会话，
+/// 后者把关键词和过滤器带进面板。返回 `Ok(None)` 表示这条提示词不归它管。
+pub(super) fn parse_session_picker_command(prompt: &str) -> Result<Option<SessionPickerRequest>> {
+    // 按词切，不按字节前缀切：`/session  search` 和 `/session search` 是同一条命令。
+    let mut tokens = prompt.split_whitespace();
+    let arguments = match tokens.next() {
+        Some("/history") => tokens.collect::<Vec<_>>(),
+        Some("/session") => match tokens.next() {
+            Some("search") => tokens.collect::<Vec<_>>(),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    if arguments.is_empty() {
+        return Ok(Some(SessionPickerRequest::default()));
+    }
+    let mut filters = parse_search_options(&arguments.join(" "))?;
+    // 关键词单独抽出来放进面板输入框，用户可以直接接着改。
+    let query = filters
+        .iter()
+        .position(|(key, _)| key == "q")
+        .map(|position| filters.remove(position).1)
+        .unwrap_or_default();
+    Ok(Some(SessionPickerRequest { query, filters }))
+}
+
 pub(super) async fn handle_session_command(
     prompt: &str,
     app: &mut App,
@@ -14,9 +47,9 @@ pub(super) async fn handle_session_command(
     let arguments = value.strip_prefix("/session").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let usage = app.language.text(
-        "用法：/session switch <会话ID> | rename <名称> | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search <关键词> | export <路径> | delete <其他会话ID>",
-        "Usage: /session switch <session-id> | rename <title> | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search <query> | export <path> | delete <other-session-id>",
-        "使用法：/session switch <セッションID> | rename <名前> | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search <検索語> | export <パス> | delete <別セッションID>",
+        "用法：/session switch <会话ID> | rename <名称> | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search [关键词]（打开历史会话面板，等同 /history） | export <路径> | delete <其他会话ID>",
+        "Usage: /session switch <session-id> | rename <title> | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search [query] (opens the Session history panel, same as /history) | export <path> | delete <other-session-id>",
+        "使用法：/session switch <セッションID> | rename <名前> | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search [検索語]（履歴セッションパネルを開く。/history と同じ） | export <パス> | delete <別セッションID>",
     );
     let result = match action {
         "switch" if !rest.trim().is_empty() => switch(app, session, store, runtime, rest).await?,
@@ -25,7 +58,6 @@ pub(super) async fn handle_session_command(
         "fork-turn" if !rest.trim().is_empty() => fork_turn(app, session, runtime, rest).await?,
         "archive" if rest.trim().is_empty() => archive(app, session, runtime, true).await?,
         "unarchive" if rest.trim().is_empty() => archive(app, session, runtime, false).await?,
-        "search" if !rest.trim().is_empty() => search(app, runtime, rest.trim()).await?,
         "export" if !rest.trim().is_empty() => export(app, session, runtime, rest.trim()).await?,
         "delete" if !rest.trim().is_empty() => delete(app, session, runtime, rest.trim()).await?,
         _ => usage.to_owned(),
@@ -223,42 +255,6 @@ async fn archive(
         )
     }
     .to_owned())
-}
-
-async fn search(app: &App, runtime: &TuiRuntime, query: &str) -> Result<String> {
-    let parameters = parse_search_options(query)?;
-    let value = crate::daemon::search_remote_sessions(&runtime.home, &parameters).await?;
-    let rows = value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(20)
-        .map(|item| {
-            format!(
-                "{} · {} · {}",
-                item.get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("?"),
-                item.get("title")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("?"),
-                item.get("snippet")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(if rows.is_empty() {
-        app.language
-            .text(
-                "没有匹配的会话",
-                "No matching Sessions",
-                "一致するセッションはありません",
-            )
-            .to_owned()
-    } else {
-        rows.join("\n")
-    })
 }
 
 pub(super) fn parse_search_options(arguments: &str) -> Result<Vec<(String, String)>> {

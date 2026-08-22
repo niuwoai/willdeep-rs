@@ -216,15 +216,6 @@ pub(crate) async fn export_remote_session(
     api_data(runtime_client(&state)?.export_session(id).await?)
 }
 
-pub(crate) async fn search_remote_sessions(
-    home: &Path,
-    parameters: &[(String, String)],
-) -> Result<serde_json::Value> {
-    Ok(serde_json::to_value(
-        search_remote_session_results(home, parameters).await?,
-    )?)
-}
-
 pub(crate) async fn search_remote_session_results(
     home: &Path,
     parameters: &[(String, String)],
