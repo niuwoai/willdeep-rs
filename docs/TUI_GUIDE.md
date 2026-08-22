@@ -37,6 +37,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 |---|---|
 | `F1`（空 Prompt 时也可按 `?`） | 打开全局快捷键帮助；`F1`、`?` 或 `Esc` 关闭 |
 | `Ctrl+P` | 全局命令面板：模糊搜索命令、Skills、会话、Agent/任务和工作区文件 |
+| `Ctrl+R` | 历史会话面板：列出当前工作区最近 20 条会话，选中进入继续（等价于 `/history`） |
 | `Ctrl+W` | 在 Prompt、聊天区、活动区与状态栏之间循环焦点 |
 | `Ctrl+B` | 显示或隐藏右侧状态栏（默认隐藏，等价于 `/sidebar`） |
 | `Ctrl+S` | 进入终端原生文本选择模式（详见下文「鼠标」） |
@@ -55,6 +56,25 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `←` / `→`、`Home` / `End` | 移动编辑光标 |
 | `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
 | `Ctrl+D` | 删除当前（最近）附件，可重复删除 |
+
+### 回到之前的会话
+
+`/history`、`Ctrl+R` 和 `/session search` 打开的是同一个历史会话面板，
+默认列出当前工作区**最近 20 条**会话（Runtime 按更新时间倒序返回，多出的部分标题写作 `20+`）。
+
+| 按键 | 行为 |
+|---|---|
+| 直接打字 | 按标题或消息内容重新搜索，命中片段显示在行尾 |
+| `↑` / `↓` / `Tab` / `Shift+Tab` | 选择会话 |
+| `Enter` 或鼠标左键点行 | 原地进入该会话继续聊 |
+| `Esc` 或 `Ctrl+R` | 关闭面板 |
+
+- 进入前会先保存当前会话状态；目标会话若已归档，会自动取消归档再进入。
+- 当前轮次正在运行时不能切换——先等它跑完，面板会明确提示而不是静默失败。
+- 原地切换要求目标会话属于同一个工作区；跨工作区请先 `/workspace switch <ID>`。
+- 带条件搜索直接写进命令：`/history 登录设计`、`/session search --status archived --model qwen3-coder 重构`。
+  关键词落进面板输入框，`--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace`
+  这些过滤器随每次重查一起下发，改关键词不会把过滤条件丢掉。
 
 ### 切换模型
 
@@ -180,6 +200,7 @@ tmux set -g mouse on
 | `/runtime <任务>` | 提交可分离的 Runtime 任务 |
 | `/local <任务>` | 仅本轮使用进程内 Harness |
 | `/session` | 管理、搜索、切换、Fork 或导出会话 |
+| `/history [关键词]` | 打开历史会话面板：最近 20 条，选中进入继续。等价于 `Ctrl+R` 和 `/session search` |
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
 | `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|log_inspector\|git_detective <task>`；Deep 必须由父 Agent 提交升级票据 |
 | `/diff` | 打开 Diff Review Center |

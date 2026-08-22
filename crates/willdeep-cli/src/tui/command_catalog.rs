@@ -38,7 +38,7 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
@@ -54,6 +54,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
             "/runtime <任务>",
             "/local <任务>",
             "/session <操作>",
+            "/history [关键词]",
             "/workspace list|switch <id>",
             "/agent instruct <id> <文本>",
             "/diff",
@@ -73,6 +74,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
             "/runtime <task>",
             "/local <task>",
             "/session <action>",
+            "/history [query]",
             "/workspace list|switch <id>",
             "/agent instruct <id> <text>",
             "/diff",
@@ -92,6 +94,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
             "/runtime <タスク>",
             "/local <タスク>",
             "/session <操作>",
+            "/history [検索語]",
             "/workspace list|switch <id>",
             "/agent instruct <id> <テキスト>",
             "/diff",
@@ -113,7 +116,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 17] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 17] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 18] {
     [
         (
             "/help",
@@ -201,6 +204,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "管理、搜索或导出会话",
                 "Manage, search, or export sessions",
                 "セッションの管理・検索・エクスポート",
+            ),
+        ),
+        (
+            "/history",
+            language.text(
+                "打开最近会话面板并继续",
+                "Open the recent Session panel and resume",
+                "最近のセッションパネルを開いて再開",
             ),
         ),
         (

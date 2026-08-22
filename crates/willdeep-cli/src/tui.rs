@@ -48,6 +48,7 @@ mod rendering;
 mod routing_settings;
 mod runtime_ui;
 mod session_commands;
+mod session_picker_ui;
 mod sidebar;
 mod webapp_commands;
 mod workspace_attention;
@@ -66,7 +67,13 @@ use rendering::*;
 use routing_settings::{RoutingSettingsAction, RoutingSettingsState, render_routing_settings};
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
-use session_commands::handle_session_command;
+use session_commands::{
+    SessionPickerRequest, handle_session_command, parse_session_picker_command,
+};
+use session_picker_ui::{
+    PendingSessionSwitch, SessionPickerAction, SessionPickerState, refresh_session_picker,
+    render_session_picker,
+};
 use sidebar::{render_attention_detail, render_sidebar};
 use workspace_attention::workspace_attention;
 use workspace_commands::handle_workspace_command;
@@ -307,26 +314,6 @@ struct PaletteItem {
     label: String,
     description: String,
     action: PaletteAction,
-}
-
-#[derive(Default)]
-struct SessionPickerState {
-    editor: PromptEditor,
-    results: Vec<willdeep_runtime_protocol::SessionSearchResult>,
-    selected: usize,
-    current_session: uuid::Uuid,
-}
-
-enum SessionPickerAction {
-    None,
-    Refresh,
-    Switch(PendingSessionSwitch),
-    Close,
-}
-
-struct PendingSessionSwitch {
-    id: String,
-    archived: bool,
 }
 
 enum PaletteAction {
@@ -794,36 +781,6 @@ async fn handle_diff_attention_action(
         let _ = ui.send(UiMessage::RuntimeNotice(notice));
     });
     Ok(())
-}
-
-async fn refresh_session_picker(app: &mut App, runtime: &TuiRuntime, session: &Session) {
-    let Some(picker) = app.session_picker.as_ref() else {
-        return;
-    };
-    let query = picker.editor.text().trim().to_owned();
-    let workspace = session
-        .workspace
-        .canonicalize()
-        .unwrap_or_else(|_| session.workspace.clone())
-        .display()
-        .to_string();
-    let mut parameters = vec![("workspace".to_owned(), workspace)];
-    if !query.is_empty() {
-        parameters.push(("q".to_owned(), query));
-    }
-    match crate::daemon::search_remote_session_results(&runtime.home, &parameters).await {
-        Ok(results) => app.set_session_picker_results(results),
-        Err(error) => {
-            app.notice = Some(format!(
-                "{}: {error}",
-                app.language.text(
-                    "搜索历史会话失败",
-                    "Historical Session search failed",
-                    "履歴セッションの検索に失敗"
-                )
-            ));
-        }
-    }
 }
 
 async fn event_loop(
@@ -1354,7 +1311,7 @@ async fn event_loop(
                                 "現在のターンが完了してから履歴セッションを切り替えてください"
                             ).to_owned());
                         } else {
-                            app.open_session_picker(session.id);
+                            app.open_session_picker(session.id,SessionPickerRequest::default());
                             refresh_session_picker(&mut app,runtime,session).await;
                         }
                         continue;
@@ -1490,6 +1447,17 @@ async fn event_loop(
                                 Ok(true)=>continue,
                                 Ok(false)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("Agent 操作失败","Agent action failed","Agent 操作に失敗しました")));continue;},
+                            }
+                            // `/history` 与 `/session search` 都开面板，必须排在 handle_session_command 前面。
+                            match parse_session_picker_command(&prompt) {
+                                // 这条分支本身就要求 !app.running；真正的运行中保护在切换那一步。
+                                Ok(Some(request))=>{
+                                    app.open_session_picker(session.id,request);
+                                    refresh_session_picker(&mut app,runtime,session).await;
+                                    continue;
+                                },
+                                Ok(None)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("打开历史会话面板失败","Open Session history panel failed","履歴セッションパネルを開けませんでした")));continue;},
                             }
                             match handle_session_command(&prompt,&mut app,session,store,runtime).await {
                                 Ok(true)=>continue,
@@ -2168,87 +2136,8 @@ impl App {
             selected: 0,
         });
     }
-    fn open_session_picker(&mut self, current_session: uuid::Uuid) {
-        self.palette = None;
-        self.search = None;
-        self.session_picker = Some(SessionPickerState {
-            current_session,
-            ..Default::default()
-        });
-    }
-    fn set_session_picker_results(
-        &mut self,
-        results: Vec<willdeep_runtime_protocol::SessionSearchResult>,
-    ) {
-        let Some(picker) = self.session_picker.as_mut() else {
-            return;
-        };
-        picker.results = results;
-        picker.selected = picker.selected.min(picker.results.len().saturating_sub(1));
-    }
-    fn handle_session_picker_key(&mut self, key: KeyEvent) -> SessionPickerAction {
-        let Some(picker) = self.session_picker.as_mut() else {
-            return SessionPickerAction::None;
-        };
-        if key.code == KeyCode::Esc
-            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r'))
-        {
-            return SessionPickerAction::Close;
-        }
-        match key.code {
-            KeyCode::Up | KeyCode::BackTab if !picker.results.is_empty() => {
-                picker.selected = picker
-                    .selected
-                    .checked_sub(1)
-                    .unwrap_or(picker.results.len() - 1);
-                SessionPickerAction::None
-            }
-            KeyCode::Down | KeyCode::Tab if !picker.results.is_empty() => {
-                picker.selected = (picker.selected + 1) % picker.results.len();
-                SessionPickerAction::None
-            }
-            KeyCode::Enter if !picker.results.is_empty() => {
-                let result = &picker.results[picker.selected.min(picker.results.len() - 1)];
-                SessionPickerAction::Switch(PendingSessionSwitch {
-                    id: result.id.to_string(),
-                    archived: result.status == willdeep_runtime_protocol::SessionStatus::Archived,
-                })
-            }
-            KeyCode::Left => {
-                picker.editor.left();
-                SessionPickerAction::None
-            }
-            KeyCode::Right => {
-                picker.editor.right();
-                SessionPickerAction::None
-            }
-            KeyCode::Home => {
-                picker.editor.home();
-                SessionPickerAction::None
-            }
-            KeyCode::End => {
-                picker.editor.end();
-                SessionPickerAction::None
-            }
-            KeyCode::Backspace => {
-                picker.editor.backspace();
-                SessionPickerAction::Refresh
-            }
-            KeyCode::Delete => {
-                picker.editor.delete();
-                SessionPickerAction::Refresh
-            }
-            KeyCode::Char(character)
-                if !key.modifiers.intersects(
-                    KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT,
-                ) =>
-            {
-                picker.editor.insert(&character.to_string());
-                SessionPickerAction::Refresh
-            }
-            _ => SessionPickerAction::None,
-        }
-    }
+    /// `Ctrl+R`、`/history` 和 `/session search` 共用这一个面板；三者只有初始
+    /// 关键词与过滤器不同，行为（改词重查、方向键、Enter 进入）完全一致。
     fn handle_palette_key(&mut self, key: KeyEvent, registry: &BackgroundTaskRegistry) {
         if key.code == KeyCode::Esc
             || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p'))
@@ -3138,41 +3027,6 @@ impl App {
         );
     }
 
-    fn activate_session_picker_at(&mut self, x: u16, y: u16) -> bool {
-        if !self.session_picker_rect.contains((x, y).into()) {
-            return false;
-        }
-        if y == self.session_picker_rect.y.saturating_add(1) {
-            if let Some(picker) = self.session_picker.as_mut() {
-                picker.editor.set_cursor_visual(
-                    0,
-                    x.saturating_sub(self.session_picker_rect.x + 3) as usize,
-                    self.session_picker_rect.width.saturating_sub(4).max(1) as usize,
-                );
-            }
-            return true;
-        }
-        let Some(position) = self
-            .session_picker_hits
-            .iter()
-            .find_map(|(row, position)| (*row == y).then_some(*position))
-        else {
-            return true;
-        };
-        let Some(picker) = self.session_picker.as_mut() else {
-            return true;
-        };
-        picker.selected = position.min(picker.results.len().saturating_sub(1));
-        if let Some(result) = picker.results.get(picker.selected) {
-            self.pending_session_switch = Some(PendingSessionSwitch {
-                id: result.id.to_string(),
-                archived: result.status == willdeep_runtime_protocol::SessionStatus::Archived,
-            });
-            self.session_picker = None;
-        }
-        true
-    }
-
     fn handle_mouse(
         &mut self,
         x: u16,
@@ -3292,6 +3146,7 @@ impl App {
                 | "/compress"
                 | "/daemon"
                 | "/diff"
+                | "/history"
                 | "/local"
                 | "/mobile"
                 | "/model"
@@ -4003,89 +3858,7 @@ fn draw(
                 f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
             }
         }
-        app.session_picker_rect = Rect::default();
-        app.session_picker_hits.clear();
-        if let Some(picker) = &app.session_picker {
-            let width = f.area().width.min(100);
-            let height = f
-                .area()
-                .height
-                .min((picker.results.len().min(16) as u16 + 3).max(7));
-            let popup = centered_rect(width, height, f.area());
-            app.session_picker_rect = popup;
-            let visible = popup.height.saturating_sub(3).max(1) as usize;
-            let start = picker.selected.saturating_sub(visible - 1);
-            let mut lines = vec![Line::styled(
-                format!("› {}", picker.editor.text()),
-                Style::default().fg(Color::Yellow),
-            )];
-            if picker.results.is_empty() {
-                lines.push(Line::styled(
-                    app.language.text(
-                        "没有匹配的历史会话",
-                        "No historical Sessions match",
-                        "一致する履歴セッションがありません",
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else {
-                for (position, result) in
-                    picker.results.iter().enumerate().skip(start).take(visible)
-                {
-                    let selected = position == picker.selected;
-                    let style = if selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else if result.id == picker.current_session {
-                        Style::default().fg(Color::LightGreen)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    lines.push(Line::styled(
-                        session_picker_result_line(
-                            result,
-                            result.id == picker.current_session,
-                            app.language,
-                            selected,
-                        ),
-                        style,
-                    ));
-                    app.session_picker_hits
-                        .push((popup.y + 2 + (position - start) as u16, position));
-                }
-            }
-            f.render_widget(Clear, popup);
-            f.render_widget(
-                Paragraph::new(lines).block(
-                    Block::default()
-                        .title(format!(
-                            "{} · {}/{} · ↑/↓/Tab · Enter · Esc",
-                            app.language.text(
-                                "历史会话（当前工作区）",
-                                "Session history (current Workspace)",
-                                "履歴セッション（現在のワークスペース）"
-                            ),
-                            if picker.results.is_empty() {
-                                0
-                            } else {
-                                picker.selected + 1
-                            },
-                            picker.results.len()
-                        ))
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::LightCyan)),
-                ),
-                popup,
-            );
-            if popup.width > 3 {
-                let cursor = UnicodeWidthStr::width(picker.editor.text())
-                    .min(popup.width.saturating_sub(4) as usize)
-                    as u16;
-                f.set_cursor_position((popup.x + 3 + cursor, popup.y + 1));
-            }
-        }
+        render_session_picker(f, app);
         render_model_picker(f, app);
         render_routing_settings(f, app);
         app.search_rect = Rect::default();
@@ -4824,53 +4597,6 @@ fn approval_action_style(decision: ApprovalDecision, selected: bool) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn session_picker_result_line(
-    result: &willdeep_runtime_protocol::SessionSearchResult,
-    current: bool,
-    language: Language,
-    selected: bool,
-) -> String {
-    let marker = if selected { "▶" } else { " " };
-    let current = if current {
-        format!(" [{}]", language.text("当前", "current", "現在"))
-    } else {
-        String::new()
-    };
-    let title = result.title.replace(['\r', '\n'], " ");
-    let snippet = result
-        .snippet
-        .as_deref()
-        .map(|value| value.replace(['\r', '\n'], " "))
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" · {value}"))
-        .unwrap_or_default();
-    let short_id = result.id.simple().to_string();
-    format!(
-        "{marker} {title}{current} · {} · {} · {} {}{snippet}",
-        &short_id[..8],
-        session_status_label(result.status, language),
-        result.message_count,
-        language.text("条消息", "messages", "件のメッセージ")
-    )
-}
-
-fn session_status_label(
-    status: willdeep_runtime_protocol::SessionStatus,
-    language: Language,
-) -> &'static str {
-    use willdeep_runtime_protocol::SessionStatus;
-    match status {
-        SessionStatus::Idle => language.text("空闲", "idle", "待機中"),
-        SessionStatus::Queued => language.text("排队中", "queued", "待機列"),
-        SessionStatus::Running => language.text("运行中", "running", "実行中"),
-        SessionStatus::WaitingApproval => language.text("等待审批", "waiting approval", "承認待ち"),
-        SessionStatus::WaitingAnswer => language.text("等待回答", "waiting answer", "回答待ち"),
-        SessionStatus::Failed => language.text("失败", "failed", "失敗"),
-        SessionStatus::Interrupted => language.text("已中断", "interrupted", "中断"),
-        SessionStatus::Archived => language.text("已归档", "archived", "アーカイブ済み"),
-    }
-}
-
 fn fuzzy_score(query: &str, value: &str) -> Option<usize> {
     if query.is_empty() {
         return Some(0);
@@ -4981,13 +4707,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+R 搜索历史会话并继续\n  Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  F2 展开/恢复大输入空间         Ctrl+A/E 行首/行尾\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  直接拖动选择聊天文字           Ctrl/Cmd+C 或 Y 复制，Q 引用\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+R 或 /history 搜索历史会话并继续\n  Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  F2 展开/恢复大输入空间         Ctrl+A/E 行首/行尾\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  直接拖动选择聊天文字           Ctrl/Cmd+C 或 Y 复制，Q 引用\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette     Ctrl+R Search and continue a historical Session\n  Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  F2 Expand/restore composer Ctrl+A/E Line start/end\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Drag to select chat text   Ctrl/Cmd+C or Y copy, Q quote\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette     Ctrl+R or /history Search and continue a Session\n  Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  F2 Expand/restore composer Ctrl+A/E Line start/end\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Drag to select chat text   Ctrl/Cmd+C or Y copy, Q quote\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R 履歴セッションを検索して再開\n  Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R または /history 履歴セッションを検索して再開\n  Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }
