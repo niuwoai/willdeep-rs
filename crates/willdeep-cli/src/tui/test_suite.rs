@@ -2673,6 +2673,86 @@ mod tests {
         );
     }
 
+    /// 本轮在跑时按 Enter 曾经什么都不做：命令发不出去，也没有任何提示。
+    /// 现在按输入的性质分三路——本地命令立即执行，提示词排队，会改状态的命令说明原因。
+    #[test]
+    fn a_running_turn_no_longer_swallows_every_enter() {
+        for command in [
+            "/help",
+            "/clear",
+            "/sidebar off",
+            "/skills",
+            "/history 登录",
+        ] {
+            assert_eq!(busy_input(command), BusyInput::RunNow, "{command}");
+        }
+        // `/session search` 只是查询，`/session switch` 会换掉当前会话。
+        assert_eq!(busy_input("/session search 登录"), BusyInput::RunNow);
+        assert_eq!(busy_input("/session switch abc"), BusyInput::Refuse);
+        for prompt in ["继续重构这个模块", "/local 跑一下测试", "/runtime 修一下"] {
+            assert_eq!(busy_input(prompt), BusyInput::Queue, "{prompt}");
+        }
+        for command in [
+            "/model qwen3-coder",
+            "/compress",
+            "/daemon upgrade",
+            "/diff",
+        ] {
+            assert_eq!(busy_input(command), BusyInput::Refuse, "{command}");
+        }
+    }
+
+    /// 一条失败的 Inbox 项此前只写 `Status: Failed`，打开详情等于什么都没说。
+    #[test]
+    fn failed_task_details_name_the_command_and_the_reason() {
+        let diagnostics = willdeep_runtime_protocol::RuntimeTaskDiagnostics {
+            task: willdeep_runtime_protocol::RuntimeTask {
+                id: uuid::Uuid::new_v4(),
+                session_id: None,
+                turn_id: None,
+                agent_id: None,
+                event_start_sequence: 1,
+                status: willdeep_runtime_protocol::TaskStatus::Failed,
+                workspace: Some("/workspace".to_owned()),
+                profile: None,
+                created_at: 1,
+                started_at: Some(1),
+                completed_at: Some(2),
+                exit_code: Some(101),
+                failure_domain: Some(willdeep_runtime_protocol::FailureDomain::Tool),
+            },
+            failure: Some("task_id=abc exit_code=101 error=harness exited".to_owned()),
+            failed_tools: vec![willdeep_runtime_protocol::RuntimeToolFailure {
+                sequence: 7,
+                name: "run_command".to_owned(),
+                arguments: Some(r#"{"command":"cargo build --release"}"#.to_owned()),
+                output: Some("error[E0425]: cannot find value `x`".to_owned()),
+            }],
+        };
+
+        let text = format_task_diagnostics(&diagnostics, Language::ZhCn).expect("failure details");
+
+        assert!(text.contains("退出码: 101"));
+        assert!(text.contains("失败域: Tool"));
+        assert!(text.contains("error=harness exited"));
+        assert!(!text.contains("task_id=abc"), "task_id 详情里已经有了");
+        assert!(text.contains("run_command"));
+        assert!(text.contains("command: cargo build --release"), "{text}");
+        assert!(text.contains("error[E0425]"));
+
+        // 没有失败痕迹时不挂一个空标题。
+        let clean = willdeep_runtime_protocol::RuntimeTaskDiagnostics {
+            task: willdeep_runtime_protocol::RuntimeTask {
+                exit_code: None,
+                failure_domain: None,
+                ..diagnostics.task.clone()
+            },
+            failure: None,
+            failed_tools: Vec::new(),
+        };
+        assert!(format_task_diagnostics(&clean, Language::ZhCn).is_none());
+    }
+
     #[test]
     fn command_completion_offers_the_runtime_controls() {
         let matches = command_catalog::command_candidates(Language::En);

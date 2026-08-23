@@ -572,6 +572,27 @@ pub struct RuntimeTask {
     pub failure_domain: Option<FailureDomain>,
 }
 
+/// 一次任务失败的排查材料。与公共事件流的关系是刻意分开的：事件流对所有客户端
+/// （含 Web 桥接与手机中继）脱敏，这个对象只经由本机 Runtime 的授权接口返回，
+/// 携带失败工具的原始参数与输出摘要。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTaskDiagnostics {
+    pub task: RuntimeTask,
+    /// `task.failed` / `task.interrupted` 事件的未截断原文（含 `error=` 部分）。
+    pub failure: Option<String>,
+    pub failed_tools: Vec<RuntimeToolFailure>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeToolFailure {
+    pub sequence: u64,
+    pub name: String,
+    /// 工具入参原文，凭据已按命令审批的同一套规则打码；`run_command` 的命令行在这里。
+    pub arguments: Option<String>,
+    /// 工具返回或报错输出的摘要，超长时保留首尾。
+    pub output: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingApproval {
     pub id: uuid::Uuid,
@@ -1069,6 +1090,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "agent.retry",
     "task.list",
     "task.get",
+    "task.diagnostics",
     "task.cancel",
     "turn.submit",
     "turn.list",

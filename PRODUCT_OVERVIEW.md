@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-22 | 当前版本：v0.40.0-rc1
+> 最后更新：2026-08-22 | 当前版本：v0.41.0-rc1
 
 ## 项目简介
 
@@ -60,6 +60,9 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
+- TUI 在轮次运行中不再吞掉回车：`/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` 立即执行，提示词与 `/local`、`/runtime` 连同附件排队并在本轮结束后按序发出，会改会话或 Runtime 状态的命令给出明确原因；`Esc` 中断当前轮次（Runtime 轮次交给 Daemon 排空，`/local` 轮次掐进程内 Harness），中断后队列立即续上；手机中继与键盘共用同一条队列；
+- TUI 审批与提问对话框按会话归属弹出：同一工作区开多个 TUI 时，别的会话的审批不再在这里弹出、也无法被就地解掉；无会话归属的任务（headless 提交）仍对所有客户端可解，Web 工作区视图维持原口径；
+- Runtime 失败工具的原始参数与输出摘要经本机 `task.diagnostics` 提供，TUI Attention Inbox 详情直接显示退出码、失败域、失败原因、失败命令与输出；公共事件流（Web 桥接、手机中继）仍按原规则脱敏，写入日志前凭据打码且输出截断为有界首尾摘要；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
 - TUI Prompt、聊天区、活动区和状态栏四态焦点循环，以及候选、审批和 ask_user 的鼠标操作；
 - Core 统一 Agent、后台任务、审批与提问的运行状态、Attention 分组和父级状态聚合语义；

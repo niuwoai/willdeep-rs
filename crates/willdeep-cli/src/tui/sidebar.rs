@@ -4,13 +4,22 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App)
     app.attention_diff_rect = Rect::default();
     app.attention_allow_rect = Rect::default();
     app.attention_deny_rect = Rect::default();
+    app.attention_detail_rect = Rect::default();
     let Some(detail) = &app.attention_detail else {
         return;
     };
     let actionable = app.selected_remote_gate().is_some();
     let diff_review = detail.source == AttentionSource::DiffReview;
+    // 失败详情挂在正文后面：一条失败的 Inbox 项如果只写「Status: Failed」，
+    // 打开详情等于什么都没说。
+    let diagnostics = app
+        .attention_diagnostics
+        .as_ref()
+        .filter(|loaded| loaded.item_id == detail.id)
+        .map(|loaded| format!("\n\n{loaded}", loaded = loaded.text))
+        .unwrap_or_default();
     let content = format!(
-        "{} · {}\n\n{}\n\n{}{}",
+        "{} · {}\n\n{}\n\n{}{diagnostics}{}",
         attention_source_label(detail.source, app.language),
         runtime_status_label(detail.status, app.language),
         detail.title,
@@ -34,6 +43,7 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App)
             .max(1),
         f.area(),
     );
+    app.attention_detail_rect = popup;
     f.render_widget(Clear, popup);
     let title = if diff_review {
         app.language.text(
@@ -509,11 +519,12 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     "  {}: {relay}",
                     app.language.text("中继", "Relay", "リレー")
                 )));
+                // 键盘和手机现在共用一条队列，标签不能再只说「手机」。
                 lines.push(Line::raw(format!(
                     "  {}: {}",
                     app.language
-                        .text("手机队列", "Phone queue", "モバイルキュー"),
-                    app.mobile_queue.len()
+                        .text("待发队列", "Queued prompts", "送信待ちキュー"),
+                    app.queued_prompts.len()
                 )));
             }
             _ => {}

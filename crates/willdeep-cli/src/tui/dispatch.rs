@@ -40,11 +40,12 @@ pub(super) fn dispatch_prompt(
     store.save(session)?;
     let agent = agent.clone();
     let tx = tx.clone();
-    tokio::spawn(async move {
+    // 句柄留着，Esc 中断本地轮次时要靠它把在途的 Harness 掐掉。
+    app.local_turn = Some(tokio::spawn(async move {
         let _ = tx.send(UiMessage::Finished(
             agent.run_with_history_message(history, user).await,
         ));
-    });
+    }));
     Ok(())
 }
 
@@ -58,9 +59,9 @@ pub(super) fn dispatch_compress(
     let history = session.messages.clone();
     let agent = agent.clone();
     let tx = tx.clone();
-    tokio::spawn(async move {
+    app.local_turn = Some(tokio::spawn(async move {
         let _ = tx.send(UiMessage::Compressed(agent.compress_history(history).await));
-    });
+    }));
 }
 
 pub(super) fn dispatch_notification(
@@ -78,10 +79,10 @@ pub(super) fn dispatch_notification(
     store.save(session)?;
     let agent = agent.clone();
     let tx = tx.clone();
-    tokio::spawn(async move {
+    app.local_turn = Some(tokio::spawn(async move {
         let _ = tx.send(UiMessage::Finished(
             agent.run_with_history_message(history, message).await,
         ));
-    });
+    }));
     Ok(())
 }

@@ -12,6 +12,98 @@ use futures_util::StreamExt;
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// 一条失败的工具，事后要能问出「哪条命令、为什么挂」。
+///
+/// 公共事件流对所有客户端脱敏（Web 桥接和手机中继都吃它），所以失败详情走本机的
+/// `task.diagnostics`：同一份数据，两种口径——这条测试同时把两边都钉住。
+#[test]
+fn task_diagnostics_reports_the_failing_tool_that_events_redact() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start_with_failing_tool();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+
+    let run = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+            "read a file that is not there",
+        ])
+        .output()
+        .expect("run headless turn");
+    assert_success(&run, "headless turn with a failing tool");
+
+    let tasks = willdeep(&home)
+        .args(["api", "task.list"])
+        .output()
+        .expect("list Runtime tasks");
+    assert_success(&tasks, "task.list");
+    let tasks: serde_json::Value = serde_json::from_slice(&tasks.stdout).expect("parse task.list");
+    let task_id = tasks["data"]
+        .as_array()
+        .and_then(|tasks| tasks.first())
+        .and_then(|task| task["id"].as_str())
+        .expect("one Runtime task")
+        .to_owned();
+
+    let params = root.join("diagnostics.json");
+    std::fs::write(&params, format!(r#"{{"id":"{task_id}"}}"#)).expect("write params");
+    let diagnostics = willdeep(&home)
+        .args([
+            "api",
+            "task.diagnostics",
+            "--params-file",
+            path_text(&params),
+        ])
+        .output()
+        .expect("read task diagnostics");
+    assert_success(&diagnostics, "task.diagnostics");
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&diagnostics.stdout).expect("parse task.diagnostics");
+    let failed = diagnostics["data"]["failed_tools"]
+        .as_array()
+        .and_then(|tools| tools.first())
+        .expect("one failed tool");
+    assert_eq!(failed["name"], "read_file");
+    assert!(
+        failed["arguments"]
+            .as_str()
+            .expect("arguments")
+            .contains("definitely-missing.txt"),
+        "诊断必须说出是哪一条调用: {failed}"
+    );
+    assert!(
+        !failed["output"].as_str().expect("output").trim().is_empty(),
+        "诊断必须说出为什么失败"
+    );
+
+    // 同一次失败，公共事件流里不能出现参数或输出。
+    let events = willdeep(&home)
+        .args(["api", "event.list"])
+        .output()
+        .expect("list public events");
+    assert_success(&events, "event.list");
+    let events = String::from_utf8(events.stdout).expect("events are UTF-8");
+    assert!(events.contains("tool_completed"), "事件流本身要有工具事件");
+    assert!(
+        !events.contains("definitely-missing.txt"),
+        "公共事件流不得泄露工具参数"
+    );
+
+    guard.stop_daemon();
+}
+
 #[test]
 fn run_uses_persistent_runtime_and_continues_the_session() {
     let _serial = process_test_guard();
@@ -1412,6 +1504,10 @@ impl MockProvider {
         Self::start_with_mode(MockMode::DelayedSuccess(delay))
     }
 
+    fn start_with_failing_tool() -> Self {
+        Self::start_with_mode(MockMode::FailingToolThenSuccess)
+    }
+
     fn start_with_mode(mode: MockMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Provider");
         listener
@@ -1472,6 +1568,8 @@ enum MockMode {
     Status(u16),
     WaitThenSuccess,
     DelayedSuccess(Duration),
+    /// 第一轮请求一个注定失败的工具（读不存在的文件），之后正常收尾。
+    FailingToolThenSuccess,
 }
 
 impl Drop for MockProvider {
@@ -1500,9 +1598,14 @@ async fn mock_provider_response(
     }
     let status = match state.mode {
         MockMode::Status(status) => status,
-        MockMode::Success | MockMode::WaitThenSuccess | MockMode::DelayedSuccess(_) => 200,
+        MockMode::Success
+        | MockMode::WaitThenSuccess
+        | MockMode::DelayedSuccess(_)
+        | MockMode::FailingToolThenSuccess => 200,
     };
-    let body = if mode_is_waiting_root(state.mode, request_index) {
+    let body = if matches!(state.mode, MockMode::FailingToolThenSuccess) && request_index == 0 {
+        r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"read_missing","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"definitely-missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
+    } else if mode_is_waiting_root(state.mode, request_index) {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"ask_root","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"keep the root active?\",\"options\":[\"yes\"]}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
     } else if status == 200 {
         format!(

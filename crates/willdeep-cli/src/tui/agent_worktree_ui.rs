@@ -2,6 +2,8 @@ use super::*;
 
 pub(super) fn render_agent_overlays(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     app.agent_detail_action_rects.clear();
+    app.agent_detail_rect = Rect::default();
+    app.worktree_review_rect = Rect::default();
     if let Some(agent) = app.agent_detail.clone() {
         render_agent_detail(frame, app, &agent);
     }
@@ -24,6 +26,7 @@ fn render_agent_detail(
             .max(1),
         frame.area(),
     );
+    app.agent_detail_rect = popup;
     let inner_width = popup.width.saturating_sub(2).max(1) as usize;
     let inner_height = popup.height.saturating_sub(3) as usize;
     let scroll =
@@ -265,7 +268,7 @@ pub(super) fn agent_detail_content(
 
 fn render_worktree_review(
     frame: &mut ratatui::Frame<'_>,
-    app: &App,
+    app: &mut App,
     review: &crate::daemon::WorktreeReview,
 ) {
     let mut lines = vec![
@@ -299,6 +302,7 @@ fn render_worktree_review(
             .max(1),
         frame.area(),
     );
+    app.worktree_review_rect = popup;
     frame.render_widget(Clear, popup);
     let title = if review.can_merge {
         app.language.text(

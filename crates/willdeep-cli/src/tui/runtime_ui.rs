@@ -169,14 +169,26 @@ fn apply_runtime_event(
         }
         "task.completed" | "turn.completed" => app.finish_turn(),
         "task.failed" => {
+            // 事件里带着 `exit_code=…` 这类活下来的线索，此前被整条丢掉，
+            // 只打印一句固定文案。完整命令与错误在侧栏详情里（`task.diagnostics`）。
             app.append_transcript(format!(
-                "Error: {}",
+                "Error: {}{}",
                 app.language.text(
                     "Runtime 任务失败",
                     "Runtime task failed",
                     "Runtime タスクが失敗しました"
-                )
+                ),
+                event_details(&event.message)
             ));
+            app.record_progress(
+                app.language
+                    .text(
+                        "任务失败 · 侧栏 Inbox 里按 Enter 看失败命令",
+                        "Task failed · Enter on the sidebar Inbox item shows the failing command",
+                        "タスク失敗 · サイドバー Inbox で Enter を押すと失敗コマンドを表示",
+                    )
+                    .to_owned(),
+            );
             app.finish_turn();
         }
         "task.interrupted" => {
@@ -204,6 +216,20 @@ fn apply_runtime_event(
         _ => {}
     }
     None
+}
+
+/// 事件消息形如 `task_id=… exit_code=1`。task_id 对用户没意义，剩下的有。
+fn event_details(message: &str) -> String {
+    let details = message
+        .split_whitespace()
+        .filter(|part| !part.starts_with("task_id="))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" · {details}")
+    }
 }
 
 fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {

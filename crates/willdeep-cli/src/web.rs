@@ -444,7 +444,7 @@ async fn runtime_activity(
     Query(query): Query<RuntimeActivityQuery>,
 ) -> Result<Json<RuntimeActivitySummary>, WebError> {
     let workspace = select_workspace(&state, Some(&query.workspace)).await?;
-    let snapshot = crate::daemon::runtime_snapshot(&state.home, &workspace.root)
+    let snapshot = crate::daemon::runtime_snapshot(&state.home, &workspace.root, None)
         .await
         .map_err(WebError::from_anyhow)?;
     Ok(Json(RuntimeActivitySummary {
@@ -731,7 +731,7 @@ async fn authorized_runtime_snapshot(
     workspace: &str,
 ) -> Result<crate::daemon::RuntimeSnapshot, WebError> {
     let workspace = select_workspace(state, Some(workspace)).await?;
-    crate::daemon::runtime_snapshot(&state.home, &workspace.root)
+    crate::daemon::runtime_snapshot(&state.home, &workspace.root, None)
         .await
         .map_err(WebError::from_anyhow)
 }

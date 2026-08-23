@@ -14,8 +14,8 @@ use willdeep_runtime_protocol::{
     ListTurnsParams, ObjectMutationResult, PendingApproval, PendingQuestion,
     RegisterWorkspaceParams, RenameSessionParams, ResolveApprovalParams, RuntimeAgent,
     RuntimeAgentCommand, RuntimeArtifact, RuntimeCapabilities, RuntimeEvent,
-    RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTool, RuntimeTurn,
-    RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
+    RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTaskDiagnostics,
+    RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
     RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SubmitTurnParams,
     UpdateSessionModelParams, WorkspaceEnsureParams, WorktreeMergeParams, WorktreeQuarantineParams,
     WorktreeReviewParams,
@@ -338,6 +338,14 @@ impl RuntimeClient {
 
     pub async fn task(&self, id: uuid::Uuid) -> Result<ApiResponse<RuntimeTask>, ClientError> {
         self.call("task.get", &IdParams { id }, None).await
+    }
+
+    /// 失败排查用的未脱敏细节。只有本机 Runtime 提供，公共事件流仍然是脱敏的。
+    pub async fn task_diagnostics(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeTaskDiagnostics>, ClientError> {
+        self.call("task.diagnostics", &IdParams { id }, None).await
     }
 
     pub async fn cancel_task(

@@ -286,6 +286,10 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
                 .unwrap_or_else(|| Err(ApiFailure::not_found("Runtime Task not found"))),
             Err(error) => Err(error),
         },
+        "task.diagnostics" => match params::<IdParams>(&request) {
+            Ok(params) => task_diagnostics(state, params.id).await,
+            Err(error) => Err(error),
+        },
         "task.cancel" => match params::<IdParams>(&request) {
             Ok(params) => match state.tasks.cancel(params.id).await {
                 Ok(Some(task)) => json(public_task(task)),
@@ -752,6 +756,88 @@ fn public_agent(
         updated_at: agent.updated_at,
         completed_at: agent.completed_at,
     }
+}
+
+/// 失败排查：把这个任务在持久事件日志里留下的失败痕迹**未脱敏**地取回来。
+///
+/// 这是本机专用的诊断口。公共事件流（`event.list`、SSE、Web 桥接、手机中继）
+/// 一律走 [`event_stream::public_event`] 脱敏，那条边界不动；这里之所以能给原文，
+/// 是因为调用方已经拿着本机 Runtime 的授权令牌——它本来就能导出整段会话转录。
+async fn task_diagnostics(state: &ServerState, id: uuid::Uuid) -> ApiResult {
+    /// 一个任务的事件不会无限多，但日志是全局的：从任务起点开始扫，扫够为止。
+    const MAX_SCANNED_EVENTS: usize = 5_000;
+    const MAX_FAILED_TOOLS: usize = 20;
+
+    let Some(task) = state.tasks.get(id).await else {
+        return Err(ApiFailure::not_found("Runtime Task not found"));
+    };
+    let marker = format!("task_id={id}");
+    let mut failure = None;
+    let mut failed_tools = Vec::new();
+    let mut cursor = task.event_start_sequence.saturating_sub(1);
+    let mut scanned = 0;
+    while scanned < MAX_SCANNED_EVENTS {
+        let events = match state.events.read_after(cursor, 1_000) {
+            Ok(events) => events,
+            Err(error) => return Err(ApiFailure::internal(error)),
+        };
+        if events.is_empty() {
+            break;
+        }
+        for event in events {
+            cursor = cursor.max(event.sequence);
+            scanned += 1;
+            if !event.message.starts_with(&marker) {
+                continue;
+            }
+            match event.kind.as_str() {
+                "task.failed" | "task.interrupted" => failure = Some(event.message.clone()),
+                "task.output" if failed_tools.len() < MAX_FAILED_TOOLS => {
+                    if let Some(failed) = failed_tool(event.sequence, &event.message) {
+                        failed_tools.push(failed);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    json(willdeep_runtime_protocol::RuntimeTaskDiagnostics {
+        task: public_task(task),
+        failure,
+        failed_tools,
+    })
+}
+
+fn failed_tool(
+    sequence: u64,
+    message: &str,
+) -> Option<willdeep_runtime_protocol::RuntimeToolFailure> {
+    let (_, payload) = message.split_once(' ')?;
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("tool_completed")
+        || !value
+            .get("is_error")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(willdeep_runtime_protocol::RuntimeToolFailure {
+        sequence,
+        name: value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        arguments: value
+            .get("arguments")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        output: value
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
@@ -1622,6 +1708,43 @@ fn error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 诊断只认「失败的工具」。成功的工具事件不带参数，也不该被算成失败痕迹。
+    #[test]
+    fn task_diagnostics_picks_up_failed_tools_only() {
+        let failed = failed_tool(
+            9,
+            concat!(
+                "task_id=abc ",
+                r#"{"type":"tool_completed","name":"run_command","is_error":true,"#,
+                r#""arguments":"{\"command\":\"cargo test\"}","output":"1 failed"}"#
+            ),
+        )
+        .expect("failed tool");
+        assert_eq!(failed.sequence, 9);
+        assert_eq!(failed.name, "run_command");
+        assert!(failed.arguments.unwrap().contains("cargo test"));
+        assert_eq!(failed.output.as_deref(), Some("1 failed"));
+
+        assert!(
+            failed_tool(
+                10,
+                r#"task_id=abc {"type":"tool_completed","name":"read_file","is_error":false}"#
+            )
+            .is_none()
+        );
+        assert!(
+            failed_tool(
+                11,
+                r#"task_id=abc {"type":"tool_requested","name":"read_file"}"#
+            )
+            .is_none()
+        );
+        assert!(failed_tool(12, "task_id=abc not-json").is_none());
+        // 诊断是只读的：它绝不能被算成写操作而占用变更去重与工作闸门。
+        assert!(!is_mutating_operation("task.diagnostics"));
+        assert!(!is_work_producing_operation("task.diagnostics"));
+    }
 
     #[test]
     fn mutation_request_fingerprint_never_retains_prompt_text() {

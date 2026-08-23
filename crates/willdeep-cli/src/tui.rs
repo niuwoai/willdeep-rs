@@ -44,6 +44,7 @@ mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
 mod model_commands;
+mod overlay_dismiss;
 mod rendering;
 mod routing_settings;
 mod runtime_ui;
@@ -186,7 +187,12 @@ struct App {
     goal: Option<String>,
     mobile_gateway: Option<RelayGateway>,
     mobile_qr: Option<String>,
-    mobile_queue: VecDeque<String>,
+    /// 本轮在跑时收到的提示词。键盘和手机共用一条队列，本轮一结束就按顺序发出去；
+    /// 中断当前轮次同样会让队列立刻续上。
+    queued_prompts: VecDeque<QueuedPrompt>,
+    /// 进程内 Harness 当前轮次的句柄。Runtime 轮次由 Daemon 停，本地轮次只能靠
+    /// 掐这个 Task——没有它，`/local` 跑飞了就只剩退出 TUI 一条路。
+    local_turn: Option<tokio::task::JoinHandle<()>>,
     latest_usage: Usage,
     turn_started: Option<Instant>,
     last_progress_at: Option<Instant>,
@@ -247,6 +253,8 @@ struct App {
     task_detail: Option<TaskDetail>,
     task_detail_scroll: usize,
     attention_detail: Option<AttentionItem>,
+    /// 当前详情对应的失败排查材料；打开另一条时作废。
+    attention_diagnostics: Option<AttentionDiagnostics>,
     attention_diff_rect: Rect,
     attention_allow_rect: Rect,
     attention_deny_rect: Rect,
@@ -274,6 +282,14 @@ struct App {
     question_rect: Rect,
     question_hits: Vec<(u16, usize)>,
     search_rect: Rect,
+    // 弹层自身的外框。只有记下来，才知道一次点击是「落在弹层里」
+    // 还是「落在弹层外」——后者按 Esc 处理。
+    mobile_qr_rect: Rect,
+    help_rect: Rect,
+    task_detail_rect: Rect,
+    attention_detail_rect: Rect,
+    agent_detail_rect: Rect,
+    worktree_review_rect: Rect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +310,21 @@ enum SidebarHit {
 struct TaskDetail {
     snapshot: BackgroundTaskSnapshot,
     output: String,
+}
+
+/// Inbox 详情里附带的失败排查材料：哪条命令、退出码、错误输出。
+/// 排版在取回时一次做完，渲染只管往下贴。
+struct AttentionDiagnostics {
+    item_id: String,
+    text: String,
+}
+
+struct QueuedPrompt {
+    text: String,
+    attachments: Vec<DraftAttachment>,
+    /// 手机来的提示词走进程内 Harness（与直接收到时的行为一致），
+    /// 键盘输入按 `/local` 与 `/runtime` 的常规规则路由。
+    from_phone: bool,
 }
 
 #[derive(Default)]
@@ -322,6 +353,36 @@ enum PaletteAction {
     Session(String),
     Task(usize),
     File(String),
+}
+
+/// 本轮在跑时，一条输入该怎么处置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusyInput {
+    /// 只改本地显示，不碰会话、模型或 Runtime——没有任何理由让它等。
+    RunNow,
+    /// 提示词：排队，本轮结束（或被中断）后按顺序发出去。
+    Queue,
+    /// 其余斜杠命令：会改会话或 Runtime 状态，延迟几分钟再执行只会更意外。
+    Refuse,
+}
+
+/// 运行中立即执行的命令白名单。判据是「只读或只改本地显示」——
+/// `/history` 打开面板是只读查询，真正的切换在消费那一步另有运行中保护。
+fn busy_input(prompt: &str) -> BusyInput {
+    let value = prompt.trim();
+    if !value.starts_with('/') {
+        return BusyInput::Queue;
+    }
+    let command = value.split_whitespace().next().unwrap_or_default();
+    match command {
+        "/help" | "/clear" | "/sidebar" | "/skills" | "/history" => BusyInput::RunNow,
+        "/session" => match value.split_whitespace().nth(1) {
+            Some("search") => BusyInput::RunNow,
+            _ => BusyInput::Refuse,
+        },
+        "/local" | "/runtime" => BusyInput::Queue,
+        _ => BusyInput::Refuse,
+    }
 }
 
 /// A pending approval: what is being asked, whether Always Allow applies,
@@ -783,6 +844,169 @@ async fn handle_diff_attention_action(
     Ok(())
 }
 
+/// 停掉当前这一轮。Runtime 轮次交给 Daemon 排空（它知道在途工具怎么收尾），
+/// 进程内轮次只能掐 Task；两条路都要保证 `running` 落回去，否则界面会一直卡在
+/// 「工作中」，排队的提示词也永远续不上。
+async fn interrupt_turn(app: &mut App, session: &Session, runtime: &TuiRuntime) -> Result<String> {
+    if !app.running {
+        return Ok(app
+            .language
+            .text(
+                "当前没有正在运行的轮次",
+                "No turn is running",
+                "実行中のターンはありません",
+            )
+            .to_owned());
+    }
+    if !app.runtime_turn
+        && let Some(handle) = app.local_turn.take()
+    {
+        handle.abort();
+        app.finish_turn();
+        app.append_transcript(format!(
+            "System: {}",
+            app.language.text(
+                "已中断本地轮次",
+                "Local turn interrupted",
+                "ローカルターンを中断しました"
+            )
+        ));
+        return Ok(app
+            .language
+            .text("已中断", "Interrupted", "中断しました")
+            .to_owned());
+    }
+    let Some(active) = crate::daemon::remote_active_turn(&runtime.home, session.id).await? else {
+        // Runtime 说没有在途轮次，那界面上的「工作中」是残留状态，就地清掉。
+        app.finish_turn();
+        return Ok(app
+            .language
+            .text(
+                "Runtime 已无在途轮次，界面状态已复位",
+                "Runtime has no active turn; the display was reset",
+                "Runtime に進行中のターンはありません。表示を戻しました",
+            )
+            .to_owned());
+    };
+    crate::daemon::stop_remote_turn(&runtime.home, active.turn_id).await?;
+    app.record_progress(
+        app.language
+            .text("已请求中断", "Interrupt requested", "中断を要求しました")
+            .to_owned(),
+    );
+    Ok(app
+        .language
+        .text(
+            "已请求中断当前轮次",
+            "Interrupt requested for the current turn",
+            "現在のターンの中断を要求しました",
+        )
+        .to_owned())
+}
+
+/// Inbox 里打开的如果是 Runtime 任务，就顺带把失败详情取回来。
+/// 拿不到（旧版 Daemon 没有这个操作、或任务已被清理）就安静跳过——
+/// 详情弹窗本身仍然有用，不该因为附加信息拉不到就打不开。
+async fn load_attention_diagnostics(app: &mut App, runtime: &TuiRuntime) {
+    let Some(item) = app.attention_detail.as_ref() else {
+        app.attention_diagnostics = None;
+        return;
+    };
+    if app
+        .attention_diagnostics
+        .as_ref()
+        .is_some_and(|loaded| loaded.item_id == item.id)
+    {
+        return;
+    }
+    let Some(id) = item
+        .id
+        .strip_prefix("runtime-task:")
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    else {
+        return;
+    };
+    let item_id = item.id.clone();
+    if let Ok(diagnostics) = crate::daemon::remote_task_diagnostics(&runtime.home, id).await
+        && let Some(text) = format_task_diagnostics(&diagnostics, app.language)
+    {
+        app.attention_diagnostics = Some(AttentionDiagnostics { item_id, text });
+    }
+}
+
+/// 把诊断对象排成人能读的几行。没有任何失败痕迹时返回 `None`，
+/// 免得在成功的任务详情下面挂一个空的「失败详情」标题。
+fn format_task_diagnostics(
+    diagnostics: &willdeep_runtime_protocol::RuntimeTaskDiagnostics,
+    language: Language,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(exit_code) = diagnostics.task.exit_code {
+        lines.push(format!(
+            "{}: {exit_code}",
+            language.text("退出码", "Exit code", "終了コード")
+        ));
+    }
+    if let Some(domain) = diagnostics.task.failure_domain {
+        lines.push(format!(
+            "{}: {domain:?}",
+            language.text("失败域", "Failure domain", "失敗ドメイン")
+        ));
+    }
+    if let Some(failure) = &diagnostics.failure {
+        // 事件原文形如 `task_id=… exit_code=1 error=…`，task_id 详情里已经有了。
+        let failure = failure
+            .split_once(' ')
+            .map_or(failure.as_str(), |(_, rest)| rest);
+        if !failure.trim().is_empty() {
+            lines.push(format!(
+                "{}: {failure}",
+                language.text("失败原因", "Failure", "失敗理由")
+            ));
+        }
+    }
+    for tool in &diagnostics.failed_tools {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} {}",
+            language.text("失败的工具", "Failed tool", "失敗したツール"),
+            tool.name
+        ));
+        if let Some(arguments) = &tool.arguments {
+            for (key, value) in tool_arguments(arguments) {
+                lines.push(format!("  {key}: {value}"));
+            }
+        }
+        if let Some(output) = tool
+            .output
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(format!("  {}:", language.text("输出", "Output", "出力")));
+            lines.extend(output.lines().map(|line| format!("    {line}")));
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// 工具入参是 JSON 字符串。能解析成对象就按 `键: 值` 逐行摊开，
+/// `run_command` 的 `command` 就落在这里；解析不了就原样给一行。
+fn tool_arguments(arguments: &str) -> Vec<(String, String)> {
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str(arguments) else {
+        return vec![("arguments".to_owned(), arguments.replace('\n', " "))];
+    };
+    object
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => value,
+                other => other.to_string(),
+            };
+            (key, value)
+        })
+        .collect()
+}
+
 async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -891,6 +1115,68 @@ async fn event_loop(
                 }
             }
         }
+        // 排队的提示词在这里续上：本轮正常结束、被 Esc 中断、或 Runtime 报失败，
+        // 都会走到这，不必在每个终态各写一遍。后台结果仍然优先。
+        if !app.running
+            && app.background_notices.is_empty()
+            && let Some(queued) = app.queued_prompts.pop_front()
+        {
+            app.attachments = queued.attachments;
+            app.selected_attachment = 0;
+            if queued.from_phone {
+                app.append_transcript(format!("Phone: {}", queued.text));
+                dispatch_prompt(
+                    &mut app,
+                    session,
+                    store,
+                    &runtime.skills,
+                    &agent,
+                    &runtime.tx,
+                    queued.text,
+                )?;
+            } else {
+                match prompt_execution(&queued.text) {
+                    PromptExecution::Local(prompt) if !prompt.is_empty() => {
+                        dispatch_prompt(
+                            &mut app,
+                            session,
+                            store,
+                            &runtime.skills,
+                            &agent,
+                            &runtime.tx,
+                            prompt,
+                        )?;
+                    }
+                    PromptExecution::Local(_) => {}
+                    PromptExecution::Runtime(prompt) => {
+                        match runtime_ui::submit_turn(&mut app, session, store, runtime, prompt)
+                            .await
+                        {
+                            Ok(()) => {
+                                app.notice = Some(
+                                    language
+                                        .text(
+                                            "队列中的提示词已发出",
+                                            "Queued prompt submitted",
+                                            "キューのプロンプトを送信しました",
+                                        )
+                                        .to_owned(),
+                                )
+                            }
+                            Err(error) => app.append_transcript(format!(
+                                "Error: {}: {error}",
+                                language.text(
+                                    "提交排队的提示词失败",
+                                    "Submitting the queued prompt failed",
+                                    "キューのプロンプト送信に失敗"
+                                )
+                            )),
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
             _=refresh.tick()=>{
@@ -901,7 +1187,8 @@ async fn event_loop(
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
                 let workspace=runtime.runtime_submit.workspace.clone();
-                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace).await{let _=tx.send(snapshot);}});
+                let session_id=session.id;
+                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace,Some(session_id)).await{let _=tx.send(snapshot);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 runtime.notifier.attention_snapshot(&snapshot.attention);
@@ -937,6 +1224,13 @@ async fn event_loop(
                         if mouse.kind==MouseEventKind::Down(MouseButton::Left) {
                             app.handle_mouse(mouse.column,mouse.row,&runtime.background_tasks,&runtime.skills);
                         }
+                        continue;
+                    }
+                    // 点在弹层边界外 == 按 Esc。放在所有弹层各自的鼠标处理之前，
+                    // 否则「点外面」会先被下面那些 `continue` 吃掉。
+                    if mouse.kind==MouseEventKind::Down(MouseButton::Left)
+                        && app.dismiss_overlay_on_outside_click(mouse.column,mouse.row)
+                    {
                         continue;
                     }
                     if app.routing_settings.is_some() {
@@ -1379,7 +1673,11 @@ async fn event_loop(
                                         }
                                         app.agent_detail_scroll=0;
                                     }
-                                }else{app.sidebar_activate(&runtime.background_tasks);}
+                                }else{
+                                    app.sidebar_activate(&runtime.background_tasks);
+                                    // 打开的是 Runtime 任务详情时，把「哪条命令、为什么挂」一并取回来。
+                                    load_attention_diagnostics(&mut app,runtime).await;
+                                }
                             },
                             KeyCode::Char(' ')=>app.sidebar_toggle(),
                             KeyCode::Char('n')|KeyCode::Char('N') if app.sidebar_selected==2=>app.prefill_new_agent(),
@@ -1440,7 +1738,39 @@ async fn event_loop(
                     KeyCode::Char('v') if (key.modifiers.contains(KeyModifiers::CONTROL)&&key.modifiers.contains(KeyModifiers::SHIFT))||key.modifiers.contains(KeyModifiers::SUPER)=>app.paste_clipboard_image(),
                         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
-                        KeyCode::Enter if !app.running&&(!app.input.is_empty()||!app.attachments.is_empty())=>{
+                        KeyCode::Enter if !app.input.is_empty()||!app.attachments.is_empty()=>{
+                            // 本轮在跑时不再把 Enter 整条封死：本地命令照常执行，
+                            // 提示词排队，其余命令说清楚为什么现在不行。
+                            if app.running {
+                                match busy_input(app.input.text()) {
+                                    BusyInput::RunNow=>{},
+                                    BusyInput::Queue=>{
+                                        let text=app.input.take();
+                                        app.append_transcript(format!("You: {text}"));
+                                        app.queued_prompts.push_back(QueuedPrompt{
+                                            text,
+                                            attachments:std::mem::take(&mut app.attachments),
+                                            from_phone:false,
+                                        });
+                                        app.selected_attachment=0;
+                                        app.notice=Some(format!(
+                                            "{} · {} {}",
+                                            language.text("已排队，本轮结束后发送","Queued · sends when this turn finishes","キューに追加 · 現在のターン終了後に送信"),
+                                            app.queued_prompts.len(),
+                                            language.text("条等待 · Esc 立即中断","waiting · Esc interrupts now","件待機 · Esc で即中断"),
+                                        ));
+                                        continue;
+                                    },
+                                    BusyInput::Refuse=>{
+                                        app.notice=Some(language.text(
+                                            "该命令会改动会话或 Runtime，本轮结束后才能执行；Esc 可立即中断",
+                                            "That command changes Session or Runtime state; it runs after this turn. Esc interrupts now",
+                                            "このコマンドはセッション/Runtime を変更するため、ターン終了後に実行されます。Esc で即中断",
+                                        ).to_owned());
+                                        continue;
+                                    },
+                                }
+                            }
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
                             match handle_agent_command(&prompt,&mut app,runtime,session.id).await {
@@ -1545,6 +1875,14 @@ async fn event_loop(
                                 Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
                             }
                         }
+                        // 走到这里说明没有任何弹层、焦点在输入框：Esc 就是「停下当前这轮」。
+                        // 此前 TUI 根本没有中断入口，唯一的停止藏在侧栏 Inbox 的 K 键后面。
+                        KeyCode::Esc if app.running=>{
+                            match interrupt_turn(&mut app,session,runtime).await {
+                                Ok(message)=>app.notice=Some(message),
+                                Err(error)=>app.notice=Some(format!("{}: {error}",language.text("中断失败","Interrupt failed","中断に失敗"))),
+                            }
+                        },
                         KeyCode::Left=>app.edit_input(|input| input.left()),KeyCode::Right=>app.edit_input(|input| input.right()),
                         KeyCode::Up=>{let width=app.prompt_rect.width.saturating_sub(2).max(1) as usize;app.edit_input(|input| input.up_visual(width));},
                         KeyCode::Down=>{let width=app.prompt_rect.width.saturating_sub(2).max(1) as usize;app.edit_input(|input| input.down_visual(width));},
@@ -1576,7 +1914,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}else if let Some(prompt)=app.mobile_queue.pop_front(){app.append_transcript(format!("Phone: {prompt}"));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt)?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
@@ -1584,7 +1922,7 @@ async fn event_loop(
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
             },
             Some(prompt)=mobile_rx.recv()=>{
-                if app.running {app.mobile_queue.push_back(prompt.text);app.notice=Some(format!("Phone request queued · {} waiting",app.mobile_queue.len()));}
+                if app.running {app.queued_prompts.push_back(QueuedPrompt{text:prompt.text,attachments:Vec::new(),from_phone:true});app.notice=Some(format!("Phone request queued · {} waiting",app.queued_prompts.len()));}
                 else {app.append_transcript(format!("Phone: {}",prompt.text));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt.text)?;}
             },
             Ok(event)=background_rx.recv()=>{
@@ -1628,7 +1966,8 @@ impl App {
             goal: None,
             mobile_gateway: None,
             mobile_qr: None,
-            mobile_queue: VecDeque::new(),
+            queued_prompts: VecDeque::new(),
+            local_turn: None,
             latest_usage: Usage::default(),
             turn_started: None,
             last_progress_at: None,
@@ -1686,6 +2025,7 @@ impl App {
             task_detail: None,
             task_detail_scroll: 0,
             attention_detail: None,
+            attention_diagnostics: None,
             attention_diff_rect: Rect::default(),
             attention_allow_rect: Rect::default(),
             attention_deny_rect: Rect::default(),
@@ -1713,6 +2053,12 @@ impl App {
             question_rect: Rect::default(),
             question_hits: Vec::new(),
             search_rect: Rect::default(),
+            mobile_qr_rect: Rect::default(),
+            help_rect: Rect::default(),
+            task_detail_rect: Rect::default(),
+            attention_detail_rect: Rect::default(),
+            agent_detail_rect: Rect::default(),
+            worktree_review_rect: Rect::default(),
         }
     }
     fn toggle_composer_expanded(&mut self) {
@@ -1825,6 +2171,7 @@ impl App {
             self.agent_detail = None;
             self.worktree_review = None;
             self.diff_review = None;
+            self.attention_diagnostics = None;
             self.attention_detail = Some(item);
         }
     }
@@ -2421,6 +2768,8 @@ impl App {
         self.running = false;
         self.last_progress_at = None;
         self.runtime_turn = false;
+        // 轮次结束，句柄就作废了；留着会让下一次 Esc 对着一个已完成的 Task 空掐。
+        self.local_turn = None;
         self.transient_thought = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
@@ -3755,13 +4104,19 @@ fn draw(
                 .as_secs_f32();
             if app.running {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache}{queued} · Esc {} · F1",
                     app.working_summary().unwrap_or_else(|| app.language.text("运行中", "Running", "実行中").to_owned()),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
                     app.language.text("上下文", "context", "コンテキスト"),
                     app.language.text("最近", "latest", "直近"),
-                    app.language.text("选择", "select", "選択")
+                    // 运行中最该被看见的是「怎么停下来」，不是文本选择的快捷键。
+                    app.language.text("中断", "interrupt", "中断"),
+                    queued = if app.queued_prompts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {} {}", app.language.text("待发", "queued", "送信待ち"), app.queued_prompts.len())
+                    }
                 )
             } else {
                 format!(
@@ -4009,6 +4364,7 @@ fn draw(
                 popup,
             );
         }
+        app.mobile_qr_rect = Rect::default();
         if let Some(qr) = &app.mobile_qr {
             let width = qr.lines().map(UnicodeWidthStr::width).max().unwrap_or(40) as u16 + 4;
             let height = qr.lines().count() as u16 + 4;
@@ -4017,6 +4373,7 @@ fn draw(
                 height.min(f.area().height),
                 f.area(),
             );
+            app.mobile_qr_rect = popup;
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(qr.clone()).block(
@@ -4032,12 +4389,14 @@ fn draw(
                 popup,
             );
         }
+        app.help_rect = Rect::default();
         if app.help_visible {
             let popup = centered_rect(
                 f.area().width.min(88),
                 f.area().height.min(28),
                 f.area(),
             );
+            app.help_rect = popup;
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(help_content(app.language))
@@ -4055,6 +4414,7 @@ fn draw(
                 popup,
             );
         }
+        app.task_detail_rect = Rect::default();
         if let Some(detail) = &app.task_detail {
             let content = format!(
                 "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {:.1}s\n{}: {}\n{}: {}\n\n{}\n{}",
@@ -4082,6 +4442,7 @@ fn draw(
                 f.area().height.min(30),
                 f.area(),
             );
+            app.task_detail_rect = popup;
             let viewport = popup.height.saturating_sub(2).max(1) as usize;
             app.task_detail_scroll = app
                 .task_detail_scroll
@@ -4707,13 +5068,13 @@ fn attention_style(status: RuntimeStatus) -> Style {
 fn help_content(language: Language) -> &'static str {
     match language {
         Language::ZhCn => {
-            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+R 或 /history 搜索历史会话并继续\n  Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  F2 展开/恢复大输入空间         Ctrl+A/E 行首/行尾\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  直接拖动选择聊天文字           Ctrl/Cmd+C 或 Y 复制，Q 引用\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
+            "全局\n  F1 / 空输入时 ?  打开帮助    Ctrl+C 退出\n  Ctrl+P 全局命令面板           Ctrl+R 或 /history 搜索历史会话并继续\n  Esc 中断当前轮次（运行中）      Ctrl+W 输入/聊天/活动/状态栏切换\n  Ctrl+B 或 /sidebar 显示/隐藏状态栏（默认隐藏）\n  Ctrl+S 文本选择/复制模式\n\n输入\n  Enter 发送                    Shift/Alt+Enter 或 Ctrl+J 换行\n  F2 展开/恢复大输入空间         Ctrl+A/E 行首/行尾\n  / 命令候选                    $ 技能候选\n  ↑/↓ 选择候选                  Enter/Tab 插入，Esc 关闭\n  Ctrl/Command+Shift+V 粘贴图片 Ctrl+D 删除附件\n\n聊天与活动\n  直接拖动选择聊天文字           Ctrl/Cmd+C 或 Y 复制，Q 引用\n  Ctrl+F 搜索，Enter/Shift+Enter 前后跳转\n  PageUp/PageDown 翻页           Alt+↑/↓ 逐行滚动\n  Ctrl+Home/End 顶部/底部        Ctrl+O 展开工具活动\n  点击活动区聚焦，Enter/Space 展开或收起\n\n状态栏\n  Tab/Shift+Tab 选择分组         ↑/↓ 选择 Inbox 条目\n  Enter 详情，K 停止，R 重试     M 已读，Space 折叠，Esc 返回\n  点击标题折叠，点击条目看详情，滚轮滚动内容"
         }
         Language::En => {
-            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette     Ctrl+R or /history Search and continue a Session\n  Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  F2 Expand/restore composer Ctrl+A/E Line start/end\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Drag to select chat text   Ctrl/Cmd+C or Y copy, Q quote\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
+            "Global\n  F1 / ? on empty prompt  Open help    Ctrl+C Exit\n  Ctrl+P Command palette     Ctrl+R or /history Search and continue a Session\n  Esc Interrupt the running turn   Ctrl+W Switch Prompt/Chat/Activity/Status\n  Ctrl+B or /sidebar Show/hide Status (hidden by default)\n  Ctrl+S Text selection mode\n\nPrompt\n  Enter Send                 Shift/Alt+Enter or Ctrl+J Newline\n  F2 Expand/restore composer Ctrl+A/E Line start/end\n  / Command suggestions      $ Skill suggestions\n  ↑/↓ Select                 Enter/Tab Insert, Esc Close\n  Ctrl/Command+Shift+V Paste image      Ctrl+D Remove attachment\n\nChat and activity\n  Drag to select chat text   Ctrl/Cmd+C or Y copy, Q quote\n  Ctrl+F Search, Enter/Shift+Enter Previous/next match\n  PageUp/PageDown Page        Alt+↑/↓ Scroll one line\n  Ctrl+Home/End Top/Bottom    Ctrl+O Expand tool activity\n  Click activity to focus, Enter/Space to expand or collapse\n\nStatus sidebar\n  Tab/Shift+Tab Select section     ↑/↓ Select Inbox item\n  Enter Details, K Stop, R Retry   M Read, Space Toggle, Esc Return\n  Click headers to toggle, items for details, wheel to scroll"
         }
         Language::Ja => {
-            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R または /history 履歴セッションを検索して再開\n  Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
+            "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R または /history 履歴セッションを検索して再開\n  Esc 実行中のターンを中断          Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     }
 }

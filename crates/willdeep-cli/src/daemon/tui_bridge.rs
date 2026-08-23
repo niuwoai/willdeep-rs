@@ -575,7 +575,14 @@ fn event_task_id(message: &str) -> Option<uuid::Uuid> {
         .ok()
 }
 
-pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<RuntimeSnapshot> {
+/// `session` 是调用方当前打开的会话：工作区决定「能看到什么」，会话决定
+/// 「哪些审批该在这里弹」。传 `None` 表示调用方就是工作区级视图（Web 端），
+/// 此时保持旧的工作区口径。
+pub(crate) async fn runtime_snapshot(
+    home: &Path,
+    workspace: &Path,
+    session: Option<uuid::Uuid>,
+) -> Result<RuntimeSnapshot> {
     let paths = DaemonPaths::new(home);
     let (state, runtime_version) = match load_state(&paths.state) {
         Ok(state) => match probe(&state).await {
@@ -620,6 +627,8 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| (agent.parent_id.is_some(), agent.parent_id, agent.id));
     let tasks = api_data(runtime_client(&state)?.tasks().await?)?;
+    // 同一个工作区可能同时开着多个 TUI。任务对本工作区可见，不代表它的审批该在
+    // 这里弹——所以除了「哪些任务可见」，还要记住「每个任务归谁」。
     let visible_tasks = tasks
         .iter()
         .filter(|task| {
@@ -629,11 +638,11 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
                 .and_then(|path| path.canonicalize().ok())
                 .is_some_and(|path| path == workspace)
         })
-        .map(|task| task.id)
-        .collect::<std::collections::HashSet<_>>();
+        .map(|task| (task.id, task.session_id))
+        .collect::<std::collections::HashMap<_, _>>();
     let remote_tasks = tasks
         .iter()
-        .filter(|task| visible_tasks.contains(&task.id))
+        .filter(|task| visible_tasks.contains_key(&task.id))
         .filter(|task| runtime_task_visible(task, now()))
         .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
         .map(|task| RemoteTask {
@@ -659,7 +668,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             .await?,
     )?
     .into_iter()
-    .filter(|tool| visible_tasks.contains(&tool.task_id))
+    .filter(|tool| visible_tasks.contains_key(&tool.task_id))
     .collect();
     let artifacts = api_data(
         runtime_client(&state)?
@@ -670,21 +679,25 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
             .await?,
     )?
     .into_iter()
-    .filter(|artifact| visible_tasks.contains(&artifact.task_id))
+    .filter(|artifact| visible_tasks.contains_key(&artifact.task_id))
     .collect();
     let approvals = api_data(runtime_client(&state)?.approvals().await?)?;
     let questions = api_data(runtime_client(&state)?.questions().await?)?;
     let mut attention = tasks
         .into_iter()
-        .filter(|task| visible_tasks.contains(&task.id))
+        .filter(|task| visible_tasks.contains_key(&task.id))
         .filter(|task| runtime_task_visible(task, now()))
         .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
         .map(runtime_task_attention)
         .collect::<Vec<_>>();
+    // 审批和提问会弹成独占对话框，还能被就地解掉——归属别的会话的，绝不能在这里
+    // 弹出来：那等于替一条你没看见上下文的命令签字。没有会话归属的任务（例如
+    // headless 提交的）仍然全弹，否则没有任何客户端能解开它，任务就吊死了。
+    let owned = |task_id: &uuid::Uuid| gate_belongs_here(session, visible_tasks.get(task_id));
     let mut gates = Vec::new();
     for approval in approvals
         .into_iter()
-        .filter(|approval| visible_tasks.contains(&approval.task_id))
+        .filter(|approval| owned(&approval.task_id))
     {
         gates.push(RemoteGate::Approval {
             id: approval.id,
@@ -702,7 +715,7 @@ pub(crate) async fn runtime_snapshot(home: &Path, workspace: &Path) -> Result<Ru
     }
     for question in questions
         .into_iter()
-        .filter(|question| visible_tasks.contains(&question.task_id))
+        .filter(|question| owned(&question.task_id))
     {
         gates.push(RemoteGate::Question {
             id: question.id,
@@ -895,6 +908,22 @@ fn parse_public_session_status(value: &str) -> Result<willdeep_runtime_protocol:
     }
 }
 
+/// 一个 gate（审批/提问）该不该在这个客户端弹出来。
+///
+/// `viewer` 是调用方打开的会话，`owner` 是该 gate 所属任务的归属会话
+/// （`None` 表示任务不在本工作区，外层 `get` 就没命中）。
+fn gate_belongs_here(viewer: Option<uuid::Uuid>, owner: Option<&Option<uuid::Uuid>>) -> bool {
+    match owner {
+        // 任务不在本工作区：本来就看不见。
+        None => false,
+        // 工作区级视图（Web）：维持旧口径，工作区里的都归它管。
+        Some(_) if viewer.is_none() => true,
+        // 没有会话归属的任务（headless 提交的）：谁都能解，否则没人解得开。
+        Some(None) => true,
+        Some(owner) => *owner == viewer,
+    }
+}
+
 fn runtime_task_attention(
     task: willdeep_runtime_protocol::RuntimeTask,
 ) -> willdeep_core::AttentionItem {
@@ -914,11 +943,22 @@ fn runtime_task_attention(
         source: willdeep_core::AttentionSource::BackgroundShell,
         status,
         title: format!("Runtime task {}", task.id),
-        detail: format!(
-            "Workspace: {}\nStatus: {:?}",
-            task.workspace.as_deref().unwrap_or("-"),
-            task.status
-        ),
+        // 退出码和失败域本来就在手上，早先却被扔掉——一条失败任务只写
+        // 「Status: Failed」，看了等于没看。
+        detail: [
+            Some(format!(
+                "Workspace: {}",
+                task.workspace.as_deref().unwrap_or("-")
+            )),
+            Some(format!("Status: {:?}", task.status)),
+            task.exit_code.map(|code| format!("Exit code: {code}")),
+            task.failure_domain
+                .map(|domain| format!("Failure domain: {domain:?}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n"),
         elapsed_millis: task
             .started_at
             .map(|started| now().saturating_sub(started).saturating_mul(1_000)),
@@ -936,6 +976,16 @@ pub(super) fn runtime_task_visible(
     ) || task
         .completed_at
         .is_some_and(|completed| timestamp.saturating_sub(completed) <= 5 * 60)
+}
+
+/// 取回一个任务的失败排查材料。只有本机 Runtime 提供，旧版本 Daemon 没有这个
+/// 操作，调用方要能接受失败。
+pub(crate) async fn remote_task_diagnostics(
+    home: &Path,
+    id: uuid::Uuid,
+) -> Result<willdeep_runtime_protocol::RuntimeTaskDiagnostics> {
+    let state = ensure_running(home).await?;
+    api_data(runtime_client(&state)?.task_diagnostics(id).await?)
 }
 
 pub(crate) async fn resolve_remote_approval(
@@ -983,4 +1033,29 @@ pub(crate) async fn cancel_remote_task(home: &Path, id: uuid::Uuid) -> Result<()
         .cancel_task(id, uuid::Uuid::new_v4())
         .await?;
     api_data(response).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同一个目录开两个 TUI 时，A 会话的审批框曾经在 B 会话照弹，
+    /// 而且在 B 里点「允许」会真的把 A 的审批解掉——等于替一条没看见的命令签字。
+    #[test]
+    fn approval_gates_only_surface_in_the_session_that_raised_them() {
+        let mine = uuid::Uuid::new_v4();
+        let theirs = uuid::Uuid::new_v4();
+
+        assert!(gate_belongs_here(Some(mine), Some(&Some(mine))));
+        assert!(
+            !gate_belongs_here(Some(mine), Some(&Some(theirs))),
+            "另一个会话的审批不能在这里弹"
+        );
+        // headless 提交的任务没有会话归属：不放行就没有任何客户端解得开它。
+        assert!(gate_belongs_here(Some(mine), Some(&None)));
+        // 工作区级视图（Web）维持旧口径。
+        assert!(gate_belongs_here(None, Some(&Some(theirs))));
+        // 不在本工作区的任务，连看都看不到。
+        assert!(!gate_belongs_here(Some(mine), None));
+    }
 }

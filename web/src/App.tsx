@@ -542,7 +542,10 @@ export function App() {
       {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
       </Box>
       <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="#202a35" color="#627184" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
-      <Dialog.Root role="alertdialog" open={deleteTarget !== null} onOpenChange={(details) => { if (!details.open) setDeleteTarget(null); }}>
+      {/* closeOnInteractOutside 必须显式写：zag 对 role="alertdialog" 默认关掉外部点击，
+          于是这个框只认 Esc，点旁边的输入框什么也不发生。删除仍要点「删除」才发生，
+          点外面等同取消，没有误删风险。 */}
+      <Dialog.Root role="alertdialog" closeOnInteractOutside open={deleteTarget !== null} onOpenChange={(details) => { if (!details.open) setDeleteTarget(null); }}>
         <Portal>
           <Dialog.Backdrop bg="#000a" />
           <Dialog.Positioner>

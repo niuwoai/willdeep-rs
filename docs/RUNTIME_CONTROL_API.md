@@ -82,6 +82,7 @@ event.stream
 turn.submit
 turn.list
 turn.stop
+task.diagnostics
 tool.list
 tool.get
 artifact.list
@@ -171,6 +172,8 @@ diff.revert
 - Prompt、附件正文和工具参数默认仅在明确需要的目标操作中返回；
 - `agent.spawn` 只接受活跃 `session_id`、Prompt、标签与只读 Profile；父 Agent、Task、Workspace 和 Child ID 由服务端绑定，客户端路径、写目标、`editor` 与未知 Profile 均拒绝；
 - `RuntimeTool` 只公开稳定 ID、Session/Turn/Task/Agent 归属、工具名、状态和起止时间；Tool 索引不保存参数、输出正文、Workspace 路径或内部错误；
+- `task.diagnostics` 是唯一返回失败工具原始参数与输出摘要的操作，专供本机排查「哪条命令、为什么失败」：调用方必须持有本机 Runtime Token（它本来就能导出整段会话转录），Web 桥接与手机中继不转发该操作。公共事件流不受影响——`task.output` 的 `arguments` / `output` 与 `error=` 后缀仍按 `public_event` 剥除，两者是同一份数据的两种口径；
+- 失败工具写入持久事件日志前，参数与输出按命令审批同一套凭据规则打码，并截断为有上界的首尾摘要，避免整段 stdout 进日志；
 - `RuntimeTask.failure_domain` 在失败时可取 `provider`、`policy`、`tool`、`harness` 或 `internal`，成功与旧记录为 `null`；未知未来值由旧客户端解码为 `unknown`，字段不包含内部错误正文；
 - Web Runtime Activity 适配层只投影 Task 的公开关联 ID、状态、Profile、耗时、退出码和失败域；Workspace、Prompt、命令、参数、输出、错误正文、报告、路径、模型、配置与 PID 不进入浏览器响应；
 - Web SSE 恢复请求不能选择 Workspace、Turn、Task 或 Agent；`after` 只表示客户端最后已应用序号，恢复不会新建 Turn、重复 Provider 请求或更改 Harness 状态；

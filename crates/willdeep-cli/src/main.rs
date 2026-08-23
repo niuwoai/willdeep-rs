@@ -1393,6 +1393,26 @@ impl EventSink for TerminalSink {
     }
 }
 
+/// 失败详情写进持久事件日志，所以必须有上界：整段 stdout 或一个巨大的
+/// 参数对象没有排查价值，只会把日志撑爆。头尾都留，中间掐掉——报错通常在末尾。
+fn failure_excerpt(value: &str) -> String {
+    const MAX_FAILURE_EXCERPT_CHARS: usize = 2_000;
+    let characters = value.chars().count();
+    if characters <= MAX_FAILURE_EXCERPT_CHARS {
+        return value.to_owned();
+    }
+    let head = value
+        .chars()
+        .take(MAX_FAILURE_EXCERPT_CHARS / 2)
+        .collect::<String>();
+    let tail = value
+        .chars()
+        .skip(characters - MAX_FAILURE_EXCERPT_CHARS / 2)
+        .collect::<String>();
+    let dropped = characters - MAX_FAILURE_EXCERPT_CHARS;
+    format!("{head}\n…[{dropped} chars omitted]…\n{tail}")
+}
+
 pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
     match event {
         AgentEvent::RouteDecided {
@@ -1420,16 +1440,37 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "id": call.id,
             "name": call.name
         }),
+        // 成功的工具只报名字。失败的额外带上参数和输出尾巴——「哪条命令、为什么挂」
+        // 全在这两个字段里，没有它们，事后排查只剩一个 task_id。这两个字段名正是
+        // `public_event` 会从公共事件流里剥掉的那两个，所以远端客户端看不到；
+        // 本机通过 `task.diagnostics` 读未脱敏原文。
         AgentEvent::ToolCompleted {
             call,
-            output: _,
+            output,
             is_error,
-        } => serde_json::json!({
-            "type": "tool_completed",
-            "id": call.id,
-            "name": call.name,
-            "is_error": is_error
-        }),
+        } => {
+            let mut value = serde_json::json!({
+                "type": "tool_completed",
+                "id": call.id,
+                "name": call.name,
+                "is_error": is_error
+            });
+            if is_error && let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "arguments".to_owned(),
+                    serde_json::Value::String(failure_excerpt(
+                        &willdeep_core::judge::redact_credentials(&call.arguments),
+                    )),
+                );
+                object.insert(
+                    "output".to_owned(),
+                    serde_json::Value::String(failure_excerpt(
+                        &willdeep_core::judge::redact_credentials(&output),
+                    )),
+                );
+            }
+            value
+        }
         AgentEvent::Usage(usage) => serde_json::json!({
             "type": "usage",
             "input_tokens": usage.input_tokens,
@@ -1578,6 +1619,42 @@ fn compact_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 成功的工具只报名字；失败的才带上参数和输出，否则事后排查只剩一个 task_id。
+    /// 参数里的凭据按命令审批的同一套规则打码，长输出留首尾。
+    #[test]
+    fn only_failed_tools_carry_their_command_and_output() {
+        let call = willdeep_core::ToolCall {
+            id: "call-1".to_owned(),
+            name: "run_command".to_owned(),
+            arguments: r#"{"command":"deploy --password hunter2"}"#.to_owned(),
+        };
+
+        let ok = agent_event_json(AgentEvent::ToolCompleted {
+            call: call.clone(),
+            output: "fine".to_owned(),
+            is_error: false,
+        });
+        assert_eq!(ok.get("arguments"), None);
+        assert_eq!(ok.get("output"), None);
+
+        let failed = agent_event_json(AgentEvent::ToolCompleted {
+            call,
+            output: "boom".to_owned(),
+            is_error: true,
+        });
+        let arguments = failed["arguments"].as_str().expect("arguments");
+        assert!(arguments.contains("deploy"), "{arguments}");
+        assert!(!arguments.contains("hunter2"), "凭据必须打码: {arguments}");
+        assert_eq!(failed["output"], "boom");
+
+        // 摘要有上界，且掐掉的部分要说清楚掐了多少。
+        let long = "x".repeat(5_000);
+        let excerpt = failure_excerpt(&long);
+        assert!(excerpt.chars().count() < long.chars().count());
+        assert!(excerpt.contains("3000 chars omitted"), "{excerpt}");
+        assert_eq!(failure_excerpt("short"), "short");
+    }
 
     /// `-w` is the short form of `--workspace`, and stays global: it must
     /// work before a subcommand, after one, and in the bare TUI form.

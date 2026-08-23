@@ -406,4 +406,27 @@ mod tests {
         });
         assert_eq!(event.message, "task_id=abc exit_code=1");
     }
+
+    /// 失败的工具事件现在会带上参数和输出，供本机 `task.diagnostics` 排查。
+    /// 这条边界不能因此松动：公共事件流（Web 桥接、手机中继都吃它）必须照旧剥干净。
+    #[test]
+    fn failed_tool_payloads_still_never_reach_public_consumers() {
+        let event = public_event(RuntimeEvent {
+            sequence: 3,
+            timestamp: 4,
+            kind: "task.output".to_owned(),
+            message: concat!(
+                "task_id=abc ",
+                r#"{"type":"tool_completed","name":"run_command","is_error":true,"#,
+                r#""arguments":"{\"command\":\"deploy --token hunter2\"}","output":"stderr secret"}"#
+            )
+            .to_owned(),
+        });
+
+        assert!(event.message.contains("run_command"));
+        assert!(event.message.contains("is_error"));
+        for secret in ["deploy", "hunter2", "stderr secret"] {
+            assert!(!event.message.contains(secret), "{}", event.message);
+        }
+    }
 }
