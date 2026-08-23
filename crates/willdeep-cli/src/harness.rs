@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use willdeep_core::hooks::HookRegistry;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
 use willdeep_core::tools::{ApprovalSource, ApprovalTrace};
 use willdeep_core::{
@@ -516,8 +517,10 @@ pub(crate) async fn build(
     };
     let approval_log = home.join("approvals.jsonl");
     let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
+    let hooks = build_hooks(&loaded.file.hooks).context("read [[hooks]]")?;
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_sandbox(sandbox)
+        .with_hooks(hooks)
         .with_approver(approver)
         .with_approval_reporter(move |trace| {
             record_approval_trace(&approval_log, &trace);
@@ -734,6 +737,50 @@ pub(crate) fn resolve_workspace(
     requested_workspace
         .canonicalize()
         .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))
+}
+
+/// 把配置里的 `[[hooks]]` 翻成注册表。
+///
+/// 配置错误在这里**直接失败**，不静默跳过：一条拼错事件名的门禁 hook 如果被
+/// 悄悄忽略，用户会以为门禁在生效，而它一次都不会触发——这比没配还危险。
+fn build_hooks(settings: &[crate::config::HookSettings]) -> Result<HookRegistry> {
+    use willdeep_core::hooks::{Hook, HookEvent, HookFailure};
+
+    let mut hooks = Vec::with_capacity(settings.len());
+    for entry in settings {
+        let event = match entry.event.as_str() {
+            "pre_tool" => HookEvent::PreTool,
+            "post_tool" => HookEvent::PostTool,
+            "approval_resolved" => HookEvent::ApprovalResolved,
+            other => bail!(
+                "hooks.event 只能是 `pre_tool`、`post_tool` 或 `approval_resolved`，收到 `{other}`"
+            ),
+        };
+        let on_error = match entry.on_error.as_deref() {
+            None | Some("deny") => HookFailure::Deny,
+            Some("ignore") => HookFailure::Ignore,
+            Some(other) => bail!("hooks.on_error 只能是 `deny` 或 `ignore`，收到 `{other}`"),
+        };
+        if entry.command.trim().is_empty() {
+            bail!("hooks.command 不能为空");
+        }
+        if entry.blocking && !event.can_block() {
+            bail!(
+                "`{}` 事件发生在动作之后，blocking = true 拦不住任何东西；\
+                 想拦请改用 `pre_tool`",
+                entry.event
+            );
+        }
+        hooks.push(Hook {
+            name: entry.name.clone().unwrap_or_else(|| entry.event.clone()),
+            event,
+            command: entry.command.clone(),
+            blocking: entry.blocking,
+            timeout: std::time::Duration::from_secs(entry.timeout_seconds.unwrap_or(10)),
+            on_error,
+        });
+    }
+    Ok(HookRegistry::new(hooks))
 }
 
 /// 把审批档位翻译成 OS 侧的围栏档位，并算出可写根。

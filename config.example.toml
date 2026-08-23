@@ -20,6 +20,25 @@ max_deep_calls_per_harness = 1
 # sandbox = false
 # sandbox_writable_roots = ["~/.cargo/registry", "~/.cargo/git"]
 
+# 生命周期挂钩：审计留痕与门禁拦截。
+# 与 [notifications] 那条 webhook 分开：webhook 是事后的礼貌通知、可以丢；
+# hook 是事中的裁决、跑在关键路径上，非零退出会真的把动作拦下来。
+# 事件 JSON 从 stdin 喂进去；退出码 0 放行，阻塞式 hook 非零退出即拦截，
+# stderr 作为拒绝理由回给模型和用户。
+#
+# [[hooks]]
+# name = "audit"
+# event = "pre_tool"              # pre_tool | post_tool | approval_resolved
+# command = "jq -c . >> /var/log/willdeep-audit.jsonl"
+#
+# [[hooks]]
+# name = "change-ticket"
+# event = "pre_tool"              # 只有 pre_tool 拦得住；post_tool 发生在事后
+# command = "/usr/local/bin/check-change-ticket"
+# blocking = true
+# timeout_seconds = 10
+# on_error = "deny"               # deny（默认）| ignore；坏掉就放行的门禁等于没门禁
+
 # Shared by WillDeep.app and willdeep-rs. Local HTTP endpoints are supported
 # for home automation, desktop notifications, and other personal workflows.
 # Both clients POST the same `willdeep.webhook.v1` envelope, so one endpoint

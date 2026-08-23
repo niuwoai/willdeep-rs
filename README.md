@@ -34,6 +34,8 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 
 上面三道闸门都在**进程内**——它们判的是"模型请求做什么"，不是"进程实际能做什么"。一条被判成安全的命令自己 fork 出去写 `~/.ssh/authorized_keys`，三道闸门一道都不会响。所以还有第四道：OS 级写入围栏（macOS Seatbelt / Linux bubblewrap），把写入范围交给内核裁决。目前是预览、默认关，细节与边界见 [OS 级写入围栏](docs/SANDBOX.md)。
 
+第五道留给你自己的规矩：[生命周期挂钩](docs/HOOKS.md)。工具执行前把事件 JSON 喂给你配的命令，**非零退出就拦下来**，stderr 成为拒绝理由。审计 hook 往日志里追加一行，门禁 hook 去问公司的变更单系统——这跟通知 webhook 不是一回事：webhook 是事后的礼貌通知、可以丢，hook 跑在关键路径上、丢不了。阻塞式 hook 超时默认**拦**而不是放，因为一个坏掉就自动放行的门禁，恰好会在出事的时候失效。
+
 ### 说得准 · 谁干的活谁不判
 
 子 Agent 的验证命令由 Runtime 亲自执行，**退出码是唯一裁决**，worker 不自证。绿了还不够：靶场会逐字比对测试块，把测试删掉也能变绿，而那是最省力的通关方式——作弊的不算通过。
@@ -119,7 +121,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **扩展** | `SKILL.md` 技能 · MCP stdio server · 项目上下文文件 |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
 | **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
-| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） |
+| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 审计与门禁 Hooks |
 | **遥测** | 子 Agent 判定落盘 · Skill Coverage / Verified Success / Escalation Rate · 实弹靶场 |
 | **语言** | 简体中文 · English · 日本語 |
 
@@ -130,7 +132,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 同一份诚实：这些是**现在没有**的，别在评审会上被它们绊倒。
 
 - **OS 级写入围栏是预览，默认关。** macOS（Seatbelt）与 Linux（bubblewrap）两个后端都在，语义一致：能读能跑，只能往工作区和临时目录里写，只读档另外断网。默认关是因为它会改变已在跑的命令的行为——`cargo fetch` 写不了工作区外的 `~/.cargo/registry`，除非显式放行。目前只罩住 Shell 工具这一条路径，后台任务与子 Agent 的 verifier 还没接。`agent.sandbox = true` 打开。
-- **无 hooks。** 目前只有通知 webhook，接审计 / 合规 / CI 门禁还缺标准挂载点。
+- **Hooks 只有三个触发点。** `pre_tool` / `post_tool` / `approval_resolved`，其中 `approval_resolved` 还没接线；没有 `session_start`、`turn_end`、`pre_write`，hook 也改不了参数（只能放行或拦截）。
 - **MCP 只有 stdio。** 没有 Streamable HTTP，没有 OAuth。
 - **无 checkpoint / rewind。** 回退靠 Diff 审查 + 安全撤销，是合格替代，但长任务的可观测性弱于逐轮快照。
 - **不含 Computer Use 与 Browser Use。**
@@ -155,6 +157,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [小上下文 Skill Worker](docs/SKILL_WORKERS.md) — 派工纪律、Verifier 闭环、实弹靶场
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [OS 级写入围栏](docs/SANDBOX.md) — Seatbelt / bubblewrap，预览态
+- [生命周期挂钩](docs/HOOKS.md) — 审计留痕与 CI / 合规门禁
 - [故障排查](docs/TROUBLESHOOTING.md) — 出问题先看这里
 
 ---

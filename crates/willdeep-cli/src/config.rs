@@ -117,6 +117,34 @@ pub struct ConfigFile {
     /// harmless metadata.
     #[serde(default)]
     pub notifications: NotificationSettings,
+    /// 生命周期挂钩：审计留痕与门禁拦截。
+    ///
+    /// 与 `[notifications]` 那条 webhook 分开是有意的：webhook 是事后的礼貌
+    /// 通知，跑在关键路径外、可以丢；hook 是事中的裁决，跑在关键路径上、
+    /// 非零退出会真的拦下动作。把审计需求接到 webhook 上会丢事件。
+    #[serde(default)]
+    pub hooks: Vec<HookSettings>,
+}
+
+/// 一条 hook 的配置。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookSettings {
+    /// 出现在拒绝理由里的名字。不给就用事件名——但配了两条同事件的 hook 时，
+    /// 拒绝理由会分不清是谁拦的，所以强烈建议起个名。
+    pub name: Option<String>,
+    /// `pre_tool` / `post_tool` / `approval_resolved`。
+    pub event: String,
+    pub command: String,
+    /// 非零退出是否拦截。只有 `pre_tool` 上有意义——`post_tool` 发生在事后，
+    /// 让它"拦截"只会制造一种拦得住的错觉。
+    #[serde(default)]
+    pub blocking: bool,
+    /// 默认 10 秒。它在关键路径上，给太长等于给 agent 装了个刹车。
+    pub timeout_seconds: Option<u64>,
+    /// hook 自己超时或起不来时：`deny`（默认）或 `ignore`。
+    /// 默认拦，是因为坏掉就自动放行的门禁恰好会在出事时失效。
+    pub on_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
