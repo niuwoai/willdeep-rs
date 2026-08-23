@@ -515,7 +515,9 @@ pub(crate) async fn build(
         None
     };
     let approval_log = home.join("approvals.jsonl");
+    let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
+        .with_sandbox(sandbox)
         .with_approver(approver)
         .with_approval_reporter(move |trace| {
             record_approval_trace(&approval_log, &trace);
@@ -732,6 +734,30 @@ pub(crate) fn resolve_workspace(
     requested_workspace
         .canonicalize()
         .with_context(|| format!("invalid workspace: {}", requested_workspace.display()))
+}
+
+/// 把审批档位翻译成 OS 侧的围栏档位，并算出可写根。
+///
+/// 不新造一个轴：围栏档位是工作区策略的投影，用户已经选过一次的东西不该再选
+/// 第二次。临时目录默认可写——不给的话 `cargo`、`rustc`、`git` 全都写不了中间
+/// 文件，围栏第一天就会被关掉。
+fn resolve_sandbox(
+    agent: &crate::config::AgentSettings,
+    approval_mode: ApprovalMode,
+    workspace: &std::path::Path,
+) -> willdeep_core::sandbox::SandboxSpec {
+    use willdeep_core::sandbox::{SandboxPolicy, SandboxSpec};
+
+    if !agent.sandbox.unwrap_or(false) {
+        return SandboxSpec::new(SandboxPolicy::Off, []);
+    }
+    let policy = match approval_mode {
+        ApprovalMode::ReadOnly => SandboxPolicy::ReadOnly,
+        _ => SandboxPolicy::WorkspaceWrite,
+    };
+    let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
+    roots.extend(agent.sandbox_writable_roots.iter().cloned());
+    SandboxSpec::new(policy, roots)
 }
 
 #[cfg(test)]

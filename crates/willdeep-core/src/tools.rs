@@ -20,6 +20,7 @@ use crate::background::{
 };
 use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
 use crate::safety::CommandSafety;
+use crate::sandbox::{SandboxPolicy, SandboxSpec};
 use crate::types::{ToolCall, ToolDefinition};
 use crate::{McpRegistry, SkillCatalog};
 
@@ -204,6 +205,9 @@ pub struct ToolRegistry {
     safety_judge: Option<Arc<dyn SafetyJudge>>,
     task_context: Arc<Mutex<String>>,
     approval_reporter: Option<ApprovalReporter>,
+    /// OS 级写入围栏。默认 `Off`：审批闸门判的是「模型请求做什么」，这一层
+    /// 判的是「进程实际能做什么」，两者互补而不互替。
+    sandbox: SandboxSpec,
 }
 
 impl ToolRegistry {
@@ -238,7 +242,29 @@ impl ToolRegistry {
             safety_judge: None,
             task_context: Arc::new(Mutex::new(String::new())),
             approval_reporter: None,
+            sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
         })
+    }
+
+    /// 套上 OS 级写入围栏。不传等于不套——这一层是加固，不是前提，
+    /// 关掉它其余三道闸门照常工作。
+    pub fn with_sandbox(mut self, sandbox: SandboxSpec) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// 建一条 shell 命令，能套围栏就套。套不上（平台不支持、这一档不需要）
+    /// 就退回裸 shell —— 退回是静默的，但 [`crate::sandbox::available`] 让
+    /// 上层能查出「这台机器上根本没有围栏」，不至于以为自己有。
+    fn shell_command(&self, command: &str) -> Command {
+        match self.sandbox.command_line(SHELL_PROGRAM, command) {
+            Some(argv) => {
+                let mut process = Command::new(&argv[0]);
+                process.args(&argv[1..]);
+                process
+            }
+            None => platform_shell(command),
+        }
     }
 
     /// Attach the AI judge consulted for commands the static classifier
@@ -1321,7 +1347,7 @@ impl ToolRegistry {
                 "Background task started: {id}. Completion will be delivered automatically; use get_job_output for details."
             ));
         }
-        let mut command = platform_shell(&args.command);
+        let mut command = self.shell_command(&args.command);
         command
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
@@ -1365,6 +1391,14 @@ impl ToolRegistry {
             &text,
         );
         let mut text = truncate_bytes(text, self.command_output_limit());
+        // 把「命令自己错了」和「命令被围栏拦了」分开说。不分开的话，用户看到的
+        // 是一句 `Operation not permitted`，然后花二十分钟怀疑自己的代码。
+        if self.sandbox.policy.is_enforcing()
+            && !output.status.success()
+            && crate::sandbox::looks_like_denial(&text)
+        {
+            text.push_str(&sandbox_denial_hint(&self.sandbox));
+        }
         if self.delegation_hints
             && !output.status.success()
             && let Some(profile) = delegable_failure_profile(&args.command)
@@ -2553,6 +2587,31 @@ exhausted attempt budget comes back to you.\n</delegation-hint>"
     )
 }
 
+/// 围栏拦下之后贴给模型看的话。写清楚「哪一档、能写哪儿」，模型才有可能
+/// 自己改到工作区里去，而不是把同一条越界命令再试三遍。
+fn sandbox_denial_hint(sandbox: &SandboxSpec) -> String {
+    let roots = if sandbox.writable_roots.is_empty() {
+        "（这一档什么都不许写）".to_owned()
+    } else {
+        sandbox
+            .writable_roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    format!(
+        "\n\n<sandbox-denied>\n这条命令看起来是被 OS 级写入围栏拦下的，不是命令本身写错了。\n\
+当前档位只允许写入：{roots}\n\
+把写入目标改到允许范围内，或请用户放宽工作区策略后重试。\n</sandbox-denied>"
+    )
+}
+
+#[cfg(windows)]
+pub(crate) const SHELL_PROGRAM: &str = "powershell.exe";
+#[cfg(not(windows))]
+pub(crate) const SHELL_PROGRAM: &str = "/bin/sh";
+
 #[cfg(windows)]
 pub(crate) fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("powershell.exe");
@@ -2562,8 +2621,8 @@ pub(crate) fn platform_shell(command: &str) -> Command {
 
 #[cfg(not(windows))]
 pub(crate) fn platform_shell(command: &str) -> Command {
-    let mut process = Command::new("/bin/sh");
-    process.args(["-lc", command]);
+    let mut process = Command::new(SHELL_PROGRAM);
+    process.args([crate::sandbox::SHELL_COMMAND_FLAG, command]);
     process
 }
 

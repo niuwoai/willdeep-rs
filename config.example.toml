@@ -13,6 +13,12 @@ safety_judge = true
 small_model_routing = true
 auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1
+# OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。默认关。
+# 开着时，Shell 命令只能往工作区和临时目录里写——由内核裁决，不由审批闸门裁决。
+# 默认关是因为它会改变已在跑的命令的行为：`cargo fetch` 写不了工作区外的
+# ~/.cargo/registry，除非把那条路径列进 sandbox_writable_roots。
+# sandbox = false
+# sandbox_writable_roots = ["~/.cargo/registry", "~/.cargo/git"]
 
 # Shared by WillDeep.app and willdeep-rs. Local HTTP endpoints are supported
 # for home automation, desktop notifications, and other personal workflows.

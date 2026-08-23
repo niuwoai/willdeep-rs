@@ -142,6 +142,17 @@ pub struct AgentSettings {
     pub auto_dispatch_read_only: Option<bool>,
     /// Admission budget for the scarce deep profile in one harness.
     pub max_deep_calls_per_harness: Option<usize>,
+    /// OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。默认关。
+    ///
+    /// 默认关不是因为它不重要，是因为它会**改变已经在跑的命令的行为**：
+    /// 围栏开着时 `cargo fetch` 写不了工作区外的 `~/.cargo/registry`，除非把
+    /// 那条路径列进 `sandbox_writable_roots`。这种破坏该由用户在知情时打开，
+    /// 而不是升级一次二进制就突然撞上。
+    pub sandbox: Option<bool>,
+    /// 围栏开着时，除工作区与临时目录之外还允许写入的根。
+    /// 典型用途是工具链缓存：`~/.cargo/registry`、`~/.npm`。
+    #[serde(default)]
+    pub sandbox_writable_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
