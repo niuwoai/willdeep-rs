@@ -3,25 +3,37 @@
 
 # 小上下文工种的实弹靶场驱动器。
 #
-# 干三件事：从 ~/.willdeep/config.toml 取出凭据、跑 willdeep-core 里的
-# live-fire 测试、把结果渲染成 JSON + Markdown 两份报告。
+# 干四件事：从 ~/.willdeep/config.toml 取出凭据、跑 willdeep-core 里的
+# live-fire 测试、把结果渲染成 JSON + Markdown 两份报告、把这一轮的成绩
+# 归档进 `bench/skill-worker-range/`。
+#
+# 第四件事是后加的，理由是前三件事产出的东西都躺在 `target/` 里，而 `target/`
+# 在 `.gitignore` 第一行。2026-08-16 那轮 12 样本的原始数据就是这么没的——
+# 只剩 `SKILL_WORKERS.md` 里一张手抄的表，改一行代码之后没人答得上来
+# 「这次是变好了还是变坏了」。一次快照不是回归，连续的快照才是。
 #
 # 它花真钱：每个样本都会真的调用 Provider。默认十个样本。
 #
 #   ruby scripts/skill_worker_range.rb
 #   ruby scripts/skill_worker_range.rb --model glm-5 --cases test_off_by_one,build_missing_mut
 #
-# 凭据只在进程内传给 cargo，不打印、不写进报告。
+# 凭据只在进程内传给 cargo，不打印、不写进报告、不进归档。
 
+require 'English'
 require 'json'
 require 'fileutils'
 require 'optparse'
+
+require_relative 'lib/range_report'
+
+REPO_ROOT = File.expand_path('..', __dir__)
 
 options = {
   model: ENV['WILLDEEP_RANGE_MODEL'] || 'glm-5',
   cases: ENV['WILLDEEP_RANGE_CASES'],
   config: File.join(ENV['WILLDEEP_HOME'] || File.join(Dir.home, '.willdeep'), 'config.toml'),
-  out: File.join(Dir.pwd, 'target', 'skill-worker-range')
+  out: File.join(Dir.pwd, 'target', 'skill-worker-range'),
+  history: File.join(REPO_ROOT, 'bench', 'skill-worker-range')
 }
 
 OptionParser.new do |parser|
@@ -30,8 +42,19 @@ OptionParser.new do |parser|
   parser.on('--cases LIST', '只跑这些样本，逗号分隔') { |value| options[:cases] = value }
   parser.on('--config PATH', 'willdeep 配置文件路径') { |value| options[:config] = value }
   parser.on('--out DIR', '报告输出目录') { |value| options[:out] = value }
+  parser.on('--history DIR', '成绩归档目录，默认 bench/skill-worker-range') { |value| options[:history] = value }
+  parser.on('--no-history', '只跑不归档（调试用；正常跑请让它归档）') { options[:history] = nil }
   parser.on('--report-only', '不派工，只把已有的 range.json 重新渲染成 Markdown') { options[:report_only] = true }
 end.parse!
+
+# git 拿不到就返回 nil，不抛：靶场可以在一个不是 git 仓库的检出里跑，
+# 那种情况下这轮成绩没有 commit 可挂，但不该因此跑不完。
+def git_output(root, *args)
+  text = IO.popen(['git', '-C', root, *args], err: File::NULL, &:read).to_s.strip
+  $CHILD_STATUS.success? && !text.empty? ? text : nil
+rescue SystemCallError
+  nil
+end
 
 # 只认默认 provider 那一段的 api_base / api_key。配置里可能有多个 provider，
 # 猜错一个就是拿错凭据打错端点，还不如报错。
@@ -90,20 +113,17 @@ end
 abort "没有可渲染的报告：#{json_path}" unless File.exist?(json_path)
 
 # 报告里有中文（目标、约束、错误原文），按 UTF-8 读，别看外部编码脸色。
-# 报告里有中文（目标、约束、错误原文），按 UTF-8 读，别看外部编码脸色。
 report = JSON.parse(File.read(json_path, encoding: 'UTF-8'))
 cases = report['cases']
-verified_cases = cases.reject { |row| row['report_only'] }
-report_cases = cases.select { |row| row['report_only'] }
-verified = verified_cases.count { |row| row['verified_success'] }
-cheated = verified_cases.count { |row| row['verifier_passed'] && !row['tests_intact'] }
-mis_seeded = cases.reject { |row| row['seeded_red'] }.map { |row| row['case'] }
-attempts = cases.map { |row| row['attempts'] }.sum
-tokens = cases.map { |row| row['input_tokens'].to_i + row['output_tokens'].to_i }.sum
-seconds = cases.map { |row| row['seconds'].to_f }.sum
-claims = report_cases.map { |row| row['claims_checked'].to_i }.sum
-bad_claims = report_cases.map { |row| row['claims_unverifiable'].to_i }.sum
-answered = report_cases.count { |row| row['expectation_met'] }
+
+# 渲染和归档共用同一份聚合。两条算路迟早分叉，分叉那天报告说 10/10、
+# 历史说 9/10，而且两边都自洽，没有任何东西会报警。
+summary = RangeReport.summarize(
+  report,
+  commit: git_output(REPO_ROOT, 'rev-parse', '--short', 'HEAD'),
+  dirty: !git_output(REPO_ROOT, 'status', '--porcelain').nil?,
+  version: File.read(File.join(REPO_ROOT, 'Cargo.toml'), encoding: 'UTF-8')[/^version\s*=\s*"([^"]+)"/, 1]
+)
 
 def ratio(part, total)
   # 分母为 0 打 `-`：什么都没跑和什么都没通过是两件事。
@@ -113,15 +133,15 @@ end
 lines = []
 lines << '# 小上下文工种实弹靶场'
 lines << ''
-lines << "- 模型：`#{report['model']}`"
-lines << "- 样本：#{cases.size}（可验证 #{verified_cases.size} · 只读 #{report_cases.size}）"
-lines << "- **Worker Verified Success**：#{ratio(verified, verified_cases.size)}（verifier 通过**且**测试块未被改动）"
-lines << "- verifier 通过但改了测试（作弊）：#{cheated}"
-lines << "- **只读工种引用准确率**：#{ratio(claims - bad_claims, claims)}（报告点名的路径/行号/commit 里，真实存在的）"
-lines << "- **只读工种答对率**：#{ratio(answered, report_cases.size)}（引用真实 ≠ 答对，这一项单独算）"
-lines << "- 平均尝试次数：#{cases.empty? ? '-' : format('%.2f', attempts.to_f / cases.size)}"
-lines << "- 总 token：#{tokens}；总耗时：#{format('%.1f', seconds)}s"
-lines << "- 派工前 verifier 未变红的样本（无效样本）：#{mis_seeded.empty? ? '无' : mis_seeded.join(', ')}"
+lines << "- 模型：`#{summary['model']}`"
+lines << "- 样本：#{summary['cases']}（可验证 #{summary['verified_cases']} · 只读 #{summary['report_cases']}）"
+lines << "- **Worker Verified Success**：#{ratio(summary['verified'], summary['verified_cases'])}（verifier 通过**且**测试块未被改动）"
+lines << "- verifier 通过但改了测试（作弊）：#{summary['cheated']}"
+lines << "- **只读工种引用准确率**：#{ratio(summary['claims_checked'] - summary['claims_unverifiable'], summary['claims_checked'])}（报告点名的路径/行号/commit 里，真实存在的）"
+lines << "- **只读工种答对率**：#{ratio(summary['answered'], summary['report_cases'])}（引用真实 ≠ 答对，这一项单独算）"
+lines << "- 平均尝试次数：#{cases.empty? ? '-' : format('%.2f', summary['attempts'].to_f / summary['cases'])}"
+lines << "- 总 token：#{summary['tokens']}；总耗时：#{format('%.1f', summary['seconds'])}s"
+lines << "- 派工前 verifier 未变红的样本（无效样本）：#{summary['mis_seeded'].empty? ? '无' : summary['mis_seeded'].join(', ')}"
 lines << ''
 lines << '| 样本 | 工种 | 判定 | 尝试 | 测试未被改 | 引用核对 | 答对 | tokens | 秒 | 错误 |'
 lines << '|---|---|---|---:|---|---|---|---:|---:|---|'
@@ -149,3 +169,14 @@ puts lines.join("\n")
 puts
 puts "JSON: #{json_path}"
 puts "Markdown: #{md_path}"
+
+# ——— 归档 ———
+# 只有真跑过才归档。`--report-only` 是重新渲染同一份报告，再 append 一行
+# 就等于凭空多出一轮成绩，趋势立刻开始说谎。
+if options[:history] && !options[:report_only]
+  archive_path, history_path = RangeReport.archive(report, summary, options[:history])
+  puts "归档: #{archive_path}"
+  puts "历史: #{history_path}"
+  warn '注意：工作区不干净，这轮成绩挂在一个没提交的状态上，回放不了。' if summary['dirty']
+  puts '趋势: ruby scripts/range_trend.rb --inject'
+end
