@@ -121,7 +121,11 @@ cases = report['cases']
 summary = RangeReport.summarize(
   report,
   commit: git_output(REPO_ROOT, 'rev-parse', '--short', 'HEAD'),
-  dirty: !git_output(REPO_ROOT, 'status', '--porcelain').nil?,
+  # 只看已跟踪文件的改动，与 `range_weekly.sh` 的判定保持一致。未跟踪文件
+  # 不算：它们本来就不在任何 commit 里，算进来的话根目录随手放一张图就会让
+  # 每一轮成绩都被标成「不可回放」，这个标记很快就没人看了。
+  dirty: !system('git', '-C', REPO_ROOT, 'diff', '--quiet', 'HEAD',
+                 out: File::NULL, err: File::NULL),
   version: File.read(File.join(REPO_ROOT, 'Cargo.toml'), encoding: 'UTF-8')[/^version\s*=\s*"([^"]+)"/, 1]
 )
 
