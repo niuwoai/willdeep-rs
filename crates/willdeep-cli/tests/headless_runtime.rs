@@ -1262,6 +1262,89 @@ fn assert_success(output: &Output, operation: &str) {
     );
 }
 
+/// 会话标题走两级：提交那一刻确定性派生，第一轮回复落地后再花一次便宜调用
+/// 摘要。这条用例把两级都钉住，同时把「多打的那一次 Provider 请求」显式写进
+/// 断言——它是这个特性的真实成本，不该藏在别的用例的计数里。
+#[test]
+fn first_turn_titles_the_session_with_one_extra_provider_call() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_titling_config(&config, provider.api_base());
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+
+    let run = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+            "重构订单模块的库存扣减",
+        ])
+        .output()
+        .expect("run titled headless turn");
+    assert_success(&run, "titled headless turn");
+    let completion: serde_json::Value =
+        serde_json::from_slice(&run.stdout).expect("parse completion JSON");
+    let session_id = completion["session_id"]
+        .as_str()
+        .expect("completion session id");
+
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("sessions").join(format!("{session_id}.json")))
+            .expect("read stored Session"),
+    )
+    .expect("parse stored Session");
+    // 模型（这里是 mock）给出的摘要生效，并落锁到 `summarized`——落锁是
+    // 「下一轮不会再花一次调用」的唯一凭据。
+    assert_eq!(stored["title"], MOCK_REPLY);
+    assert_eq!(stored["title_source"], "summarized");
+    assert_eq!(
+        provider.requests(),
+        2,
+        "one turn plus exactly one title summary"
+    );
+
+    // 第二轮不再摘要：标题已经锁死，Provider 只该被打一次。
+    let again = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            session_id,
+            "--output",
+            "json",
+            "继续",
+        ])
+        .output()
+        .expect("continue titled Session");
+    assert_success(&again, "continued titled turn");
+    assert_eq!(
+        provider.requests(),
+        3,
+        "a locked title must not buy another summary"
+    );
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("sessions").join(format!("{session_id}.json")))
+            .expect("re-read stored Session"),
+    )
+    .expect("parse stored Session again");
+    assert_eq!(stored["title"], MOCK_REPLY);
+
+    guard.stop_daemon();
+}
+
 fn write_private_config(path: &Path, api_base: String) {
     write_private_config_with_language(path, api_base, None);
 }
@@ -1277,6 +1360,10 @@ default_provider = "mock"
 [agent]
 max_turns = 4
 approval = "smart"
+# 这些用例数的是「一轮打几次 Provider」。自动标题会在会话第一轮多打一次，
+# 那是它设计上的成本，但会把这里的断言变成在数两件事。标题链路本身由
+# `first_turn_titles_the_session_with_one_extra_provider_call` 单独盯。
+auto_title = false
 {language_line}
 [providers.mock]
 provider = "openai-compatible"
@@ -1286,6 +1373,10 @@ api_key = "integration-test-only"
 model = "mock-model"
 "#
     );
+    write_private_text(path, &contents);
+}
+
+fn write_private_text(path: &Path, contents: &str) {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1298,6 +1389,28 @@ model = "mock-model"
         .expect("create private test config")
         .write_all(contents.as_bytes())
         .expect("write test config");
+}
+
+/// 与 [`write_private_config`] 同一份配置，只是把自动标题打开。
+fn write_titling_config(path: &Path, api_base: String) {
+    let contents = format!(
+        r#"version = 1
+default_provider = "mock"
+
+[agent]
+max_turns = 4
+approval = "smart"
+auto_title = true
+
+[providers.mock]
+provider = "openai-compatible"
+api = "chat-completions"
+api_base = "{api_base}"
+api_key = "integration-test-only"
+model = "mock-model"
+"#
+    );
+    write_private_text(path, &contents);
 }
 
 fn write_json(path: &Path, value: serde_json::Value) {

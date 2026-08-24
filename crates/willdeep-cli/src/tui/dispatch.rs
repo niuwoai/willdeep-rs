@@ -33,8 +33,11 @@ pub(super) fn dispatch_prompt(
     let attachments = std::mem::take(&mut app.attachments)
         .into_iter()
         .map(|value| value.message)
-        .collect();
+        .collect::<Vec<_>>();
     let enriched = app.enrich_prompt(&prompt, skills);
+    // L1 用**原始**提示词，不用 enrich 之后的：enrich 会把技能清单之类的
+    // 系统素材拼进去，那些东西当标题毫无意义。
+    crate::titling::apply_derived_title(session, &prompt, !attachments.is_empty());
     let user = Message::user_with_attachments(enriched, attachments);
     session.messages.push(user.clone());
     store.save(session)?;
@@ -85,4 +88,34 @@ pub(super) fn dispatch_notification(
         ));
     }));
     Ok(())
+}
+
+/// L2 摘要跑在后台任务里：它是一次网络往返，在事件循环里 `await` 会让界面
+/// 在每轮收尾时僵住。跑完只回一个可选标题，写库仍由主循环做。
+///
+/// `force` 是 `/session retitle` 走的路：绕过「一个进程只试一次」，但绕不过
+/// 人自己起的名字。
+pub(super) fn dispatch_retitle(
+    session: &Session,
+    agent: &Arc<Agent>,
+    tx: &mpsc::UnboundedSender<UiMessage>,
+    force: bool,
+) {
+    if force {
+        if session.title_source == willdeep_core::TitleSource::User {
+            return;
+        }
+    } else if !crate::titling::claim_summary_attempt(session) {
+        return;
+    }
+    let messages = session.messages.clone();
+    let agent = agent.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let title = crate::titling::summarized_title(&agent, &messages).await;
+        let _ = tx.send(UiMessage::Retitled {
+            title,
+            requested: force,
+        });
+    });
 }

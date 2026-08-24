@@ -163,6 +163,13 @@ pub struct AgentSettings {
     /// the gateway-hosted `someim-32b-compressor`; elsewhere defaults to the
     /// session model with the inline instruction.
     pub compressor_model: Option<String>,
+    /// 自动整理会话标题。默认开：一屏 `New session` 的历史列表等于没有列表，
+    /// 而这条链路只在会话**第一轮**花一次便宜调用，不随对话长度增长。
+    /// 关掉后标题停在第一条提示词的确定性派生，仍然可读。
+    pub auto_title: Option<bool>,
+    /// 会话标题摘要模型。默认取会话模型——标题请求只发一问一答各 800 字，
+    /// 成本可忽略，而另指一个端点意味着它可能缺凭据、然后静默退化。
+    pub title_model: Option<String>,
     /// Deterministic worker/standard/deep routing. Defaults to enabled.
     pub small_model_routing: Option<bool>,
     /// Dispatch high-confidence read-only requests before the root model sees

@@ -249,6 +249,8 @@ pub struct Agent {
     /// （some.im 的 someim-32b-compressor，服务端 replace 注入），
     /// 摘要请求只发裸转录；为假时仍携带行内压缩指令。
     compressor: Option<(Arc<dyn Provider>, bool)>,
+    /// 会话标题摘要的专用 Provider。没绑就没有 L2 润色，列表停在 L1 派生标题。
+    titler: Option<Arc<dyn Provider>>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
@@ -265,6 +267,7 @@ impl Agent {
             sink: Arc::new(NoopSink),
             image_fallback: None,
             compressor: None,
+            titler: None,
             subagents: None,
             instruction_inbox: None,
             goal_continuation: None,
@@ -313,6 +316,21 @@ impl Agent {
     pub fn with_compressor(mut self, provider: Arc<dyn Provider>, hosted_prompt: bool) -> Self {
         self.compressor = Some((provider, hosted_prompt));
         self
+    }
+
+    /// Bind the provider used for the one-shot session-title summary. Left
+    /// unbound the session keeps its deterministic first-prompt title — a
+    /// missing title model degrades the label, never the conversation.
+    pub fn with_titler(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.titler = Some(provider);
+        self
+    }
+
+    /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回
+    /// 垃圾时一律 `None`——标题是装饰，不值得为它中断任何东西。
+    pub async fn summarize_title(&self, first_user: &str, first_assistant: &str) -> Option<String> {
+        let provider = self.titler.clone()?;
+        crate::session_title::summarize(provider, first_user, first_assistant).await
     }
 
     pub fn with_subagents(mut self, catalog: Arc<SubagentCatalog>) -> Self {

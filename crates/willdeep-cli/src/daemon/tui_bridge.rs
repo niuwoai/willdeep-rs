@@ -246,13 +246,19 @@ pub(crate) async fn search_remote_session_results(
     Ok(results)
 }
 
+/// 让 Runtime 登记（或确认已登记）一条已经存在的 Core 会话。
+///
+/// **不带标题**。这是一次「领养」，Runtime 那边直接沿用会话文件里的标题；
+/// 而幂等键是会话 ID 本身（同一条会话反复 ensure 必须是同一次调用），所以
+/// 参数里塞进任何**会变**的字段都会变成地雷：标题一改，下一次 ensure 就会
+/// 撞上「同一个 request_id 配了不同的参数」而整条失败。自动标题正是踩响它的
+/// 那只脚——`/session rename` 早就能踩响，只是一直没人踩到。
 pub(crate) async fn ensure_runtime_session(
     home: &Path,
     id: uuid::Uuid,
     workspace: &Path,
     profile: Option<String>,
     model: Option<String>,
-    title: String,
 ) -> Result<RemoteRuntimeSession> {
     let state = ensure_running(home).await?;
     let session = api_data(
@@ -263,7 +269,7 @@ pub(crate) async fn ensure_runtime_session(
                     workspace: workspace.canonicalize()?.display().to_string(),
                     profile,
                     model,
-                    title: Some(title),
+                    title: None,
                 },
                 id,
             )

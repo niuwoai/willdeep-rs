@@ -1010,7 +1010,6 @@ async fn ensure_web_runtime_session(state: &WebState, id: uuid::Uuid) -> Result<
         &session.workspace,
         session.profile,
         None,
-        session.title,
     )
     .await
     .map_err(WebError::from_anyhow)?;
@@ -1250,7 +1249,6 @@ async fn run_runtime_turn_inner(
         &workspace,
         session.profile.clone().or(profile),
         None,
-        session.title.clone(),
     )
     .await
     .map_err(WebError::from_anyhow)?;

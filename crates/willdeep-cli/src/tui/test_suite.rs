@@ -1128,6 +1128,7 @@ mod tests {
                 updated_at: 1,
                 message_count: 2,
                 snippet: None,
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             },
             willdeep_runtime_protocol::SessionSearchResult {
                 id: target_id,
@@ -1139,6 +1140,7 @@ mod tests {
                 updated_at: 2,
                 message_count: 8,
                 snippet: Some("讨论 OAuth 登录".to_owned()),
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             },
         ]);
         assert!(matches!(
@@ -1235,6 +1237,7 @@ mod tests {
                 updated_at: 100 - index,
                 message_count: 1,
                 snippet: None,
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             })
             .collect()
     }
@@ -1280,6 +1283,44 @@ mod tests {
         );
         assert!(app.session_picker.is_none());
     }
+    /// 标题排第一位，Xedit 桥接的会话要有来源标记。
+    ///
+    /// 此前这一行是「标题 · ID · 状态 · 条数」，而当标题清一色是 `New session`
+    /// 时，一屏里唯一在变的东西就是那八位十六进制——那不是列表，是让人用
+    /// UUID 认对话。ID 仍然留着，只是让位给标题。
+    #[test]
+    fn session_picker_line_leads_with_the_title_and_flags_bridged_sessions() {
+        let bridged = willdeep_runtime_protocol::SessionSearchResult {
+            id: uuid::Uuid::new_v4(),
+            title: "代码提交一下".to_owned(),
+            workspace: Some("/workspace".to_owned()),
+            status: willdeep_runtime_protocol::SessionStatus::Idle,
+            profile: None,
+            model: None,
+            updated_at: 1,
+            message_count: 22,
+            snippet: None,
+            origin: willdeep_runtime_protocol::SessionOrigin::Xedit,
+        };
+        let line =
+            session_picker_ui::session_picker_result_line(&bridged, false, Language::ZhCn, false);
+        assert!(line.starts_with("  代码提交一下 [Xedit]"), "{line}");
+        assert!(line.contains("22 条消息"), "{line}");
+        assert!(
+            line.contains(&bridged.id.simple().to_string()[..8]),
+            "ID 仍要留在行里，出问题时人得靠它对日志: {line}"
+        );
+
+        // Runtime 来源是默认，不加噪音标记。
+        let managed = willdeep_runtime_protocol::SessionSearchResult {
+            origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
+            ..bridged.clone()
+        };
+        let line =
+            session_picker_ui::session_picker_result_line(&managed, false, Language::ZhCn, false);
+        assert!(!line.contains('['), "{line}");
+    }
+
     #[test]
     fn session_picker_result_includes_content_snippet_without_embedded_lines() {
         let result = willdeep_runtime_protocol::SessionSearchResult {
@@ -1292,6 +1333,7 @@ mod tests {
             updated_at: 1,
             message_count: 4,
             snippet: Some("RBAC\n数据权限".to_owned()),
+            origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
         };
 
         let line =

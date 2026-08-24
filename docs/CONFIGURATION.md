@@ -30,6 +30,7 @@ language = "zh-CN"      # zh-CN | en | ja
 small_model_routing = true
 auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1
+auto_title = true
 
 [providers.some-im]
 provider = "some-im"
@@ -74,6 +75,8 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | `small_model_routing` | Runtime 小模型优先路由；默认 `true` |
 | `auto_dispatch_read_only` | 自动把高置信度定位、阅读、日志、Git 追溯派给窄工种；默认 `true` |
 | `max_deep_calls_per_harness` | 每个 Harness 允许的 1M Deep 升级次数，`0..16`，默认 `1` |
+| `auto_title` | 自动整理会话标题；默认 `true`。关掉后标题停在第一条提示词的确定性派生，见 [会话标题](TUI_GUIDE.md#会话标题怎么来的) |
+| `title_model` | 标题摘要模型；默认取会话模型。请求只发一问一答各 800 字，与对话长度无关 |
 
 ## `[providers.*]` 段
 

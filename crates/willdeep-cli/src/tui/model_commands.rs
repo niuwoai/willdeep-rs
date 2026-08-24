@@ -334,7 +334,6 @@ pub(super) async fn switch_model(
             &session.workspace,
             session.profile.clone(),
             Some(model.to_owned()),
-            session.title.clone(),
         )
         .await?;
         crate::daemon::update_remote_session_model(&runtime.home, session.id, model.to_owned())
