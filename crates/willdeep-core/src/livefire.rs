@@ -50,6 +50,24 @@ struct RangeCase {
     git_history: bool,
 }
 
+impl RangeCase {
+    /// 样本铺下的全部源文件。给 Task Packet 当读写集用。
+    ///
+    /// 注意这里**给的是文件清单，不是答案**：跨文件样本里哪个文件有 bug 仍要
+    /// 工种自己顺着调用链找。把清单藏起来只会把「找 bug」换成「猜文件名」，
+    /// 那是另一种能力，而且测不出可复现的东西。
+    fn source_files(&self) -> Vec<String> {
+        let mut files = vec!["src/lib.rs".to_owned()];
+        files.extend(
+            self.extra_files
+                .iter()
+                .map(|(path, _)| (*path).to_owned())
+                .filter(|path| path.ends_with(".rs")),
+        );
+        files
+    }
+}
+
 const PROMPT_TEST: &str = "把失败的测试修到绿。改实现，不要改测试，更不要删测试或加 #[ignore]。";
 const PROMPT_BUILD: &str = "把编译错误修掉，让 cargo build 通过。只做最小改动。";
 const PROMPT_REPORT: &str = "回答问题并给出确切位置。只报你亲眼看到的东西，找不到就直说，不要猜。";
@@ -353,7 +371,160 @@ pub fn retry_budget() -> u32 {
         expect_contains: &["retry"],
         git_history: true,
     },
+    // ——— 难样本 ———
+    //
+    // 上面那批的共同形状是「测试点名的函数就是有 bug 的函数」，一跳可达。
+    // 下面这批把 bug 挪到调用链深处、挪到另一个文件里：失败的断言和该改的
+    // 那一行之间隔着两到三次跳转。加它们的理由很直接——一个永远 100% 的指标
+    // 和没有指标一样没用，得让它有机会掉下来。
+    RangeCase {
+        id: "test_three_hop_call_chain",
+        profile: "test_fixer",
+        goal: "pipeline::run 没有把连续空白折叠成一个空格",
+        known_facts: &[
+            "测试期望 run(\"  hello   world  \") == \"hello world\"",
+            "实际得到 \"hello   world\"",
+        ],
+        constraints: &["不改测试", "不改任何函数签名"],
+        verifier: Some("cargo test --quiet"),
+        lib_rs: r#"
+pub mod pipeline;
+pub mod stage;
+pub mod text;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapses_runs_of_whitespace() {
+        assert_eq!(pipeline::run("  hello   world  "), "hello world");
+        assert_eq!(pipeline::run("a"), "a");
+    }
+}
+"#,
+        extra_files: &[
+            (
+                "src/pipeline.rs",
+                "use crate::stage;\n\npub fn run(input: &str) -> String {\n    stage::normalize(input)\n}\n",
+            ),
+            (
+                "src/stage.rs",
+                "use crate::text;\n\npub fn normalize(input: &str) -> String {\n    text::squeeze(input.trim())\n}\n",
+            ),
+            (
+                "src/text.rs",
+                "/// Collapse every run of whitespace into a single space.\npub fn squeeze(input: &str) -> String {\n    input.to_owned()\n}\n",
+            ),
+        ],
+        expect_contains: &[],
+        git_history: false,
+    },
+    // 两个调用方共用一个有 bug 的辅助函数，两条断言各压一个调用方。
+    // 只在其中一个调用方上打补丁能过一条、挂另一条：想两条都过，要么改到
+    // 共用的那一层，要么两个调用方都改对——两条路都得先看懂谁调了谁。
+    RangeCase {
+        id: "test_shared_helper_two_callers",
+        profile: "test_fixer",
+        goal: "折扣计算按截断取整，应当四舍五入到分",
+        known_facts: &[
+            "测试期望 cart::total(&[1995], 12) == 1756，实际 1755",
+            "测试期望 invoice::line_total(333, 10) == 300，实际 299",
+        ],
+        constraints: &["不改测试", "不改任何函数签名"],
+        verifier: Some("cargo test --quiet"),
+        lib_rs: r#"
+pub mod cart;
+pub mod invoice;
+pub mod money;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discounts_round_to_the_nearest_cent() {
+        assert_eq!(cart::total(&[1995], 12), 1756);
+        assert_eq!(invoice::line_total(333, 10), 300);
+    }
+}
+"#,
+        extra_files: &[
+            (
+                "src/cart.rs",
+                "use crate::money;\n\npub fn total(line_cents: &[u64], percent_off: u64) -> u64 {\n    line_cents\n        .iter()\n        .map(|cents| money::apply_discount(*cents, percent_off))\n        .sum()\n}\n",
+            ),
+            (
+                "src/invoice.rs",
+                "use crate::money;\n\npub fn line_total(cents: u64, percent_off: u64) -> u64 {\n    money::apply_discount(cents, percent_off)\n}\n",
+            ),
+            (
+                "src/money.rs",
+                "/// Apply a percentage discount, rounding to the nearest cent.\npub fn apply_discount(cents: u64, percent_off: u64) -> u64 {\n    cents * (100 - percent_off) / 100\n}\n",
+            ),
+        ],
+        expect_contains: &[],
+        git_history: false,
+    },
+    // 编译错误报在 render.rs，而该补的东西在 event.rs：报错的地方不是该改的
+    // 地方。上面那批 build 样本全是「错在哪报在哪」，一行就能修。
+    RangeCase {
+        id: "build_missing_impl_elsewhere",
+        profile: "build_fixer",
+        goal: "补上缺失的 trait 实现让 cargo build 通过",
+        known_facts: &["报错出现在 src/render.rs", "Describe 定义在 src/event.rs"],
+        constraints: &["不改 render.rs 里的调用方式", "不删代码"],
+        verifier: Some("cargo build --quiet"),
+        lib_rs: r#"
+pub mod event;
+pub mod render;
+"#,
+        extra_files: &[
+            (
+                "src/event.rs",
+                "pub trait Describe {\n    fn describe(&self) -> String;\n}\n\npub struct Started;\npub struct Finished;\n\nimpl Describe for Started {\n    fn describe(&self) -> String {\n        \"started\".to_owned()\n    }\n}\n",
+            ),
+            (
+                "src/render.rs",
+                "use crate::event::{Describe, Finished, Started};\n\npub fn render_all() -> Vec<String> {\n    vec![Started.describe(), Finished.describe()]\n}\n",
+            ),
+        ],
+        expect_contains: &[],
+        git_history: false,
+    },
+    // 只读工种的难样本：仓库里有两个同名定义，grep 直接给出两个命中，
+    // 而正确答案取决于 send() 实际 use 的是哪一个。
+    RangeCase {
+        id: "scout_picks_the_called_definition",
+        profile: "scout",
+        goal: "net::send 实际调用的 retry_budget 定义在哪个文件",
+        known_facts: &["仓库里有两处同名定义，只有一处被真正调用"],
+        constraints: &["报告要给出路径", "说明判断依据"],
+        verifier: None,
+        lib_rs: r#"
+pub mod legacy;
+pub mod net;
+pub mod util;
+"#,
+        extra_files: &[
+            (
+                "src/legacy.rs",
+                "/// Old budget, kept for the migration. Nothing calls this any more.\npub fn retry_budget() -> u32 {\n    9\n}\n",
+            ),
+            (
+                "src/net.rs",
+                "use crate::util;\n\npub fn send() -> u32 {\n    util::retry_budget()\n}\n",
+            ),
+            (
+                "src/util.rs",
+                "pub fn retry_budget() -> u32 {\n    3\n}\n",
+            ),
+        ],
+        expect_contains: &["src/util.rs"],
+        git_history: false,
+    },
 ];
+
 #[derive(Default)]
 struct RangeSink {
     verdicts: Mutex<Vec<(Option<bool>, usize)>>,
@@ -586,6 +757,40 @@ fn env_or_skip(key: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// 预检：每个带 verifier 的样本，派工**之前**必须是红的。
+///
+/// 绿着的靶子测不出任何东西——它会以 100% 通过的姿态进分子，把成绩往上抬，
+/// 而没人看得出来。付费那一轮虽然也会在 `mis_seeded` 里点名，但那时钱已经
+/// 花完了。这个测试不联网、不调 Provider，只是把每个样本铺出来跑一遍它自己
+/// 的 verifier，加样本之后跑一次即可。
+///
+/// 仍标 `#[ignore]`：它要为每个样本起一次 cargo，几分钟起步，不该拖住常规测试。
+#[test]
+#[ignore = "preflight: seeds every fixture and runs its verifier; minutes, no network. Run after adding samples."]
+fn every_verifiable_sample_starts_red() {
+    let root = std::env::temp_dir().join(format!("willdeep-preflight-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("preflight root");
+
+    let mut green = Vec::new();
+    for case in CASES {
+        let Some(verifier) = case.verifier else {
+            continue;
+        };
+        let fixture = root.join(case.id);
+        std::fs::create_dir_all(&fixture).expect("fixture dir");
+        seed_fixture(&fixture, case).expect("seed fixture");
+        if verifier_passes(&fixture, verifier) {
+            green.push(case.id);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        green.is_empty(),
+        "这些样本派工前就是绿的，测不出任何东西：{green:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live fire: needs real provider credentials and spends money; run scripts/skill_worker_range.rb"]
 async fn skill_worker_range() {
@@ -653,8 +858,20 @@ async fn skill_worker_range() {
         .with_worktree_root(&worktrees);
 
         let writes = case.verifier.is_some();
-        let targets = writes.then(|| BTreeSet::from([fixture.join("src/lib.rs")]));
-        let mut task_files = vec!["src/lib.rs".to_owned()];
+        // 写集必须覆盖样本铺下的每个源文件，而不是写死 `src/lib.rs`。
+        //
+        // 写死的话，跨文件样本会在「Worker 发出正确补丁 → 被判越界写入」这一步
+        // 挂掉，而报告上看起来就像模型修不动——这个仓库在审批层被同一类假信号
+        // 咬过一次（符号链接没规范化那次）。让工种够不着正确答案，测出来的是
+        // 围栏的形状，不是它的能力。
+        let sources = case.source_files();
+        let targets = writes.then(|| {
+            sources
+                .iter()
+                .map(|path| fixture.join(path))
+                .collect::<BTreeSet<_>>()
+        });
+        let mut task_files = sources.clone();
         if !writes {
             // 让只读工种自己去找，测的才是「找」这门手艺。
             task_files.clear();
