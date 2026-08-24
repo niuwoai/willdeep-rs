@@ -1035,7 +1035,13 @@ async fn event_loop(
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
             .await
             .unwrap_or_default();
-        store.save(session)?;
+        // 一条还没说过话的会话不该为了记一个事件游标就落盘。此前每开一次 TUI
+        // 不敲字就关，磁盘上就多一条 0 消息会话，历史列表被它们挤满——而它们
+        // 什么都没记录。游标会在第一条提示词落盘时一起写下去；在那之前丢掉它
+        // 的唯一后果是下次从事件流头部重读，而空会话没有任何东西要重放。
+        if !session.messages.is_empty() {
+            store.save(session)?;
+        }
     }
     app.runtime_event_cursor = session.runtime_event_cursor;
     app.workspace = Some(session.workspace.clone());

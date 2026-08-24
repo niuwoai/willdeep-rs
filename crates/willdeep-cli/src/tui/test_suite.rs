@@ -1283,6 +1283,53 @@ mod tests {
         );
         assert!(app.session_picker.is_none());
     }
+    /// 开一次 TUI 不敲字就关，此前磁盘上就多一条 0 消息会话。它们按更新时间
+    /// 排在最前，能把 20 个名额吃光，真正的历史一条都露不出来。
+    #[test]
+    fn empty_sessions_are_kept_out_of_the_panel_except_the_current_one() {
+        let current = uuid::Uuid::new_v4();
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(current, SessionPickerRequest::default());
+
+        let mut results = recent_session_results(3);
+        // 当前会话也是空的（刚开的 TUI），但人得看得见自己在哪儿。
+        results[0].id = current;
+        results[0].message_count = 0;
+        results[1].message_count = 0;
+        results[2].message_count = 7;
+        let survivor = results[2].id;
+        app.set_session_picker_results(results);
+
+        let listed = app
+            .session_picker
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .map(|result| result.id)
+            .collect::<Vec<_>>();
+        assert_eq!(listed, vec![current, survivor], "{listed:?}");
+    }
+
+    /// 过滤必须发生在截断之前，否则空会话先占满 20 个名额再被删掉，
+    /// 面板会剩下一张几乎空的列表，还谎称「20+」。
+    #[test]
+    fn empty_sessions_are_dropped_before_the_twenty_row_cap() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(uuid::Uuid::new_v4(), SessionPickerRequest::default());
+
+        let mut results = recent_session_results(25);
+        for result in results.iter_mut().take(20) {
+            result.message_count = 0;
+        }
+        app.set_session_picker_results(results);
+
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.results.len(), 5);
+        assert!(!picker.truncated, "5 条真实会话不该被标成截断");
+        assert!(picker.results.iter().all(|result| result.message_count > 0));
+    }
+
     /// 标题排第一位，Xedit 桥接的会话要有来源标记。
     ///
     /// 此前这一行是「标题 · ID · 状态 · 条数」，而当标题清一色是 `New session`

@@ -1262,6 +1262,78 @@ fn assert_success(output: &Output, operation: &str) {
     );
 }
 
+/// 同一条会话第二次 ensure，参数变了也必须能跑。
+///
+/// `ensure_runtime_session` 曾经拿**会话 ID 当幂等键**，而幂等记录存的是整个
+/// params 的指纹。于是任何一个会变的字段——Provider、模型、标题——改一次，
+/// 下一次 ensure 就撞 `request_id was already used with different operation
+/// params`；记录是持久化的，撞上之后这条会话**永久**发不出 ensure，TUI 和 Web
+/// 一起哑掉。Web 侧两个调用点传的 profile 本来就不一样，一直在踩。
+#[test]
+fn re_ensuring_a_session_with_changed_params_is_not_an_idempotency_conflict() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(&workspace).expect("create test workspace");
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+
+    let first = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+            "first turn without an explicit profile",
+        ])
+        .output()
+        .expect("run first headless turn");
+    assert_success(&first, "first headless turn");
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("parse first completion JSON");
+    let session_id = first_json["session_id"]
+        .as_str()
+        .expect("completion session id")
+        .to_owned();
+
+    // 第二轮显式带上 --profile：ensure 的 params 与第一轮不同。
+    let second = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            &session_id,
+            "--profile",
+            "mock",
+            "--output",
+            "json",
+            "second turn with an explicit profile",
+        ])
+        .output()
+        .expect("continue headless Session");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stderr.contains("request_id was already used"),
+        "changed ensure params must not collide with the previous request id: {stderr}"
+    );
+    assert_success(&second, "continued headless turn with a changed profile");
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("parse second completion JSON");
+    assert_eq!(second_json["session_id"], session_id);
+
+    guard.stop_daemon();
+}
+
 /// 会话标题走两级：提交那一刻确定性派生，第一轮回复落地后再花一次便宜调用
 /// 摘要。这条用例把两级都钉住，同时把「多打的那一次 Provider 请求」显式写进
 /// 断言——它是这个特性的真实成本，不该藏在别的用例的计数里。

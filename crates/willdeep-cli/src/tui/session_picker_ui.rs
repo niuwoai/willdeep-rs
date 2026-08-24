@@ -60,6 +60,11 @@ impl App {
         let Some(picker) = self.session_picker.as_mut() else {
             return;
         };
+        // 一条消息都没有的会话进不了这个列表：它没有可继续的内容，标题永远是
+        // 占位符，进去也只是回到一张白纸。当前会话是唯一的例外——人得看得见
+        // 自己在哪儿。过滤必须发生在截断之前，否则一串刚建的空会话会按更新
+        // 时间排在最前，把 20 个名额吃光，真正的历史一条都露不出来。
+        results.retain(|result| result.message_count > 0 || result.id == picker.current_session);
         picker.truncated = results.len() > SESSION_PICKER_LIMIT;
         results.truncate(SESSION_PICKER_LIMIT);
         picker.results = results;
