@@ -18,8 +18,10 @@ use tokio::process::Command;
 use crate::background::{
     BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskStatus, TaskResult,
 };
+use crate::hooks::{HookEvent, HookPayload, HookRegistry};
 use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
 use crate::safety::CommandSafety;
+use crate::sandbox::{SandboxPolicy, SandboxSpec};
 use crate::types::{ToolCall, ToolDefinition};
 use crate::{McpRegistry, SkillCatalog};
 
@@ -144,6 +146,9 @@ pub enum ToolError {
     ApprovalDenied(String),
     #[error("read-only Workspace policy blocks tool: {0}")]
     ReadOnlyPolicy(String),
+    /// 被生命周期 hook 拦下。理由由 hook 的 stderr 提供，已点名是哪一条。
+    #[error("{0}")]
+    HookDenied(String),
     #[error("file already exists: {0}")]
     FileAlreadyExists(String),
     #[error("exact edit text was not found in {0}")]
@@ -204,6 +209,13 @@ pub struct ToolRegistry {
     safety_judge: Option<Arc<dyn SafetyJudge>>,
     task_context: Arc<Mutex<String>>,
     approval_reporter: Option<ApprovalReporter>,
+    /// OS 级写入围栏。默认 `Off`：审批闸门判的是「模型请求做什么」，这一层
+    /// 判的是「进程实际能做什么」，两者互补而不互替。
+    sandbox: SandboxSpec,
+    /// 生命周期挂钩。默认空：没配 hook 的用户不该为此付任何成本。
+    hooks: HookRegistry,
+    /// 只用于 hook 事件的溯源字段，不参与任何判定。
+    session_id: Option<String>,
 }
 
 impl ToolRegistry {
@@ -238,7 +250,53 @@ impl ToolRegistry {
             safety_judge: None,
             task_context: Arc::new(Mutex::new(String::new())),
             approval_reporter: None,
+            sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
+            hooks: HookRegistry::default(),
+            session_id: None,
         })
+    }
+
+    /// 注册生命周期挂钩。与审批闸门是两回事：闸门问的是用户，hook 问的是
+    /// 用户**事先配好的程序**——审计留痕和 CI 门禁要的是后者。
+    pub fn with_hooks(mut self, hooks: HookRegistry) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// 带上会话标识，hook 的审计记录里才对得上是哪一次会话。
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    fn hook_payload(&self, event: HookEvent, call: &ToolCall) -> HookPayload {
+        HookPayload::new(event)
+            .with_tool(call.name.clone(), &call.arguments)
+            .with_session(
+                self.session_id.clone(),
+                Some(self.workspace.display().to_string()),
+            )
+    }
+
+    /// 套上 OS 级写入围栏。不传等于不套——这一层是加固，不是前提，
+    /// 关掉它其余三道闸门照常工作。
+    pub fn with_sandbox(mut self, sandbox: SandboxSpec) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// 建一条 shell 命令，能套围栏就套。套不上（平台不支持、这一档不需要）
+    /// 就退回裸 shell —— 退回是静默的，但 [`crate::sandbox::available`] 让
+    /// 上层能查出「这台机器上根本没有围栏」，不至于以为自己有。
+    fn shell_command(&self, command: &str) -> Command {
+        match self.sandbox.command_line(SHELL_PROGRAM, command) {
+            Some(argv) => {
+                let mut process = Command::new(&argv[0]);
+                process.args(&argv[1..]);
+                process
+            }
+            None => platform_shell(command),
+        }
     }
 
     /// Attach the AI judge consulted for commands the static classifier
@@ -671,6 +729,32 @@ impl ToolRegistry {
         {
             return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
         }
+        // hook 在这里拦，是因为这是「工具即将执行」唯一的收口。放在各个工具
+        // 内部就得逐个记得加，而漏掉的那个恰好会是出事的那个。
+        if !self.hooks.is_empty() {
+            let outcome = self
+                .hooks
+                .fire(
+                    HookEvent::PreTool,
+                    &self.hook_payload(HookEvent::PreTool, call),
+                )
+                .await;
+            if let Some(message) = outcome.message() {
+                return Err(ToolError::HookDenied(message));
+            }
+        }
+        let result = self.dispatch(call).await;
+        if !self.hooks.is_empty() {
+            let payload = self
+                .hook_payload(HookEvent::PostTool, call)
+                .with_outcome(if result.is_ok() { "ok" } else { "error" });
+            // 事后 hook 拦不住已经发生的事，结果丢弃。
+            let _ = self.hooks.fire(HookEvent::PostTool, &payload).await;
+        }
+        result
+    }
+
+    async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
         match call.name.as_str() {
             "list_skills" => self.list_skills(parse(call)?),
             "read_skill" => self.read_skill(parse(call)?),
@@ -1321,7 +1405,7 @@ impl ToolRegistry {
                 "Background task started: {id}. Completion will be delivered automatically; use get_job_output for details."
             ));
         }
-        let mut command = platform_shell(&args.command);
+        let mut command = self.shell_command(&args.command);
         command
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
@@ -1365,6 +1449,14 @@ impl ToolRegistry {
             &text,
         );
         let mut text = truncate_bytes(text, self.command_output_limit());
+        // 把「命令自己错了」和「命令被围栏拦了」分开说。不分开的话，用户看到的
+        // 是一句 `Operation not permitted`，然后花二十分钟怀疑自己的代码。
+        if self.sandbox.policy.is_enforcing()
+            && !output.status.success()
+            && crate::sandbox::looks_like_denial(&text)
+        {
+            text.push_str(&sandbox_denial_hint(&self.sandbox));
+        }
         if self.delegation_hints
             && !output.status.success()
             && let Some(profile) = delegable_failure_profile(&args.command)
@@ -2553,6 +2645,31 @@ exhausted attempt budget comes back to you.\n</delegation-hint>"
     )
 }
 
+/// 围栏拦下之后贴给模型看的话。写清楚「哪一档、能写哪儿」，模型才有可能
+/// 自己改到工作区里去，而不是把同一条越界命令再试三遍。
+fn sandbox_denial_hint(sandbox: &SandboxSpec) -> String {
+    let roots = if sandbox.writable_roots.is_empty() {
+        "（这一档什么都不许写）".to_owned()
+    } else {
+        sandbox
+            .writable_roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    format!(
+        "\n\n<sandbox-denied>\n这条命令看起来是被 OS 级写入围栏拦下的，不是命令本身写错了。\n\
+当前档位只允许写入：{roots}\n\
+把写入目标改到允许范围内，或请用户放宽工作区策略后重试。\n</sandbox-denied>"
+    )
+}
+
+#[cfg(windows)]
+pub(crate) const SHELL_PROGRAM: &str = "powershell.exe";
+#[cfg(not(windows))]
+pub(crate) const SHELL_PROGRAM: &str = "/bin/sh";
+
 #[cfg(windows)]
 pub(crate) fn platform_shell(command: &str) -> Command {
     let mut process = Command::new("powershell.exe");
@@ -2562,8 +2679,8 @@ pub(crate) fn platform_shell(command: &str) -> Command {
 
 #[cfg(not(windows))]
 pub(crate) fn platform_shell(command: &str) -> Command {
-    let mut process = Command::new("/bin/sh");
-    process.args(["-lc", command]);
+    let mut process = Command::new(SHELL_PROGRAM);
+    process.args([crate::sandbox::SHELL_COMMAND_FLAG, command]);
     process
 }
 
@@ -2940,6 +3057,80 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
             "alpha gamma"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_blocking_hook_stops_the_tool_before_it_runs() {
+        // 引擎能拦是一回事，接没接上工具分发是另一回事。这条钉的是后者。
+        let root = workspace("hook-gate");
+        let target = root.join("file.txt");
+        std::fs::write(&target, "unchanged").expect("fixture");
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_hooks(crate::hooks::HookRegistry::new(vec![crate::hooks::Hook {
+                name: "change-ticket".to_owned(),
+                event: crate::hooks::HookEvent::PreTool,
+                command: "echo '缺少变更单编号' >&2; exit 1".to_owned(),
+                blocking: true,
+                timeout: std::time::Duration::from_secs(5),
+                on_error: crate::hooks::HookFailure::Deny,
+            }]));
+
+        let result = registry
+            .execute(&ToolCall {
+                id: "write".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments: serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "unchanged",
+                    "new_string": "changed"
+                })
+                .to_string(),
+            })
+            .await;
+
+        let Err(ToolError::HookDenied(message)) = result else {
+            panic!("hook 应当拦下这次调用：{result:?}");
+        };
+        assert!(message.contains("change-ticket"), "{message}");
+        assert!(message.contains("缺少变更单编号"), "{message}");
+        // 拦住的意思是文件没被动过，不是"改完了再报个错"。
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unchanged");
+    }
+
+    #[tokio::test]
+    async fn an_observer_hook_sees_the_call_without_blocking_it() {
+        let root = workspace("hook-audit");
+        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
+        let log = root.join("audit.log");
+        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+            .expect("registry")
+            .with_hooks(crate::hooks::HookRegistry::new(vec![crate::hooks::Hook {
+                name: "audit".to_owned(),
+                event: crate::hooks::HookEvent::PreTool,
+                command: format!("cat >> {}", log.display()),
+                blocking: false,
+                timeout: std::time::Duration::from_secs(5),
+                on_error: crate::hooks::HookFailure::Deny,
+            }]));
+
+        let result = registry
+            .execute(&ToolCall {
+                id: "edit".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments: serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "unchanged",
+                    "new_string": "changed"
+                })
+                .to_string(),
+            })
+            .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        let recorded = std::fs::read_to_string(&log).expect("审计 hook 应当收到事件");
+        assert!(recorded.contains("\"event\":\"pre_tool\""), "{recorded}");
+        assert!(recorded.contains("edit_file"), "{recorded}");
     }
 
     #[tokio::test]

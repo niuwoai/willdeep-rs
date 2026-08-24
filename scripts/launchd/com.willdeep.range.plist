@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  模板：把 __REPO__ 换成仓库绝对路径再装。安装步骤见同目录 README.md。
+  默认每周一 03:00 本地时间跑一轮。它花真钱，别把间隔调小。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.willdeep.range</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>__REPO__/scripts/range_weekly.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 错过的场次不补跑：睡醒后连补三轮，就是三倍的账单换一个同样的数字。 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/target/skill-worker-range/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/target/skill-worker-range/launchd.log</string>
+</dict>
+</plist>

@@ -251,7 +251,49 @@ ruby scripts/skill_worker_range.rb --model glm-5 --cases test_off_by_one,build_m
    「跑满 8 轮、一个字没改」的失败，就是靠记录才看出来是 Runtime 拒了 Worker
    的正确补丁，而不是模型不会修。
 
-### 实测（2026-08-16，`glm-5`，12 样本）
+### 常态化
+
+一次快照回答「小模型行不行」，回答不了**「我这次改动让它变好了还是变坏了」**，
+而后者才是回归。所以靶场跑完会自动把成绩归档进 `bench/skill-worker-range/`
+（git 跟踪）：`history.jsonl` 每轮一行摘要，`runs/<时间戳>-<模型>.json` 存完整报告。
+在此之前产出全落在 `target/` 里，被 `.gitignore` 第一行拦着，2026-08-16 那轮的
+原始数据就是这么没的。
+
+```bash
+ruby scripts/skill_worker_range.rb        # 跑一轮，自动归档
+ruby scripts/range_trend.rb               # 看趋势
+ruby scripts/range_trend.rb --inject      # 把趋势写回 README 与本文档
+```
+
+摘要里最重要的字段是 `commit`：没有它，一行成绩就是无主的，涨跌归因不到任何
+改动上。工作区不干净时脚本会警告——那轮成绩挂在一个没提交的状态上，回放不了。
+
+**它仍然不进 PR 的 CI**：要真凭据、要网络、每轮都花钱。定时跑用 launchd
+（模板见 [`scripts/launchd/`](../scripts/launchd/README.md)）或 cron，建议每周一轮，
+并在跑之前 `git pull` 到要测的那版代码上。
+
+三条比率的分母为 0 时存 `null` 不存 `0`，渲染成 `-` 与 `·` 而不是谷底——
+这条纪律与 `agent-metrics` 的「分母为 0 打 `-`」同源，见下文「遥测与指标」。
+
+### 趋势
+
+下面这段由 `ruby scripts/range_trend.rb --inject` 生成，别手改。
+
+<!-- range:begin -->
+靶场还没有跑过（`bench/skill-worker-range/history.jsonl` 为空）。
+
+```bash
+ruby scripts/skill_worker_range.rb
+```
+
+它会真的调用 Provider、真的花钱，跑完自动归档并在这里长出趋势。
+<!-- range:end -->
+
+### 首轮实测（2026-08-16，`glm-5`，12 样本 · 手抄留档）
+
+> 这张表是归档机制上线之前手抄进文档的，原始数据已随 `target/` 丢失，**不进
+> 趋势曲线**。留着是因为它是这条谱系上第一个真实数据点；下一轮跑完，上面的
+> 「趋势」会自动接管。
 
 | 指标 | 结果 |
 |---|---|
