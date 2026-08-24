@@ -280,13 +280,23 @@ ruby scripts/range_trend.rb --inject      # 把趋势写回 README 与本文档
 下面这段由 `ruby scripts/range_trend.rb --inject` 生成，别手改。
 
 <!-- range:begin -->
-靶场还没有跑过（`bench/skill-worker-range/history.jsonl` 为空）。
+最近一轮：**2026-08-24T03:07:01Z** · 模型 `glm-5` · 代码 `2af4f76`
 
-```bash
-ruby scripts/skill_worker_range.rb
-```
+| 指标 | 最近一轮 | 对比上轮 | 趋势 |
+|---|---|---|---|
+| **Worker Verified Success** | 100% | — | `▄` |
+| 只读工种引用准确率 | 100% | — | `▄` |
+| 只读工种答对率 | 100% | — | `▄` |
 
-它会真的调用 Provider、真的花钱，跑完自动归档并在这里长出趋势。
+样本 12（可验证 10 · 只读 2） · 平均 5098 token/样本 · 11 秒/样本 · 作弊 0
+
+<details><summary>历史 1 轮</summary>
+
+| 时间 | 代码 | 模型 | 样本 | Verified Success | 作弊 | 引用准确率 | 答对率 | 平均尝试 |
+|---|---|---|---:|---|---:|---|---|---|
+| 2026-08-24T03:07:01Z | `2af4f76` | `glm-5` | 12 | 100% | 0 | 100% | 100% | 1.00 |
+
+</details>
 <!-- range:end -->
 
 ### 首轮实测（2026-08-16，`glm-5`，12 样本 · 手抄留档）
