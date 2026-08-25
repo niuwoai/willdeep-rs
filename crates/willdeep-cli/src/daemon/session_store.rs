@@ -6,17 +6,6 @@ const MAX_SESSION_TITLE_CHARS: usize = 200;
 const MAX_SEARCH_QUERY_CHARS: usize = 200;
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_SNIPPET_CHARS: usize = 160;
-const MAX_AUTO_TITLE_CHARS: usize = 80;
-
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum SessionTitleSource {
-    AutoPending,
-    Auto,
-    User,
-    #[default]
-    Legacy,
-}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -46,8 +35,6 @@ pub(crate) struct RuntimeSession {
     pub created_at: u64,
     pub updated_at: u64,
     pub last_error: Option<String>,
-    #[serde(default)]
-    title_source: SessionTitleSource,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -162,6 +149,22 @@ struct ExportedCoreSession {
     compression_checkpoint: Option<willdeep_core::session::CompressionCheckpoint>,
 }
 
+/// 一条搜索结果是从哪个仓里捞出来的。
+///
+/// 历史面板此前只列 Runtime 登记过的会话，于是同一个工作区里由桌面版 Xedit
+/// 写下的会话、以及 TUI 建了却从没提交过 Runtime 轮次的会话，全都不在列表里
+/// ——但它们的文件就在旁边，`--resume` 也一直能打开。列表少一半等于列表说谎。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionOrigin {
+    /// Runtime 登记过：有状态、有轮次队列、能派工。
+    Runtime,
+    /// 只有 Core 会话文件（rs 自己写的），继续聊时才会被 Runtime 领养。
+    Local,
+    /// 桌面版 Xedit 写的会话，rs 这侧是只读桥接。
+    Xedit,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RuntimeSessionSearchResult {
     pub(super) id: uuid::Uuid,
@@ -173,6 +176,7 @@ pub(crate) struct RuntimeSessionSearchResult {
     pub(super) updated_at: u64,
     pub(super) message_count: usize,
     pub(super) snippet: Option<String>,
+    pub(super) origin: SessionOrigin,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -329,7 +333,7 @@ impl RuntimeSessionStore {
             }
             return Ok((existing, false));
         }
-        let (core, title_source) = if let Some(id) = request.id {
+        let core = if let Some(id) = request.id {
             let mut core = self
                 .core
                 .load(id)
@@ -347,22 +351,26 @@ impl RuntimeSessionStore {
                 core.config = request.config.clone();
             }
             self.core.save(&mut core)?;
-            (core, SessionTitleSource::Legacy)
+            // 领养一条已经存在的 Core 会话：它的 `title_source` 已经写在文件里，
+            // 这里不覆盖。此前这里一律钉成 `Legacy`，于是每一条从 TUI 建出来
+            // 再交给 Runtime 的会话都永久失去了自动标题——历史面板里那一屏
+            // `New session` 就是这么来的。
+            core
         } else {
             let explicit_title = request.title.filter(|value| !value.trim().is_empty());
-            let (title, title_source) = match explicit_title {
-                Some(title) => (normalized_title(title)?, SessionTitleSource::User),
-                None => (
-                    "New Runtime session".to_owned(),
-                    SessionTitleSource::AutoPending,
-                ),
-            };
-            let mut core =
-                willdeep_core::Session::new(workspace.clone(), request.profile.clone(), &title);
+            let mut core = willdeep_core::Session::new(
+                workspace.clone(),
+                request.profile.clone(),
+                explicit_title.as_deref().unwrap_or_default(),
+            );
+            if let Some(title) = explicit_title {
+                core.title = normalized_title(title)?;
+                core.title_source = willdeep_core::TitleSource::User;
+            }
             core.model = request.model.clone();
             core.config = request.config.clone();
             self.core.save(&mut core)?;
-            (core, title_source)
+            core
         };
         let timestamp = now();
         let session = RuntimeSession {
@@ -378,7 +386,6 @@ impl RuntimeSessionStore {
             created_at: timestamp,
             updated_at: timestamp,
             last_error: None,
-            title_source,
         };
         let mut sessions = self.lock()?;
         sessions.insert(session.id, session.clone());
@@ -409,8 +416,8 @@ impl RuntimeSessionStore {
             .load(id)
             .with_context(|| format!("load Core Session {id}"))?;
         core.title = title;
+        core.title_source = willdeep_core::TitleSource::User;
         self.core.save(&mut core)?;
-        session.title_source = SessionTitleSource::User;
         session.updated_at = now();
         let result = session.clone();
         persist_sessions(&self.path, &sessions)?;
@@ -480,6 +487,8 @@ impl RuntimeSessionStore {
             Some(title) => normalized_title(title)?,
             None => default_fork_title(&core.title),
         };
+        // 派生标题带着母会话的名字，属于既成事实，自动流程不该再动它。
+        core.title_source = willdeep_core::TitleSource::User;
         core.created_at = timestamp;
         core.updated_at = timestamp;
         core.attention_read.clear();
@@ -502,7 +511,6 @@ impl RuntimeSessionStore {
             created_at: timestamp,
             updated_at: timestamp,
             last_error: None,
-            title_source: SessionTitleSource::User,
         };
         let mut sessions = self.lock()?;
         sessions.insert(fork.id, fork.clone());
@@ -583,6 +591,7 @@ impl RuntimeSessionStore {
     pub fn search(&self, filters: SessionSearchQuery) -> Result<Vec<RuntimeSessionSearchResult>> {
         let query = filters
             .q
+            .clone()
             .map(|value| value.trim().to_lowercase())
             .filter(|value| !value.is_empty());
         if query
@@ -600,6 +609,7 @@ impl RuntimeSessionStore {
         }
         let workspace = filters
             .workspace
+            .clone()
             .map(|value| value.canonicalize())
             .transpose()
             .context("invalid Session search workspace")?;
@@ -664,13 +674,107 @@ impl RuntimeSessionStore {
                 updated_at: session.updated_at.max(core.updated_at),
                 message_count: core.messages.len(),
                 snippet: matching_message.map(|message| bounded_snippet(&message.content)),
+                origin: SessionOrigin::Runtime,
             });
             if results.len() >= MAX_SEARCH_RESULTS {
                 break;
             }
         }
+        self.extend_with_unmanaged(
+            &mut results,
+            query.as_deref(),
+            workspace.as_deref(),
+            &filters,
+        );
         results.sort_by_key(|result| std::cmp::Reverse(result.updated_at));
+        results.truncate(MAX_SEARCH_RESULTS);
         Ok(results)
+    }
+
+    /// 把 Runtime 没登记过的会话补进结果：Xedit 桥接的，以及只有 Core 文件的。
+    ///
+    /// 三条取舍：
+    ///
+    /// * **`--profile` / `--model` 过滤存在时整段跳过。** 这两样只记在 Runtime
+    ///   元数据里，未登记的会话根本没有这个字段。把它们当「不匹配」剔掉是对的，
+    ///   当「匹配」混进去则是让过滤器撒谎。
+    /// * **状态一律按 `Idle` 记。** 它们没有轮次队列，也就没有别的状态可言。
+    /// * **正文匹配才读全文。** 先用 digest（按 mtime+size 缓存、不物化正文）
+    ///   过掉工作区和时间窗，剩下的才逐条 load。桌面版那个目录有几百个会话、
+    ///   上百 MB，每敲一个键全量反序列化一遍是不能接受的。
+    fn extend_with_unmanaged(
+        &self,
+        results: &mut Vec<RuntimeSessionSearchResult>,
+        query: Option<&str>,
+        workspace: Option<&Path>,
+        filters: &SessionSearchQuery,
+    ) {
+        if filters.profile.is_some() || filters.model.is_some() {
+            return;
+        }
+        if filters
+            .status
+            .is_some_and(|status| status != RuntimeSessionStatus::Idle)
+        {
+            return;
+        }
+        let known = results
+            .iter()
+            .map(|result| result.id)
+            .collect::<HashSet<_>>();
+        for digest in self.core.digests() {
+            if known.contains(&digest.id) || results.len() >= MAX_SEARCH_RESULTS {
+                continue;
+            }
+            let digest_workspace = digest
+                .workspace
+                .canonicalize()
+                .unwrap_or_else(|_| digest.workspace.clone());
+            if workspace.is_some_and(|value| value != digest_workspace)
+                || filters
+                    .updated_after
+                    .is_some_and(|value| digest.updated_at < value)
+                || filters
+                    .updated_before
+                    .is_some_and(|value| digest.updated_at > value)
+            {
+                continue;
+            }
+            let title_matches =
+                query.is_none_or(|query| digest.title.to_lowercase().contains(query));
+            let matching_message = match query {
+                Some(query) if !title_matches => {
+                    let Ok(core) = self.core.load(digest.id) else {
+                        continue;
+                    };
+                    let Some(message) = core
+                        .messages
+                        .iter()
+                        .find(|message| message.content.to_lowercase().contains(query))
+                    else {
+                        continue;
+                    };
+                    Some(bounded_snippet(&message.content))
+                }
+                _ => None,
+            };
+            results.push(RuntimeSessionSearchResult {
+                id: digest.id,
+                title: digest.title,
+                workspace: digest_workspace,
+                status: RuntimeSessionStatus::Idle,
+                profile: None,
+                model: None,
+                updated_at: digest.updated_at,
+                message_count: digest.message_count,
+                snippet: matching_message,
+                origin: if digest.bridged {
+                    SessionOrigin::Xedit
+                } else {
+                    SessionOrigin::Local
+                },
+            });
+        }
     }
 
     fn ensure_manageable(&self, id: uuid::Uuid) -> Result<()> {
@@ -783,26 +887,28 @@ impl RuntimeSessionStore {
         Ok((metadata, true, title_changed))
     }
 
+    /// L1：轮次入队那一刻就把占位标题换掉，不等轮次跑完。
+    ///
+    /// 判定与 TUI 本地轮次共用 [`crate::titling`]，两条入口对同一条会话必须
+    /// 给出同一个标题；来源位存在 Core 会话上，Runtime 这边不再另存一份。
     fn apply_auto_title(
         &self,
         session_id: uuid::Uuid,
         prompt: &str,
         has_attachments: bool,
     ) -> Result<bool> {
-        let mut sessions = self.lock()?;
-        let session = sessions
-            .get_mut(&session_id)
-            .context("Runtime Session not found")?;
-        if session.title_source != SessionTitleSource::AutoPending {
-            return Ok(false);
-        }
         let mut core = self
             .core
             .load(session_id)
             .with_context(|| format!("load Core Session {session_id} for automatic title"))?;
-        core.title = safe_auto_title(prompt, has_attachments);
+        if !crate::titling::apply_derived_title(&mut core, prompt, has_attachments) {
+            return Ok(false);
+        }
         self.core.save(&mut core)?;
-        session.title_source = SessionTitleSource::Auto;
+        let mut sessions = self.lock()?;
+        let session = sessions
+            .get_mut(&session_id)
+            .context("Runtime Session not found")?;
         session.updated_at = now();
         persist_sessions(&self.path, &sessions)?;
         Ok(true)
@@ -1873,7 +1979,6 @@ fn load_sessions(path: &Path) -> Result<(HashMap<uuid::Uuid, RuntimeSession>, bo
             RUNTIME_SESSION_SCHEMA => {}
             1 => {
                 session.schema = RUNTIME_SESSION_SCHEMA;
-                session.title_source = SessionTitleSource::Legacy;
                 migrated = true;
             }
             _ => {
@@ -1957,59 +2062,6 @@ fn backup_sessions_before_migration(path: &Path, source_schema: u32) -> Result<(
     })
 }
 
-fn safe_auto_title(prompt: &str, has_attachments: bool) -> String {
-    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return if has_attachments {
-            "Attachment conversation".to_owned()
-        } else {
-            "New Runtime session".to_owned()
-        };
-    }
-    let lowercase = normalized.to_ascii_lowercase();
-    let sensitive_marker = [
-        "api_key",
-        "api key",
-        "password",
-        "passwd",
-        "secret",
-        "authorization:",
-        "bearer ",
-        "private key",
-        "access_token",
-        "refresh_token",
-        "sk-",
-        "ghp_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "akia",
-    ]
-    .iter()
-    .any(|marker| lowercase.contains(marker));
-    let high_entropy_token = normalized.split_whitespace().any(|token| {
-        let token = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
-        token.len() >= 24
-            && token.bytes().any(|byte| byte.is_ascii_lowercase())
-            && token.bytes().any(|byte| byte.is_ascii_uppercase())
-            && token.bytes().any(|byte| byte.is_ascii_digit())
-    });
-    if sensitive_marker || high_entropy_token {
-        return "New Runtime session".to_owned();
-    }
-    let truncated = normalized.chars().count() > MAX_AUTO_TITLE_CHARS;
-    let limit = if truncated {
-        MAX_AUTO_TITLE_CHARS.saturating_sub(1)
-    } else {
-        MAX_AUTO_TITLE_CHARS
-    };
-    let mut title = normalized.chars().take(limit).collect::<String>();
-    if truncated {
-        title.push('…');
-    }
-    title
-}
-
 fn load_turns(path: &Path) -> Result<HashMap<uuid::Uuid, StoredRuntimeTurn>> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -2073,11 +2125,9 @@ mod tests {
         let store = RuntimeSessionStore::open(path.clone(), &root).unwrap();
         let migrated = store.get(id).unwrap().unwrap();
         assert_eq!(migrated.schema, RUNTIME_SESSION_SCHEMA);
-        assert_eq!(migrated.title_source, SessionTitleSource::Legacy);
         let persisted: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted[0]["schema"], RUNTIME_SESSION_SCHEMA);
-        assert_eq!(persisted[0]["title_source"], "legacy");
         let backups = std::fs::read_dir(&root)
             .unwrap()
             .flatten()
@@ -2107,7 +2157,7 @@ mod tests {
     }
 
     #[test]
-    fn first_turn_titles_only_auto_pending_sessions_without_exposing_secrets() {
+    fn first_turn_titles_only_unnamed_sessions_without_exposing_secrets() {
         let root = std::env::temp_dir().join(format!(
             "willdeep-runtime-auto-title-{}",
             uuid::Uuid::new_v4()
@@ -2116,11 +2166,6 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
         let core = willdeep_core::SessionStore::new(&root);
-        assert_eq!(
-            safe_auto_title("debug sk-FakeCredential1234567890", false),
-            "New Runtime session"
-        );
-        assert!(safe_auto_title(&"a".repeat(200), false).chars().count() <= 80);
         let create = |title| {
             store
                 .create(CreateRuntimeSession {
@@ -2150,8 +2195,8 @@ mod tests {
             "Analyze the session migration architecture"
         );
         assert_eq!(
-            store.get(automatic.id).unwrap().unwrap().title_source,
-            SessionTitleSource::Auto
+            core.load(automatic.id).unwrap().title_source,
+            willdeep_core::TitleSource::Derived
         );
 
         let renamed = create(None);
@@ -2179,10 +2224,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            core.load(sensitive.id).unwrap().title,
-            "New Runtime session"
-        );
+        // 凭据样的提示词一个字都不许进标题：占位符原地不动。
+        assert_eq!(core.load(sensitive.id).unwrap().title, "New session");
 
         let attachment = create(None);
         store
@@ -2201,6 +2244,123 @@ mod tests {
         assert_eq!(
             core.load(attachment.id).unwrap().title,
             "Attachment conversation"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 历史面板此前只列 Runtime 登记过的会话。同一个工作区里还躺着两类文件：
+    /// 桌面版 Xedit 写的，以及 TUI 建了却从没提交过 Runtime 轮次的——它们
+    /// `--resume` 一直打得开，却从来不出现在列表里。列表少一半等于列表说谎。
+    #[test]
+    fn search_lists_sessions_the_runtime_never_registered() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-runtime-unmanaged-search-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+        let core = willdeep_core::SessionStore::new(&root);
+
+        let managed = store
+            .create(CreateRuntimeSession {
+                id: None,
+                workspace: workspace.clone(),
+                profile: None,
+                model: None,
+                config: None,
+                title: Some("Runtime 登记过的会话".to_owned()),
+            })
+            .unwrap();
+
+        // 只有 Core 文件、Runtime 一无所知的那一类。
+        let mut orphan =
+            willdeep_core::Session::new(canonical.clone(), None, "只有会话文件的历史对话");
+        orphan
+            .messages
+            .push(willdeep_core::Message::user("只有会话文件的历史对话"));
+        core.save(&mut orphan).unwrap();
+
+        // 另一个工作区的会话不能混进来。
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mut foreign = willdeep_core::Session::new(
+            elsewhere.canonicalize().unwrap(),
+            None,
+            "别的工作区的会话",
+        );
+        core.save(&mut foreign).unwrap();
+
+        let results = store
+            .search(SessionSearchQuery {
+                q: None,
+                workspace: Some(workspace.clone()),
+                status: None,
+                profile: None,
+                model: None,
+                updated_after: None,
+                updated_before: None,
+            })
+            .unwrap();
+        let found = results
+            .iter()
+            .map(|result| (result.id, result.origin))
+            .collect::<Vec<_>>();
+        assert!(
+            found.contains(&(managed.id, SessionOrigin::Runtime)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&(orphan.id, SessionOrigin::Local)),
+            "{found:?}"
+        );
+        assert!(
+            !found.iter().any(|(id, _)| *id == foreign.id),
+            "workspace filter must still hold: {found:?}"
+        );
+        let orphan_result = results
+            .iter()
+            .find(|result| result.id == orphan.id)
+            .unwrap();
+        assert_eq!(orphan_result.title, "只有会话文件的历史对话");
+        assert_eq!(orphan_result.message_count, 1);
+
+        // 关键词同时匹配标题与正文，两条路都要走通。
+        for query in ["只有会话文件", "历史对话"] {
+            let hits = store
+                .search(SessionSearchQuery {
+                    q: Some(query.to_owned()),
+                    workspace: Some(workspace.clone()),
+                    status: None,
+                    profile: None,
+                    model: None,
+                    updated_after: None,
+                    updated_before: None,
+                })
+                .unwrap();
+            assert!(
+                hits.iter().any(|result| result.id == orphan.id),
+                "{query} missed the unmanaged Session"
+            );
+        }
+
+        // Provider / 模型过滤器只存在于 Runtime 元数据里。未登记的会话没有这些
+        // 字段，混进来就是让过滤器撒谎——整段跳过才是诚实的。
+        let filtered = store
+            .search(SessionSearchQuery {
+                q: None,
+                workspace: Some(workspace.clone()),
+                status: None,
+                profile: None,
+                model: Some("mock-model".to_owned()),
+                updated_after: None,
+                updated_before: None,
+            })
+            .unwrap();
+        assert!(
+            !filtered.iter().any(|result| result.id == orphan.id),
+            "a model filter must not match a Session that has no model"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -36,7 +36,8 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | webhook `willdeep.webhook.v1` | Xedit 定义、rs 遵从 | `notify.rs:8-14`（"wire format is not ours to invent"），状态词表对齐 Swift enum raw value，回归测试锁定 | `AgentAttentionSettings.swift:472-511` |
 | 工种→模型映射（`someim-32b-<trade>`） | 双端镜像 | `subagent.rs:1618`（注释点名镜像对象）+ 单测 | `AgentSubagentJobPrompts.hostedModel(for:)` |
 | Task Packet 字段 | 近乎字段级同构 | `subagent.rs:143-178` | `AgentSubagentTaskPacket.swift:19-66` |
-| 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件 | `session.rs:472-572` | Xedit 不读 `~/.willdeep/sessions` |
+| 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件。0.43.0-rc1 起桥接会话进入 rs 历史面板并标 `[Xedit]` | `session.rs` 的 `swift_digest` / `swift_session`；`session_store.rs` 的 `extend_with_unmanaged` | Xedit 不读 `~/.willdeep/sessions` |
+| 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |

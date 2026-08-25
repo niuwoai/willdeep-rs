@@ -301,6 +301,18 @@ pub struct SearchSessionsParams {
     pub updated_before: Option<u64>,
 }
 
+/// 搜索结果来自哪个仓。同一个工作区的历史会话不只 Runtime 一个来源：桌面版
+/// Xedit 写的会话与只有 Core 文件的本地会话同样可以续聊，列表必须列出来，
+/// 但它们没有 Runtime 元数据（Provider、模型、轮次队列），得让客户端知道。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    #[default]
+    Runtime,
+    Local,
+    Xedit,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSearchResult {
     pub id: uuid::Uuid,
@@ -312,6 +324,10 @@ pub struct SessionSearchResult {
     pub updated_at: u64,
     pub message_count: usize,
     pub snippet: Option<String>,
+    /// 老客户端读不到这个字段，缺省按 `runtime` 处理——那正是这个字段出现
+    /// 之前唯一存在的来源。
+    #[serde(default)]
+    pub origin: SessionOrigin,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

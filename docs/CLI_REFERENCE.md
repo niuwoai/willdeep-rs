@@ -85,8 +85,11 @@ willdeep --project "项目名"
 ```
 
 从 Swift 会话续聊时，结果保存为 `~/.willdeep/sessions` 下的 Rust 副本，不覆盖 Swift 原文件。
+这些桥接会话也出现在 TUI 的历史面板里（标 `[Xedit]`），标题读的是 Xedit 写下的那一个。
 
-每次成功回复会原子保存到 `$WILLDEEP_HOME/sessions/<uuid>.json`。
+每次成功回复会原子保存到 `$WILLDEEP_HOME/sessions/<uuid>.json`。会话标题由两级自动生成
+（提交时确定性派生 + 第一轮回复后一次模型摘要），关掉写 `[agent] auto_title = false`，
+详见 [会话标题](TUI_GUIDE.md#会话标题怎么来的)。
 
 ## `willdeep run` — 自动化入口
 

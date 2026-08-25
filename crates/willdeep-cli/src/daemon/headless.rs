@@ -23,7 +23,6 @@ pub(crate) struct HeadlessRuntimeRequest {
     pub workspace: PathBuf,
     pub profile: Option<String>,
     pub model: Option<String>,
-    pub title: String,
     pub prompt: String,
     pub attachments: Vec<willdeep_core::MessageAttachment>,
 }
@@ -40,7 +39,6 @@ pub(crate) async fn execute_headless_turn(
         &request.workspace,
         request.profile,
         request.model,
-        request.title,
     )
     .await?;
     let submitted = submit_runtime_turn(

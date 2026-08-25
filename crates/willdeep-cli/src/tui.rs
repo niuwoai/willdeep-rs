@@ -59,7 +59,7 @@ use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
-use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt};
+use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt, dispatch_retitle};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
@@ -87,6 +87,16 @@ pub enum UiMessage {
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
     ModelsLoaded(std::result::Result<Vec<String>, String>),
+    /// 标题摘要跑完了（`Some` 才是有结果）。摘要是一次网络往返，不能在
+    /// 事件循环里直接 await——那会让整个界面在轮次收尾时卡住。
+    ///
+    /// `requested` 区分「轮次收尾时自动跑的」和「人敲 `/session retitle` 要的」：
+    /// 前者失败该静默（列表里还有 L1 标题），后者失败必须说出来，
+    /// 否则一条命令按下去什么都没发生。
+    Retitled {
+        title: Option<String>,
+        requested: bool,
+    },
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
 pub struct TuiSink {
@@ -542,6 +552,13 @@ fn is_selection_copy_key(key: KeyEvent) -> bool {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER))
         || (key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE)
+}
+
+fn is_clipboard_image_paste_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
 }
 
 fn quote_selected_text(value: &str) -> String {
@@ -1025,7 +1042,13 @@ async fn event_loop(
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
             .await
             .unwrap_or_default();
-        store.save(session)?;
+        // 一条还没说过话的会话不该为了记一个事件游标就落盘。此前每开一次 TUI
+        // 不敲字就关，磁盘上就多一条 0 消息会话，历史列表被它们挤满——而它们
+        // 什么都没记录。游标会在第一条提示词落盘时一起写下去；在那之前丢掉它
+        // 的唯一后果是下次从事件流头部重读，而空会话没有任何东西要重放。
+        if !session.messages.is_empty() {
+            store.save(session)?;
+        }
     }
     app.runtime_event_cursor = session.runtime_event_cursor;
     app.workspace = Some(session.workspace.clone());
@@ -1729,13 +1752,16 @@ async fn event_loop(
                         continue;
                     }
                     if app.handle_command_key(key) || app.handle_skill_key(key, &runtime.skills) { continue; }
+                    if is_clipboard_image_paste_key(key) {
+                        app.paste_clipboard_image();
+                        continue;
+                    }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
                         KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_top(),KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_bottom(),
                         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.tools_expanded = !app.tools_expanded,
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.delete_selected_attachment(),
-                    KeyCode::Char('v') if (key.modifiers.contains(KeyModifiers::CONTROL)&&key.modifiers.contains(KeyModifiers::SHIFT))||key.modifiers.contains(KeyModifiers::SUPER)=>app.paste_clipboard_image(),
                         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
                         KeyCode::Enter if !app.input.is_empty()||!app.attachments.is_empty()=>{
@@ -1788,6 +1814,17 @@ async fn event_loop(
                                 },
                                 Ok(None)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("打开历史会话面板失败","Open Session history panel failed","履歴セッションパネルを開けませんでした")));continue;},
+                            }
+                            // `/session retitle` 要 agent 与 UI 通道，落在这里而不是
+                            // handle_session_command 里——摘要是网络往返，必须扔进后台任务。
+                            if prompt.trim()=="/session retitle" {
+                                if session.title_source==willdeep_core::TitleSource::User {
+                                    app.append_transcript(format!("System: {}",language.text("这条会话的标题是你自己起的；先 /session rename 交回控制权再重算","This Session's title was set by you; hand it back with /session rename before recomputing","このセッション名はあなたが付けたものです。再計算する前に /session rename で戻してください")));
+                                } else {
+                                    dispatch_retitle(session,&agent,&runtime.tx,true);
+                                    app.append_transcript(format!("System: {}",language.text("正在整理会话标题…","Retitling the Session…","セッション名を整理しています…")));
+                                }
+                                continue;
                             }
                             match handle_session_command(&prompt,&mut app,session,store,runtime).await {
                                 Ok(true)=>continue,
@@ -1914,12 +1951,15 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
+                // 摘要失败是静默的：列表里还留着 L1 派生的标题，为一行装饰
+                // 文字往聊天区塞报错不划算。改成功了才说一句。
+                UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
             },
             Some(prompt)=mobile_rx.recv()=>{
                 if app.running {app.queued_prompts.push_back(QueuedPrompt{text:prompt.text,attachments:Vec::new(),from_phone:true});app.notice=Some(format!("Phone request queued · {} waiting",app.queued_prompts.len()));}

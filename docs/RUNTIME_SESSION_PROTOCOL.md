@@ -91,6 +91,28 @@ turn.stop
 
 创建 Turn 必须提供客户端生成的 `request_id`。同一 Session 内重复提交相同 `request_id` 返回原 Turn，不再次运行模型或工具。
 
+`session.create` 带 `id` 时是**领养**语义：Runtime 沿用会话文件里已有的标题，请求里的 `title` 被忽略。
+
+**领养调用每次发新的 `request_id`，不要拿会话 ID 当幂等键。** 幂等记录存的是整个 params
+的指纹，而领养的参数里有会变的字段（Provider、模型）。拿会话 ID 当键的话，参数变一次就撞
+`request_id was already used with different operation params`；这条记录是持久化的，撞上之后
+这条会话**永久**发不出领养调用。换新键是安全的：领养本身就幂等——会话已登记就直接返回它，
+不会建出第二条，幂等闸门在这里没有任何东西可保护。
+
+固定 `request_id` 仍然是 `turn.submit` 的硬要求：那里重复提交会真的再跑一遍模型和工具。
+
+`session.search` 的每条结果带 `origin`，取值 `runtime` / `local` / `xedit`：
+
+| `origin` | 含义 | Provider / 模型字段 |
+|---|---|---|
+| `runtime` | Runtime 登记过的会话 | 有 |
+| `local` | 只有 Core 会话文件，Runtime 尚未领养 | 无（恒为 `null`） |
+| `xedit` | macOS 桌面版写的会话，只读桥接 | 无（恒为 `null`） |
+
+后两类没有 Runtime 元数据，因此 `profile` / `model` 过滤器在场时不参与检索；
+`status` 过滤器只在取值为 `idle` 时匹配它们。老客户端读不到 `origin`，缺省按 `runtime` 处理
+——那正是这个字段出现之前唯一存在的来源。
+
 带私有配置文件引用的 Session 创建属于进程内 Harness 能力，使用 `/v1/internal/sessions`，不进入公开 DTO；普通客户端只能通过 `session.create` 提交公开字段。
 
 ### 3.1 会话管理语义

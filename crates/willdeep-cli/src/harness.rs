@@ -264,6 +264,11 @@ pub(crate) async fn execute_noninteractive(
             compressed: true,
         });
     }
+    // L1：提交那一刻就把占位标题换掉。历史列表要在轮次跑完之前就可读——
+    // 一条正在跑的会话恰恰是人最可能去列表里找的那条。
+    if crate::titling::apply_derived_title(session, &prompt, !attachments.is_empty()) {
+        store.save(session)?;
+    }
     let (history, user_message) = if options.replay_existing_user_message {
         let user_message = session
             .messages
@@ -309,6 +314,11 @@ pub(crate) async fn execute_noninteractive(
             session.messages = outcome.messages.clone();
             store.save(session)?;
         }
+    }
+    // L2：第一轮问答落地后跑一次摘要。放在通知之前，好让 webhook 带上的是
+    // 整理过的标题而不是提示词前缀。
+    if crate::titling::apply_summarized_title(&built.agent, session).await {
+        store.save(session)?;
     }
     // A headless run is exactly the case where nobody is watching the
     // terminal, so this is the ping that matters most — and the one that has to
@@ -708,6 +718,18 @@ pub(crate) async fn build(
         agent = agent.with_compressor(
             build_provider(compressor_config).context("initialize context compressor provider")?,
             hosted_prompt,
+        );
+    }
+    // 会话标题摘要模型：默认取会话模型。标题请求只发一问一答各 800 字，
+    // 成本可忽略；另指一个端点反而多一种「缺凭据 → 静默退化」的失败方式，
+    // 这是安全裁决那边已经踩过的坑（见 `default_judge_model`）。
+    if loaded.file.agent.auto_title.unwrap_or(true) {
+        let mut title_config = parent_provider_config.clone();
+        if let Some(title_model) = loaded.file.agent.title_model.clone() {
+            title_config.model = title_model;
+        }
+        agent = agent.with_titler(
+            build_provider(title_config).context("initialize session title provider")?,
         );
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);

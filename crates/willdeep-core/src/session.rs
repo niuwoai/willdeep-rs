@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::session_title::{self, TitleSource};
 use crate::types::Message;
 use crate::types::Role;
 
@@ -29,6 +30,10 @@ pub struct Session {
     pub version: u32,
     pub id: Uuid,
     pub title: String,
+    /// 标题从哪来的，决定自动流程还能不能改它。缺省 `Legacy`：这个字段出现
+    /// 之前的会话文件里没有它，而它们的标题只能靠占位符判定来接管。
+    #[serde(default)]
+    pub title_source: TitleSource,
     pub workspace: PathBuf,
     pub profile: Option<String>,
     #[serde(default)]
@@ -59,10 +64,18 @@ pub struct Session {
 impl Session {
     pub fn new(workspace: PathBuf, profile: Option<String>, prompt: &str) -> Self {
         let now = now();
+        let derived = session_title::derive_from_prompt(prompt, false);
         Self {
             version: SESSION_VERSION,
             id: Uuid::new_v4(),
-            title: title(prompt),
+            title: derived.clone(),
+            // 占位符不算「派生过」：`Session::new` 在 TUI 里是先于任何提示词
+            // 建出来的，此时标题只是个名字位，得留给后续轮次接管。
+            title_source: if session_title::is_placeholder(&derived) {
+                TitleSource::Legacy
+            } else {
+                TitleSource::Derived
+            },
             workspace,
             profile,
             model: None,
@@ -110,6 +123,10 @@ pub struct SessionDigest {
     pub pinned_at: Option<u64>,
     /// 是否存在非空的用户输入（正文非空或带附件）。
     pub has_user_input: bool,
+    /// 消息条数。列表视图靠它区分「聊过的」和「点开就没再回来的」。
+    pub message_count: usize,
+    /// 会话文件由 Xedit（macOS 桌面版）写出，rs 这边是只读桥接。
+    pub bridged: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -424,6 +441,8 @@ fn local_digest(path: &Path, _metadata: &std::fs::Metadata) -> Option<SessionDig
         updated_at: probe.updated_at,
         pinned_at: probe.pinned_at,
         has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+        message_count: probe.messages.len(),
+        bridged: false,
     })
 }
 
@@ -466,6 +485,8 @@ fn swift_digest(path: &Path, metadata: &std::fs::Metadata) -> Option<SessionDige
         updated_at: updated,
         pinned_at: probe.pinned_at.as_deref().and_then(parse_iso8601),
         has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
+        message_count: probe.messages.len(),
+        bridged: true,
     })
 }
 
@@ -550,6 +571,8 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .and_then(|value| value.as_str())
             .unwrap_or("Swift session")
             .to_owned(),
+        // Xedit 有自己的两级标题流程，桥接过来的标题按既成事实读，不重算。
+        title_source: TitleSource::Legacy,
         workspace: PathBuf::from(workspace),
         profile: None,
         model: None,
@@ -655,16 +678,6 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
-fn title(prompt: &str) -> String {
-    prompt
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(80)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +830,84 @@ mod tests {
             assert_eq!(swift_bridge_directory(&foreign, Some(&home)), None);
         }
         assert_eq!(swift_bridge_directory(&default_home_store, None), None);
+    }
+
+    /// Xedit 写的会话文件用 camelCase、时间戳是 ISO8601、正文键叫 `content`。
+    /// 列表视图要从里面读出标题、工作区和消息数，并且认出它是桥接来的——
+    /// 桥接会话在 rs 这边是只读的，UI 得能把这件事标出来。
+    #[test]
+    fn desktop_session_files_yield_a_readable_digest() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-digest-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = Uuid::new_v4();
+        let path = root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "title": "代码提交一下。",
+                "workspaceLocation": {"path": "/Users/tester/Sites/willdeep-rs"},
+                "pinnedAt": "2026-08-11T00:00:00Z",
+                "messages": [
+                    {"role": "user", "content": "代码提交一下。"},
+                    {"role": "assistant", "content": "好的"},
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let digest = cached_digest(&path, swift_digest).expect("Swift digest");
+        assert_eq!(digest.id, id);
+        assert_eq!(digest.title, "代码提交一下。");
+        assert_eq!(
+            digest.workspace,
+            PathBuf::from("/Users/tester/Sites/willdeep-rs")
+        );
+        assert_eq!(digest.message_count, 2);
+        assert!(digest.has_user_input);
+        assert!(digest.bridged, "desktop sessions must be marked read-only");
+        assert_eq!(digest.pinned_at, Some(1_786_406_400));
+
+        // 没有标题的会话仍要出现在列表里，只是叫占位名——不能整条被丢掉。
+        let untitled = Uuid::new_v4();
+        let untitled_path = root.join(format!("{untitled}.json"));
+        std::fs::write(
+            &untitled_path,
+            serde_json::json!({"id": untitled, "messages": []}).to_string(),
+        )
+        .unwrap();
+        let digest = cached_digest(&untitled_path, swift_digest).expect("untitled Swift digest");
+        assert_eq!(digest.title, "Swift session");
+        assert_eq!(digest.message_count, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 桥接会话读进来时按 `Legacy` 记：Xedit 有自己的两级标题流程，rs 这边
+    /// 不该在别人的会话上再跑一遍自动改名。
+    #[test]
+    fn bridged_sessions_keep_their_desktop_title() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-load-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = Uuid::new_v4();
+        let path = root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "title": "排查 CPU 负载",
+                "workspaceRootPath": "/Users/tester/Sites/tokenhub",
+                "messages": [{"role": "user", "content": "top 一下"}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let session = swift_session(&path).expect("Swift session");
+        assert_eq!(session.title, "排查 CPU 负载");
+        assert_eq!(session.title_source, TitleSource::Legacy);
+        assert_eq!(session.swift_source.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
