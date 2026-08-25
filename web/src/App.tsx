@@ -42,6 +42,17 @@ async function mutate(url: string, init: RequestInit) {
 
 function nextId(prefix: string) { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 
+function clipboardImageFile(clipboard: DataTransfer): File | null {
+  const file = Array.from(clipboard.files).find((candidate) => candidate.type.startsWith("image/"));
+  if (file) return file;
+  for (const item of Array.from(clipboard.items)) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    const candidate = item.getAsFile();
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
 function runtimeCursorKey(sessionId: string, turnId: string) {
   return `${runtimeCursorPrefix}${sessionId}.${turnId}`;
 }
@@ -463,8 +474,8 @@ export function App() {
   }
 
   function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
-    const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === "file" && item.type.startsWith("image/"));
-    if (imageItem) { const file = imageItem.getAsFile(); if (file) { event.preventDefault(); attachImage(file); } return; }
+    const imageFile = clipboardImageFile(event.clipboardData);
+    if (imageFile) { event.preventDefault(); attachImage(imageFile); return; }
     const text = event.clipboardData.getData("text/plain");
     if (text.includes("\n") || text.length > 200) { event.preventDefault(); setAttachments((current) => [...current, { kind: "text", name: `${t.pastedText}-${current.length + 1}.txt`, content: text }]); }
   }

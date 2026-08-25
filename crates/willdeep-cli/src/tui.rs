@@ -554,6 +554,13 @@ fn is_selection_copy_key(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE)
 }
 
+fn is_clipboard_image_paste_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+}
+
 fn quote_selected_text(value: &str) -> String {
     value
         .lines()
@@ -1745,13 +1752,16 @@ async fn event_loop(
                         continue;
                     }
                     if app.handle_command_key(key) || app.handle_skill_key(key, &runtime.skills) { continue; }
+                    if is_clipboard_image_paste_key(key) {
+                        app.paste_clipboard_image();
+                        continue;
+                    }
                     match key.code {
                         KeyCode::PageUp=>app.scroll_up(app.viewport_height.saturating_sub(1).max(1)),KeyCode::PageDown=>app.scroll_down(app.viewport_height.saturating_sub(1).max(1)),
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_up(1),KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT)=>app.scroll_down(1),
                         KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_top(),KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL)=>app.scroll_to_bottom(),
                         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.tools_expanded = !app.tools_expanded,
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.delete_selected_attachment(),
-                    KeyCode::Char('v') if (key.modifiers.contains(KeyModifiers::CONTROL)&&key.modifiers.contains(KeyModifiers::SHIFT))||key.modifiers.contains(KeyModifiers::SUPER)=>app.paste_clipboard_image(),
                         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
                         KeyCode::Enter if !app.input.is_empty()||!app.attachments.is_empty()=>{

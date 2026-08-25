@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.43.0-rc3] - 2026-08-25
+
+### Fixed
+- **输入区恢复图片粘贴。** TUI 原先只识别小写 `v`，部分终端把 `Ctrl+Shift+V` 上报为大写 `V` 时快捷键会被静默漏掉；同时多数终端会截获 `Cmd+V` / `Ctrl+Shift+V`，导致文本能经 Bracketed Paste 进入、图片却没有事件可处理。现在大小写都识别，并新增终端可直接交给 TUI 的 `Ctrl+V` 备用入口。Web Composer 同时兼容浏览器把剪贴板图片放在 `clipboardData.files` 而非 `items` 的情况。
+
+### Tests
+- 新增 TUI 图片粘贴快捷键回归测试，覆盖 `Ctrl+V`、大写 `Ctrl+Shift+V`、`Cmd+V`，并确认普通字母 `v` 不会被误拦截。
+
 ## [0.43.0-rc2] - 2026-08-25
 
 ### Fixed

@@ -1537,6 +1537,23 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn recognizes_clipboard_image_paste_shortcuts() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('V'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+        ] {
+            assert!(is_clipboard_image_paste_key(key));
+        }
+        assert!(!is_clipboard_image_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+    }
     #[tokio::test]
     async fn ask_dialog_accepts_custom_text() {
         let mut app = App::new(Vec::new(), Language::En);
