@@ -246,13 +246,30 @@ pub(crate) async fn search_remote_session_results(
     Ok(results)
 }
 
+/// 让 Runtime 登记（或确认已登记）一条已经存在的 Core 会话。
+///
+/// **每次发新的 `request_id`，不拿会话 ID 当幂等键。**
+///
+/// 此前这里把会话 ID 当 request_id 用，本意是「同一条会话反复 ensure 算同一次
+/// 调用」。但幂等记录存的是**整个 params 的指纹**，于是任何一个会变的字段都成了
+/// 地雷：标题改一次、Provider 换一次，下一次 ensure 就撞
+/// `request_id was already used with different operation params`，
+/// 而且这条记录是持久化的——撞上之后这条会话**永久**发不出 ensure，
+/// TUI 和 Web 一起哑掉。Web 侧两个调用点传的 `profile` 本来就不一样
+/// （一个带 `.or(profile)` 一个不带），所以它一直在踩，只是要凑巧才发作。
+///
+/// 换新 ID 是安全的：这是 `id: Some(..)` 的领养调用，服务端本来就幂等——
+/// 会话已登记就直接返回它，不会建出第二条。幂等闸门在这里一分钱价值都没买到，
+/// 只买到了这颗雷。
+///
+/// 顺带也不再带 `title`：领养分支根本不读它，而少一个会变的字段就少一分
+/// 「换个键还是撞上」的机会。
 pub(crate) async fn ensure_runtime_session(
     home: &Path,
     id: uuid::Uuid,
     workspace: &Path,
     profile: Option<String>,
     model: Option<String>,
-    title: String,
 ) -> Result<RemoteRuntimeSession> {
     let state = ensure_running(home).await?;
     let session = api_data(
@@ -263,9 +280,9 @@ pub(crate) async fn ensure_runtime_session(
                     workspace: workspace.canonicalize()?.display().to_string(),
                     profile,
                     model,
-                    title: Some(title),
+                    title: None,
                 },
-                id,
+                uuid::Uuid::new_v4(),
             )
             .await?,
     )?;

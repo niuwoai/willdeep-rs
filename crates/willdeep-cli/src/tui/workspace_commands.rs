@@ -127,7 +127,6 @@ async fn switch(
         &workspace.root,
         workspace.provider_profile.clone(),
         target.model.clone(),
-        target.title.clone(),
     )
     .await?;
     crate::daemon::activate_remote_workspace(&runtime.home, id).await?;

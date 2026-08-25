@@ -50,7 +50,6 @@ pub(super) async fn submit_turn(
         &session.workspace,
         session.profile.clone(),
         session.model.clone(),
-        session.title.clone(),
     )
     .await?;
     session.runtime_managed = true;
@@ -110,7 +109,11 @@ pub(super) fn apply_runtime_events(
         } else {
             session.runtime_event_cursor = app.runtime_event_cursor;
         }
-        store.save(session)?;
+        // 同 `tui::run` 的启动写入：空会话不为游标落盘。别的工作区的事件照样
+        // 会推进游标，光坐着不说话也能把一条空会话写出来。
+        if !session.messages.is_empty() {
+            store.save(session)?;
+        }
     }
     Ok(())
 }

@@ -60,6 +60,11 @@ impl App {
         let Some(picker) = self.session_picker.as_mut() else {
             return;
         };
+        // 一条消息都没有的会话进不了这个列表：它没有可继续的内容，标题永远是
+        // 占位符，进去也只是回到一张白纸。当前会话是唯一的例外——人得看得见
+        // 自己在哪儿。过滤必须发生在截断之前，否则一串刚建的空会话会按更新
+        // 时间排在最前，把 20 个名额吃光，真正的历史一条都露不出来。
+        results.retain(|result| result.message_count > 0 || result.id == picker.current_session);
         picker.truncated = results.len() > SESSION_PICKER_LIMIT;
         results.truncate(SESSION_PICKER_LIMIT);
         picker.results = results;
@@ -298,6 +303,11 @@ pub(super) fn render_session_picker(f: &mut ratatui::Frame<'_>, app: &mut App) {
     }
 }
 
+/// 一行结果的排版。标题在最前，ID 挪到状态之后。
+///
+/// 此前 ID 紧跟标题，而当标题全是 `New session` 时，一屏看下来只有八位十六进制
+/// 在变——那不是列表，那是让人用 UUID 认对话。ID 仍然留着：`/session switch`
+/// 要它，出问题时人也要靠它对上日志。
 pub(super) fn session_picker_result_line(
     result: &willdeep_runtime_protocol::SessionSearchResult,
     current: bool,
@@ -311,6 +321,9 @@ pub(super) fn session_picker_result_line(
         String::new()
     };
     let title = result.title.replace(['\r', '\n'], " ");
+    let origin = session_origin_label(result.origin, language)
+        .map(|label| format!(" [{label}]"))
+        .unwrap_or_default();
     let snippet = result
         .snippet
         .as_deref()
@@ -320,12 +333,27 @@ pub(super) fn session_picker_result_line(
         .unwrap_or_default();
     let short_id = result.id.simple().to_string();
     format!(
-        "{marker} {title}{current} · {} · {} · {} {}{snippet}",
-        &short_id[..8],
+        "{marker} {title}{current}{origin} · {} · {} {} · {}{snippet}",
         session_status_label(result.status, language),
         result.message_count,
-        language.text("条消息", "messages", "件のメッセージ")
+        language.text("条消息", "messages", "件のメッセージ"),
+        &short_id[..8],
     )
+}
+
+/// 非 Runtime 来源要在行里说清楚：Xedit 的会话是只读桥接（续聊会在 rs 这边
+/// 落一份副本），本地会话则是还没被 Runtime 领养过的。两者都没有 Provider
+/// 和模型元数据，不标出来的话，人会以为是这些字段丢了。
+fn session_origin_label(
+    origin: willdeep_runtime_protocol::SessionOrigin,
+    language: Language,
+) -> Option<&'static str> {
+    use willdeep_runtime_protocol::SessionOrigin;
+    match origin {
+        SessionOrigin::Runtime => None,
+        SessionOrigin::Local => Some(language.text("本地", "local", "ローカル")),
+        SessionOrigin::Xedit => Some("Xedit"),
+    }
 }
 
 fn session_status_label(

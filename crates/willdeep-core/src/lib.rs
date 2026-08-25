@@ -14,6 +14,7 @@ pub mod routing;
 pub mod safety;
 pub mod sandbox;
 pub mod session;
+pub mod session_title;
 pub mod skills;
 pub mod subagent;
 mod subagent_worktree;
@@ -42,6 +43,7 @@ pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
 pub use routing::{EscalationTicket, RouteDecision, RoutingGuard, RoutingPolicy, RoutingTier};
 pub use safety::{CommandSafety, classify_with_workspace_write};
 pub use session::{Session, SessionDigest, SessionStore, format_iso8601};
+pub use session_title::TitleSource;
 pub use skills::SkillCatalog;
 pub use subagent::{
     SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket, TaskVerifier,

@@ -387,6 +387,9 @@ pub(super) fn render_routing_settings(f: &mut ratatui::Frame<'_>, app: &mut App)
             Style::default().fg(Color::DarkGray),
         ));
     }
+    // 编辑行永远是 `lines` 的最后一行；光标要落在它**实际渲染到**的那一行上，
+    // 所以这个行数必须在 `lines` 被 Paragraph 拿走之前先记下来。
+    let editor_row = popup.y + u16::try_from(lines.len()).unwrap_or(u16::MAX);
     f.render_widget(Clear, popup);
     f.render_widget(
         Paragraph::new(lines).block(
@@ -398,7 +401,11 @@ pub(super) fn render_routing_settings(f: &mut ratatui::Frame<'_>, app: &mut App)
         popup,
     );
     if let Some(editor) = state.editor.as_ref() {
-        let row = popup.y + popup.height.saturating_sub(2);
+        // 此前这里写的是 `popup.y + popup.height - 2`，等于假设内容正好把弹层
+        // 填满。弹层高度是固定的 22 行，工种表填不满时它比内容高，光标就掉进
+        // 内容下方的空白里——人看到的是「字在这儿、光标在那儿」，删了几个字符
+        // 也不知道删在哪。
+        let row = editor_row.min(popup.bottom().saturating_sub(2));
         let prefix = language.text("模型: ", "Model: ", "モデル: ");
         let column = popup.x
             + 1
@@ -513,6 +520,73 @@ mod tests {
         refresh_effective(&mut settings);
         assert!(settings.profiles[0].automatic);
         assert_eq!(settings.profiles[0].effective_model, "someim-32b-scout");
+    }
+
+    /// 光标必须和它正在编辑的那行字在同一行。
+    ///
+    /// 此前光标行写死成「弹层倒数第二行」，而弹层高度是固定的 22 行——工种表
+    /// 填不满时，光标掉进内容下方的空白里：屏幕上字在这儿、光标在那儿，
+    /// 删掉几个字符也不知道删在哪。断言不写死行号，直接比对「`模型:` 渲染在
+    /// 哪一行」和「光标在哪一行」。
+    #[test]
+    fn routing_editor_cursor_sits_on_the_line_it_edits() {
+        let settings = crate::model_routing::ModelRoutingSettings {
+            revision: "r1".to_owned(),
+            default_provider: "some-im".to_owned(),
+            active_provider_override: None,
+            root_model: "deepseek-v4-flash".to_owned(),
+            small_model_routing: true,
+            auto_dispatch_read_only: true,
+            max_deep_calls_per_harness: 1,
+            providers: vec![crate::model_routing::ModelProviderOption {
+                id: "some-im".to_owned(),
+                provider: "some-im".to_owned(),
+                model: "glm-5".to_owned(),
+            }],
+            profiles: vec![crate::model_routing::ProfileRoutingSettings {
+                id: "scout".to_owned(),
+                provider_profile: None,
+                model: None,
+                context_window: 32_768,
+                automatic: true,
+                effective_provider: "some-im".to_owned(),
+                effective_model: "someim-32b-scout".to_owned(),
+                recommended_model: None,
+            }],
+        };
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_routing_settings(settings);
+        // Enter 进入主模型的编辑态。
+        app.handle_routing_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // 屏幕远高于弹层内容，正是此前会错位的形状。
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_routing_settings(frame, &mut app))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let editor_row = (0..buffer.area.height)
+            .find(|row| {
+                // 双宽字符在缓冲区里占两格，第二格是空白；比对前先把空格抹掉。
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, *row)].symbol())
+                    .collect::<String>()
+                    .replace(' ', "")
+                    .contains("模型:")
+            })
+            .expect("编辑行必须渲染出来");
+
+        let cursor = terminal.get_cursor_position().expect("光标位置");
+        assert_eq!(
+            cursor.y, editor_row,
+            "光标落在第 {} 行，而 `模型:` 渲染在第 {editor_row} 行",
+            cursor.y
+        );
+        // 列也要紧跟在文字后面：`模型: ` 占 6 列，模型名 17 列。
+        let popup_left = buffer.area.width.saturating_sub(112) / 2;
+        assert_eq!(cursor.x, popup_left + 1 + 6 + 17);
     }
 
     #[test]

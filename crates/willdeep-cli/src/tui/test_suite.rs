@@ -1026,6 +1026,7 @@ mod tests {
         assert!(help.contains("M 已读"));
         assert!(help.contains("Ctrl+F"));
         assert!(help.contains("Ctrl+P"));
+        assert!(help.contains("Alt+V"));
     }
     #[test]
     fn chat_search_filters_cycles_and_scrolls_to_matching_entries() {
@@ -1128,6 +1129,7 @@ mod tests {
                 updated_at: 1,
                 message_count: 2,
                 snippet: None,
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             },
             willdeep_runtime_protocol::SessionSearchResult {
                 id: target_id,
@@ -1139,6 +1141,7 @@ mod tests {
                 updated_at: 2,
                 message_count: 8,
                 snippet: Some("讨论 OAuth 登录".to_owned()),
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             },
         ]);
         assert!(matches!(
@@ -1235,6 +1238,7 @@ mod tests {
                 updated_at: 100 - index,
                 message_count: 1,
                 snippet: None,
+                origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
             })
             .collect()
     }
@@ -1280,6 +1284,91 @@ mod tests {
         );
         assert!(app.session_picker.is_none());
     }
+    /// 开一次 TUI 不敲字就关，此前磁盘上就多一条 0 消息会话。它们按更新时间
+    /// 排在最前，能把 20 个名额吃光，真正的历史一条都露不出来。
+    #[test]
+    fn empty_sessions_are_kept_out_of_the_panel_except_the_current_one() {
+        let current = uuid::Uuid::new_v4();
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(current, SessionPickerRequest::default());
+
+        let mut results = recent_session_results(3);
+        // 当前会话也是空的（刚开的 TUI），但人得看得见自己在哪儿。
+        results[0].id = current;
+        results[0].message_count = 0;
+        results[1].message_count = 0;
+        results[2].message_count = 7;
+        let survivor = results[2].id;
+        app.set_session_picker_results(results);
+
+        let listed = app
+            .session_picker
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .map(|result| result.id)
+            .collect::<Vec<_>>();
+        assert_eq!(listed, vec![current, survivor], "{listed:?}");
+    }
+
+    /// 过滤必须发生在截断之前，否则空会话先占满 20 个名额再被删掉，
+    /// 面板会剩下一张几乎空的列表，还谎称「20+」。
+    #[test]
+    fn empty_sessions_are_dropped_before_the_twenty_row_cap() {
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.open_session_picker(uuid::Uuid::new_v4(), SessionPickerRequest::default());
+
+        let mut results = recent_session_results(25);
+        for result in results.iter_mut().take(20) {
+            result.message_count = 0;
+        }
+        app.set_session_picker_results(results);
+
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.results.len(), 5);
+        assert!(!picker.truncated, "5 条真实会话不该被标成截断");
+        assert!(picker.results.iter().all(|result| result.message_count > 0));
+    }
+
+    /// 标题排第一位，Xedit 桥接的会话要有来源标记。
+    ///
+    /// 此前这一行是「标题 · ID · 状态 · 条数」，而当标题清一色是 `New session`
+    /// 时，一屏里唯一在变的东西就是那八位十六进制——那不是列表，是让人用
+    /// UUID 认对话。ID 仍然留着，只是让位给标题。
+    #[test]
+    fn session_picker_line_leads_with_the_title_and_flags_bridged_sessions() {
+        let bridged = willdeep_runtime_protocol::SessionSearchResult {
+            id: uuid::Uuid::new_v4(),
+            title: "代码提交一下".to_owned(),
+            workspace: Some("/workspace".to_owned()),
+            status: willdeep_runtime_protocol::SessionStatus::Idle,
+            profile: None,
+            model: None,
+            updated_at: 1,
+            message_count: 22,
+            snippet: None,
+            origin: willdeep_runtime_protocol::SessionOrigin::Xedit,
+        };
+        let line =
+            session_picker_ui::session_picker_result_line(&bridged, false, Language::ZhCn, false);
+        assert!(line.starts_with("  代码提交一下 [Xedit]"), "{line}");
+        assert!(line.contains("22 条消息"), "{line}");
+        assert!(
+            line.contains(&bridged.id.simple().to_string()[..8]),
+            "ID 仍要留在行里，出问题时人得靠它对日志: {line}"
+        );
+
+        // Runtime 来源是默认，不加噪音标记。
+        let managed = willdeep_runtime_protocol::SessionSearchResult {
+            origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
+            ..bridged.clone()
+        };
+        let line =
+            session_picker_ui::session_picker_result_line(&managed, false, Language::ZhCn, false);
+        assert!(!line.contains('['), "{line}");
+    }
+
     #[test]
     fn session_picker_result_includes_content_snippet_without_embedded_lines() {
         let result = willdeep_runtime_protocol::SessionSearchResult {
@@ -1292,6 +1381,7 @@ mod tests {
             updated_at: 1,
             message_count: 4,
             snippet: Some("RBAC\n数据权限".to_owned()),
+            origin: willdeep_runtime_protocol::SessionOrigin::Runtime,
         };
 
         let line =
@@ -1447,6 +1537,24 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[test]
+    fn recognizes_clipboard_image_paste_shortcuts() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('V'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+        ] {
+            assert!(is_clipboard_image_paste_key(key));
+        }
+        assert!(!is_clipboard_image_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
     }
     #[tokio::test]
     async fn ask_dialog_accepts_custom_text() {

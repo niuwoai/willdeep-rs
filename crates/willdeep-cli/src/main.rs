@@ -25,6 +25,7 @@ mod model_routing;
 mod notify;
 mod onboarding;
 mod projects;
+mod titling;
 mod tui;
 mod web;
 
@@ -627,10 +628,12 @@ async fn run() -> Result<()> {
     let context_window = built.context_window;
 
     let mut session = resumed.unwrap_or_else(|| {
+        // 没有提示词就没有标题可派生；占位符由 `Session::new` 自己给，
+        // 交互式 TUI 的标题在第一条提示词提交时才成形。
         let mut session = willdeep_core::Session::new(
             workspace.clone(),
             cli.profile.clone(),
-            prompt.as_deref().unwrap_or("New session"),
+            prompt.as_deref().unwrap_or_default(),
         );
         session.model = cli.model.clone();
         session
@@ -753,7 +756,6 @@ async fn run_with_runtime(
             workspace,
             profile: session.profile.clone().or_else(|| cli.profile.clone()),
             model: cli.model.clone(),
-            title: session.title.clone(),
             prompt,
             attachments,
         },

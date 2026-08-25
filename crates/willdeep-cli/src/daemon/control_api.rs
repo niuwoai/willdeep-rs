@@ -649,6 +649,13 @@ fn public_session_search_result(
         updated_at: result.updated_at,
         message_count: result.message_count,
         snippet: result.snippet,
+        origin: match result.origin {
+            session_store::SessionOrigin::Runtime => {
+                willdeep_runtime_protocol::SessionOrigin::Runtime
+            }
+            session_store::SessionOrigin::Local => willdeep_runtime_protocol::SessionOrigin::Local,
+            session_store::SessionOrigin::Xedit => willdeep_runtime_protocol::SessionOrigin::Xedit,
+        },
     }
 }
 

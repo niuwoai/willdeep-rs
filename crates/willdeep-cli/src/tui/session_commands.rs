@@ -47,9 +47,9 @@ pub(super) async fn handle_session_command(
     let arguments = value.strip_prefix("/session").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let usage = app.language.text(
-        "用法：/session switch <会话ID> | rename <名称> | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search [关键词]（打开历史会话面板，等同 /history） | export <路径> | delete <其他会话ID>",
-        "Usage: /session switch <session-id> | rename <title> | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search [query] (opens the Session history panel, same as /history) | export <path> | delete <other-session-id>",
-        "使用法：/session switch <セッションID> | rename <名前> | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search [検索語]（履歴セッションパネルを開く。/history と同じ） | export <パス> | delete <別セッションID>",
+        "用法：/session switch <会话ID> | rename <名称> | retitle（让标题模型重算一次） | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search [关键词]（打开历史会话面板，等同 /history） | export <路径> | delete <其他会话ID>",
+        "Usage: /session switch <session-id> | rename <title> | retitle (recompute with the title model) | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search [query] (opens the Session history panel, same as /history) | export <path> | delete <other-session-id>",
+        "使用法：/session switch <セッションID> | rename <名前> | retitle（タイトルモデルで再計算） | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search [検索語]（履歴セッションパネルを開く。/history と同じ） | export <パス> | delete <別セッションID>",
     );
     let result = match action {
         "switch" if !rest.trim().is_empty() => switch(app, session, store, runtime, rest).await?,

@@ -55,7 +55,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `↑` / `↓` | 在多行之间移动光标；候选层打开时用于选择候选 |
 | `Enter` / `Tab` | 插入选中候选；`Esc` 关闭候选层 |
 | `←` / `→`、`Home` / `End` | 移动编辑光标 |
-| `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片 |
+| `Alt+V` / `Ctrl+V` / `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片；终端截获系统粘贴键时优先使用 `Alt+V` 或 `Ctrl+V` |
 | `Ctrl+D` | 删除当前（最近）附件，可重复删除 |
 
 ### 本轮还在跑的时候
@@ -101,6 +101,37 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 - 带条件搜索直接写进命令：`/history 登录设计`、`/session search --status archived --model qwen3-coder 重构`。
   关键词落进面板输入框，`--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace`
   这些过滤器随每次重查一起下发，改关键词不会把过滤条件丢掉。
+
+面板列的不只是 Runtime 登记过的会话：
+
+| 行尾标记 | 含义 |
+|---|---|
+| 无 | Runtime 登记过：有状态、有轮次队列、能派工 |
+| `[本地]` | 只有 Core 会话文件（TUI 建了但从没提交过 Runtime 轮次），继续聊时才被领养 |
+| `[Xedit]` | macOS 桌面版 WillDeep 写的会话，rs 这侧只读桥接；继续聊会在 rs 这边落一份副本，不覆盖原文件 |
+
+后两类没有 Provider 与模型元数据，因此 `--profile` / `--model` 过滤器在场时它们**整段不参与**
+——把没有这个字段的会话算成匹配，等于让过滤器撒谎。
+
+### 会话标题怎么来的
+
+标题分两级，`[agent] auto_title`（默认开）管的是第二级：
+
+1. **提交那一刻**：从第一条用户消息确定性派生，不花模型调用、不会失败。
+   命中凭据特征（`sk-`、`password`、长随机串等）时整条放弃、退回占位标题——
+   半截密钥仍然是密钥，而标题会进列表、通知载荷和导出文件。
+2. **第一轮回复落地后**：用 `[agent] title_model`（默认会话模型）跑一次单发请求，
+   把这轮问答压成一行短句，然后**锁定**。请求只带一问一答各 800 字，成本与对话长度无关。
+
+三条不变量：
+
+- `/session rename` 起的名字是终态，自动流程永不覆盖。想交回控制权就先 rename 成别的。
+- 第二级失败一律静默——列表里还有第一级的标题，为一行装饰文字打断轮次收尾不划算。
+  同一个进程对同一条会话只试一次，配置写错不会变成每轮一次的隐形开销。
+- 这个字段出现之前的老会话只看标题本身：`New session` 这类占位符会被接管，
+  其它一律当人写的。宁可漏改一个该改的，也不能改掉一个人自己起的名字。
+
+`/session retitle` 让标题模型重算一次，绕过「只在第一轮开火」；它同样不碰 `rename` 起的名字。
 
 ### 切换模型
 
@@ -220,7 +251,7 @@ tmux set -g mouse on
 
 ### 剪贴板的真实边界
 
-`Ctrl+Shift+V` / `Cmd+V` 读取的是**运行 WillDeep 那台机器**的系统剪贴板。SSH 会话中，远端进程读不到你本地电脑的剪贴板图片——这是终端的边界，WillDeep 会明确报错，不会静默伪装成功。
+`Alt+V` / `Ctrl+V` / `Ctrl+Shift+V` / `Cmd+V` 读取的是**运行 WillDeep 那台机器**的系统剪贴板。终端截获系统粘贴键时请用 `Alt+V` 或 `Ctrl+V`。SSH 会话中，远端进程读不到你本地电脑的剪贴板图片——这是终端的边界，WillDeep 会明确报错，不会静默伪装成功。
 
 文本粘贴不受影响：终端启用了 Bracketed Paste，短单行粘贴直接插入光标处，多行或超过 200 字符的内容显示为 `Pasted text` 附件行，走的是正常的键盘输入通道。
 
@@ -240,7 +271,7 @@ tmux set -g mouse on
 | `/daemon` | `status`（缺省）/ `start` / `stop` / `upgrade`，管理真正执行命令的 Runtime。`upgrade` 会排空在途工作再交接，耗时较长但不阻塞界面 |
 | `/runtime <任务>` | 提交可分离的 Runtime 任务 |
 | `/local <任务>` | 仅本轮使用进程内 Harness |
-| `/session` | 管理、搜索、切换、Fork 或导出会话 |
+| `/session` | 管理、搜索、切换、Fork 或导出会话；`/session retitle` 让标题模型重算一次标题 |
 | `/history [关键词]` | 打开历史会话面板：最近 20 条，选中进入继续。等价于 `Ctrl+R` 和 `/session search` |
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
 | `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|log_inspector\|git_detective <task>`；Deep 必须由父 Agent 提交升级票据 |
