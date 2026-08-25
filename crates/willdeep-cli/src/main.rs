@@ -25,6 +25,7 @@ mod model_routing;
 mod notify;
 mod onboarding;
 mod projects;
+mod telemetry;
 mod titling;
 mod tui;
 mod web;
@@ -167,6 +168,11 @@ enum CliCommand {
         #[command(subcommand)]
         action: config::ConfigAction,
     },
+    /// Inspect anonymous product analytics, or delete what was reported.
+    Telemetry {
+        #[command(subcommand)]
+        action: telemetry::TelemetryAction,
+    },
     /// Manage the persistent local Runtime Daemon.
     Daemon {
         #[command(subcommand)]
@@ -279,7 +285,11 @@ enum ApiArg {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
+    let result = run().await;
+    // 遥测在唯一的出口 flush：run() 有几十个 return 点，逐个挂 flush 只会
+    // 漏掉其中几个。没装过句柄（或被关掉）时这里是空操作。
+    telemetry::flush_before_exit().await;
+    if let Err(error) = result {
         eprintln!("error: {error:#}");
         std::process::exit(stable_exit_code(&error));
     }
@@ -425,6 +435,10 @@ async fn run() -> Result<()> {
             CliCommand::Man => generate_man_page(),
             CliCommand::Session { action } => daemon::handle_session(action).await,
             CliCommand::Config { action } => config::handle(action, cli.config.as_deref()),
+            CliCommand::Telemetry { action } => {
+                let loaded = LoadedConfig::load(cli.config.as_deref())?;
+                telemetry::handle(action, &willdeep_home()?, loaded.file.telemetry.enabled).await
+            }
             CliCommand::Daemon { action } => daemon::handle(action).await,
             CliCommand::Api {
                 operation,
@@ -474,6 +488,17 @@ async fn run() -> Result<()> {
             .or(loaded.file.agent.language.as_deref()),
     )?;
     let home = willdeep_home()?;
+    // 匿名产品遥测。配置默认开启，WILLDEEP_TELEMETRY_DISABLED=1 可整体关掉。
+    // 只写本地队列，实际发送在进程退出前一次性做（见 main）。
+    telemetry::install(telemetry::Telemetry::new(
+        loaded.file.telemetry.enabled,
+        &home,
+    ));
+    telemetry::global().record({
+        let mut event = telemetry::global().event(telemetry::EventName::AppSessionStarted);
+        event.locale = Some(language.telemetry_tag().to_owned());
+        event
+    });
     if cli.web {
         let mut candidates = Vec::new();
         if let Some(project) = cli.project.as_deref() {

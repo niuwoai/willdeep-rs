@@ -29,6 +29,16 @@ impl Language {
         }
     }
 
+    /// 规范语言标签，与桌面端遥测上报的 `locale` 口径一致（`zh-Hans` 而非 `zh-CN`），
+    /// 否则同一个中文用户在两端会被聚合成两条曲线。
+    pub fn telemetry_tag(self) -> &'static str {
+        match self {
+            Self::ZhCn => "zh-Hans",
+            Self::En => "en",
+            Self::Ja => "ja",
+        }
+    }
+
     /// `text` 的取值版：文案需要插值时用它，三个候选都已构造完毕，只挑一个。
     pub fn pick<T>(self, zh: T, en: T, ja: T) -> T {
         match self {

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.44.0-rc1] - 2026-08-25
+
+### Added
+- 匿名产品遥测：向 `og.niuwoai.com` 上报使用数据，回答「CLI 有多少人在用、跑哪些模型、请求成不成功、快不快」，与 WillDeep.app 共用一套协议（canonical 文档在 muchtoken 仓库 `docs/client-telemetry.md`）。事件写本地队列文件，实际发送只在进程退出前做一次，不拖慢命令。
+- `willdeep telemetry status` 展示开关状态、匿名标识、上报地址、队列条数，以及「会上报什么 / 绝不上报什么」的完整清单；`willdeep telemetry forget` 请求服务端删掉这台机器已上报的全部数据。删除入口做成一等命令而不是藏在 config 里——承诺了「可以删」就得有人找得到的地方能删。
+- 配置新增 `[telemetry] enabled`（缺省开启）；`WILLDEEP_TELEMETRY_DISABLED=1` 优先级更高，CI 与容器构建里跑 CLI 不会被算成用户。
+- `AgentOutcome` 新增 `input_tokens` / `output_tokens`：调用方要 token 用量不必再自己挂一个 `AgentEvent::Usage` 收集器。
+
+### Security
+- 协议里没有能装下正文的字段：提示词与模型回复、文件名与路径、文件内容、终端命令与输出、API Key、原始错误正文在事件结构里根本没有落脚点。
+- 本地清洗是「不合规就丢弃」而非「截断后凑合上报」：标识符必须匹配 `^[A-Za-z0-9._:+_-]{1,96}$`（模型名额外允许 `/` 但拒绝路径形状）。本地拦下来的，连传输过程都不存在。
+- 上报的 provider 只出 `someim` / `anthropic` / `openai_compatible` 这个有限集，**不是**用户在配置里起的 profile 名——那是自由文本。
+- 错误一律收敛成结构化错误码（`provider_error`、`max_turns`、`token_budget_exceeded`…），不发原始错误文案。
+- 匿名标识是 `WILLDEEP_HOME/telemetry-install-id` 里的随机 UUID，不从硬件标识推导；写不进去时干脆不上报，而不是每次生成一个新 ID 把一台机器算成无数台。
+
+### Tests
+- `telemetry` 模块 11 条：自由文本（中文句子、绝对路径、shell 命令、原始网络错误）必须被丢弃；合法标识符与下划线维度名原样保留；编码出的 JSON 与服务端协议逐字对齐且不含 `prompt`/`content`/`path`；关闭时不写队列、开启时有上限；安装 ID 稳定；入队前先清洗（并断言落盘文件里不出现那句中文）；凭据来源与 provider 标签只出有限集。
+
 ## [0.43.0-rc4] - 2026-08-25
 
 ### Fixed
