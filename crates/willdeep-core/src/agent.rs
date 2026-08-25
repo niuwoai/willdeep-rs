@@ -221,6 +221,10 @@ pub struct AgentOutcome {
     pub turns: usize,
     pub messages: Vec<Message>,
     pub stop_reason: AgentStopReason,
+    /// 本次运行累计的 token 用量（Provider 报了多少算多少）。
+    /// 调用方拿它做用量展示与遥测，不必自己去挂 `AgentEvent::Usage` 收集器。
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -437,6 +441,10 @@ impl Agent {
         let definitions = self.tools.definitions();
         let mut compressed: Option<(usize, String)> = None;
         let mut used_tokens = 0_u64;
+        // 分别累计输入/输出，供 AgentOutcome 上报——`used_tokens` 是预算判定用的
+        // 合计值，两者语义不同，不能互相顶替。
+        let mut input_tokens = 0_u64;
+        let mut output_tokens = 0_u64;
         // 自上次续推判定以来成功发起的工具调用数——续推判定的「进展证据」。
         let mut tools_since_check = 0_usize;
         for turn in 1..=self.config.max_turns {
@@ -448,6 +456,8 @@ impl Agent {
                 .complete(&request_messages, &definitions)
                 .await?;
             if let Some(usage) = completion.usage {
+                input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
+                output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
                 used_tokens = used_tokens.saturating_add(usage.total_tokens.unwrap_or_else(|| {
                     usage
                         .input_tokens
@@ -512,6 +522,8 @@ impl Agent {
                                 } else {
                                     AgentStopReason::GoalComplete
                                 },
+                                input_tokens,
+                                output_tokens,
                             });
                         }
                         None => {}
@@ -522,6 +534,8 @@ impl Agent {
                     turns: turn,
                     messages,
                     stop_reason: AgentStopReason::Finished,
+                    input_tokens,
+                    output_tokens,
                 });
             }
             tools_since_check = tools_since_check.saturating_add(completion.tool_calls.len());

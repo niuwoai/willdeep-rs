@@ -111,6 +111,9 @@ pub struct ConfigFile {
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub skills: SkillSettings,
+    /// 匿名产品遥测；缺省即开启。
+    #[serde(default)]
+    pub telemetry: TelemetrySettings,
     /// Cross-client attention delivery settings shared with WillDeep.app.
     /// The CLI accepts the full section even when only webhook fields are
     /// relevant on a headless machine; desktop-only sound fields remain
@@ -195,6 +198,28 @@ pub struct AgentSettings {
 pub struct SkillSettings {
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+}
+
+/// 匿名产品遥测。默认开启，`enabled = false` 关掉；
+/// `WILLDEEP_TELEMETRY_DISABLED=1` 优先级更高（CI、容器构建不该被算成用户）。
+/// 采集范围与红线见 `crates/willdeep-cli/src/telemetry.rs`。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetrySettings {
+    #[serde(default = "default_telemetry_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for TelemetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_telemetry_enabled(),
+        }
+    }
+}
+
+fn default_telemetry_enabled() -> bool {
+    true
 }
 
 /// Deliberately *not* `deny_unknown_fields`: this is the one section both

@@ -286,10 +286,26 @@ pub(crate) async fn execute_noninteractive(
         store.save(session)?;
         (history, user_message)
     };
-    let mut outcome = built
+    // 一次 AI 回合的遥测：供应商类型、模型、耗时、token、结构化错误码。
+    // 提示词与回复正文一个字都不上报（协议里也没有能装下它们的字段）。
+    let turn_telemetry = crate::telemetry::TurnTelemetry::start(
+        built.provider_config.kind,
+        &built.provider_config.base_url,
+        &built.provider_config.model,
+        !built.provider_config.api_key.is_empty(),
+    );
+    let run_result = built
         .agent
         .run_with_history_message(history, user_message)
-        .await?;
+        .await;
+    match &run_result {
+        Ok(outcome) => turn_telemetry.finish(
+            crate::telemetry::global(),
+            Ok((outcome.input_tokens, outcome.output_tokens)),
+        ),
+        Err(error) => turn_telemetry.finish(crate::telemetry::global(), Err(error)),
+    }
+    let mut outcome = run_result?;
     session.messages = outcome.messages.clone();
     store.save(session)?;
     loop {
