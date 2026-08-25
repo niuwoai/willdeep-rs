@@ -1026,6 +1026,7 @@ mod tests {
         assert!(help.contains("M 已读"));
         assert!(help.contains("Ctrl+F"));
         assert!(help.contains("Ctrl+P"));
+        assert!(help.contains("Alt+V"));
     }
     #[test]
     fn chat_search_filters_cycles_and_scrolls_to_matching_entries() {
@@ -1546,6 +1547,7 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
         ] {
             assert!(is_clipboard_image_paste_key(key));
         }
