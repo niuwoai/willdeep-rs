@@ -1506,7 +1506,11 @@ mod tests {
         );
         assert!(summary_request.content.contains("older user message"));
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 1, "session provider must not see the summary call");
+        assert_eq!(
+            requests.len(),
+            1,
+            "session provider must not see the summary call"
+        );
         assert!(
             requests[0]
                 .iter()
@@ -1550,9 +1554,11 @@ mod tests {
             .expect("run");
         let compressor_requests = compressor.requests.lock().expect("compressor requests");
         assert_eq!(compressor_requests.len(), 1);
-        assert!(compressor_requests[0][0]
-            .content
-            .contains("Summarize this older"));
+        assert!(
+            compressor_requests[0][0]
+                .content
+                .contains("Summarize this older")
+        );
     }
 
     /// 锁定 75% 触发线：构造一段估算落在窗口 75%~80% 之间的历史，

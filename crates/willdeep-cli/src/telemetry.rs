@@ -153,7 +153,8 @@ impl Event {
 
     /// 把可疑字段就地清掉。入队前统一走一遍，保证队列里每条都符合协议。
     pub fn sanitized(mut self) -> Self {
-        self.app_version = identifier(&self.app_version, 32).unwrap_or_else(|| "unknown".to_owned());
+        self.app_version =
+            identifier(&self.app_version, 32).unwrap_or_else(|| "unknown".to_owned());
         self.os_version = self.os_version.as_deref().and_then(|v| identifier(v, 16));
         self.arch = self.arch.as_deref().and_then(|v| identifier(v, 16));
         self.locale = self.locale.as_deref().and_then(|v| identifier(v, 16));
@@ -474,7 +475,11 @@ impl Telemetry {
             .post(&self.endpoint)
             .header(
                 "User-Agent",
-                format!("some.im/willdeep-cli-{} ({})", willdeep_core::VERSION, os_name()),
+                format!(
+                    "some.im/willdeep-cli-{} ({})",
+                    willdeep_core::VERSION,
+                    os_name()
+                ),
             )
             .json(&payload)
             .send()
@@ -484,8 +489,7 @@ impl Telemetry {
                 let status = response.status();
                 // 4xx（除 429）是协议问题，重发也不会变好；当作已处理丢掉这批，
                 // 免得一条坏事件把队列永久卡死。
-                status.is_success()
-                    || (status.is_client_error() && status.as_u16() != 429)
+                status.is_success() || (status.is_client_error() && status.as_u16() != 429)
             }
             Err(_) => false,
         }
@@ -641,7 +645,10 @@ mod tests {
         let clean = event.sanitized();
         assert_eq!(clean.provider.as_deref(), Some("anthropic"));
         assert_eq!(clean.requested_model.as_deref(), Some("claude-opus-5"));
-        assert_eq!(clean.resolved_model.as_deref(), Some("deepseek/deepseek-v3"));
+        assert_eq!(
+            clean.resolved_model.as_deref(),
+            Some("deepseek/deepseek-v3")
+        );
         assert_eq!(clean.error_code.as_deref(), Some("http_429"));
         assert_eq!(clean.feature.as_deref(), Some("agent_chat"));
     }

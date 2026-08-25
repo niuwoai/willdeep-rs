@@ -515,10 +515,7 @@ pub mod util;
                 "src/net.rs",
                 "use crate::util;\n\npub fn send() -> u32 {\n    util::retry_budget()\n}\n",
             ),
-            (
-                "src/util.rs",
-                "pub fn retry_budget() -> u32 {\n    3\n}\n",
-            ),
+            ("src/util.rs", "pub fn retry_budget() -> u32 {\n    3\n}\n"),
         ],
         expect_contains: &["src/util.rs"],
         git_history: false,
