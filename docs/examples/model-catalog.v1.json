@@ -1,0 +1,240 @@
+{
+  "schema_version": "willdeep.model-catalog.v1",
+  "revision": "example-2026-08-26",
+  "updated_at": "2026-08-26T00:00:00Z",
+  "credential_store": {
+    "namespace": "willdeep.providers",
+    "allow_inline_secrets": false,
+    "extensions": {}
+  },
+  "providers": [
+    {
+      "id": "local-qwen",
+      "display_name": "Local Qwen",
+      "provider_kind": "openai-compatible",
+      "api_dialect": "chat-completions",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "network_scope": "local",
+      "credential_ref": null,
+      "credential_env": null,
+      "supports_model_discovery": true,
+      "enabled": true,
+      "extensions": {}
+    },
+    {
+      "id": "some-im-main",
+      "display_name": "some.im",
+      "provider_kind": "some-im",
+      "api_dialect": "chat-completions",
+      "base_url": "https://some.im/v1",
+      "network_scope": "public",
+      "credential_ref": "credential:provider/some-im-main",
+      "credential_env": "SOMEIM_API_KEY",
+      "supports_model_discovery": true,
+      "enabled": true,
+      "extensions": {}
+    }
+  ],
+  "models": [
+    {
+      "id": "local-qwen-worker",
+      "provider_id": "local-qwen",
+      "model": "qwen3.8-27B",
+      "display_name": "Qwen 3.8 27B",
+      "kind": "physical",
+      "billing_model_id": null,
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "capabilities": [
+        "text",
+        "tool_calling",
+        "coding"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "tags": [
+        "worker",
+        "local"
+      ],
+      "pricing": null,
+      "metadata_source": "user",
+      "observed_at": null,
+      "enabled": true,
+      "extensions": {
+        "example_note": "Fill context and output limits from the real local endpoint before context-critical routing."
+      }
+    },
+    {
+      "id": "some-im-glm-standard",
+      "provider_id": "some-im-main",
+      "model": "glm-5",
+      "display_name": "GLM-5",
+      "kind": "physical",
+      "billing_model_id": null,
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "capabilities": [
+        "text",
+        "tool_calling",
+        "structured_output",
+        "coding",
+        "reasoning"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "tags": [
+        "standard"
+      ],
+      "pricing": null,
+      "metadata_source": "managed",
+      "observed_at": null,
+      "enabled": true,
+      "extensions": {
+        "example_note": "Provider-reported context must resolve the current 200K versus 256K client drift."
+      }
+    },
+    {
+      "id": "some-im-deep-long",
+      "provider_id": "some-im-main",
+      "model": "deepseek-v4-flash",
+      "display_name": "DeepSeek V4 Flash",
+      "kind": "physical",
+      "billing_model_id": null,
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "capabilities": [
+        "text",
+        "tool_calling",
+        "coding",
+        "reasoning"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "tags": [
+        "deep",
+        "long_context"
+      ],
+      "pricing": null,
+      "metadata_source": "managed",
+      "observed_at": null,
+      "enabled": true,
+      "extensions": {}
+    }
+  ],
+  "routing": {
+    "active_policy": "balanced",
+    "policies": [
+      {
+        "id": "sovereign",
+        "allowed_network_scopes": [
+          "local",
+          "lan",
+          "private_cloud"
+        ],
+        "quality_floor": 0.8,
+        "weights": {
+          "cost": 1,
+          "latency": 1,
+          "public_exposure": 100,
+          "failure_risk": 2
+        },
+        "extensions": {}
+      },
+      {
+        "id": "balanced",
+        "allowed_network_scopes": [
+          "local",
+          "lan",
+          "private_cloud",
+          "public"
+        ],
+        "quality_floor": 0.85,
+        "weights": {
+          "cost": 1,
+          "latency": 1,
+          "public_exposure": 4,
+          "failure_risk": 3
+        },
+        "extensions": {}
+      }
+    ],
+    "profiles": [
+      {
+        "id": "scout",
+        "required_capabilities": [
+          "text",
+          "tool_calling"
+        ],
+        "candidate_model_ids": [
+          "local-qwen-worker",
+          "some-im-glm-standard"
+        ],
+        "context_utilization_limit": 0.55,
+        "max_same_tier_retries": 1,
+        "escalates_to": "implementer",
+        "extensions": {}
+      },
+      {
+        "id": "test_fixer",
+        "required_capabilities": [
+          "text",
+          "tool_calling",
+          "coding"
+        ],
+        "candidate_model_ids": [
+          "local-qwen-worker",
+          "some-im-glm-standard"
+        ],
+        "context_utilization_limit": 0.6,
+        "max_same_tier_retries": 1,
+        "escalates_to": "implementer",
+        "extensions": {}
+      },
+      {
+        "id": "implementer",
+        "required_capabilities": [
+          "text",
+          "tool_calling",
+          "coding",
+          "reasoning"
+        ],
+        "candidate_model_ids": [
+          "some-im-glm-standard"
+        ],
+        "context_utilization_limit": 0.65,
+        "max_same_tier_retries": 0,
+        "escalates_to": "deep",
+        "extensions": {}
+      },
+      {
+        "id": "deep",
+        "required_capabilities": [
+          "text",
+          "tool_calling",
+          "reasoning"
+        ],
+        "candidate_model_ids": [
+          "some-im-deep-long"
+        ],
+        "context_utilization_limit": 0.7,
+        "max_same_tier_retries": 0,
+        "escalates_to": null,
+        "extensions": {}
+      }
+    ],
+    "extensions": {}
+  },
+  "extensions": {}
+}

@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://willdeep.dev/schemas/model-catalog.v1.schema.json",
+  "title": "WillDeep shared model catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "updated_at",
+    "credential_store",
+    "providers",
+    "models",
+    "routing",
+    "extensions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "willdeep.model-catalog.v1"
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "credential_store": {
+      "$ref": "#/$defs/credentialStore"
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "routing": {
+      "$ref": "#/$defs/routing"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    },
+    "nullableIdentifier": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "credentialStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "allow_inline_secrets",
+        "extensions"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "const": "willdeep.providers"
+        },
+        "allow_inline_secrets": {
+          "const": false
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "display_name",
+        "provider_kind",
+        "api_dialect",
+        "base_url",
+        "network_scope",
+        "credential_ref",
+        "credential_env",
+        "supports_model_discovery",
+        "enabled",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "provider_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "api_dialect": {
+          "enum": [
+            "chat-completions",
+            "responses",
+            "anthropic-messages",
+            "gemini-generate-content"
+          ]
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/@\\s][^@\\s]*$"
+        },
+        "network_scope": {
+          "enum": [
+            "local",
+            "lan",
+            "private_cloud",
+            "public"
+          ]
+        },
+        "credential_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^credential:[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_env": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z_][A-Z0-9_]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supports_model_discovery": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "input_per_1m",
+        "output_per_1m",
+        "cache_read_per_1m",
+        "cache_write_per_1m",
+        "per_request",
+        "extensions"
+      ],
+      "properties": {
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "input_per_1m": {
+          "$ref": "#/$defs/nullableDecimal"
+        },
+        "output_per_1m": {
+          "$ref": "#/$defs/nullableDecimal"
+        },
+        "cache_read_per_1m": {
+          "$ref": "#/$defs/nullableDecimal"
+        },
+        "cache_write_per_1m": {
+          "$ref": "#/$defs/nullableDecimal"
+        },
+        "per_request": {
+          "$ref": "#/$defs/nullableDecimal"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "nullableDecimal": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider_id",
+        "model",
+        "display_name",
+        "kind",
+        "billing_model_id",
+        "context_window_tokens",
+        "max_output_tokens",
+        "capabilities",
+        "input_modalities",
+        "output_modalities",
+        "tags",
+        "pricing",
+        "metadata_source",
+        "observed_at",
+        "enabled",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\s\\x00-\\x1F\\x7F]+$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "enum": [
+            "physical",
+            "virtual",
+            "local_alias"
+          ]
+        },
+        "billing_model_id": {
+          "$ref": "#/$defs/nullableIdentifier"
+        },
+        "context_window_tokens": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 4000,
+              "maximum": 10000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_output_tokens": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "text",
+              "tool_calling",
+              "structured_output",
+              "coding",
+              "reasoning",
+              "vision",
+              "native_web"
+            ]
+          }
+        },
+        "input_modalities": {
+          "$ref": "#/$defs/modalities"
+        },
+        "output_modalities": {
+          "$ref": "#/$defs/modalities"
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "pricing": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pricing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metadata_source": {
+          "enum": [
+            "provider",
+            "user",
+            "managed",
+            "bundled"
+          ]
+        },
+        "observed_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "modalities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "text",
+          "image",
+          "audio",
+          "video",
+          "file",
+          "embedding"
+        ]
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_policy",
+        "policies",
+        "profiles",
+        "extensions"
+      ],
+      "properties": {
+        "active_policy": {
+          "$ref": "#/$defs/identifier"
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy"
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/profile"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "allowed_network_scopes",
+        "quality_floor",
+        "weights",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allowed_network_scopes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "local",
+              "lan",
+              "private_cloud",
+              "public"
+            ]
+          }
+        },
+        "quality_floor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "weights": {
+          "$ref": "#/$defs/weights"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "weights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cost",
+        "latency",
+        "public_exposure",
+        "failure_risk"
+      ],
+      "properties": {
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "latency": {
+          "type": "number",
+          "minimum": 0
+        },
+        "public_exposure": {
+          "type": "number",
+          "minimum": 0
+        },
+        "failure_risk": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "required_capabilities",
+        "candidate_model_ids",
+        "context_utilization_limit",
+        "max_same_tier_retries",
+        "escalates_to",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "text",
+              "tool_calling",
+              "structured_output",
+              "coding",
+              "reasoning",
+              "vision",
+              "native_web"
+            ]
+          }
+        },
+        "candidate_model_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "context_utilization_limit": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 0.9
+        },
+        "max_same_tier_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "escalates_to": {
+          "$ref": "#/$defs/nullableIdentifier"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.45.0-rc1] - 2026-08-26
+
+### Added
+- 新增 `model-catalog.v1` 共享模型目录契约、JSON Schema 与可直接校验的示例，统一描述 Provider 实例、模型能力/上下文/价格、候选池、路由权重、升级链和逻辑凭据引用；Xedit 与 WillDeep CLI 可据此逐步收敛到同一份模型事实，而不再各自按模型名猜测。
+- `willdeep-runtime-protocol` 新增强类型模型目录 DTO、严格 JSON 解码与语义校验，拒绝重复标识、悬空引用、升级环、非法 URL/环境变量/价格和不合理上下文边界。
+- 新增 Xedit / WillDeep 共享凭据设计：目录只存 `credential_ref`，macOS 发行版由同一 Data Protection Keychain access group 解析真实凭据，未签名 CLI 使用环境变量回退；后续可由 Runtime 的本机 Unix Socket 统一代理 Provider 调用。
+
+### Security
+- 共享模型目录禁止出现 `api_key`、`token`、`secret` 等明文凭据字段，`extensions` 内也会递归扫描并拒绝此类字段名；Provider Base URL 禁止嵌入 user-info。私有 Provider URL、模型名与价格仍按敏感元数据处理，建议目录文件权限固定为 `0600`。
+- 未签名或 entitlement 不匹配的 CLI 不伪装成可以读取 Xedit Keychain，也不通过会把密钥打印到标准输出的辅助命令转交凭据。
+
+### Tests
+- 新增目录示例解码、重复 Provider/模型、悬空候选、升级环、明文密钥、未知字段与环境变量名等协议回归测试；文档示例另经结构引用和敏感字段扫描验证。
+
 ## [0.44.0-rc1] - 2026-08-25
 
 ### Added

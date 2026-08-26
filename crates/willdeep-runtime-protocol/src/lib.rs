@@ -2,6 +2,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod model_catalog;
+pub use model_catalog::{
+    CatalogApiDialect, CatalogModel, CatalogModelKind, CatalogProvider, CatalogRouting,
+    CredentialStore, MODEL_CATALOG_SCHEMA_VERSION, ModelCapability, ModelCatalog,
+    ModelCatalogError, ModelMetadataSource, ModelModality, ModelPricing, NetworkScope,
+    RoutingPolicyEntry, RoutingProfileEntry, RoutingWeights,
+};
+
 pub const PROTOCOL_VERSION: &str = "1.0";
 pub const MIN_CLIENT_PROTOCOL_VERSION: &str = "1.0";
 

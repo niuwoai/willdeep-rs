@@ -40,6 +40,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
+| `model-catalog.v1.json` 模型目录 | **canonical 契约已定，代码未接入** | `docs/SHARED_MODEL_CATALOG.md` + JSON Schema/示例 | 计划由 `AgentProviderLibrary` / some.im public model catalog 迁移；真实凭据只存 `credential_ref` |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |
 | 判官模型 `someim-security-guard` | 同名 | `harness.rs:26` | `AgentModels.swift` |
 | `mobile-gateway.v1` | 协议版本共用，room/token 独立 | `mobile.rs`、`AUTHENTICATION.md:133` | `MobileGatewayCoordinator.swift` |
@@ -47,7 +48,9 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 
 **明确尚未共用**（见 Xedit `docs/SMALL_MODEL_FIRST_RUNTIME_PLAN.md` §6）：
 `[subagents.<trade>]`（Xedit 存 UserDefaults）、`[providers.*]`（Xedit 走
-Provider 库 + Keychain，不读明文 TOML）。
+Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定义在
+[`SHARED_MODEL_CATALOG.md`](SHARED_MODEL_CATALOG.md)：先共享非敏感 Provider/模型目录，
+再用 `credential_ref` 接系统凭据后端，绝不把 Key 搬进共享 JSON。
 
 ## 契约层对齐
 
