@@ -82,6 +82,8 @@ TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 
 
 图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`。some.im 已知纯文本主模型由 Agent 通过同一 API Base/API Key 的 `qwen3-vl-plus`（或 `vision_model` 覆盖值）生成描述，再移除发往主模型的图片负载。
 
+助手输出的媒体采用另一条只读链路：Markdown 图片先在聊天文本中变成卡片，用户通过 `Ctrl+L` 明确选择后才下载。远端目标复用 Web Tool 的公网地址校验，并叠加重定向、超时、8 MiB 响应、尺寸和解码内存上限；本地目标 canonicalize 后必须仍位于 Workspace。Ratatui 图片状态在后台线程完成缩放/编码，启动探测 Kitty、iTerm2、Sixel，原生编码失败时使用保留的解码缓存重建 Unicode halfblocks，避免阻塞或清空 TUI。
+
 ### 上下文与网络工具
 
 Provider Profile 可声明 `context_window`。在途自动压缩按四道水位工作，全部只作用于临时请求视图，会话存档始终保留完整消息：
@@ -107,11 +109,11 @@ Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。
 
 `BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
 
-`SubagentCatalog` 内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。只读工种不提供 Shell 或写工具。
+`SubagentCatalog` 面向用户公开 reader、implementer、tester、ops_runner、judge、deep 六个工种；scout、editor、test_fixer、build_fixer、log_inspector、git_detective 等旧专门 ID 继续保留给自动路由、托管链和历史兼容。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。
 
 除 `deep` 外的工种运行在可私有部署的 32K / 48K / 64K / 256K 档位并各自限制工具输出字节数——**窗口纪律由客户端执行**，不依赖模型自觉。16K 已取消；`implementer` 是 256K 日常多文件编码主力，`deep` 只在任务确实无法有界拆分时跑父模型并继承会话窗口。
 
-`spawn_agent` 的可选 `task` 参数是 Task Packet：目标、已知事实、约束、相关文件与 verifier 命令。Runtime 按窗口档位把相关文件内联进 Worker 首条消息，并在每次尝试后**由 Runtime 自己执行** verifier 命令来判定成败——退出码是唯一裁决，模型的自述不是。失败输出经纯 Rust 的确定性消化（失败聚焦段 + 尾部，断言原文逐字保留）后回灌下一次尝试；尝试打满即判运行失败并要求升档。verifier 命令过与 `run_command` 同一条门禁链：静态只读放行、破坏性形状直接拒绝、其余交 AI 判官；判官缺席时拒绝，因为子 Agent 没有审批 UI 可回退。
+`spawn_agent` 的可选 `task` 参数是 Task Packet：目标、已知事实、约束、相关文件与 verifier 命令。Runtime 按窗口档位把相关文件内联进 Worker 首条消息，并在每次尝试后**由 Runtime 自己执行** verifier 命令来判定成败——退出码是唯一裁决，模型的自述不是。失败输出经纯 Rust 的确定性消化（失败聚焦段 + 尾部，断言原文逐字保留）后回灌下一次尝试；尝试打满即判运行失败并要求升档。命令型 Worker 共用三层门禁：静态安全命令直接放行；非破坏、非凭据敏感的模糊命令交 AI 判官；拒绝或不可用时精确返回父 Agent。父 Agent 仅能通过 `ops_runner + target_command` 请求人类对同一命令一次性确认，子 Agent 本身没有审批 UI，危险与凭据命令也绝不进入 AI。
 
 写通道是一条通路的两种规模：写入型工种的目标文件先由父 ToolRegistry canonicalize 并作为**一个集合**整体审批，子 ToolRegistry 再以 canonical 绝对路径做集合成员匹配，符号链接或路径别名不能扩大授权范围；editor 是集合大小为 1 的特例。同一 Catalog 内运行中 Worker 的文件集互斥，冲突时后来者被拒绝并点名冲突文件，锁在运行结束、超时、取消或 panic 时随 `Drop` 释放。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 

@@ -65,15 +65,26 @@ willdeep --profile some-im --workspace .
 | `--web-workspace <PATH>` | Web 模式额外允许的工作区，可重复 |
 | `--onboarding` | 重新运行交互式首次设置 |
 | `--json` | 在 stdout 输出 NDJSON 事件 |
-| `-r`, `--resume <ID\|latest>` | 恢复已保存的会话 |
+| `-r`, `--resume [ID\|latest]` | 恢复已保存的会话；省略值时直接加载最近更新的会话 |
 
 短选项一览：`-c` 配置、`-p` Profile、`-m` 模型、`-w` 工作区、`-r` 恢复会话。前四个是全局选项，子命令前后都能写。
+
+### TUI 链接与图片
+
+助手回复里的 Markdown 图片会显示为 `▧` 卡片。按 `Ctrl+L` 打开当前会话的链接与图片面板，使用 `↑/↓` 或滚轮选择：
+
+- 链接按 `Enter` 或点击后交给系统默认浏览器，调用不经过 Shell；
+- 图片按 `Enter` 或点击后才会加载，不会在消息出现时自动向远端发请求；
+- 预览优先使用终端探测到的 Kitty、iTerm2 或 Sixel，失败或不支持时自动使用 Unicode 半块字符；预览内按 `U` 可主动切换字符模式，按 `O` 打开远程原图；
+- 远程图片只允许公网 HTTP(S)，并有重定向、超时、下载大小、像素尺寸和解码内存限制；本地路径必须留在当前工作区。
 
 ## 会话与项目
 
 ```bash
 willdeep --list-sessions
-willdeep -r latest "继续检查刚才的问题"          # -r 即 --resume
+willdeep -r                                      # 直接进入最近一次会话
+willdeep --resume                                # 与 willdeep -r 等价
+willdeep -r latest "继续检查刚才的问题"          # 也可显式写 latest
 willdeep --resume 550e8400-e29b-41d4-a716-446655440000 "继续"
 ```
 

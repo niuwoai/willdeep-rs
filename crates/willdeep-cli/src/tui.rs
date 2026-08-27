@@ -43,6 +43,7 @@ mod command_catalog;
 mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
+mod media_ui;
 mod model_commands;
 mod overlay_dismiss;
 mod rendering;
@@ -60,6 +61,7 @@ use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
 use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt, dispatch_retitle};
+use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
@@ -87,6 +89,11 @@ pub enum UiMessage {
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
     ModelsLoaded(std::result::Result<Vec<String>, String>),
+    MediaLoaded {
+        target: String,
+        result: std::result::Result<DynamicImage, String>,
+    },
+    MediaResized(std::result::Result<ratatui_image::thread::ResizeResponse, String>),
     /// 标题摘要跑完了（`Some` 才是有结果）。摘要是一次网络往返，不能在
     /// 事件循环里直接 await——那会让整个界面在轮次收尾时卡住。
     ///
@@ -256,6 +263,7 @@ struct App {
     sidebar_rect: Rect,
     sidebar_wide: bool,
     help_visible: bool,
+    media: MediaState,
     sidebar_hits: Vec<(u16, SidebarHit)>,
     sidebar_manual_scroll: bool,
     attention_selected: usize,
@@ -1037,6 +1045,9 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    let (media_resize_tx, mut media_resize_rx) =
+        mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
+    app.media = MediaState::detect(media_resize_tx);
     app.goal = session.goal.clone();
     if session.runtime_event_cursor == 0 {
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
@@ -1227,6 +1238,15 @@ async fn event_loop(
                 }
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
+            Some(request)=media_resize_rx.recv()=>{
+                let tx=runtime.tx.clone();
+                tokio::spawn(async move {
+                    let result=tokio::task::spawn_blocking(move || request.resize_encode().map_err(|error|error.to_string()))
+                        .await
+                        .unwrap_or_else(|error|Err(format!("image resize worker failed: {error}")));
+                    let _=tx.send(UiMessage::MediaResized(result));
+                });
+            },
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>{
                     if app.approval.is_some() {
@@ -1254,6 +1274,11 @@ async fn event_loop(
                     if mouse.kind==MouseEventKind::Down(MouseButton::Left)
                         && app.dismiss_overlay_on_outside_click(mouse.column,mouse.row)
                     {
+                        continue;
+                    }
+                    if app.media.is_open() {
+                        let action=app.media.handle_mouse(mouse);
+                        dispatch_media_action(action,&mut app,runtime);
                         continue;
                     }
                     if app.routing_settings.is_some() {
@@ -1368,6 +1393,17 @@ async fn event_loop(
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if app.approval.is_some(){
                         app.handle_approval_key(key);
+                        continue;
+                    }
+                    if app.media.is_open(){
+                        let action=app.media.handle_key(key);
+                        dispatch_media_action(action,&mut app,runtime);
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('l'){
+                        if !app.media.open(&app.transcript){
+                            app.notice=Some(language.text("当前会话里没有链接或图片","No links or images in this Session","現在のセッションにリンクや画像はありません").to_owned());
+                        }
                         continue;
                     }
                     if let Some(detail)=app.attention_detail.clone(){
@@ -1957,6 +1993,12 @@ async fn event_loop(
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
+                UiMessage::MediaLoaded{target,result}=>app.media.finish_load(target,result),
+                UiMessage::MediaResized(result)=>{
+                    if let Some(error)=app.media.finish_resize(result){
+                        app.notice=Some(format!("{}: {error}",language.text("图片协议已降级","Image protocol downgraded","画像プロトコルをフォールバックしました")));
+                    }
+                },
                 // 摘要失败是静默的：列表里还留着 L1 派生的标题，为一行装饰
                 // 文字往聊天区塞报错不划算。改成功了才说一句。
                 UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
@@ -1976,6 +2018,43 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+fn dispatch_media_action(action: MediaAction, app: &mut App, runtime: &TuiRuntime) {
+    match action {
+        MediaAction::None => {}
+        MediaAction::OpenUrl(target) => match media_ui::open_external_url(&target) {
+            Ok(()) => {
+                app.notice = Some(
+                    app.language
+                        .text(
+                            "已交给系统浏览器打开",
+                            "Opened in the system browser",
+                            "システムブラウザで開きました",
+                        )
+                        .to_owned(),
+                )
+            }
+            Err(error) => {
+                app.notice = Some(format!(
+                    "{}: {error}",
+                    app.language.text(
+                        "打开链接失败",
+                        "Could not open link",
+                        "リンクを開けませんでした"
+                    )
+                ))
+            }
+        },
+        MediaAction::LoadImage(target) => {
+            let workspace = runtime.runtime_submit.workspace.clone();
+            let tx = runtime.tx.clone();
+            tokio::spawn(async move {
+                let result = media_ui::load_image(&target, &workspace).await;
+                let _ = tx.send(UiMessage::MediaLoaded { target, result });
+            });
+        }
+    }
 }
 
 impl App {
@@ -2058,6 +2137,7 @@ impl App {
             sidebar_rect: Rect::default(),
             sidebar_wide: false,
             help_visible: false,
+            media: MediaState::default(),
             sidebar_hits: Vec::new(),
             sidebar_manual_scroll: false,
             attention_selected: 0,
@@ -2326,7 +2406,7 @@ impl App {
             );
             return;
         }
-        self.input.insert("/agent spawn scout ");
+        self.input.insert("/agent spawn reader ");
         self.focus = FocusPane::Prompt;
     }
     fn open_task_detail(&mut self, index: usize, registry: &BackgroundTaskRegistry) {
@@ -4610,6 +4690,7 @@ fn draw(
         }
         render_agent_overlays(f, app);
         render_attention_detail(f, app);
+        render_media_overlay(f, app);
         app.approval_rect = Rect::default();
         app.approval_action_hits.clear();
         if let Some((description, always, _)) = &app.approval {
@@ -5117,10 +5198,23 @@ fn help_content(language: Language) -> String {
             "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R または /history 履歴セッションを検索して再開\n  Esc 実行中のターンを中断          Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     };
-    content.replace(
-        "Ctrl/Command+Shift+V",
-        "Alt+V / Ctrl+V / Ctrl/Command+Shift+V",
-    )
+    content
+        .replace(
+            "Ctrl/Command+Shift+V",
+            "Alt+V / Ctrl+V / Ctrl/Command+Shift+V",
+        )
+        .replace(
+            "Ctrl+S 文本选择/复制模式",
+            "Ctrl+S 文本选择/复制模式        Ctrl+L 链接与图片面板",
+        )
+        .replace(
+            "Ctrl+S Text selection mode",
+            "Ctrl+S Text selection mode      Ctrl+L Links and images",
+        )
+        .replace(
+            "Ctrl+S テキスト選択モード",
+            "Ctrl+S テキスト選択モード       Ctrl+L リンクと画像",
+        )
 }
 
 pub fn channel() -> (

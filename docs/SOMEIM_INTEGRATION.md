@@ -117,16 +117,17 @@ Provider 为 some.im 时，七个托管窄工种自动绑定各自的 `someim-32
 
 ## 上下文压缩模型
 
-Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。其它 Provider 未配置时维持旧行为（会话模型 + 行内指令）。
+Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用默认绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。启用 `[local_model] prefer_for_context_summaries = true` 后，本地辅助模型排在这条链之前，失败再回退托管压缩器；其它 Provider 最终回退会话模型。
 
 ## 会话标题模型
 
-**标题不绑网关别名，所有 Provider 一律默认取会话模型。** 这是与判官、压缩器不同的一条，
+**标题不绑网关别名；未启用本地辅助时，所有 Provider 一律默认取会话模型。** 这是与判官、压缩器不同的一条，
 理由有两条：网关侧没有为标题托管的职能模型，而 `/v1/models` 不列虚拟模型链——想确认某个
 `someim-*` 档存不存在只能逐档发最小请求探活，凭猜测钉一个别名等于埋一个"某天静默失效"的默认值；
 `deepseek-v4-flash` 虽然按 flash 档计费，但它在 [模型三档](MODEL_TIERS.md) 里是稀缺的 L 档，
 拿 1M 窗口写一行标题与那份文档的口径直接打架。
 
+启用 `[local_model] prefer_for_titles = true` 后，本地辅助模型排在会话模型之前，失败自动回退。
 代价是可控的：标题请求只在会话**第一轮**发一次，载荷是一问一答各截断到 800 字，
 与对话长度无关。要换便宜档写 `[agent] title_model`；整条关掉写 `[agent] auto_title = false`，
 标题会停在第一条提示词的确定性派生，仍然可读。详见 [会话标题](TUI_GUIDE.md#会话标题怎么来的)。

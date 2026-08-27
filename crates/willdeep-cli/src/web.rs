@@ -696,12 +696,9 @@ fn validate_agent_spawn(
     action: WebAgentSpawnAction,
 ) -> Result<(String, String, Option<String>), WebError> {
     let profile = action.profile.trim().to_owned();
-    if !matches!(
-        profile.as_str(),
-        "scout" | "reader" | "log_inspector" | "git_detective"
-    ) {
+    if !matches!(profile.as_str(), "reader" | "judge") {
         return Err(WebError::bad_request(
-            "profile must be one of scout, reader, log_inspector, or git_detective; deep requires a runtime escalation ticket",
+            "external spawn permits the public read-only reader or judge trade; command and writing trades require the parent Agent safety chain",
         ));
     }
     let prompt = action.prompt.trim().to_owned();
@@ -2055,7 +2052,16 @@ mod tests {
         assert_eq!(prompt, "read the architecture docs");
         assert_eq!(label.as_deref(), Some("architecture reader"));
 
-        for profile in ["deep", "editor", "writer", "shell"] {
+        let judge = WebAgentSpawnAction {
+            workspace: "/allowed".to_owned(),
+            session_id,
+            profile: "judge".to_owned(),
+            prompt: "review the evidence".to_owned(),
+            label: None,
+        };
+        assert!(validate_agent_spawn(judge).is_ok());
+
+        for profile in ["deep", "editor", "scout", "writer", "shell"] {
             let action = WebAgentSpawnAction {
                 workspace: "/allowed".to_owned(),
                 session_id,

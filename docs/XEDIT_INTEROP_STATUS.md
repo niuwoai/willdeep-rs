@@ -1,7 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
-> 勘察日期：2026-08-21（同日完成建议路径三步 + 运行时层阶段一并回写）|
-> rs：0.39.0-rc3 | Xedit：1.284.0-rc1。
+> 初次勘察：2026-08-21；最近同步复核：2026-08-27。|
+> rs：0.49.0-rc1 | Xedit：1.296.0-rc5。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -19,7 +19,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 
 | 项 | willdeep-rs | Xedit |
 |---|---|---|
-| 版本 | 0.39.0-rc3 | 1.284.0-rc1 |
+| 版本 | 0.49.0-rc1 | 1.296.0-rc5 |
 | 规模 | ~60K 行 Rust / 4 crate | ~252K 行 Swift（主应用 481 文件） |
 | 工具数 | 21+2 | 164（`Xedit/AgentToolRegistry.swift`） |
 | 系统提示词 | `STABLE_CONTRACT` ~4.5KB | 稳定前缀 ~30KB（v29，`AgentContextBuilder.swift`） |
@@ -38,10 +38,13 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | Task Packet 字段 | 近乎字段级同构 | `subagent.rs:143-178` | `AgentSubagentTaskPacket.swift:19-66` |
 | 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件。0.43.0-rc1 起桥接会话进入 rs 历史面板并标 `[Xedit]` | `session.rs` 的 `swift_digest` / `swift_session`；`session_store.rs` 的 `extend_with_unmanaged` | Xedit 不读 `~/.willdeep/sessions` |
 | 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
+| 本地辅助模型 | 语义对齐、配置存储暂不共享：复用单模型，本地优先后远端回退，低置信度才做模型路由 | `config.rs` `[local_model]`、`harness.rs`、`routing.rs` | `AgentLocalModelSupport.swift`、`AppStateAgentWorkerRouting.swift` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
 | `model-catalog.v1.json` 模型目录 | **canonical 契约已定，代码未接入** | `docs/SHARED_MODEL_CATALOG.md` + JSON Schema/示例 | 计划由 `AgentProviderLibrary` / some.im public model catalog 迁移；真实凭据只存 `credential_ref` |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |
+| 六个公开工种 + 内部旧 ID | 双端同语义 | `PUBLIC_SUBAGENT_IDS` / `public_profile_id` | `AgentSubagentProfile.publicBuiltIn` / presentation 映射 |
+| 子 Worker 命令智能审核 | 双端同语义 | `reviewed_subagent_shell` + `target_command` 精确授权 | `CommandReviewer` + 父级 `ops_runner(target_command)` 人审兜底 |
 | 判官模型 `someim-security-guard` | 同名 | `harness.rs:26` | `AgentModels.swift` |
 | `mobile-gateway.v1` | 协议版本共用，room/token 独立 | `mobile.rs`、`AUTHENTICATION.md:133` | `MobileGatewayCoordinator.swift` |
 | CLI 命名权 | `willdeep` 归 rs | — | `CommandLineToolInstaller.swift`（App 装成 `willdeep-app`） |
@@ -136,7 +139,8 @@ Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工
    （托管职能提示词、4KB 技能索引、MCP 按需）流向 Xedit，而非反向。
 
 **有意分歧（不处理，已有书面理由）**：冲突文件集 Xedit 排队 / rs 拒绝；
-`terminal_operator` rs 明确不做；Provider 凭据存储结构性差异；
+Swift 的 `terminal_operator` 驾驶 App 侧栏终端，Rust 以公开 `ops_runner` 承接同类
+命令审核语义但不模拟 GUI 终端；Provider 凭据存储结构性差异；
 `auto_dispatch_read_only` Xedit 仅解析不生效（先对名字后对行为）。
 
 ## 战略判断

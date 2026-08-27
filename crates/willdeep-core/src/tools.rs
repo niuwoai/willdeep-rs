@@ -194,6 +194,13 @@ pub struct ToolRegistry {
     /// `run_command` under the ordinary approval chain; a set means only
     /// these literal commands (its verifier) are runnable at all.
     command_allowlist: Option<HashSet<String>>,
+    /// Child-worker shell policy: static safe commands pass, the ambiguous
+    /// middle goes to the AI judge, and denial/unavailability is returned to
+    /// the parent instead of trying to show UI from the child context.
+    reviewed_subagent_shell: bool,
+    /// Commands authorized verbatim by the parent after a human approval.
+    /// Nothing derived from or decorated around these strings is authorized.
+    preapproved_commands: HashSet<String>,
     /// Byte cap on tool payloads handed back to the model. `None` keeps the
     /// per-tool defaults the main agent has always used; `Some` is the
     /// small-context worker budget — a 128 KB test log would eat a 32K
@@ -242,6 +249,8 @@ impl ToolRegistry {
             write_targets: None,
             read_only_git_shell: false,
             command_allowlist: None,
+            reviewed_subagent_shell: false,
+            preapproved_commands: HashSet::new(),
             tool_output_limit: None,
             delegation_hints: false,
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
@@ -430,6 +439,20 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_reviewed_subagent_shell(mut self, enabled: bool) -> Self {
+        self.reviewed_subagent_shell = enabled;
+        self
+    }
+
+    pub fn with_preapproved_commands(mut self, commands: impl IntoIterator<Item = String>) -> Self {
+        self.preapproved_commands = commands
+            .into_iter()
+            .map(|command| command.trim().to_owned())
+            .filter(|command| !command.is_empty())
+            .collect();
+        self
+    }
+
     /// Cap every tool payload this registry returns. Values below 1 KB are
     /// raised to 1 KB: a cap that truncates the failing assertion itself
     /// defeats the point of showing the output at all.
@@ -507,6 +530,35 @@ impl ToolRegistry {
         )
         .await?;
         Ok(targets)
+    }
+
+    /// Ask the human about one exact command a child could not authorize by
+    /// static policy or AI review. The returned string is the capability:
+    /// the child accepts only a byte-for-byte match after trimming the outer
+    /// whitespace, and receives no remembered or wildcard authority.
+    pub async fn approve_subagent_command(&self, command: &str) -> Result<String, ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly {
+            return Err(ToolError::ReadOnlyPolicy(
+                "subagent target_command".to_owned(),
+            ));
+        }
+        let command = command.trim();
+        if command.is_empty()
+            || command.len() > 16 * 1024
+            || command
+                .chars()
+                .any(|character| character == '\0' || matches!(character, '\n' | '\r'))
+        {
+            return Err(ToolError::ApprovalDenied(
+                "target_command must contain 1 to 16384 bytes on one line".to_owned(),
+            ));
+        }
+        self.require_approval(
+            &format!("allow ops_runner subagent to run this exact command once:\n{command}"),
+            false,
+        )
+        .await?;
+        Ok(command.to_owned())
     }
 
     pub fn workspace(&self) -> &Path {
@@ -617,13 +669,14 @@ impl ToolRegistry {
             ),
             definition(
                 "spawn_agent",
-                "Delegate a self-contained task to a child agent with an isolated context. Prefer deployable models and the narrowest profile that fits: scout (locate files and symbols), reader (summarize long files), log_inspector (explain a failure log), git_detective (regression archaeology), editor (one file), implementer (bounded multi-file coding in 256K), test_fixer (failing tests), build_fixer (compile/type/lint errors), deep only after smaller tiers were attempted and an escalation ticket explains why decomposition cannot work. Children cannot spawn more agents. Pass `task` whenever you can: a worker given read_files, write_files, known_facts and a verifier command finishes on its own instead of burning its window re-discovering what you already know.",
+                "Delegate a self-contained task to an isolated child. The public trades are reader (research and inspection), implementer (bounded coding), tester (tests and review), ops_runner (bounded command execution), judge (independent correctness/safety review), and deep (only after smaller tiers were attempted and a runtime-validated escalation ticket explains why decomposition cannot work). Legacy specialist IDs remain internally compatible but are not public choices. Children cannot spawn agents or show approval UI. A command-capable child uses static safety rules first and AI review only for the ambiguous, non-sensitive middle. If review declines or is unavailable, it returns the exact command; the parent may respawn ops_runner with target_command, which requests one-time human approval for that identical command. Pass task whenever possible so the worker receives known facts, exact read/write files, and a verifier instead of rediscovering them.",
                 json!({"type":"object","properties":{
                     "prompt":{"type":"string","description":"Free-text instruction. Still required when `task` is present; keep it to what the packet does not already say."},
                     "label":{"type":"string"},
-                    "profile":{"type":"string","enum":["scout","reader","deep","editor","implementer","test_fixer","build_fixer","log_inspector","git_detective"]},
+                    "profile":{"type":"string","enum":["reader","implementer","tester","ops_runner","judge","deep"]},
                     "run_in_background":{"type":"boolean"},
                     "target_file":{"type":"string","description":"Single write target for the editor profile."},
+                    "target_command":{"type":"string","description":"Exact command returned by a denied/unavailable child review. Valid only with ops_runner; the parent asks the human for one-time approval and authorizes no decorated or substituted command."},
                     "escalation":{"type":"object","description":"Required admission ticket for the deep profile. The runtime cross-checks attempted_profiles against observed lower-tier work before spending the 1M-context budget.","properties":{
                         "reason":{"type":"string","description":"Concrete reason the standard tier could not finish."},
                         "attempted_profiles":{"type":"array","items":{"type":"string"},"minItems":1,"description":"Lower-tier profiles already attempted in this harness."},
@@ -1525,15 +1578,23 @@ impl ToolRegistry {
     /// judge for the ambiguous middle, and only escalate to the user when
     /// both tiers decline.
     async fn gate_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
+        let trimmed = command.trim();
         let escalate = |registry: &Self, detail: String| {
             registry.report_approval(command, ApprovalSource::User, detail);
         };
+        if self.preapproved_commands.contains(trimmed) {
+            self.report_approval(
+                command,
+                ApprovalSource::User,
+                "parent relayed one-time human approval for this exact command".to_owned(),
+            );
+            return Ok(());
+        }
         // A worker with an allowlist runs its verifier and nothing else. This
         // gate is first because it is the narrowest: no approval mode, static
         // rule or judge verdict can widen a worker past the exact command its
         // dispatcher declared.
         if self.read_only_git_shell {
-            let trimmed = command.trim();
             let is_git = trimmed == "git" || trimmed.starts_with("git ");
             if !is_git || crate::safety::classify(trimmed) != CommandSafety::AlwaysSafe {
                 return Err(ToolError::ApprovalDenied(format!(
@@ -1542,9 +1603,10 @@ impl ToolRegistry {
             }
             return Ok(());
         }
-        if let Some(allowed) = &self.command_allowlist
-            && !allowed.contains(command.trim())
-        {
+        if let Some(allowed) = &self.command_allowlist {
+            if allowed.contains(trimmed) {
+                return Ok(());
+            }
             // Name the command it *may* run. The live-fire range showed the
             // typical near-miss is a decorated verifier — `cargo build 2>&1`
             // instead of `cargo build` — and a refusal that only says "not
@@ -1557,6 +1619,66 @@ impl ToolRegistry {
             return Err(ToolError::ApprovalDenied(format!(
                 "this subagent may only run its declared verifier command verbatim ({allowed_list}), not: {command}"
             )));
+        }
+        if self.reviewed_subagent_shell {
+            if child_command_is_sensitive(trimmed) {
+                return Err(reviewed_subagent_denial(
+                    command,
+                    "credential-sensitive command; AI review was bypassed",
+                ));
+            }
+            match crate::safety::classify(trimmed) {
+                CommandSafety::AlwaysSafe => {
+                    self.report_approval(
+                        command,
+                        ApprovalSource::StaticAllowlist,
+                        "subagent static rule: read-only or bounded command".to_owned(),
+                    );
+                    return Ok(());
+                }
+                CommandSafety::AlwaysDangerous => {
+                    return Err(reviewed_subagent_denial(
+                        command,
+                        "destructive command shape; AI review was bypassed",
+                    ));
+                }
+                CommandSafety::NeedsJudgment => {}
+            }
+            let Some(judge) = &self.safety_judge else {
+                return Err(reviewed_subagent_denial(
+                    command,
+                    "no AI safety judge is configured",
+                ));
+            };
+            let task_context = self.task_context.lock().expect("task context").clone();
+            let verdict = judge
+                .judge(JudgeRequest {
+                    tool: "subagent_run_command".to_owned(),
+                    command: command.to_owned(),
+                    task_context,
+                })
+                .await;
+            return match verdict {
+                JudgeVerdict::Allow => {
+                    self.report_approval(
+                        command,
+                        ApprovalSource::Judge,
+                        format!(
+                            "subagent AI review ({}): bounded and consistent with the delegated task",
+                            judge.model()
+                        ),
+                    );
+                    Ok(())
+                }
+                JudgeVerdict::Deny => Err(reviewed_subagent_denial(
+                    command,
+                    &format!("AI safety judge ({}) declined", judge.model()),
+                )),
+                JudgeVerdict::Unavailable(reason) => Err(reviewed_subagent_denial(
+                    command,
+                    &format!("AI safety judge ({}) unavailable: {reason}", judge.model()),
+                )),
+            };
         }
         if matches!(
             self.approval_mode,
@@ -2247,6 +2369,51 @@ fn command_carries_credentials(command: &str) -> bool {
     crate::judge::redact_credentials(command) != command
 }
 
+pub(crate) fn child_command_is_sensitive(command: &str) -> bool {
+    if command_carries_credentials(command) {
+        return true;
+    }
+    let normalized = command.to_ascii_lowercase();
+    const SENSITIVE_PATHS: &[&str] = &[
+        "~/.ssh",
+        "/.ssh/",
+        "/.gnupg",
+        "/.aws",
+        "/.config/gh",
+        "/library/keychains",
+        ".env",
+        "id_rsa",
+        "id_ed25519",
+        ".aws/credentials",
+        ".kube/config",
+        ".docker/config.json",
+        "/etc/shadow",
+        "private_key",
+        "private key",
+        ".pem",
+        ".p12",
+        ".pfx",
+    ];
+    if SENSITIVE_PATHS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return true;
+    }
+    let head = normalized.split_whitespace().next().unwrap_or_default();
+    matches!(
+        head,
+        "env" | "printenv" | "set" | "security" | "op" | "pass" | "gpg" | "ssh-add"
+    ) || normalized.contains("security find-generic-password")
+        || normalized.contains("security find-internet-password")
+}
+
+fn reviewed_subagent_denial(command: &str, reason: &str) -> ToolError {
+    ToolError::ApprovalDenied(format!(
+        "subagent command was not authorized ({reason}). Report this exact command to the parent: {command}\nThe parent may ask the human, then respawn profile=\"ops_runner\" with target_command set to the identical command. Do not decorate, rewrite, or substitute it."
+    ))
+}
+
 fn rule_carries_credentials(rule: &str) -> bool {
     command_carries_credentials(
         rule.strip_prefix(COMMAND_SIGNATURE_PREFIX)
@@ -2403,7 +2570,11 @@ fn append_web_chunk(output: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ToolError>
     Ok(())
 }
 
-async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
+/// Validate that an HTTP(S) URL resolves exclusively to public addresses.
+///
+/// Kept as a shared boundary for both agent web tools and user-triggered TUI
+/// media downloads so SSRF rules cannot drift between the two call sites.
+pub async fn validate_public_url(url: &reqwest::Url) -> Result<(), ToolError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(ToolError::Network(
             "only HTTP(S) URLs are supported".to_owned(),
@@ -3331,6 +3502,96 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
             })
             .await;
         assert!(matches!(denied, Err(ToolError::ApprovalDenied(_))));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn reviewed_child_never_sends_dangerous_or_sensitive_commands_to_the_judge() {
+        struct RecordingJudge(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait]
+        impl SafetyJudge for RecordingJudge {
+            async fn judge(&self, request: JudgeRequest) -> JudgeVerdict {
+                self.0.lock().expect("seen").push(request.command);
+                JudgeVerdict::Allow
+            }
+        }
+
+        let root = workspace("reviewed-child-boundary");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+            .expect("registry")
+            .with_reviewed_subagent_shell(true)
+            .with_safety_judge(Arc::new(RecordingJudge(seen.clone())));
+
+        let reviewed = registry
+            .run_command(CommandArgs {
+                command: "printf reviewed > result.txt".to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await;
+        assert!(
+            reviewed.is_ok(),
+            "AI-approved bounded command: {reviewed:?}"
+        );
+        for command in [
+            "rm -rf build",
+            "cat ~/.ssh/id_ed25519",
+            "cat .env",
+            "printenv",
+        ] {
+            let denied = registry
+                .run_command(CommandArgs {
+                    command: command.to_owned(),
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                })
+                .await;
+            let Err(ToolError::ApprovalDenied(message)) = denied else {
+                panic!("reviewed child must refuse {command}");
+            };
+            assert!(
+                message.contains(command),
+                "denial must return exact command"
+            );
+            assert!(message.contains("target_command"));
+        }
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            ["printf reviewed > result.txt"]
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn human_preapproval_is_exact_and_does_not_authorize_a_decorated_command() {
+        let root = workspace("reviewed-child-human");
+        let exact = "printf human > exact.txt";
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+            .expect("registry")
+            .with_reviewed_subagent_shell(true)
+            .with_preapproved_commands([exact.to_owned()]);
+        registry
+            .run_command(CommandArgs {
+                command: exact.to_owned(),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await
+            .expect("exact human-authorized command");
+        let decorated = registry
+            .run_command(CommandArgs {
+                command: format!("{exact} && printf extra"),
+                timeout_seconds: None,
+                label: None,
+                run_in_background: None,
+            })
+            .await;
+        assert!(matches!(decorated, Err(ToolError::ApprovalDenied(_))));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

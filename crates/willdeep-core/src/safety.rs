@@ -109,14 +109,18 @@ static ALWAYS_SAFE_HEADS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "whereis",
         "type",
         "printenv",
+        "getent",
         "uname",
+        "who",
+        "users",
+        "last",
+        "lastlog",
         "whoami",
         "id",
         "date",
         "uptime",
         "sw_vers",
         "arch",
-        "hostname",
         "getconf",
         "locale",
         "groups",
@@ -128,6 +132,13 @@ static ALWAYS_SAFE_HEADS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "lsof",
         "vm_stat",
         "free", // Spotlight metadata reads
+        "dmesg",
+        "ss",
+        "netstat",
+        "lsblk",
+        "lscpu",
+        "lsmem",
+        "lsns",
         "mdfind",
         "mdls", // calculators
         "cal",
@@ -340,6 +351,10 @@ static CONDITIONAL_HEADS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "bash",
         "zsh",
         "env",
+        "hostname",
+        "hostnamectl",
+        "timedatectl",
+        "resolvectl",
     ]
     .into_iter()
     .collect()
@@ -646,6 +661,43 @@ fn classify_conditional(head: &str, args: &[&str]) -> CommandSafety {
             Some("get") | Some("describe") | Some("logs") | Some("status") | Some("list-units")
             | Some("top") => CommandSafety::AlwaysSafe,
             None => CommandSafety::AlwaysSafe,
+            _ => CommandSafety::NeedsJudgment,
+        },
+        "hostname" => {
+            if args.is_empty()
+                || args.iter().all(|arg| {
+                    matches!(
+                        *arg,
+                        "-s" | "--short"
+                            | "-f"
+                            | "--fqdn"
+                            | "-d"
+                            | "--domain"
+                            | "-i"
+                            | "--ip-address"
+                    )
+                })
+            {
+                CommandSafety::AlwaysSafe
+            } else {
+                CommandSafety::NeedsJudgment
+            }
+        }
+        "hostnamectl" => match subcommand.as_deref() {
+            None | Some("status") | Some("show") => CommandSafety::AlwaysSafe,
+            _ => CommandSafety::NeedsJudgment,
+        },
+        "timedatectl" => match subcommand.as_deref() {
+            None
+            | Some("status")
+            | Some("show")
+            | Some("timesync-status")
+            | Some("show-timesync")
+            | Some("list-timezones") => CommandSafety::AlwaysSafe,
+            _ => CommandSafety::NeedsJudgment,
+        },
+        "resolvectl" => match subcommand.as_deref() {
+            None | Some("status") | Some("query") | Some("statistics") => CommandSafety::AlwaysSafe,
             _ => CommandSafety::NeedsJudgment,
         },
         // Everything below reaches the network, another host, a database, or
@@ -1056,6 +1108,41 @@ mod tests {
         safe("find . -name '*.rs' -type f");
         safe("echo hello");
         safe("uname -a && date");
+    }
+
+    #[test]
+    fn linux_operational_inspection_is_safe_but_mutation_needs_review() {
+        for command in [
+            "getent hosts example.com",
+            "who",
+            "users",
+            "last -n 5",
+            "lastlog",
+            "free -h",
+            "dmesg --level=err",
+            "ss -lntp",
+            "netstat -rn",
+            "lsblk",
+            "lscpu",
+            "lsmem",
+            "lsns",
+            "hostname",
+            "hostnamectl status",
+            "timedatectl show",
+            "timedatectl list-timezones",
+            "resolvectl status",
+            "resolvectl query example.com",
+        ] {
+            safe(command);
+        }
+        for command in [
+            "hostname new-host",
+            "hostnamectl set-hostname new-host",
+            "timedatectl set-timezone UTC",
+            "resolvectl dns eth0 1.1.1.1",
+        ] {
+            judged(command);
+        }
     }
 
     #[test]

@@ -1026,6 +1026,7 @@ mod tests {
         assert!(help.contains("M 已读"));
         assert!(help.contains("Ctrl+F"));
         assert!(help.contains("Ctrl+P"));
+        assert!(help.contains("Ctrl+L 链接与图片面板"));
         assert!(help.contains("Alt+V"));
     }
     #[test]
@@ -1483,7 +1484,7 @@ mod tests {
             "说明：\n\n| 层级 | 说明 |\n|---|---|\n| 产品 | 官网、用户体系 |\n| SSO | 1. 登录<br>2. 同步权限 |",
             24,
         );
-        let rendered = lines
+        let rendered_lines = lines
             .iter()
             .map(|line| {
                 line.spans
@@ -1491,8 +1492,13 @@ mod tests {
                     .map(|span| span.content.as_ref())
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        assert!(
+            rendered_lines
+                .iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 24)
+        );
+        let rendered = rendered_lines.join("\n");
 
         assert!(rendered.contains("层级"));
         assert!(rendered.contains("─┼─"));
@@ -1501,6 +1507,33 @@ mod tests {
         assert!(rendered.contains("2. 同步权限"));
         assert!(!rendered.contains("|---|"));
         assert!(!rendered.contains("<br>"));
+    }
+    #[test]
+    fn renders_closed_thin_rules_around_and_between_table_rows() {
+        let lines = render_assistant_markdown("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |", 80);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "WillDeep: ",
+                "┌───┬───┐",
+                "│ A │ B │",
+                "├───┼───┤",
+                "│ 1 │ 2 │",
+                "├───┼───┤",
+                "│ 3 │ 4 │",
+                "└───┴───┘",
+            ]
+        );
     }
     #[test]
     fn recognizes_terminal_line_navigation_control_bytes() {

@@ -92,6 +92,7 @@ export function ModelRoutingSettings({ messages: t }: { messages: Messages }) {
     const labels: Record<string, string> = {
       scout: t.routingProfileScout, reader: t.routingProfileReader, editor: t.routingProfileEditor,
       implementer: t.routingProfileImplementer, test_fixer: t.routingProfileTestFixer,
+      tester: t.routingProfileTester, ops_runner: t.routingProfileOpsRunner, judge: t.routingProfileJudge,
       build_fixer: t.routingProfileBuildFixer, log_inspector: t.routingProfileLogInspector,
       git_detective: t.routingProfileGitDetective, deep: t.routingProfileDeep,
     };

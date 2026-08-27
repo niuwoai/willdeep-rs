@@ -46,8 +46,8 @@ pub use session::{Session, SessionDigest, SessionStore, format_iso8601};
 pub use session_title::TitleSource;
 pub use skills::SkillCatalog;
 pub use subagent::{
-    SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket, TaskVerifier,
-    builtin_profiles,
+    PUBLIC_SUBAGENT_IDS, SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket,
+    TaskVerifier, builtin_profiles, public_profile_id,
 };
 pub use subagent_worktree::SubagentWorktreePolicy;
 pub use tools::{

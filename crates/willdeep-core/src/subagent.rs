@@ -67,6 +67,51 @@ pub enum SubagentShell {
     /// must be `git`, and the command must still pass the same static
     /// read-only classification every other command passes.
     ReadOnlyGit,
+    /// Static read-only/bounded commands run directly. Ambiguous commands
+    /// are reviewed by the configured safety judge in this worker's task
+    /// context. Destructive or credential-sensitive commands are refused
+    /// before the judge sees them.
+    Reviewed,
+    /// A reviewed shell that still requires a verifier in the task packet.
+    ReviewedVerifierOnly,
+    /// A reviewed shell whose verifier is optional.
+    ReviewedVerifierOptional,
+}
+
+impl SubagentShell {
+    fn requires_verifier(self) -> bool {
+        matches!(self, Self::VerifierOnly | Self::ReviewedVerifierOnly)
+    }
+
+    fn uses_intelligent_review(self) -> bool {
+        matches!(
+            self,
+            Self::Reviewed | Self::ReviewedVerifierOnly | Self::ReviewedVerifierOptional
+        )
+    }
+}
+
+/// Public trades shown to people and advertised in the tool schema. Legacy
+/// specialist IDs remain executable for automatic routing and saved flows.
+pub const PUBLIC_SUBAGENT_IDS: [&str; 6] = [
+    "reader",
+    "implementer",
+    "tester",
+    "ops_runner",
+    "judge",
+    "deep",
+];
+
+pub fn public_profile_id(id: &str) -> Option<&'static str> {
+    match id.trim().to_ascii_lowercase().as_str() {
+        "scout" | "reader" | "log_inspector" | "git_detective" => Some("reader"),
+        "editor" | "implementer" | "test_fixer" | "build_fixer" => Some("implementer"),
+        "tester" | "reviewer" | "small_reviewer" => Some("tester"),
+        "ops_runner" | "terminal_operator" => Some("ops_runner"),
+        "security_guard" | "judge" => Some("judge"),
+        "deep" => Some("deep"),
+        _ => None,
+    }
 }
 
 /// How a profile is allowed to write.
@@ -270,6 +315,10 @@ pub(crate) struct SpawnAgentArgs {
     pub profile: Option<String>,
     pub run_in_background: Option<bool>,
     pub target_file: Option<String>,
+    /// Exact command requested after an unattended worker reported that AI
+    /// review declined or was unavailable. Only `ops_runner` may receive it,
+    /// and the parent must separately authorize the identical string.
+    pub target_command: Option<String>,
     pub task: Option<TaskPacket>,
     pub escalation: Option<EscalationTicket>,
 }
@@ -347,8 +396,9 @@ impl SubagentCatalog {
     }
 
     pub fn description(&self) -> String {
-        self.profiles
-            .values()
+        PUBLIC_SUBAGENT_IDS
+            .iter()
+            .filter_map(|id| self.profiles.get(*id))
             .map(|profile| format!("`{}` — {}", profile.id, profile.purpose))
             .collect::<Vec<_>>()
             .join(" ")
@@ -407,8 +457,28 @@ impl SubagentCatalog {
         args: SpawnAgentArgs,
         approved_targets: Option<BTreeSet<PathBuf>>,
     ) -> Result<String, AgentError> {
-        self.run_with_id(uuid::Uuid::new_v4(), args, approved_targets)
+        if args.target_command.is_some() {
+            return Err(AgentError::Subagent(
+                "target_command requires exact parent authorization".to_owned(),
+            ));
+        }
+        self.run_with_id(uuid::Uuid::new_v4(), args, approved_targets, None)
             .await
+    }
+
+    pub(crate) async fn run_authorized(
+        &self,
+        args: SpawnAgentArgs,
+        approved_targets: Option<BTreeSet<PathBuf>>,
+        approved_command: Option<String>,
+    ) -> Result<String, AgentError> {
+        self.run_with_id(
+            uuid::Uuid::new_v4(),
+            args,
+            approved_targets,
+            approved_command,
+        )
+        .await
     }
 
     pub async fn spawn_external_read_only(
@@ -462,6 +532,7 @@ impl SubagentCatalog {
                 ..SpawnAgentArgs::default()
             },
             None,
+            None,
         )
         .await?;
         Ok(())
@@ -472,11 +543,27 @@ impl SubagentCatalog {
         agent_id: uuid::Uuid,
         args: SpawnAgentArgs,
         approved_targets: Option<BTreeSet<PathBuf>>,
+        approved_command: Option<String>,
     ) -> Result<String, AgentError> {
         let profile = self
             .profile(args.profile.as_deref())
             .ok_or_else(|| AgentError::Subagent("no subagent profiles configured".to_owned()))?
             .clone();
+        let requested_command = args
+            .target_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty());
+        if requested_command.is_some() && profile.id != "ops_runner" {
+            return Err(AgentError::Subagent(
+                "target_command is only supported by the ops_runner profile".to_owned(),
+            ));
+        }
+        if requested_command != approved_command.as_deref() {
+            return Err(AgentError::Subagent(
+                "target_command did not receive matching parent authorization".to_owned(),
+            ));
+        }
         let failure_count = self
             .failures
             .lock()
@@ -508,7 +595,7 @@ impl SubagentCatalog {
         // "fix, then prove it". Without a verifier it has nothing to run and
         // nothing to prove, and its report would be exactly the unverified
         // self-assessment this profile exists to replace.
-        if verifier.is_none() && profile.shell == SubagentShell::VerifierOnly {
+        if verifier.is_none() && profile.shell.requires_verifier() {
             return Err(AgentError::Subagent(format!(
                 "profile {} is a verified worker and requires task.verifier.command",
                 profile.id
@@ -556,6 +643,8 @@ impl SubagentCatalog {
             max_attempts,
             claimed_files: self.claimed_files.clone(),
             skills: self.skills.clone(),
+            safety_judge: self.safety_judge.clone(),
+            approved_command,
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -712,6 +801,11 @@ impl SubagentCatalog {
                 "verifier.command cannot be empty".to_owned(),
             ));
         }
+        if crate::tools::child_command_is_sensitive(command) {
+            return Err(AgentError::Subagent(format!(
+                "verifier command is credential-sensitive and will not be sent to the AI judge: {command}. The parent may request exact human authorization through ops_runner target_command instead"
+            )));
+        }
         match crate::safety::classify(command) {
             CommandSafety::AlwaysSafe => return Ok(verifier),
             CommandSafety::AlwaysDangerous => {
@@ -736,11 +830,11 @@ impl SubagentCatalog {
         {
             JudgeVerdict::Allow => Ok(verifier),
             JudgeVerdict::Deny => Err(AgentError::Subagent(format!(
-                "the safety judge ({}) refused this verifier command: {command}",
+                "the safety judge ({}) refused this verifier command: {command}. The parent may request exact human authorization through ops_runner target_command",
                 judge.model()
             ))),
             JudgeVerdict::Unavailable(reason) => Err(AgentError::Subagent(format!(
-                "the safety judge ({}) could not review this verifier command ({reason}): {command}",
+                "the safety judge ({}) could not review this verifier command ({reason}): {command}. The parent may request exact human authorization through ops_runner target_command",
                 judge.model()
             ))),
         }
@@ -904,6 +998,8 @@ struct SubagentRun {
     max_attempts: usize,
     claimed_files: Arc<Mutex<BTreeSet<PathBuf>>>,
     skills: Option<Arc<crate::skills::SkillCatalog>>,
+    safety_judge: Option<Arc<dyn SafetyJudge>>,
+    approved_command: Option<String>,
 }
 
 /// Run a worker to a verdict.
@@ -931,6 +1027,8 @@ async fn run_subagent(
         max_attempts,
         claimed_files,
         skills,
+        safety_judge,
+        approved_command,
     } = run;
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
@@ -958,6 +1056,18 @@ async fn run_subagent(
         skills.as_deref(),
     )
     .await;
+    let review_goal = task
+        .as_ref()
+        .map(|task| task.goal.as_str())
+        .filter(|goal| !goal.trim().is_empty())
+        .unwrap_or(prompt.as_str());
+    let command_review_context = bounded(
+        crate::judge::redact_credentials(&format!(
+            "delegated trade={} purpose={} goal={review_goal}",
+            profile.id, profile.purpose
+        )),
+        2 * 1024,
+    );
     let attempts = if verifier.is_some() { max_attempts } else { 1 };
     let mut outcome: Option<VerifierOutcome> = None;
 
@@ -971,6 +1081,9 @@ async fn run_subagent(
             lifecycle_sink.clone(),
             agent_id,
             instruction_inbox.clone(),
+            safety_judge.clone(),
+            approved_command.clone(),
+            command_review_context.clone(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -1176,8 +1289,13 @@ async fn run_once(
     lifecycle_sink: Arc<dyn EventSink>,
     agent_id: uuid::Uuid,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
+    safety_judge: Option<Arc<dyn SafetyJudge>>,
+    approved_command: Option<String>,
+    command_review_context: String,
 ) -> Result<String, AgentError> {
-    let approval = if approved_targets.is_some() {
+    let approval = if profile.shell.uses_intelligent_review() {
+        ApprovalMode::Smart
+    } else if approved_targets.is_some() {
         ApprovalMode::WorkspaceAccess
     } else {
         ApprovalMode::Strict
@@ -1185,6 +1303,10 @@ async fn run_once(
     let mut tools = ToolRegistry::new(workspace, approval)?
         .with_allowed_tools(profile.tool_names.clone())
         .with_write_targets(approved_targets.clone());
+    if let Some(judge) = safety_judge {
+        tools = tools.with_safety_judge(judge);
+    }
+    tools.set_task_context(&command_review_context);
     if let Some(limit) = profile.tool_output_limit {
         tools = tools.with_tool_output_limit(limit);
     }
@@ -1201,9 +1323,18 @@ async fn run_once(
                     .unwrap_or_default(),
             ))
         }
+        SubagentShell::Reviewed
+        | SubagentShell::ReviewedVerifierOnly
+        | SubagentShell::ReviewedVerifierOptional => tools
+            .with_reviewed_subagent_shell(true)
+            .with_preapproved_commands(
+                approved_command
+                    .map(|command| HashSet::from([command]))
+                    .unwrap_or_default(),
+            ),
     };
     let boundary = format!(
-        "You are a WillDeep subagent working in {}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent.",
+        "You are a WillDeep subagent working in {}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent. Read-only and bounded commands may pass static checks. Other non-destructive commands may be reviewed by an AI safety judge. Destructive or credential-sensitive commands are outside that judge's authority. If command review is denied or unavailable, report the exact command to the parent; the parent may ask the human and respawn an ops_runner with that exact target_command.",
         workspace.display()
     );
     // A relay-hosted trade already carries its job prompt server-side. Sending
@@ -1695,7 +1826,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "git_detective",
-                shell: SubagentShell::ReadOnlyGit,
+                shell: SubagentShell::Reviewed,
                 purpose: "Find when and where a regression was introduced from repository history; read-only.",
                 tools: &[
                     "git_log",
@@ -1705,7 +1836,7 @@ pub fn builtin_profiles(
                     "read_file",
                     "run_command",
                 ],
-                prompt: "Your trade is REGRESSION ARCHAEOLOGY. You may run read-only `git` commands directly — `git log -p`, `git show <sha>`, `git diff <a> <b>`, `git bisect` inspection — which is the only way to compare two commits; nothing but git will run. Work backwards from the symptom through history and report exact commits, dates and hunks. Name the commit you believe introduced the change, and say plainly when the evidence does not single one out.",
+                prompt: "Your trade is REGRESSION ARCHAEOLOGY. Prefer read-only `git` commands — `git log -p`, `git show <sha>`, `git diff <a> <b>`, `git bisect` inspection. Work backwards from the symptom through history and report exact commits, dates and hunks. Name the commit you believe introduced the change, and say plainly when the evidence does not single one out.",
                 max_turns: 8,
                 context_window: WORKER_WINDOW_STANDARD,
                 tool_output_limit: Some(PAYLOAD_LIMIT_STANDARD),
@@ -1718,7 +1849,7 @@ pub fn builtin_profiles(
             parent,
             ProfileSpec {
                 id: "deep",
-                shell: SubagentShell::None,
+                shell: SubagentShell::Reviewed,
                 purpose: "Complex investigation across files and repository state.",
                 tools: &[
                     "search_files",
@@ -1726,6 +1857,7 @@ pub fn builtin_profiles(
                     "read_file",
                     "list_directory",
                     "git_status",
+                    "run_command",
                 ],
                 prompt: "Your trade is INVESTIGATION. Follow evidence across files and state what you could not confirm.",
                 max_turns: 12,
@@ -1756,7 +1888,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "implementer",
-                shell: SubagentShell::VerifierOptional,
+                shell: SubagentShell::ReviewedVerifierOptional,
                 purpose: "Implement a bounded multi-file change with a deployable 256K model.",
                 tools: &[
                     "search_files",
@@ -1780,7 +1912,7 @@ pub fn builtin_profiles(
             cheap.clone(),
             ProfileSpec {
                 id: "test_fixer",
-                shell: SubagentShell::VerifierOnly,
+                shell: SubagentShell::ReviewedVerifierOnly,
                 purpose: "Drive failing tests back to green across the declared file set; needs a verifier command.",
                 tools: &["read_file", "edit_file", "run_command"],
                 prompt: "Your trade is MAKING A FAILING TEST PASS. The verifier command is the only judge — run it, read the real failure, fix the cause. Prefer fixing the implementation; change the test only when the test itself encodes the wrong expectation, and say so explicitly in your report. Never delete, skip or weaken a test to make it pass. You may edit only the files declared in your task packet.",
@@ -1793,10 +1925,10 @@ pub fn builtin_profiles(
             },
         ),
         profile(
-            cheap,
+            cheap.clone(),
             ProfileSpec {
                 id: "build_fixer",
-                shell: SubagentShell::VerifierOnly,
+                shell: SubagentShell::ReviewedVerifierOnly,
                 purpose: "Fix compile, type and lint errors across the declared file set; needs a verifier command.",
                 tools: &["read_file", "edit_file", "run_command"],
                 prompt: "Your trade is MAKING THE BUILD PASS. Read the compiler or linter diagnostic literally: it usually names the file, line and expected type. Make the smallest change that satisfies it without changing behaviour, and never silence a diagnostic with a suppression unless your task packet asked for one. You may edit only the files declared in your task packet.",
@@ -1806,6 +1938,76 @@ pub fn builtin_profiles(
                 write_scope: SubagentWriteScope::FileSet,
                 timeout_seconds: 900,
                 worktree: SubagentWorktreePolicy::Dedicated,
+            },
+        ),
+        profile(
+            cheap.clone(),
+            ProfileSpec {
+                id: "tester",
+                shell: SubagentShell::Reviewed,
+                purpose: "Test and review behavior without modifying source files.",
+                tools: &[
+                    "search_files",
+                    "grep_files",
+                    "list_directory",
+                    "read_file",
+                    "git_status",
+                    "git_diff",
+                    "run_command",
+                ],
+                prompt: "Your trade is TESTING AND REVIEW. Reproduce claims with the narrowest relevant checks, inspect failures literally, and report defects with exact evidence. Do not edit source files. Commands that are not statically safe require contextual AI safety review.",
+                max_turns: 18,
+                context_window: WORKER_WINDOW_WIDE,
+                tool_output_limit: Some(PAYLOAD_LIMIT_WIDE),
+                write_scope: SubagentWriteScope::None,
+                timeout_seconds: 900,
+                worktree: SubagentWorktreePolicy::Shared,
+            },
+        ),
+        profile(
+            cheap.clone(),
+            ProfileSpec {
+                id: "ops_runner",
+                shell: SubagentShell::Reviewed,
+                purpose: "Run bounded operational commands with static, AI, and exact human safety gates.",
+                tools: &[
+                    "search_files",
+                    "grep_files",
+                    "list_directory",
+                    "read_file",
+                    "git_status",
+                    "run_command",
+                ],
+                prompt: "Your trade is BOUNDED OPERATIONS. Inspect before acting and run only commands needed for the declared task. Static safe commands run directly; other non-destructive commands require AI review. Dangerous or credential-sensitive commands are never delegated to the judge. If review declines or is unavailable, return the exact command so the parent can request one-time human authorization through target_command.",
+                max_turns: 32,
+                context_window: WORKER_WINDOW_BALANCED,
+                tool_output_limit: Some(PAYLOAD_LIMIT_BALANCED),
+                write_scope: SubagentWriteScope::None,
+                timeout_seconds: 1_200,
+                worktree: SubagentWorktreePolicy::Shared,
+            },
+        ),
+        profile(
+            cheap,
+            ProfileSpec {
+                id: "judge",
+                shell: SubagentShell::None,
+                purpose: "Review correctness, risk, and policy boundaries without shell or writes.",
+                tools: &[
+                    "search_files",
+                    "grep_files",
+                    "list_directory",
+                    "read_file",
+                    "git_status",
+                    "git_diff",
+                ],
+                prompt: "Your trade is INDEPENDENT JUDGMENT. Audit the proposed behavior and evidence, identify concrete correctness or safety risks, and distinguish proven facts from uncertainty. You have no shell and make no changes.",
+                max_turns: 12,
+                context_window: WORKER_WINDOW_BALANCED,
+                tool_output_limit: Some(PAYLOAD_LIMIT_BALANCED),
+                write_scope: SubagentWriteScope::None,
+                timeout_seconds: 600,
+                worktree: SubagentWorktreePolicy::Shared,
             },
         ),
     ]
@@ -2795,6 +2997,47 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
+    #[tokio::test]
+    async fn a_sensitive_verifier_never_reaches_the_ai_judge() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-sensitive-verifier-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(
+                Arc::new(ReportProvider) as Arc<dyn Provider>,
+                Arc::new(ReportProvider),
+                128_000,
+            ),
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_safety_judge(Arc::new(AllowingJudge));
+        let error = catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "inspect".to_owned(),
+                    profile: Some("reader".to_owned()),
+                    task: Some(TaskPacket {
+                        goal: "verify".to_owned(),
+                        verifier: Some(TaskVerifier {
+                            command: "cat ~/.ssh/id_ed25519".to_owned(),
+                            expected_exit_code: None,
+                        }),
+                        ..TaskPacket::default()
+                    }),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .expect_err("sensitive verifier must be refused before AI review");
+        assert!(error.to_string().contains("credential-sensitive"));
+        assert!(error.to_string().contains("cat ~/.ssh/id_ed25519"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     /// The packet is the worker's whole starting position: goal, facts,
     /// constraints, verifier and the file contents themselves, so it never
     /// spends a turn re-finding what the parent already knew.
@@ -2908,6 +3151,36 @@ mod tests {
                 profile.context_window
             );
         }
+    }
+
+    #[test]
+    fn public_catalog_is_six_trades_while_legacy_profiles_remain_executable() {
+        let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
+        let catalog = SubagentCatalog::new(
+            std::env::temp_dir(),
+            builtin_profiles(provider.clone(), provider, 200_000),
+            Arc::new(BackgroundTaskRegistry::default()),
+        );
+        let description = catalog.description();
+        for profile in PUBLIC_SUBAGENT_IDS {
+            assert!(description.contains(&format!("`{profile}`")));
+            assert!(catalog.has_profile(profile));
+        }
+        for legacy in [
+            "scout",
+            "editor",
+            "test_fixer",
+            "build_fixer",
+            "log_inspector",
+            "git_detective",
+        ] {
+            assert!(catalog.has_profile(legacy));
+            assert!(!description.contains(&format!("`{legacy}`")));
+        }
+        assert_eq!(public_profile_id("git_detective"), Some("reader"));
+        assert_eq!(public_profile_id("build_fixer"), Some("implementer"));
+        assert_eq!(public_profile_id("terminal_operator"), Some("ops_runner"));
+        assert_eq!(public_profile_id("security_guard"), Some("judge"));
     }
 
     /// The digest is what a small-window worker gets to read of a long log:

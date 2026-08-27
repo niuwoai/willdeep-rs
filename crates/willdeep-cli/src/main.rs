@@ -98,8 +98,14 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Resume a saved session by UUID, or use `latest`.
-    #[arg(short = 'r', long, value_name = "ID|latest")]
+    /// Resume a saved session. Omit the value to load the most recently updated session.
+    #[arg(
+        short = 'r',
+        long,
+        value_name = "ID|latest",
+        num_args = 0..=1,
+        default_missing_value = "latest"
+    )]
     resume: Option<String>,
 
     /// List saved sessions and exit.
@@ -1743,6 +1749,29 @@ mod tests {
         assert_eq!(short.profile.as_deref(), Some("some-im"));
         assert_eq!(short.model.as_deref(), Some("glm-5"));
         assert_eq!(short.resume.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn resume_without_a_value_defaults_to_the_latest_session() {
+        for argv in [
+            vec!["willdeep", "-r"],
+            vec!["willdeep", "--resume"],
+            vec!["willdeep", "-r", "--workspace", "/tmp"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone())
+                .unwrap_or_else(|error| panic!("parse {argv:?}: {error}"));
+            assert_eq!(cli.resume.as_deref(), Some("latest"), "for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn resume_still_accepts_an_explicit_session_id() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        for flag in ["-r", "--resume"] {
+            let cli = Cli::try_parse_from(["willdeep", flag, session_id.as_str()])
+                .unwrap_or_else(|error| panic!("parse {flag}: {error}"));
+            assert_eq!(cli.resume.as_deref(), Some(session_id.as_str()));
+        }
     }
 
     /// Without `--workspace`, tools operate on the directory the user ran

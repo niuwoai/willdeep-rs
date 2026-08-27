@@ -29,23 +29,41 @@
 
 `spawn_agent` 把自包含任务交给隔离上下文的子 Agent，可选择同步等待或 `run_in_background = true`。
 
-| Profile | 用途 | 默认工具 | 窗口 |
+| 公开 Profile | 用途 | 默认工具 | 窗口 |
 |---|---|---|---:|
-| `scout` | 快速定位文件、符号和调用点 | search / grep / list / read | 32K |
 | `reader` | 阅读和总结长文件或文档 | read / list / search | 48K |
-| `log_inspector` | 解释失败日志、归类错误 | read | 32K |
-| `git_detective` | 回归定位与 commit 考古 | git log / diff / blame / status / read | 32K |
-| `deep` | 无法分片的跨库/超长材料调查 | search / grep / read / list / git status | 1M（需升级票据） |
-| `editor` | 修改一个明确目标文件 | read / edit | 48K |
-| `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / verifier | 256K |
-| `test_fixer` | 把失败测试修到绿（需 verifier） | read / edit / run_command | 64K |
-| `build_fixer` | 修编译 / 类型 / lint 错误（需 verifier） | read / edit / run_command | 48K |
+| `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / reviewed shell | 256K |
+| `tester` | 测试与行为审核，不改源码 | search / grep / read / git / reviewed shell | 64K |
+| `ops_runner` | 有界运维与命令执行 | read / git status / reviewed shell | 48K，最多 32 轮 |
+| `judge` | 独立正确性与安全边界审核 | search / grep / read / git diff，无 Shell | 48K |
+| `deep` | 无法分片的跨库/超长材料调查 | search / grep / read / list / git status / reviewed shell | 1M（需升级票据） |
+
+旧 ID 不删除，但不再出现在公开工种选择器：`scout` / `reader` / `log_inspector` /
+`git_detective` 归并到 Reader 展示组，`editor` / `test_fixer` / `build_fixer` /
+`implementer` 归并到 Implementer 展示组。Runtime 仍按原 ID 执行自动路由、托管
+工种链、已保存工作流与历史记录，不做会改变旧任务语义的偷偷重映射。
 
 除 `deep` 外，每个工种都跑在 32K / 48K / 64K / 256K 的**可私有部署窗口档位**里，并对工具输出设了独立的字节上限。16K 档已经取消：16GB 显存可部署的 35B-A3B 级模型已经能覆盖至少 32K，继续保留 16K 只会增加路由碎片。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
 
 硬性约束：子 Agent **看不到父对话、不能询问用户、不能继续派生**。
 
-外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只接受 `scout` / `reader` / `log_inspector` / `git_detective` 四种 Worker 档**只读** Profile。`deep` 只能由父 Agent 提交升级票据后调用，外部接口不能绕过准入。
+外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只公开无 Shell、无写入的
+`reader` 与 `judge`。命令型、写入型和 `deep` 必须由父 Agent 走完整安全链，外部接口
+不能绕过命令审核、写集审批或升级票据。Runtime API 仍接受旧只读 ID，以便已有保存
+流程继续运行，但 UI 不再把它们当成公开选项。
+
+### 子 Worker 命令审核与人类兜底
+
+携带 `run_command` 的工种不再被限制为只跑 verifier，但权限也不是“有 Shell 就随便跑”：
+
+1. 确定性静态分类证明为只读或有界的命令直接执行；
+2. 非破坏、非凭据敏感且静态无法确认的命令，连同工种、用途和任务摘要交给 AI Safety Judge；
+3. Judge 允许才执行；拒绝、不可用或未配置时，子 Worker 返回**原命令**，不会自己弹审批 UI；
+4. 父 Agent 可用 `profile = "ops_runner"` 和完全相同的 `target_command` 请求人类一次性授权。任何拼接、加参数、换命令都不继承该授权。
+
+`rm` / force reset 等破坏性形状、内联凭据、SSH/云配置/私钥路径以及环境变量枚举在
+进入 AI 前即拒绝。AI 没有为这些命令背书的权力；若业务确实需要，只能走父 Agent
+点名完整命令的人类确认。
 
 ### Task Packet 与 Verifier
 
@@ -62,11 +80,11 @@
 各工种可以绑定不同模型，并配置 Token 总预算、执行超时和连续失败熔断：
 
 ```toml
-[subagents.scout]
-# some.im 下省略 provider_profile/model，自动使用 someim-32b-scout。
+[subagents.reader]
+# some.im 下省略 provider_profile/model，自动使用 someim-32b-reader。
 max_turns = 8
-context_window = 32768      # 工种自己的窗口档位，不是会话窗口
-tool_output_limit = 4096    # 单次工具输出字节上限
+context_window = 49152      # 工种自己的窗口档位，不是会话窗口
+tool_output_limit = 5120    # 单次工具输出字节上限
 token_budget = 32000
 timeout_seconds = 300
 max_consecutive_failures = 3
@@ -162,7 +180,7 @@ willdeep daemon instruct-agent <agent-id> "补充要求"
 - `K` 停止运行中的后台 Child Agent，`R` 重试已结束的；
 - `Enter` 打开详情：按 Agent 过滤的最近工具时间线、Workspace Change Artifact、已有结果报告，支持键盘和鼠标滚轮浏览长内容；
 - 详情中可补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 里已有的草稿；
-- `/agent spawn scout|reader|log_inspector|git_detective <task>` 在活动父会话中创建 Worker 档只读子 Agent。
+- `/agent spawn reader|judge <task>` 在活动父会话中创建公开的无 Shell、无写入子 Agent。
 
 Agent 列表保持最小摘要，按 `Enter` 才读取受保护的单项详情。
 

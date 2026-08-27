@@ -1424,15 +1424,15 @@ fn agent_spawn(state: &ServerState, request: &ApiRequest) -> ApiResult {
 }
 
 fn validate_external_spawn_profile(profile: Option<&str>) -> Result<String, ApiFailure> {
-    let profile = profile.unwrap_or("scout").trim().to_ascii_lowercase();
+    let profile = profile.unwrap_or("reader").trim().to_ascii_lowercase();
     if matches!(
         profile.as_str(),
-        "scout" | "reader" | "log_inspector" | "git_detective"
+        "reader" | "judge" | "scout" | "log_inspector" | "git_detective"
     ) {
         Ok(profile)
     } else {
         Err(ApiFailure::invalid(
-            "external agent.spawn only permits worker-tier read-only scout, reader, log_inspector, or git_detective profiles; deep requires a parent-issued escalation ticket",
+            "external agent.spawn permits public read-only reader or judge trades; legacy read-only profile IDs remain accepted only for saved-flow compatibility",
         ))
     }
 }
@@ -1806,7 +1806,7 @@ mod tests {
         );
         assert_eq!(
             validate_external_spawn_profile(None).ok().as_deref(),
-            Some("scout")
+            Some("reader")
         );
         assert_eq!(
             validate_external_spawn_profile(Some(" SCOUT "))

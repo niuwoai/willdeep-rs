@@ -479,7 +479,7 @@ fn table_column_widths(rows: &[Vec<String>], width: usize) -> Vec<usize> {
             }
         }
     }
-    let separators = columns.saturating_sub(1) * 3;
+    let separators = columns.saturating_sub(1) * 3 + 4;
     let available = width.max(columns + separators).saturating_sub(separators);
     if natural.iter().sum::<usize>() <= available {
         return natural;
@@ -530,9 +530,22 @@ fn wrap_table_cell(value: &str, width: usize) -> Vec<String> {
     output
 }
 
+fn table_horizontal_rule(widths: &[usize], left: char, junction: char, right: char) -> String {
+    let inner = widths
+        .iter()
+        .map(|width| "─".repeat(width + 2))
+        .collect::<Vec<_>>()
+        .join(&junction.to_string());
+    format!("{left}{inner}{right}")
+}
+
 fn render_markdown_table(rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
     let widths = table_column_widths(rows, width.max(1));
-    let mut output = Vec::new();
+    let rule_style = Style::default().fg(Color::DarkGray);
+    let mut output = vec![Line::styled(
+        table_horizontal_rule(&widths, '┌', '┬', '┐'),
+        rule_style,
+    )];
     for (row_index, row) in rows.iter().enumerate() {
         let cells = widths
             .iter()
@@ -543,7 +556,7 @@ fn render_markdown_table(rows: &[Vec<String>], width: usize) -> Vec<Line<'static
             .collect::<Vec<_>>();
         let row_height = cells.iter().map(Vec::len).max().unwrap_or(1);
         for line_index in 0..row_height {
-            let mut spans = Vec::new();
+            let mut spans = vec![Span::styled("│ ", rule_style)];
             for (column, column_width) in widths.iter().enumerate() {
                 if column > 0 {
                     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
@@ -563,19 +576,18 @@ fn render_markdown_table(rows: &[Vec<String>], width: usize) -> Vec<Line<'static
                 spans.push(Span::styled(value.to_owned(), style));
                 spans.push(Span::styled(" ".repeat(padding), style));
             }
+            spans.push(Span::styled(" │", rule_style));
             output.push(Line::from(spans));
         }
-        if row_index == 0 {
-            let separator = widths
-                .iter()
-                .map(|width| "─".repeat(*width))
-                .collect::<Vec<_>>()
-                .join("─┼─");
-            output.push(Line::styled(
-                separator,
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+        let (left, junction, right) = if row_index + 1 == rows.len() {
+            ('└', '┴', '┘')
+        } else {
+            ('├', '┼', '┤')
+        };
+        output.push(Line::styled(
+            table_horizontal_rule(&widths, left, junction, right),
+            rule_style,
+        ));
     }
     output
 }
@@ -586,8 +598,9 @@ fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
     while !rest.is_empty() {
         let bold = rest.find("**").map(|index| (index, "bold"));
         let code = rest.find('`').map(|index| (index, "code"));
+        let image = rest.find("![").map(|index| (index, "image"));
         let link = rest.find('[').map(|index| (index, "link"));
-        let Some((index, kind)) = [bold, code, link]
+        let Some((index, kind)) = [bold, code, image, link]
             .into_iter()
             .flatten()
             .min_by_key(|item| item.0)
@@ -615,6 +628,23 @@ fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
                     Style::default().fg(Color::LightCyan).bg(Color::DarkGray),
                 ));
                 rest = &rest[end + 1..];
+            }
+            "image" if rest.find("](").is_some() => {
+                let label_end = rest.find("](").expect("image label was checked");
+                if let Some(url_end) = rest[label_end + 2..].find(')') {
+                    let url_end = label_end + 2 + url_end;
+                    let label = rest[2..label_end].trim();
+                    spans.push(Span::styled(
+                        format!("▧ {} · Ctrl+L", if label.is_empty() { "—" } else { label }),
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    rest = &rest[url_end + 1..];
+                } else {
+                    spans.push(Span::styled(rest[..1].to_owned(), base));
+                    rest = &rest[1..];
+                }
             }
             "link" if rest.find("](").is_some() => {
                 let label_end = rest.find("](").unwrap();
