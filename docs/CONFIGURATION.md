@@ -32,6 +32,14 @@ auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1
 auto_title = true
 
+[local_model]
+enabled = false
+base_url = "http://127.0.0.1:11434/v1"
+summary_model = "gemma4:e4b-it-qat"
+prefer_for_titles = true
+prefer_for_context_summaries = false
+prefer_for_worker_routing = true
+
 [providers.some-im]
 provider = "some-im"
 api = "chat-completions"
@@ -77,6 +85,21 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | `max_deep_calls_per_harness` | 每个 Harness 允许的 1M Deep 升级次数，`0..16`，默认 `1` |
 | `auto_title` | 自动整理会话标题；默认 `true`。关掉后标题停在第一条提示词的确定性派生，见 [会话标题](TUI_GUIDE.md#会话标题怎么来的) |
 | `title_model` | 标题摘要模型；默认取会话模型。请求只发一问一答各 800 字，与对话长度无关 |
+
+## `[local_model]` 段
+
+本段对齐 macOS Swift App 的“本地模型辅助”语义，复用一个轻量文本模型做短任务，避免标题、压缩和路由各自常驻一套模型。当前通过配置文件启用：
+
+| 键 | 说明 |
+|---|---|
+| `enabled` | 本地辅助模型总开关；默认 `false` |
+| `base_url` | OpenAI-compatible API Base；支持域名、局域网 IP 与回环地址，默认 `http://127.0.0.1:11434/v1` |
+| `summary_model` | 三类辅助任务复用的模型 ID；默认 `gemma4:e4b-it-qat` |
+| `prefer_for_titles` | 会话标题优先本地生成；默认 `true` |
+| `prefer_for_context_summaries` | 上下文压缩优先本地生成；默认 `false`，避免弱模型损失长期上下文 |
+| `prefer_for_worker_routing` | 低置信度 Worker 路由优先咨询本地模型；默认 `true` |
+
+辅助端点可以不设置 API Key/Token，此时不会发送空的 `Authorization`。它可以部署在当前机器、家庭局域网或用户控制的域名后面；如果使用明文 HTTP，传输内容不会加密，应只放在可信网络。标题和压缩会按候选链自动回退；Worker 路由仅在关键词规则置信度低于 86 时调用模型，并且只允许更换已知 Worker Profile，不会改变 Tier、自动派工或安全约束。关闭总开关后行为与旧版本一致。
 
 ## `[providers.*]` 段
 
@@ -209,9 +232,10 @@ Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage
 - Web 左栏点击“模型与路由”。
 
 两者编辑同一个 `config.toml`，覆盖 Root Provider/模型、`[agent]` 路由开关与 Deep
-预算，以及 `[subagents.*]` 的 Provider、模型和上下文窗口。空的 Worker Provider/模型
-表示采用推荐默认：some.im 的七个托管工种使用 `someim-32b-<trade>`，其余情况继承
-Root/Provider。显式值始终优先。
+预算，以及六个公开工种 `reader` / `implementer` / `tester` / `ops_runner` / `judge` /
+`deep` 的 Provider、模型和上下文窗口。空的 Worker Provider/模型表示采用推荐默认：
+some.im 已托管的旧窄工种仍使用 `someim-32b-<trade>`，其余情况继承 Root/Provider。
+旧专门工种配置不会被设置页删除，继续服务自动路由和已保存流程；显式值始终优先。
 
 保存使用配置内容指纹检测并发修改，并通过 `0600` 临时文件原子替换；不会重写无关
 字段或整份文件的注释。若页面打开后又手改了文件，保存会失败，重新打开设置即可。

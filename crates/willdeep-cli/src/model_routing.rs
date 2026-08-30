@@ -11,14 +11,11 @@ use crate::config::{ConfigFile, LoadedConfig};
 pub const STALE_CONFIG_MESSAGE: &str = "model routing settings are stale; reload before saving";
 
 const PROFILE_IDS: &[&str] = &[
-    "scout",
     "reader",
-    "editor",
     "implementer",
-    "test_fixer",
-    "build_fixer",
-    "log_inspector",
-    "git_detective",
+    "tester",
+    "ops_runner",
+    "judge",
     "deep",
 ];
 
@@ -330,9 +327,8 @@ fn safe_bare_key(value: &str) -> bool {
 
 fn default_context_window(id: &str) -> u64 {
     match id {
-        "scout" | "log_inspector" | "git_detective" => 32_768,
-        "reader" | "editor" | "build_fixer" => 49_152,
-        "test_fixer" => 65_536,
+        "reader" | "ops_runner" | "judge" => 49_152,
+        "tester" => 65_536,
         "implementer" => 262_144,
         "deep" => 1_000_000,
         _ => 32_768,
@@ -503,9 +499,9 @@ api_key_env = "SOMEIM_API_KEY"
 provider = "openai-compatible"
 model = "local-coder"
 
-[subagents.scout]
+[subagents.reader]
 # preserve worker comments
-context_window = 32768
+context_window = 49152
 
 [notifications]
 future_desktop_field = "preserved"
@@ -518,13 +514,13 @@ future_desktop_field = "preserved"
         let mut value = sample();
         value = patch_key(
             &value,
-            Some("subagents.scout"),
+            Some("subagents.reader"),
             "model",
-            Some(toml_string("custom-scout")),
+            Some(toml_string("custom-reader")),
         );
         value = patch_key(
             &value,
-            Some("subagents.scout"),
+            Some("subagents.reader"),
             "provider_profile",
             Some(toml_string("local")),
         );
@@ -538,7 +534,7 @@ future_desktop_field = "preserved"
         assert!(value.contains("small_model_routing = false # keep nearby comments"));
         assert!(value.contains("# preserve worker comments"));
         assert!(value.contains("future_desktop_field = \"preserved\""));
-        assert!(value.contains("model = \"custom-scout\""));
+        assert!(value.contains("model = \"custom-reader\""));
         assert!(value.contains("provider_profile = \"local\""));
         toml::from_str::<ConfigFile>(&value).expect("patched config");
     }
@@ -551,28 +547,28 @@ future_desktop_field = "preserved"
         let path = root.join("config.toml");
         std::fs::write(&path, sample()).expect("sample config");
         let settings = load(&path, None).expect("load settings");
-        assert_eq!(settings.profiles[0].effective_model, "someim-32b-scout");
+        assert_eq!(settings.profiles[0].effective_model, "someim-32b-reader");
         let mut update = settings.to_update();
         update.default_provider = "local".to_owned();
         update.root_model = "local-coder-v2".to_owned();
         update.max_deep_calls_per_harness = 0;
-        let scout = update
+        let reader = update
             .profiles
             .iter_mut()
-            .find(|profile| profile.id == "scout")
-            .expect("scout update");
-        scout.provider_profile = Some("some-im".to_owned());
-        scout.model = Some("custom-scout".to_owned());
+            .find(|profile| profile.id == "reader")
+            .expect("reader update");
+        reader.provider_profile = Some("some-im".to_owned());
+        reader.model = Some("custom-reader".to_owned());
         let saved = save(&path, None, &update).expect("save settings");
         assert_eq!(saved.default_provider, "local");
         assert_eq!(saved.root_model, "local-coder-v2");
         assert_eq!(saved.max_deep_calls_per_harness, 0);
-        let scout = saved
+        let reader = saved
             .profiles
             .iter()
-            .find(|profile| profile.id == "scout")
-            .expect("saved scout");
-        assert_eq!(scout.model.as_deref(), Some("custom-scout"));
+            .find(|profile| profile.id == "reader")
+            .expect("saved reader");
+        assert_eq!(reader.model.as_deref(), Some("custom-reader"));
         assert!(
             std::fs::read_to_string(&path)
                 .expect("saved config")

@@ -43,6 +43,8 @@ impl Provider for ChatCompletionsProvider {
             tools: &wire_tools,
             tool_choice: (!tools.is_empty()).then_some("auto"),
             stream: false,
+            reasoning_effort: self.is_auxiliary_or_loopback().then_some("none"),
+            think: self.is_auxiliary_or_loopback().then_some(false),
         };
         let request =
             openai_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
@@ -77,6 +79,15 @@ impl Provider for ChatCompletionsProvider {
     }
 }
 
+impl ChatCompletionsProvider {
+    fn is_auxiliary_or_loopback(&self) -> bool {
+        self.config.allow_unauthenticated
+            || reqwest::Url::parse(&self.config.base_url)
+                .ok()
+                .is_some_and(|url| super::is_loopback_base_url(&url))
+    }
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -86,6 +97,10 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Serialize)]

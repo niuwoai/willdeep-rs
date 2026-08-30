@@ -252,9 +252,9 @@ pub struct Agent {
     /// 上下文压缩的专用 Provider。bool 为真表示压缩指令由网关托管
     /// （some.im 的 someim-32b-compressor，服务端 replace 注入），
     /// 摘要请求只发裸转录；为假时仍携带行内压缩指令。
-    compressor: Option<(Arc<dyn Provider>, bool)>,
+    compressors: Vec<(Arc<dyn Provider>, bool)>,
     /// 会话标题摘要的专用 Provider。没绑就没有 L2 润色，列表停在 L1 派生标题。
-    titler: Option<Arc<dyn Provider>>,
+    titlers: Vec<Arc<dyn Provider>>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
@@ -270,8 +270,8 @@ impl Agent {
             config,
             sink: Arc::new(NoopSink),
             image_fallback: None,
-            compressor: None,
-            titler: None,
+            compressors: Vec::new(),
+            titlers: Vec::new(),
             subagents: None,
             instruction_inbox: None,
             goal_continuation: None,
@@ -318,7 +318,14 @@ impl Agent {
     /// client sends only the bare transcript; without it the inline
     /// instruction is kept so a custom model never loses its task description.
     pub fn with_compressor(mut self, provider: Arc<dyn Provider>, hosted_prompt: bool) -> Self {
-        self.compressor = Some((provider, hosted_prompt));
+        self.compressors.push((provider, hosted_prompt));
+        self
+    }
+
+    /// Bind context-compression candidates in preference order. A failed or
+    /// empty local summary falls through to the hosted/session candidate.
+    pub fn with_compressors(mut self, providers: Vec<(Arc<dyn Provider>, bool)>) -> Self {
+        self.compressors = providers;
         self
     }
 
@@ -326,15 +333,28 @@ impl Agent {
     /// unbound the session keeps its deterministic first-prompt title — a
     /// missing title model degrades the label, never the conversation.
     pub fn with_titler(mut self, provider: Arc<dyn Provider>) -> Self {
-        self.titler = Some(provider);
+        self.titlers.push(provider);
+        self
+    }
+
+    /// Bind title candidates in preference order. Titling is decorative, so
+    /// every failed candidate is skipped without affecting the conversation.
+    pub fn with_titlers(mut self, providers: Vec<Arc<dyn Provider>>) -> Self {
+        self.titlers = providers;
         self
     }
 
     /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回
     /// 垃圾时一律 `None`——标题是装饰，不值得为它中断任何东西。
     pub async fn summarize_title(&self, first_user: &str, first_assistant: &str) -> Option<String> {
-        let provider = self.titler.clone()?;
-        crate::session_title::summarize(provider, first_user, first_assistant).await
+        for provider in &self.titlers {
+            if let Some(title) =
+                crate::session_title::summarize(provider.clone(), first_user, first_assistant).await
+            {
+                return Some(title);
+            }
+        }
+        None
     }
 
     pub fn with_subagents(mut self, catalog: Arc<SubagentCatalog>) -> Self {
@@ -619,6 +639,15 @@ impl Agent {
                     "subagent profile not found: {profile}"
                 )));
             }
+            let approved_command = match args.target_command.as_deref() {
+                Some(_) if profile != "ops_runner" => {
+                    return Err(ToolError::ApprovalDenied(
+                        "target_command may only be used with profile=\"ops_runner\"".to_owned(),
+                    ));
+                }
+                Some(command) => Some(self.tools.approve_subagent_command(command).await?),
+                None => None,
+            };
             if let Some(routing) = &self.routing
                 && profile == "deep"
             {
@@ -640,7 +669,7 @@ impl Agent {
                 let requested = args.requested_write_targets(scope);
                 if requested.is_empty() {
                     return Err(ToolError::OutsideWorkspace(
-                        "a writing profile needs its files declared up front: target_file for editor, task.write_files for implementer, test_fixer or build_fixer".to_owned(),
+                        "a writing profile needs its files declared up front: target_file for legacy editor, task.write_files for implementer, test_fixer or build_fixer".to_owned(),
                     ));
                 }
                 Some(self.tools.approve_subagent_write_set(&requested).await?)
@@ -656,7 +685,7 @@ impl Agent {
                 routing.record_profile_attempt(&profile);
             }
             catalog
-                .run(args, approved_targets)
+                .run_authorized(args, approved_targets, approved_command)
                 .await
                 .map_err(|error| ToolError::Network(error.to_string()))
         })
@@ -672,7 +701,9 @@ impl Agent {
             let (Some(routing), Some(catalog)) = (&self.routing, &self.subagents) else {
                 return;
             };
-            let decision = routing.route(routing_request_from_message(&user_message.content));
+            let decision = routing
+                .route(routing_request_from_message(&user_message.content))
+                .await;
             self.sink
                 .emit(AgentEvent::RouteDecided {
                     tier: decision.tier,
@@ -829,18 +860,29 @@ The runtime dispatched this bounded read-only preflight before the standard mode
     /// 绑定了压缩 Provider 时用它（托管模式只发裸转录，固定指令由网关
     /// 注入）；未绑定时沿用会话模型 + 行内指令。
     async fn summarize_history(&self, source: String) -> Result<String, AgentError> {
-        let (provider, hosted_prompt) = match &self.compressor {
-            Some((provider, hosted)) => (provider.clone(), *hosted),
-            None => (self.provider()?, false),
-        };
-        let request = if hosted_prompt {
-            Message::user(source)
+        let candidates = if self.compressors.is_empty() {
+            vec![(self.provider()?, false)]
         } else {
-            Message::user(format!(
-                "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
-            ))
+            self.compressors.clone()
         };
-        Ok(provider.complete(&[request], &[]).await?.content)
+        let mut last_error = None;
+        for (provider, hosted_prompt) in candidates {
+            let request = if hosted_prompt {
+                Message::user(source.clone())
+            } else {
+                Message::user(format!(
+                    "Summarize this older coding-agent conversation compactly. Preserve decisions, constraints, changed files, commands, failures, unresolved work, and exact identifiers.\n\n{source}"
+                ))
+            };
+            match provider.complete(&[request], &[]).await {
+                Ok(completion) if !completion.content.trim().is_empty() => {
+                    return Ok(completion.content);
+                }
+                Ok(_) => last_error = Some(ProviderError::EmptyResponse),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or(ProviderError::EmptyResponse).into())
     }
 }
 
@@ -1558,6 +1600,62 @@ mod tests {
             compressor_requests[0][0]
                 .content
                 .contains("Summarize this older")
+        );
+    }
+
+    #[tokio::test]
+    async fn auxiliary_title_and_compression_fall_back_after_empty_local_reply() {
+        let session = RecordingProvider::new(&["final"]);
+        let local_title = RecordingProvider::new(&[""]);
+        let remote_title = RecordingProvider::new(&["修复登录 bug"]);
+        let local_compressor = RecordingProvider::new(&[""]);
+        let remote_compressor = RecordingProvider::new(&["compact summary"]);
+        let agent = Agent::new(
+            session.clone(),
+            registry("auxiliary-fallback"),
+            AgentConfig {
+                max_turns: 2,
+                system_prompt: "system".to_owned(),
+                context_window: 200,
+                token_budget: None,
+            },
+        )
+        .with_titlers(vec![local_title.clone(), remote_title.clone()])
+        .with_compressors(vec![
+            (local_compressor.clone(), false),
+            (remote_compressor.clone(), false),
+        ]);
+
+        assert_eq!(
+            agent
+                .summarize_title("修复登录超时", "已完成并通过测试")
+                .await,
+            Some("修复登录 bug".to_owned())
+        );
+
+        let history = (0..18)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Message::user(format!("older user message {index} with enough detail"))
+                } else {
+                    Message::assistant(
+                        format!("older assistant message {index} with enough detail"),
+                        Vec::new(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("fallback summary keeps the turn running");
+
+        assert_eq!(local_title.requests.lock().expect("requests").len(), 1);
+        assert_eq!(remote_title.requests.lock().expect("requests").len(), 1);
+        assert_eq!(local_compressor.requests.lock().expect("requests").len(), 1);
+        assert_eq!(
+            remote_compressor.requests.lock().expect("requests").len(),
+            1
         );
     }
 

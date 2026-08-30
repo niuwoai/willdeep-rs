@@ -22,6 +22,16 @@ max_deep_calls_per_harness = 1
 # sandbox = false
 # sandbox_writable_roots = ["~/.cargo/registry", "~/.cargo/git"]
 
+# 与 Swift App 同语义的自建辅助模型。可使用域名、局域网 IP 或回环地址，不需要 API Key。
+# 文本辅助任务共用 summary_model，避免本机同时驻留多份模型。
+[local_model]
+enabled = false
+base_url = "http://127.0.0.1:11434/v1"
+summary_model = "gemma4:e4b-it-qat"
+prefer_for_titles = true
+prefer_for_context_summaries = false
+prefer_for_worker_routing = true
+
 # 生命周期挂钩：审计留痕与门禁拦截。
 # 与 [notifications] 那条 webhook 分开：webhook 是事后的礼貌通知、可以丢；
 # hook 是事中的裁决、跑在关键路径上，非零退出会真的把动作拦下来。
@@ -89,6 +99,9 @@ max_output_tokens = 16384
 # The built-in deployable tiers are 32K/48K/64K/256K. Bind them to private or
 # on-prem Provider profiles to keep enterprise source and prompts off the
 # public internet. Only `deep` is the scarce 1M escalation path.
+# Public selectors show reader/implementer/tester/ops_runner/judge/deep. The
+# specialist sections below remain valid for automatic routing and saved-flow
+# compatibility.
 [subagents.scout]
 max_turns = 8
 context_window = 32768
@@ -122,6 +135,21 @@ context_window = 262144
 tool_output_limit = 16384
 timeout_seconds = 1200
 worktree = "dedicated"
+
+[subagents.tester]
+context_window = 65536
+max_turns = 18
+timeout_seconds = 900
+
+[subagents.ops_runner]
+context_window = 49152
+max_turns = 32
+timeout_seconds = 1200
+
+[subagents.judge]
+context_window = 49152
+max_turns = 12
+timeout_seconds = 600
 
 # Verified workers: the runtime runs task.verifier.command after every attempt
 # and the exit code is the verdict. max_attempts bounds how many times a

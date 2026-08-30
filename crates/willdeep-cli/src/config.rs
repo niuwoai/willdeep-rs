@@ -103,6 +103,11 @@ pub struct ConfigFile {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub agent: AgentSettings,
+    /// Credential-free loopback model used for lightweight auxiliary work.
+    /// Kept separate from Provider profiles so enabling it never changes the
+    /// session's root model or donates a cloud credential to a local server.
+    #[serde(default)]
+    pub local_model: LocalModelSettings,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderProfile>,
     #[serde(default)]
@@ -127,6 +132,30 @@ pub struct ConfigFile {
     /// 非零退出会真的拦下动作。把审计需求接到 webhook 上会丢事件。
     #[serde(default)]
     pub hooks: Vec<HookSettings>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalModelSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub summary_model: String,
+    pub prefer_for_titles: bool,
+    pub prefer_for_context_summaries: bool,
+    pub prefer_for_worker_routing: bool,
+}
+
+impl Default for LocalModelSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://127.0.0.1:11434/v1".to_owned(),
+            summary_model: "gemma4:e4b-it-qat".to_owned(),
+            prefer_for_titles: true,
+            prefer_for_context_summaries: false,
+            prefer_for_worker_routing: true,
+        }
+    }
 }
 
 /// 一条 hook 的配置。
@@ -358,6 +387,16 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         bail!("agent.max_deep_calls_per_harness must be between 0 and 16");
     }
     crate::i18n::Language::parse(file.agent.language.as_deref())?;
+    if file.local_model.enabled {
+        let base_url = reqwest::Url::parse(file.local_model.base_url.trim())
+            .context("local_model.base_url must be a valid URL")?;
+        if !matches!(base_url.scheme(), "http" | "https") || base_url.host_str().is_none() {
+            bail!("local_model.base_url must be an HTTP(S) URL with a host");
+        }
+        if file.local_model.summary_model.trim().is_empty() {
+            bail!("local_model.summary_model must not be empty");
+        }
+    }
     if file.notifications.webhook_enabled.unwrap_or(false) {
         let webhook_url = file
             .notifications
@@ -395,6 +434,9 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
                 | "build_fixer"
                 | "log_inspector"
                 | "git_detective"
+                | "tester"
+                | "ops_runner"
+                | "judge"
         ) {
             bail!("unknown subagent profile: {name}");
         }
@@ -562,6 +604,37 @@ base_url = "https://example.com/v1"
                 .expect("parse configured judge");
         assert_eq!(configured.agent.safety_judge, Some(false));
         assert_eq!(configured.agent.judge_model.as_deref(), Some("glm-5"));
+    }
+
+    #[test]
+    fn local_model_defaults_match_the_desktop_auxiliary_policy() {
+        let parsed: ConfigFile = toml::from_str("version = 1\n").expect("parse minimal config");
+        assert!(!parsed.local_model.enabled);
+        assert_eq!(parsed.local_model.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(parsed.local_model.summary_model, "gemma4:e4b-it-qat");
+        assert!(parsed.local_model.prefer_for_titles);
+        assert!(!parsed.local_model.prefer_for_context_summaries);
+        assert!(parsed.local_model.prefer_for_worker_routing);
+    }
+
+    #[test]
+    fn enabled_local_model_accepts_domain_lan_and_loopback_endpoints_without_a_key() {
+        for base_url in [
+            "https://models.home.example/v1",
+            "http://192.168.50.20:11434/v1",
+            "http://127.0.0.1:11434/v1",
+        ] {
+            let source =
+                format!("version = 1\n[local_model]\nenabled = true\nbase_url = {base_url:?}\n");
+            let parsed: ConfigFile = toml::from_str(&source).expect("parse auxiliary model config");
+            validate(&parsed, Path::new("config.toml")).expect("accept auxiliary endpoint");
+        }
+
+        let parsed: ConfigFile = toml::from_str(
+            "version = 1\n[local_model]\nenabled = true\nbase_url = \"file:///tmp/model\"\n",
+        )
+        .expect("parse invalid auxiliary model config");
+        assert!(validate(&parsed, Path::new("config.toml")).is_err());
     }
 
     #[test]

@@ -15,6 +15,7 @@ use super::*;
 /// 可以被「点外面」关掉的弹层。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DismissibleOverlay {
+    Media,
     MobileQr,
     AttentionDetail,
     TaskDetail,
@@ -45,6 +46,10 @@ impl App {
             )),
             (self.question.is_some()).then_some(OverlayLayer::Blocking),
             (self.approval.is_some()).then_some(OverlayLayer::Blocking),
+            (self.media.is_open()).then_some(OverlayLayer::Dismissible(
+                DismissibleOverlay::Media,
+                self.media.rect,
+            )),
             (self.attention_detail.is_some()).then_some(OverlayLayer::Dismissible(
                 DismissibleOverlay::AttentionDetail,
                 self.attention_detail_rect,
@@ -138,6 +143,7 @@ impl App {
             return false;
         };
         match overlay {
+            DismissibleOverlay::Media => self.media.close(),
             DismissibleOverlay::MobileQr => self.mobile_qr = None,
             DismissibleOverlay::AttentionDetail => self.attention_detail = None,
             DismissibleOverlay::TaskDetail => self.task_detail = None,

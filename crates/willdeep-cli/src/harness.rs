@@ -427,6 +427,7 @@ pub(crate) async fn build(
     };
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
+    let local_auxiliary_config = local_auxiliary_provider_config(&loaded.file.local_model);
     let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
     let runtime_access = match &frontend {
         HarnessFrontend::Runtime {
@@ -697,7 +698,7 @@ pub(crate) async fn build(
         goal_continuation.activate(goal, willdeep_core::GoalBudget::default());
     }
     let mut agent = Agent::new(
-        provider,
+        provider.clone(),
         tools,
         AgentConfig {
             max_turns,
@@ -711,42 +712,71 @@ pub(crate) async fn build(
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone());
     if loaded.file.agent.small_model_routing.unwrap_or(true) {
-        agent = agent.with_routing_guard(Arc::new(RoutingGuard::new(RoutingPolicy {
+        let mut routing = RoutingGuard::new(RoutingPolicy {
             auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
             max_deep_calls: loaded.file.agent.max_deep_calls_per_harness.unwrap_or(1),
-        })));
+        });
+        if loaded.file.local_model.enabled
+            && loaded.file.local_model.prefer_for_worker_routing
+            && let Some(local_config) = local_auxiliary_config.clone()
+        {
+            routing = routing.with_classifiers(vec![
+                build_provider(local_config).context("initialize local routing model")?,
+                provider.clone(),
+            ]);
+        }
+        agent = agent.with_routing_guard(Arc::new(routing));
     }
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
-    // 压缩摘要模型：some.im 默认绑网关托管的 someim-32b-compressor，
-    // `[agent] compressor_model` 可覆盖。只有恰好绑到托管模型时才省掉
-    // 行内指令（hosted_prompt）——覆盖成别的模型时指令必须跟着请求走，
-    // 否则压缩调用没有任务描述。其它 provider 未配置时维持会话模型。
-    let compressor_model = loaded.file.agent.compressor_model.clone().or_else(|| {
-        (kind == ProviderKind::SomeIm).then(|| SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned())
-    });
-    if let Some(compressor_model) = compressor_model {
-        let hosted_prompt =
-            kind == ProviderKind::SomeIm && compressor_model == SOMEIM_CONTEXT_COMPRESSOR_MODEL;
+    // 与 Swift App 同一候选顺序：显式偏好的本地辅助模型 → some.im 托管压缩器
+    // （仅在没有显式 compressor_model 时）/显式模型 → 会话模型兜底。
+    let mut compressors = Vec::new();
+    if loaded.file.local_model.enabled
+        && loaded.file.local_model.prefer_for_context_summaries
+        && let Some(local_config) = local_auxiliary_config.clone()
+    {
+        compressors.push((
+            build_provider(local_config).context("initialize local context summary model")?,
+            false,
+        ));
+    }
+    if let Some(compressor_model) = loaded.file.agent.compressor_model.clone() {
         let mut compressor_config = parent_provider_config.clone();
         compressor_config.model = compressor_model;
-        agent = agent.with_compressor(
+        compressors.push((
             build_provider(compressor_config).context("initialize context compressor provider")?,
-            hosted_prompt,
-        );
+            false,
+        ));
+    } else if kind == ProviderKind::SomeIm {
+        let mut compressor_config = parent_provider_config.clone();
+        compressor_config.model = SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned();
+        compressors.push((
+            build_provider(compressor_config).context("initialize hosted context compressor")?,
+            true,
+        ));
     }
-    // 会话标题摘要模型：默认取会话模型。标题请求只发一问一答各 800 字，
-    // 成本可忽略；另指一个端点反而多一种「缺凭据 → 静默退化」的失败方式，
-    // 这是安全裁决那边已经踩过的坑（见 `default_judge_model`）。
+    compressors.push((provider.clone(), false));
+    agent = agent.with_compressors(compressors);
+
+    // 标题同样本地优先、会话 Provider 兜底；请求仍只带一问一答各 800 字。
     if loaded.file.agent.auto_title.unwrap_or(true) {
+        let mut titlers = Vec::new();
+        if loaded.file.local_model.enabled
+            && loaded.file.local_model.prefer_for_titles
+            && let Some(local_config) = local_auxiliary_config
+        {
+            titlers.push(
+                build_provider(local_config).context("initialize local session title model")?,
+            );
+        }
         let mut title_config = parent_provider_config.clone();
         if let Some(title_model) = loaded.file.agent.title_model.clone() {
             title_config.model = title_model;
         }
-        agent = agent.with_titler(
-            build_provider(title_config).context("initialize session title provider")?,
-        );
+        titlers.push(build_provider(title_config).context("initialize session title provider")?);
+        agent = agent.with_titlers(titlers);
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
@@ -759,6 +789,29 @@ pub(crate) async fn build(
         notifier,
         _command_watcher: command_watcher,
     })
+}
+
+fn local_auxiliary_provider_config(
+    settings: &crate::config::LocalModelSettings,
+) -> Option<ProviderConfig> {
+    if !settings.enabled {
+        return None;
+    }
+    let mut config = ProviderConfig::new(
+        ProviderKind::OpenAiCompatible,
+        ApiDialect::ChatCompletions,
+        settings.base_url.trim(),
+        "",
+        settings.summary_model.trim(),
+    );
+    // “本地”描述的是用户自建的辅助算力，不限定部署在当前进程所在机器。
+    // 家庭局域网、内网域名和回环地址都可以明确选择免 Token；普通 Provider
+    // Profile 没有这个标记，缺 Key 时仍然拒绝启动。
+    config.allow_unauthenticated = true;
+    // Swift App caps Worker routing at eight seconds. Reusing the same local
+    // client timeout keeps every auxiliary fallback bounded as well.
+    config.request_timeout_secs = 8;
+    Some(config)
 }
 
 pub(crate) fn resolve_workspace(

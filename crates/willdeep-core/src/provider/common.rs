@@ -33,7 +33,12 @@ pub fn anthropic_endpoint(base_url: &str) -> Result<Url, ProviderError> {
 }
 
 pub fn openai_auth(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {
-    let request = apply_client_headers(request).bearer_auth(config.api_key.trim());
+    let request = apply_client_headers(request);
+    let request = if config.api_key.trim().is_empty() {
+        request
+    } else {
+        request.bearer_auth(config.api_key.trim())
+    };
     apply_some_im_headers(request, config)
 }
 
@@ -152,5 +157,30 @@ mod tests {
                 Some(crate::VERSION)
             );
         }
+    }
+
+    #[test]
+    fn credential_free_local_request_omits_authorization() {
+        let config = ProviderConfig::new(
+            ProviderKind::OpenAiCompatible,
+            ApiDialect::ChatCompletions,
+            "http://127.0.0.1:11434/v1",
+            "",
+            "gemma4:e4b-it-qat",
+        );
+        let request = openai_auth(
+            client(&config)
+                .expect("client")
+                .post("http://127.0.0.1:11434/v1/chat/completions"),
+            &config,
+        )
+        .build()
+        .expect("request");
+
+        assert!(
+            !request
+                .headers()
+                .contains_key(reqwest::header::AUTHORIZATION)
+        );
     }
 }

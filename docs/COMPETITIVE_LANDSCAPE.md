@@ -18,7 +18,7 @@
 - 常驻 21 个工具 + MCP 按需 2 个（`list_mcp_tools` / `call_mcp_tool`）；
   CLI / TUI / daemon / Web / mobile 五形态真实存在，daemon 统一 API 50+ 操作、
   SSE 断点续传、Unix socket / Named Pipe、幂等去重。
-- 9 个子代理工种（32K–1M 五档窗口）；写入型默认专属 worktree + 前置写集审批；
+- 6 个公开子代理工种（旧专门 ID 内部兼容，32K–1M 多档窗口）；写入型默认专属 worktree + 前置写集审批；
   verifier 由 Runtime 亲自执行、退出码裁决，worker 不自证。
 - small-model-first 路由自 0.37.0-rc1 起是 Runtime 强制策略（`routing.rs`），
   deep 档申请制升级票据 + 运行时观测交叉验证 + 每 Harness 调用预算。
@@ -38,7 +38,7 @@
 | 系统提示词量级 | 核心 ~1K token，实测总 ~2.6K | <1K token | 核心 ~10.5K，起步实发 ~33K | ~2–4K，实发 ~13K | minimal 模式一句话 |
 | 工具数 | 21+2 | 4（read/write/edit/bash） | 27+ | 中等 | minimal 仅 2 |
 | 模型路由 | S/M/L 三档 Runtime 强制 + deep 申请制 | 手动换模型（15+ 供应商） | 手选 + 子代理可指定 | 手选 | 手选 |
-| 子代理 | 9 工种 + verifier 闭环 + worktree 隔离 | 拒绝黑盒，bash 里 spawn 子进程 | agent teams、后台 agents | 较弱 | 插件化提供（含 Codex/CC 子代理插件） |
+| 子代理 | 6 个公开工种 + 内部专门路由 + verifier 闭环 + worktree 隔离 | 拒绝黑盒，bash 里 spawn 子进程 | agent teams、后台 agents | 较弱 | 插件化提供（含 Codex/CC 子代理插件） |
 | OS 级沙箱 | 无（审批 + 静态规则 + AI judge） | 无（外包 Docker/micro-VM） | 有 | 有（Seatbelt/Landlock 三档） | 有（bwrap/Landlock/Seatbelt） |
 | Hooks / Checkpoint | 无 / 无（diff review + revert 替代） | 扩展系统 / 无 | 有 / 有（/rewind） | 部分 | 插件化 |
 | MCP | stdio client，schema 按需 | 明确拒绝 | 全套 | 支持 | 依赖在、默认不启用 |

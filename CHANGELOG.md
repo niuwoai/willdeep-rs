@@ -1,5 +1,103 @@
 # Changelog
 
+## [0.49.0-rc1] - 2026-08-27
+
+### Added
+- 同步 Swift App 的 Worker 安全审核链：携带 `run_command` 的子 Worker 先走确定性静态规则，仅把非破坏、非凭据敏感且无法静态判断的命令交给 AI Safety Judge；Judge 允许才执行，拒绝、不可用或未配置时把原命令精确返回父 Agent。
+- `spawn_agent` 新增 `ops_runner + target_command` 人类兜底：父 Agent 对完整命令请求一次性授权，子 Worker 只接受完全相同的命令；任何拼接、加参数或替换都不会继承授权。危险形状和凭据读取始终绕过 AI，不让模型为高风险命令自行背书。
+- 新增公开 `tester`、`ops_runner`、`judge` 工种，并为 Linux 常用只读巡检命令补齐静态安全分类；`hostnamectl`、`timedatectl`、`resolvectl` 的修改动作仍需审核。
+
+### Changed
+- 面向用户的工种目录由历史九项专门工种收敛为 `reader`、`implementer`、`tester`、`ops_runner`、`judge`、`deep` 六项；`scout`、`editor`、`test_fixer`、`build_fixer`、`log_inspector`、`git_detective` 等旧 ID 继续作为内部路由与已保存流程的兼容标识。
+- TUI/Web 的外部只读子 Agent 入口只公开 `reader` 与 `judge`；需要命令、写入或 Deep 升级的工种必须经过父 Agent 的完整授权链。
+
+### Security
+- 子 Worker 不直接显示或继承人类审批 UI，也不会在 Judge 拒绝后自动降级执行；敏感路径、环境变量枚举、内联凭据、破坏性命令在进入 AI 前即被拒绝。
+
+### Tests
+- 新增 AI 审核范围、危险/凭据命令旁路、拒绝信息精确回传、一次性命令不可扩权、六工种路由设置以及 Linux 巡检命令读写边界测试。
+
+## [0.48.0-rc2] - 2026-08-27
+
+### Changed
+- “本地辅助模型”不再被误解为“必须和 WillDeep 跑在同一台机器”：`[local_model].base_url` 现可使用任意合法 HTTP(S) 域名、家庭/办公局域网 IP 或回环地址，并继续支持完全不设置 API Key/Token。
+- 免凭据能力改成辅助 Provider 的显式内部标记；普通 OpenAI-compatible Provider Profile 仍要求凭据，放宽自建算力拓扑不会连带放宽云端 Provider 的默认安全边界。
+
+### Tests
+- 配置回归测试覆盖 HTTPS 域名、局域网 IP、回环地址和非法非 HTTP(S) URL；Provider 测试锁定“辅助端点显式免 Key、普通远程 Provider 缺 Key 仍拒绝”的边界。
+
+## [0.48.0-rc1] - 2026-08-27
+
+### Added
+- 按 macOS Swift App 的既有语义加入可选本地辅助模型：同一个 OpenAI-compatible 回环端点可用于会话标题、上下文压缩和低置信度 Worker 路由；每项可独立开关，默认只优先标题与 Worker 路由，避免后台同时装载多套本地模型。
+- 标题与上下文压缩改为候选链：本地模型空回复、超时或失败时自动继续远端标题模型、some.im 托管压缩器或会话模型，不让辅助能力阻断主轮次。
+- Worker 路由仅在关键词规则置信度低于 86 时咨询辅助模型；模型只能从已知工种中改选 Profile，不能放宽层级、自动派工或安全闸门。
+
+### Security
+- 无 API Key 的 OpenAI-compatible Provider 仅允许 HTTP(S) 回环地址（`localhost`、`127.0.0.1` 或 `::1`）；远程端点仍必须提供凭据。本地请求不发送空的 Authorization，并显式关闭兼容服务的思考模式。
+
+### Tests
+- 新增本地模型默认配置、非回环端点拒绝、免密钥边界、模型路由 JSON 容错与安全字段保持，以及本地空回复后标题/压缩自动回退测试。
+
+## [0.47.0-rc1] - 2026-08-27
+
+### Added
+- TUI 识别助手消息中的 Markdown 链接、裸 HTTP(S) URL 与 `![图片](地址)`；图片在聊天记录中显示为卡片，`Ctrl+L` 打开统一媒体面板，可用键盘或鼠标选择链接并交给系统浏览器，或加载图片预览。
+- 图片预览启动时探测 Kitty、iTerm2 与 Sixel 原生图形协议；终端不支持或原生编码失败时自动重建为 Unicode 半块字符预览，预览中也可手动按 `U` 切换通用字符模式。
+- 远程图片仅在用户明确选择后加载，限制为公网 HTTP(S)、最多 5 次安全重定向、20 秒超时、8 MiB 下载、12000×12000 像素和 96 MiB 解码预算；本地图片限定在当前工作区，`data:image` 仅接受有界 Base64。解码结果使用最多 6 项的进程内缓存。
+
+### Security
+- 链接通过操作系统命令的独立参数打开，不经过 Shell，并拒绝非 HTTP(S) 协议和带用户凭据的 URL；媒体下载复用 Core 的公网地址校验，拒绝 localhost、私网、回环、链路本地与保留地址，并在每次重定向后重新校验。
+
+### Tests
+- 新增 Markdown 媒体提取、图片卡片、重复目标、Data URL 限制、危险链接拒绝，以及原生协议编码失败自动降级为 Unicode 预览的回归测试。
+
+## [0.46.0-rc2] - 2026-08-27
+
+### Fixed
+- TUI 的 GFM 表格从开放式分隔线改为完整闭合细边框，补齐每行左右竖线以及顶部、行间、底部的四角和边缘连接符；列宽计算同步预留外框与内边距，避免最右侧边线超出聊天区后被裁掉。
+
+### Tests
+- 表格边框回归测试升级为逐行精确验证 `┌┬┐`、`├┼┤`、`└┴┘` 和左右 `│`。
+
+## [0.46.0-rc1] - 2026-08-27
+
+### Added
+- `willdeep -r` 与 `willdeep --resume` 现在可省略参数，启动时直接加载按 `updated_at` 判定的最近持久会话；原有 `-r latest`、`--resume latest` 和显式 Session UUID 用法保持兼容。
+
+### Tests
+- 新增无值短/长参数、后接其他选项以及显式 UUID 的 CLI 解析回归测试。
+
+## [0.45.0-rc3] - 2026-08-27
+
+### Fixed
+- TUI 的 GFM 表格补齐完整细横线：表头顶部、每个逻辑行之间和表尾底部都会按列宽绘制对应连接线；单元格因窄屏换行时，分隔线仍只出现在完整逻辑行之间。
+
+### Tests
+- 新增三行终端表格边框回归测试，精确约束顶部 `─┬─`、行间 `─┼─` 与底部 `─┴─` 的渲染结果。
+
+## [0.45.0-rc2] - 2026-08-26
+
+### Fixed
+- 修复空白 TUI 会话第一次提交必然报 `cannot create Session: adopt Core Session <id>`：此前为了不让“打开后没说话”的空会话污染历史列表，启动阶段不再落盘，但 Runtime 领养仍发生在首次保存之前。现在只在第一次真实提交且 Core Session 确实不存在时补写；已有本地会话、Xedit 桥接会话和 Runtime 管理会话都不会被客户端旧副本覆盖。
+
+### Tests
+- 新增首次 Runtime 提交的 Core Session 领养前置测试，以及“领养检查不得覆盖已有 Runtime 消息历史”的回归测试。
+
+## [0.45.0-rc1] - 2026-08-26
+
+### Added
+- 新增 `model-catalog.v1` 共享模型目录契约、JSON Schema 与可直接校验的示例，统一描述 Provider 实例、模型能力/上下文/价格、候选池、路由权重、升级链和逻辑凭据引用；Xedit 与 WillDeep CLI 可据此逐步收敛到同一份模型事实，而不再各自按模型名猜测。
+- `willdeep-runtime-protocol` 新增强类型模型目录 DTO、严格 JSON 解码与语义校验，拒绝重复标识、悬空引用、升级环、非法 URL/环境变量/价格和不合理上下文边界。
+- 新增 Xedit / WillDeep 共享凭据设计：目录只存 `credential_ref`，macOS 发行版由同一 Data Protection Keychain access group 解析真实凭据，未签名 CLI 使用环境变量回退；后续可由 Runtime 的本机 Unix Socket 统一代理 Provider 调用。
+
+### Security
+- 共享模型目录禁止出现 `api_key`、`token`、`secret` 等明文凭据字段，`extensions` 内也会递归扫描并拒绝此类字段名；Provider Base URL 禁止嵌入 user-info。私有 Provider URL、模型名与价格仍按敏感元数据处理，建议目录文件权限固定为 `0600`。
+- 未签名或 entitlement 不匹配的 CLI 不伪装成可以读取 Xedit Keychain，也不通过会把密钥打印到标准输出的辅助命令转交凭据。
+
+### Tests
+- 新增目录示例解码、重复 Provider/模型、悬空候选、升级环、明文密钥、未知字段与环境变量名等协议回归测试；文档示例另经结构引用和敏感字段扫描验证。
+
 ## [0.44.0-rc1] - 2026-08-25
 
 ### Added
