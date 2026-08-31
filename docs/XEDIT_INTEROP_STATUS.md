@@ -1,7 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
 > 初次勘察：2026-08-21；最近同步复核：2026-08-31（Worker 三档）。|
-> rs：0.51.0-rc1 | Xedit：1.312.0-rc2。
+> rs：0.52.0-rc2 | Xedit：1.312.0-rc2。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -19,7 +19,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 
 | 项 | willdeep-rs | Xedit |
 |---|---|---|
-| 版本 | 0.51.0-rc1 | 1.312.0-rc2 |
+| 版本 | 0.52.0-rc2 | 1.312.0-rc2 |
 | 规模 | ~60K 行 Rust / 4 crate | ~252K 行 Swift（主应用 481 文件） |
 | 工具数 | 21+2 | 164（`Xedit/AgentToolRegistry.swift`） |
 | 系统提示词 | `STABLE_CONTRACT` ~4.5KB | 稳定前缀 ~30KB（v29，`AgentContextBuilder.swift`） |
@@ -37,7 +37,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | **Worker 三档**（基础/进阶/专家）与默认模型 | 双端镜像，同一张表 | `worker_tier.rs`（`default_hosted_model` + 契约测试） | `AgentWorkerTierModels.defaultBinding`（Xedit 1.312.0-rc1） |
 | **五个公开职责**（调查/实现/验证/审查/运维） | 同名同义 | `PUBLIC_SUBAGENT_IDS` + `public_profile_id` 别名表 | `AgentWorkerRole` |
 | 工种→模型映射（`someim-32b-<trade>`） | **已退役**（0.50.0-rc1 / 1.311.0-rc2）：七个别名在请求边界归一到 `someim-32b`，职责提示词由客户端持有 | `worker_tier.rs` 的 `normalize_hosted_model` + `hosted_worker_model` | `AgentSubagentModelCompatibility` |
-| Task Packet 字段 | 近乎字段级同构 | `subagent.rs:143-178` | `AgentSubagentTaskPacket.swift:19-66` |
+| Task Packet 字段 | 近乎字段级同构 | `subagent/types.rs:139-174` | `AgentSubagentTaskPacket.swift:19-66` |
 | 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件。0.43.0-rc1 起桥接会话进入 rs 历史面板并标 `[Xedit]` | `session.rs` 的 `swift_digest` / `swift_session`；`session_store.rs` 的 `extend_with_unmanaged` | Xedit 不读 `~/.willdeep/sessions` |
 | 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
 | 本地辅助模型 | 语义对齐、配置存储暂不共享：复用单模型，本地优先后远端回退，低置信度才做模型路由 | `config.rs` `[local_model]`、`harness.rs`、`routing.rs` | `AgentLocalModelSupport.swift`、`AppStateAgentWorkerRouting.swift` |

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.52.0-rc2] - 2026-08-31
+
+### Changed
+- 3467 行的 `crates/willdeep-core/src/subagent.rs` 按职责拆为 `subagent/` 目录模块：`types.rs`（派工契约：工种壳、写入范围、Task Packet、`SpawnAgentArgs.worker_tier`）、`profiles.rs`（五职责工种表、窗口档位、`hosted_worker_model`）、`catalog.rs`（调度、旧名解析、档位兑现 `TierBinding`、熔断、verifier 安全闸门、worktree 与后台生命周期）、`runner.rs`（重试循环、隔离子 Agent、verifier 执行、文件占用）、`brief.rs`（首条消息组装与超长材料摘要）、`audit.rs`（引用抽检）、`text.rs`（截断），`mod.rs` 仅做模块编排与 re-export。
+- 单测随代码就近下沉到各子模块，共享测试替身收敛到 `test_support.rs`。
+
+### Fixed
+- 消除单文件超过 3000 行的硬约束违规；拆分后最大文件 1310 行。
+- `builtin_profiles` 的文档链接指向不存在的 `SubagentCatalog::with_expert_tier`，改为实际存在的 `with_tier_binding`。
+- 补齐 0.52.0-rc1 遗漏的版本号同步：`PRODUCT_OVERVIEW.md` 仍停在 v0.49.0-rc1、`XEDIT_INTEROP_STATUS.md` 仍停在 0.51.0-rc1。
+
+### Tests
+- 26 个 subagent 单测逐个迁移到对应子模块（含本版新增的三条档位测试），行为与断言逐字未变；`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets -- -D warnings` 零警告、`cargo fmt --check` 通过。
+- 公开路径 `willdeep_core::subagent::*` 保持不变（含 0.52.0-rc1 新增的 `TierBinding`），`willdeep-cli` 与既有测试无需改动。
+
 ## [0.52.0-rc1] - 2026-08-31
 
 ### Added
