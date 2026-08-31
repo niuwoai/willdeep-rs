@@ -29,6 +29,7 @@
 | [双端共享模型目录](SHARED_MODEL_CATALOG.md) | Xedit / rs 共用 Provider、模型事实、候选池与凭据引用契约 |
 | [审批与自动化](APPROVALS.md) | 三档审批模式、Always Allow 边界、CI 用法、`ask_user` |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |
+| [插件系统](PLUGINS.md) | 与 macOS 版共享插件包、三种页面运行时、页面桥与沙箱边界 |
 | [手机中继](MOBILE.md) | `/mobile` 二维码配对与凭据安全 |
 
 ## 排查

@@ -848,7 +848,7 @@ async fn skill_worker_range() {
         });
         let catalog = SubagentCatalog::new(
             &fixture,
-            builtin_profiles(traced.clone(), traced.clone(), 128_000),
+            builtin_profiles(traced.clone()),
             Arc::new(BackgroundTaskRegistry::default()),
         )
         .with_event_sink(sink.clone())

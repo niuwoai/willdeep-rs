@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.52.0-rc1] - 2026-08-31
+
+### Added
+- `[worker_tiers.<档>]` 配置段：逐档绑定 `provider_profile` / `model` / `context_window`。只填 `model` 就沿用当前 Provider 的端点与凭据换个模型；填了 `provider_profile` 则整套端点都换（专家档走 Anthropic 的 `opus-5`、其余仍走网关，是最常见的一种配法）。段名只认 `standard` / `advanced` / `expert` 三个正名——`deep` 做 `worker_tier` 参数值仍可用，做段名则会与 `expert` 撞成同一档，与其定一条谁赢的规则不如拒绝。
+- 解析优先级：显式 `[worker_tiers.*]` > some.im 网关默认表 > 回落父模型（仅专家档、仅在非网关 Provider 上）。基础档默认不绑定，否则会盖掉用户在 `[subagents.*]` 里的选择。
+
+### Fixed
+- **档位默认模型表此前只是文档，运行时从未查过它。** `WorkerTier::default_hosted_model()` 全仓只有测试引用：实际行为是进阶档只放宽预算、根本不换模型，专家档则兑现「当前会话的父模型」。于是 some.im 会话把 Root 设成 `glm-5` 时，`worker_tier=expert` 拿到的还是 `glm-5`——票据照扣，档没升。现在三档都真的按表兑现。
+- **换掉托管工种的模型会造出没有职责描述的空壳 Worker。** `hosted_job_prompt` 表示「网关会 prepend 职责提示词，客户端因此不必发」。档位换模型时该标志没跟着更新，工种绑在托管别名上、档位又换成别处的模型时，两边都不发，Worker 只剩边界段落。判定改为跟着**最终解析出的模型**走（`worker_tier::hosts_job_prompt`），不跟着工种名走。
+- 同一处判定在 0.51 的收敛里也是错的：七个 `someim-32b-<trade>` 退役后 `generalist` 绑定基础档 `someim-32b`，而 harness 仍把它当成托管工种。基础档模型本身不 prepend 任何东西，于是 `generalist` 从那一版起就没有职责提示词。
+- `config.example.toml` 校验不通过：`[subagents.ops_runner] max_turns = 32` 超出验证器 1..=24 的上限，照抄示例的人会被 CLI 拒绝加载。上限改为 32（内置 `ops_runner` 自己的值）——用户至少得能把内置默认值写下来。`example_config_stays_valid` 此前只解析不校验，现在真的走一遍 `validate()`。
+
+### Documentation
+- `SUBAGENTS.md` 新增「换掉某一档的模型」一节，写明两根轴的分工：想让**某次派工**更贵是传 `worker_tier`，给某个职责绑贵模型是让它**每次**都贵。
+- `MODEL_TIERS.md` 的档位表标注「默认」是字面意思——表的价值在于两个客户端默认一致，不在于锁死。
+
+## [0.51.0-rc1] - 2026-08-31
+
+### Added
+- Worker 模型三档 `WorkerTier`（基础 128K / 进阶 256K / 专家会话窗口），默认模型 `someim-32b` / `deepseek-v4-flash` / `gpt-5.6-sol`，与 macOS 版 Xedit 1.312.0-rc1 的 `AgentWorkerTier` 同一张表并有契约测试锁定。
+- `spawn_agent.worker_tier` 独立于 `profile` 选档。**职责与模型正交**：职责只管提示词、工具与写入边界，模型档位单独选；以前一个工种既定职责又定模型，加一种职责就要在网关上多铺一条链。
+- 档位只放宽预算、不收窄：`implementer` 的 256K 不会因为跑在基础档上被砍掉。
+
+### Changed
+- 公开职责由六个工种收敛为五个，与 Xedit `AgentWorkerRole` 同名：调查 `generalist`、实现 `implementer`、验证 `tester`、审查 `reviewer`、运维 `ops_runner`。`reader` → `generalist`、`judge` → `reviewer`；旧 ID（含 `scout`/`editor`/`test_fixer`/`build_fixer`/`log_inspector`/`git_detective`/`deep`）继续路由，`[subagents.reader]` 这类既有配置段继续读得到、写回原段落不产生重复。
+- 七个 `someim-32b-<trade>` 托管工种链退役，全部归一到基础档 `someim-32b`。它们存在的理由是服务端 prepend 职责提示词，而提示词现在随请求发送——两边都做就是双重注入，且每加一种职责都要先在网关上铺链才能发版。`someim-32b-compressor` 与 `someim-32b-security-guard` 不在此列，它们是独立职能模型而非工种别名。
+- Deep 准入（升级票据 + 每 Harness 预算）改绑 `worker_tier=expert`，机制不变。`deep` 从工种变成档位别名后仍然要票据——否则换个名字就等于白送一次升档。
+- `generalist` 默认走基础档而非父模型：贵模型只能经专家档拿到。
+
+### Documentation
+- `MODEL_TIERS.md` 新增「两个『档』，别混」一节。本仓现在有两套三档：**部署基线 S/M/L** 按上下文窗口切，论证私有化可跑不跑得起来；**Worker 档位**按模型能力切，论证这次派工给多贵的。文中写明二者的张力——基础档 128K 的 KV cache 比 S 档 32K 大一个量级，同一张卡装不下，进 air-gapped 机房必须按那台机器重配预算，照抄托管默认值会在采购单上少算一位数。
+
+## [0.50.0-rc1] - 2026-08-31
+
+### Added
+- Web 端插件宿主：与 macOS 版共享 `~/.willdeep/plugins/<id>/<version>/` 安装目录，同一个插件包**不改一行**即可在浏览器里运行。经典游戏厅（10 个游戏）、待办、收藏夹、会话体检中心、俄罗斯方块、项目概览、Issue 面板七个第一方插件全部可用。
+- 插件页面桥 `window.willdeep.*`（`getContext` / `selectItem` / `refresh` / `executeCommand` / `ai.providers` / `ai.complete`）与 `willdeep:context-changed` 等事件，逐个方法对齐 Swift 宿主；传输层由 WKWebView messageHandlers 换成 iframe postMessage。
+- MCP Apps 页面协议：`ui/initialize` → `ui/notifications/initialized` → `tools/call` / `resources/read`，握手未完成时对后两者回 `-32002`。
+- `willdeep-core` 新增 `plugin` 模块：清单解析与校验、包发现与路径安全、内容 digest、启用与权限审批状态（0600 落盘）、声明式 UI 限制校验、每插件隔离的 MCP 连接。
+- `willdeep plugin` 子命令：`list` / `info` / `install` / `import` / `approve` / `enable` / `disable` / `remove`。`import` 能从已安装的 macOS App 包或 Xedit 检出目录批量导入第一方插件。
+- MCP 客户端支持 `resources/list`、`resources/read` 与 `resources/subscribe`，声明式侧栏与 MCP App 页面依赖它们。
+- 插件页面的 localStorage 垫片：opaque origin 下浏览器存储不可用，宿主注入垫片并把数据落到 `~/.willdeep/plugin-web-storage/<id>.json`，每插件隔离、上限 256 KiB。
+- Web 一级入口写进 URL hash（`#plugin/<id>:<destination>`、`#plugins`），刷新与分享链接都回到同一目的地。
+- 六个菜单贡献点全部接入：命令面板（⌘K / Ctrl+K）、聊天正文选中气泡（固定传 `text` 与 `source="chat.selection"`，与 macOS 宿主一致）、会话行右键、Composer 更多菜单、侧栏行右键、页面工具栏。收藏夹与待办「聊天里选中一句就记下」的用法因此在 Web 端可用。
+
+### Fixed
+- 插件包的内容指纹曾在发现阶段就算，于是「列一下装了什么」要把整个插件目录读一遍：本机 30 MB 的目录让 `willdeep --web` 启动花 6.5 秒、`willdeep plugin list` 花 8.2 秒。改为按需计算——没批准过、版本变了、权限多了这三条都不必读包内容就能判定，只有真要比对指纹时才哈希；结果再按 (文件名, 大小, mtime) 在进程内缓存。启动降到 0.4 秒，`plugin list` 降到 0.7 秒。`/api/plugins` 对从未批准的包不再返回 `digest`。
+- Composer 的插件菜单按钮点了没反应：弹出菜单的那一次点击还在往 `window` 冒泡，立刻挂上的关闭监听把刚弹出的菜单当场关掉。监听改为延迟一帧注册。
+- 「模型与路由」与「新会话」按钮沿用 Chakra 默认变体，在深色底上文字近乎不可见；改为显式前景与描边色。
+- Composer 的插件菜单按钮与「Enter 发送」提示重叠。
+
+### Changed
+- 重排 Web 侧栏：语言与「模型与路由」收进标题旁的设置齿轮，工作区收成一行（选择器 + 加号，去掉标签行），会话列表改为吃掉全部剩余高度（此前固定 42vh，且被几块设置挤在下半屏）。设一次就不再动的东西不该占着每天都在看的位置。
+- 会话列表里标题仍是占位符（`New session` 等）的会话，改为显示第一条用户消息的开头。这些会话是有内容的，藏起来会丢东西，显示一排一模一样的占位符又等于没有列表。`SessionDigest` 新增 `preview` 字段，上限 96 字符。
+- Web 端可以添加工作区（工作区选择器右上角「添加」），只在回环监听时开放——与模型路由设置同一条既有语义。Web 模式没有应用层鉴权，对外暴露的实例上能加工作区就等于能让 Agent 读写机器上任意目录，那条边界必须留在启动命令的 `--web-workspace` 里。添加只影响当前浏览器视图的白名单，不改 Runtime 的全局默认工作区。
+- 插件的启用状态与权限审批**不与 macOS 版共享**，存 `~/.willdeep/plugin-registry.web.json`。两个宿主的沙箱边界不同，跨宿主复用审批等于替另一侧替用户点了头。
+- MCP 服务缺少 `tools/list` 时不再让整份注册表失败：只提供 Resource 的服务是合法的，警告照发，服务照常注册。
+
+### Security
+- 插件页面跑在 `sandbox="allow-scripts"` 的 iframe 里（opaque origin），拿不到父页面的 DOM、cookie 与 localStorage；CSP `connect-src 'none'` 让它够不着任何网络端点，包括宿主自己的 API。
+- CSP 使用请求 Host 推出的显式 origin 而非 `'self'`——后者在 opaque origin 下不匹配任何东西。
+- 只对 `Origin: null` 返回 `Access-Control-Allow-Origin`，普通网页读不到本机插件包内容。
+- 权限审批绑定版本、内容 digest、来源与权限集合，任一变化即失效；权限差异优先于 digest 变化上报。
+- 包内路径经词法校验、符号链接解析与包根前缀三道关；`mcp.json` 出现明文凭据即拒载该服务；插件设置里的 secret 永不回显。
+
+### Tests
+- 清单/包/注册表/声明式文档/宿主共 34 项单测，覆盖路径逃逸、符号链接逃逸、明文凭据、审批失效条件、0600 权限拒绝、命令白名单与上下文权限裁剪。
+- Web 层覆盖 bootstrap 注入位置、CSP 出口封锁、MIME 不嗅探、存储路径净化与 CORS 只放行 opaque origin。
+
 ## [0.49.0-rc1] - 2026-08-27
 
 ### Added

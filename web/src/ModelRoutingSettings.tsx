@@ -25,8 +25,24 @@ type Settings = {
   profiles: ProfileSetting[];
 };
 
-export function ModelRoutingSettings({ messages: t }: { messages: Messages }) {
-  const [open, setOpen] = useState(false);
+/// 可以自带触发按钮，也可以由外部控制开关。侧栏把它收进设置面板后走的是
+/// 后一种：`open` 一给，这里就不再渲染自己的按钮。
+export function ModelRoutingSettings({
+  messages: t,
+  open: controlledOpen,
+  onOpenChange,
+}: {
+  messages: Messages;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (controlled) onOpenChange?.(next);
+    else setUncontrolledOpen(next);
+  };
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -100,7 +116,9 @@ export function ModelRoutingSettings({ messages: t }: { messages: Messages }) {
   }
 
   return <>
-    <Button size="sm" variant="outline" width="100%" mb="5" onClick={() => setOpen(true)}>{t.modelRouting}</Button>
+    {/* 受控时按钮由调用方提供。Chakra 的 outline 变体在这套深底上把文字压到
+        近乎看不见，所以这里显式给前景与描边色，别依赖主题默认值。 */}
+    {!controlled && <Button size="sm" variant="outline" width="100%" mb="5" color="#d8e2ec" borderColor="#3a4859" _hover={{ bg: "#16212c", color: "#f2f6fa", borderColor: "#4c5d72" }} onClick={() => setOpen(true)}>{t.modelRouting}</Button>}
     <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)} size="xl">
       <Portal>
         <Dialog.Backdrop bg="#000c" />

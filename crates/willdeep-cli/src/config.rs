@@ -112,6 +112,14 @@ pub struct ConfigFile {
     pub providers: BTreeMap<String, ProviderProfile>,
     #[serde(default)]
     pub subagents: BTreeMap<String, SubagentProfileSettings>,
+    /// 每个 Worker 档位兑现成哪个模型。与 `[subagents.*]` 是两根轴：那边配
+    /// 「这个职责平时用什么」，这边配「派工时说要贵一档，贵成什么样」。
+    ///
+    /// 段名只认 `standard` / `advanced` / `expert` 三个正名。`deep` 之类的
+    /// 别名在 `worker_tier` 参数上仍然可用，但不能做段名——两个段落映射到同
+    /// 一档时谁赢是说不清楚的。
+    #[serde(default)]
+    pub worker_tiers: BTreeMap<String, WorkerTierSettings>,
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
@@ -301,6 +309,19 @@ pub struct SubagentProfileSettings {
     pub max_attempts: Option<usize>,
 }
 
+/// `[worker_tiers.<档>]`：这一档兑现成哪个模型。
+///
+/// 三个字段都可以只填一部分：只填 `model` 就沿用当前 provider 的端点与凭据
+/// 换个模型；填了 `provider_profile` 则整套端点都换（例如专家档走
+/// Anthropic，其余仍走网关）。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerTierSettings {
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+    pub context_window: Option<u64>,
+}
+
 pub struct LoadedConfig {
     pub file: ConfigFile,
 }
@@ -425,9 +446,14 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     for (name, subagent) in &file.subagents {
         if !matches!(
             name.as_str(),
-            "scout"
+            // 五个公开职责 + 改名前的公开名 + 内部专门工种。旧名保留是为了
+            // 别人已经写好的 config 不因为一次改名就报「unknown subagent」。
+            "generalist"
+                | "reviewer"
+                | "scout"
                 | "reader"
                 | "deep"
+                | "judge"
                 | "editor"
                 | "implementer"
                 | "test_fixer"
@@ -436,7 +462,6 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
                 | "git_detective"
                 | "tester"
                 | "ops_runner"
-                | "judge"
         ) {
             bail!("unknown subagent profile: {name}");
         }
@@ -460,11 +485,14 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         {
             bail!("subagents.{name}.tool_output_limit must be between 1024 and 131072");
         }
+        // 上限取内置里最能跑的那个工种（ops_runner 的 32）。卡在 24 的时候，
+        // 用户连内置默认值都抄不下来——config.example.toml 自己就因此校验
+        // 不过，而那份示例正是让人照抄的。
         if subagent
             .max_turns
-            .is_some_and(|value| !(1..=24).contains(&value))
+            .is_some_and(|value| !(1..=32).contains(&value))
         {
-            bail!("subagents.{name}.max_turns must be between 1 and 24");
+            bail!("subagents.{name}.max_turns must be between 1 and 32");
         }
         if subagent
             .token_budget
@@ -495,6 +523,31 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             && !file.providers.contains_key(provider)
         {
             bail!("subagents.{name}.provider_profile not found: {provider}");
+        }
+    }
+    for (name, tier) in &file.worker_tiers {
+        // 只认正名。`deep`/`basic` 这些别名在 `worker_tier` 参数上还通，但做
+        // 段名就意味着 `[worker_tiers.deep]` 与 `[worker_tiers.expert]` 可以
+        // 同时存在却指向同一档——与其定一条谁赢的规则，不如不许写。
+        if !willdeep_core::WorkerTier::ALL
+            .iter()
+            .any(|value| value.as_str() == name)
+        {
+            bail!("unknown worker tier: {name} (expected standard, advanced or expert)");
+        }
+        if tier.model.as_deref().is_some_and(|value| value.is_empty()) {
+            bail!("worker_tiers.{name}.model cannot be empty");
+        }
+        if tier
+            .context_window
+            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
+        {
+            bail!("worker_tiers.{name}.context_window must be between 4000 and 1000000");
+        }
+        if let Some(provider) = &tier.provider_profile
+            && !file.providers.contains_key(provider)
+        {
+            bail!("worker_tiers.{name}.provider_profile not found: {provider}");
         }
     }
     for (name, server) in &file.mcp_servers {
@@ -651,6 +704,56 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn worker_tier_sections_take_only_canonical_names_and_real_providers() {
+        let source = r#"
+version = 1
+default_provider = "some-im"
+
+[providers.some-im]
+provider = "some-im"
+api_key_env = "SOMEIM_API_KEY"
+model = "glm-5"
+
+[providers.anthropic]
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "opus-5"
+
+[worker_tiers.advanced]
+model = "deepseek-v4-flash"
+
+[worker_tiers.expert]
+provider_profile = "anthropic"
+model = "opus-5"
+context_window = 400000
+"#;
+        let parsed: ConfigFile = toml::from_str(source).expect("parse worker tiers");
+        validate(&parsed, Path::new("config.toml")).expect("accept worker tiers");
+        assert_eq!(parsed.worker_tiers.len(), 2);
+        assert_eq!(
+            parsed.worker_tiers["expert"].provider_profile.as_deref(),
+            Some("anthropic")
+        );
+
+        // 段名只认正名。`deep` 做参数值仍然可用，做段名则会和 `expert` 撞成
+        // 同一档——与其定一条谁赢的规则，不如直接拒绝。
+        for bad in [
+            "[worker_tiers.deep]\nmodel = \"opus-5\"\n",
+            "[worker_tiers.basic]\nmodel = \"glm-5\"\n",
+            "[worker_tiers.expert]\nmodel = \"\"\n",
+            "[worker_tiers.expert]\ncontext_window = 2000\n",
+            "[worker_tiers.expert]\nprovider_profile = \"nope\"\n",
+        ] {
+            let parsed: ConfigFile =
+                toml::from_str(&format!("version = 1\n{bad}")).expect("parse rejected tier");
+            assert!(
+                validate(&parsed, Path::new("config.toml")).is_err(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn example_config_stays_valid() {
         let parsed: ConfigFile = toml::from_str(include_str!("../../../config.example.toml"))
             .expect("parse config.example.toml");
@@ -684,6 +787,14 @@ base_url = "https://example.com/v1"
         }
         let deep = parsed.subagents.get("deep").expect("deep profile");
         assert_eq!(deep.model.as_deref(), Some("deepseek-v4-flash"));
+        // 这条测试的名字说的是「stays valid」，那就真的校验一遍——只解析
+        // 不校验的话，示例里写错一个 provider_profile 也照样绿。
+        validate(&parsed, Path::new("config.example.toml")).expect("example config validates");
+        assert_eq!(
+            parsed.worker_tiers["expert"].provider_profile.as_deref(),
+            Some("anthropic"),
+            "示例要示范「专家档单独换端点」这件事"
+        );
     }
 
     #[test]

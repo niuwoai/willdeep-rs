@@ -522,7 +522,7 @@ mod tests {
         settings.profiles[0].model = None;
         refresh_effective(&mut settings);
         assert!(settings.profiles[0].automatic);
-        assert_eq!(settings.profiles[0].effective_model, "someim-32b-scout");
+        assert_eq!(settings.profiles[0].effective_model, "someim-32b");
     }
 
     /// 光标必须和它正在编辑的那行字在同一行。

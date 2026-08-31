@@ -29,27 +29,74 @@
 
 `spawn_agent` 把自包含任务交给隔离上下文的子 Agent，可选择同步等待或 `run_in_background = true`。
 
-| 公开 Profile | 用途 | 默认工具 | 窗口 |
+**职责与模型是两根独立的轴**：`profile` 选做什么，`worker_tier` 选用多贵的模型。
+以前一个工种既定职责又定模型，于是加一种职责就要在网关上多铺一条模型链，
+换个模型又得改工种。
+
+| 公开 Profile（职责） | 用途 | 默认工具 | 默认窗口 |
 |---|---|---|---:|
-| `reader` | 阅读和总结长文件或文档 | read / list / search | 48K |
+| `generalist` | 跨文件与仓库状态的调查 | search / grep / read / list / git status / reviewed shell | 128K |
 | `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / reviewed shell | 256K |
 | `tester` | 测试与行为审核，不改源码 | search / grep / read / git / reviewed shell | 64K |
+| `reviewer` | 独立正确性与安全边界审核 | search / grep / read / git diff，无 Shell | 48K |
 | `ops_runner` | 有界运维与命令执行 | read / git status / reviewed shell | 48K，最多 32 轮 |
-| `judge` | 独立正确性与安全边界审核 | search / grep / read / git diff，无 Shell | 48K |
-| `deep` | 无法分片的跨库/超长材料调查 | search / grep / read / list / git status / reviewed shell | 1M（需升级票据） |
+
+| `worker_tier`（模型档） | 预算 | some.im 默认模型 | 准入 |
+|---|---:|---|---|
+| `standard`（默认） | 128K | `someim-32b` | 无 |
+| `advanced` | 256K | `deepseek-v4-flash` | 无 |
+| `expert` | 会话窗口 | `gpt-5.6-sol` | **升级票据 + 每 Harness 预算** |
+
+档位只放宽预算、不收窄：`implementer` 的 256K 不会因为跑在基础档上被砍掉。
+
+### 换掉某一档的模型
+
+「some.im 默认模型」那一列是与 macOS 版共享的默认表——同一个人换个客户端不该
+换个 Worker。要改用别的模型，写 `[worker_tiers.<档>]`：
+
+```toml
+[worker_tiers.advanced]
+# 只填 model：沿用当前 Provider 的端点与凭据，只换模型。
+model = "deepseek-v4-pro"
+
+[worker_tiers.expert]
+# 填了 provider_profile：整套端点都换。专家档走 Anthropic，其余仍走网关。
+provider_profile = "anthropic"
+model = "opus-5"
+context_window = 400000
+```
+
+段名只认 `standard` / `advanced` / `expert` 三个正名。`deep` 做 `worker_tier`
+参数值仍然可用，但**不能**做段名——`[worker_tiers.deep]` 与 `[worker_tiers.expert]`
+同时存在时谁赢是说不清楚的，与其定规则不如拒绝。
+
+解析优先级：`[worker_tiers.*]` > some.im 默认表 > 回落父模型（仅专家档，且仅在
+非 some.im Provider 上——别处没有那张表里的模型）。基础档默认**不绑定**，它已经
+是工种自己的模型了，再绑一次只会盖掉 `[subagents.*]` 里的选择。
+
+两根轴别用混：想让**某次派工**用更贵的模型，是在 `spawn_agent` 上传 `worker_tier`；
+给某个职责在 `[subagents.*]` 里绑一个贵模型，是让它**每次**都贵。
+
+> 专家档换成什么模型，都还有升级票据那道闸门兜着（`[agent] max_deep_calls_per_harness`）。
+> 准入跟着**档位**走，不跟着工种名走——这一点在 0.51 的改名里差点漏掉。
 
 旧 ID 不删除，但不再出现在公开工种选择器：`scout` / `reader` / `log_inspector` /
-`git_detective` 归并到 Reader 展示组，`editor` / `test_fixer` / `build_fixer` /
-`implementer` 归并到 Implementer 展示组。Runtime 仍按原 ID 执行自动路由、托管
-工种链、已保存工作流与历史记录，不做会改变旧任务语义的偷偷重映射。
+`git_detective` / `deep` 归并到 generalist 展示组，`editor` / `test_fixer` /
+`build_fixer` 归并到 implementer，`judge` / `security_guard` 归并到 reviewer。
+`deep` 同时是 `worker_tier=expert` 的别名——它当年既表示职责也表示价格，拆开之后
+两处都认得它。Runtime 仍按原 ID 执行自动路由、已保存工作流与历史记录，不做会改变
+旧任务语义的偷偷重映射；`[subagents.reader]` 这类既有配置段也继续读得到、写得回。
 
-除 `deep` 外，每个工种都跑在 32K / 48K / 64K / 256K 的**可私有部署窗口档位**里，并对工具输出设了独立的字节上限。16K 档已经取消：16GB 显存可部署的 35B-A3B 级模型已经能覆盖至少 32K，继续保留 16K 只会增加路由碎片。详见 [小上下文 Skill Worker](SKILL_WORKERS.md)。
+每个工种都跑在**可私有部署的窗口档位**里，并对工具输出设了独立的字节上限。
+注意托管环境的默认预算（128K 起）与 air-gapped 机房的部署基线（32K 起）是两回事，
+进私有环境要按那台机器重配，见 [模型三档](MODEL_TIERS.md) 的「两个『档』，别混」。
 
 硬性约束：子 Agent **看不到父对话、不能询问用户、不能继续派生**。
 
 外部 Spawn（Runtime API、TUI `/agent spawn`、Web 侧栏）只公开无 Shell、无写入的
-`reader` 与 `judge`。命令型、写入型和 `deep` 必须由父 Agent 走完整安全链，外部接口
-不能绕过命令审核、写集审批或升级票据。Runtime API 仍接受旧只读 ID，以便已有保存
+`generalist` 与 `reviewer`（旧名 `reader` / `judge` 一并接受）。命令型、写入型和
+`worker_tier=expert` 必须由父 Agent 走完整安全链，外部接口不能绕过命令审核、
+写集审批或升级票据。Runtime API 仍接受旧只读 ID，以便已有保存
 流程继续运行，但 UI 不再把它们当成公开选项。
 
 ### 子 Worker 命令审核与人类兜底
@@ -81,7 +128,7 @@
 
 ```toml
 [subagents.reader]
-# some.im 下省略 provider_profile/model，自动使用 someim-32b-reader。
+# some.im 下省略 provider_profile/model，自动使用基础档 someim-32b。
 max_turns = 8
 context_window = 49152      # 工种自己的窗口档位，不是会话窗口
 tool_output_limit = 5120    # 单次工具输出字节上限
@@ -113,7 +160,7 @@ timeout_seconds = 1200
 worktree = "dedicated"
 ```
 
-Provider 为 some.im 时，七个托管窄工种默认使用各自的 `someim-32b-<trade>`，`implementer` 默认使用 GLM-5；`deep` 推荐显式绑定 `deepseek-v4-flash`，且无有效升级票据不会启动。
+Provider 为 some.im 时，`generalist` 与七个内部窄工种默认使用基础档 `someim-32b`，`implementer` 默认使用 GLM-5。`worker_tier=expert`（旧名 `deep`）没有有效升级票据不会启动。七个 `someim-32b-<trade>` 别名已退役：职责提示词随请求发送，网关不再按工种各铺一条链，旧名在请求边界归一到 `someim-32b`。
 
 > **注意**：子 Agent 从 Profile 直接构造 Provider 配置，**不继承** `--api-key` / `WILLDEEP_API_KEY`。给子 Agent 绑定独立 Profile 时必须在该 Profile 里写 `api_key` 或 `api_key_env`，见 [认证与凭据](AUTHENTICATION.md)。
 
@@ -180,7 +227,7 @@ willdeep daemon instruct-agent <agent-id> "补充要求"
 - `K` 停止运行中的后台 Child Agent，`R` 重试已结束的；
 - `Enter` 打开详情：按 Agent 过滤的最近工具时间线、Workspace Change Artifact、已有结果报告，支持键盘和鼠标滚轮浏览长内容；
 - 详情中可补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 里已有的草稿；
-- `/agent spawn reader|judge <task>` 在活动父会话中创建公开的无 Shell、无写入子 Agent。
+- `/agent spawn generalist|reviewer <task>` 在活动父会话中创建公开的无 Shell、无写入子 Agent（旧名 `reader` / `judge` 一并接受）。
 
 Agent 列表保持最小摘要，按 `Enter` 才读取受保护的单项详情。
 

@@ -24,6 +24,8 @@ mod mobile;
 mod model_routing;
 mod notify;
 mod onboarding;
+mod plugin_cmd;
+mod plugin_web;
 mod projects;
 mod telemetry;
 mod titling;
@@ -210,6 +212,11 @@ enum CliCommand {
     Integrations {
         #[command(subcommand)]
         action: integrations::IntegrationAction,
+    },
+    /// Install, approve and enable plugins shared with the macOS app.
+    Plugin {
+        #[command(subcommand)]
+        action: plugin_cmd::PluginAction,
     },
     /// Diagnose local configuration and runtime readiness without contacting a Provider.
     Doctor {
@@ -455,6 +462,7 @@ async fn run() -> Result<()> {
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
+            CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
             CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {
                     config_path: cli.config.clone(),

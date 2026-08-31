@@ -92,16 +92,34 @@ api_key_env = "ANTHROPIC_API_KEY"
 model = "claude-sonnet-4-5"
 max_output_tokens = 16384
 
-# Optional per-trade policy overrides. When the parent is some.im, omit
-# provider_profile/model for hosted narrow trades so WillDeep selects the
-# matching someim-32b-<trade> model. Explicit model bindings replace that
-# hosted mapping. provider_profile references [providers.*].
-# The built-in deployable tiers are 32K/48K/64K/256K. Bind them to private or
-# on-prem Provider profiles to keep enterprise source and prompts off the
-# public internet. Only `deep` is the scarce 1M escalation path.
-# Public selectors show reader/implementer/tester/ops_runner/judge/deep. The
-# specialist sections below remain valid for automatic routing and saved-flow
-# compatibility.
+# 每个 Worker 档位兑现成哪个模型。这是与 [subagents.*] 正交的另一根轴：
+# 那边配「这个职责平时用什么」，这边配「派工时说要贵一档，贵成什么样」。
+#
+# 段名只认 standard / advanced / expert 三个正名。不写就用 some.im 网关的
+# 默认表（someim-32b / deepseek-v4-flash / gpt-5.6-sol），与 macOS 版同一张，
+# 保证同一个人换个客户端不会换个 Worker。
+#
+# 专家档受准入控制：调用方要先拿到升级票据（见 [agent] max_deep_calls_per_harness）。
+# 换句话说，把它绑到多贵的模型，都还有那道闸门兜着。
+[worker_tiers.advanced]
+model = "deepseek-v4-flash"
+
+[worker_tiers.expert]
+# 整套端点都换：专家档走 Anthropic，其余仍走网关。只填 model 则沿用当前
+# provider 的端点与凭据。
+provider_profile = "anthropic"
+model = "opus-5"
+context_window = 400000
+
+# Optional per-trade policy overrides. provider_profile references [providers.*].
+# 五个公开职责是 generalist / implementer / tester / reviewer / ops_runner；
+# 下面这些改名前的专门工种段落仍然有效，自动路由和已保存的流程照旧能读到。
+# 内置窗口是 32K/48K/64K/256K。把它们绑到内网或本地部署的 Provider profile，
+# 企业源码与提示词就不出公网。
+#
+# 注意：这里绑的是「职责平时用什么模型」。想让某次派工用更贵的模型，是在
+# spawn_agent 上传 worker_tier，由上面的 [worker_tiers.*] 兑现——不要靠给某个
+# 职责绑一个贵模型来达到这个目的，那会让它每次都贵。
 [subagents.scout]
 max_turns = 8
 context_window = 32768
@@ -114,8 +132,9 @@ max_consecutive_failures = 3
 context_window = 49152
 
 [subagents.deep]
-# L-tier work is explicit: whole-repo reasoning or indivisible huge material.
-# The runtime requires an escalation ticket before this profile may start.
+# `deep` 现在是 generalist 的旧名，段落保留是为了别人写好的 config 不失效。
+# 它已经不再自带「最贵的模型」这层含义——那层含义搬到了 worker_tier=expert，
+# 准入也跟着档位走（改名当天差点在这里漏掉，见 CHANGELOG 0.51.0-rc1）。
 provider_profile = "some-im"
 model = "deepseek-v4-flash"
 context_window = 1000000

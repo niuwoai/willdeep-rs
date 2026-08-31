@@ -60,7 +60,17 @@ impl McpRegistry {
         let mut registry = Self::default();
         for (name, config) in configs.iter().filter(|(_, c)| c.enabled) {
             let server = Arc::new(McpServer::start(name, config).await?);
-            let listed = server.request("tools/list", json!({})).await?;
+            // 一个只提供 Resource 的 MCP 服务是合法的（插件的声明式侧栏与
+            // MCP App 页面就只用 resources）。它没有 tools/list 不该把整份
+            // 注册表拖垮，但也不能静默——报到 stderr，服务照常注册。
+            let listed = match server.request("tools/list", json!({})).await {
+                Ok(listed) => listed,
+                Err(error) => {
+                    eprintln!("warning: MCP server {name} has no usable tool list: {error}");
+                    registry.servers.insert(name.clone(), server);
+                    continue;
+                }
+            };
             for item in listed
                 .get("tools")
                 .and_then(Value::as_array)
@@ -153,6 +163,75 @@ impl McpRegistry {
             .await?;
         Ok(serde_json::to_string_pretty(&result)?)
     }
+
+    pub fn server_names(&self) -> Vec<&str> {
+        self.servers.keys().map(String::as_str).collect()
+    }
+
+    pub fn has_server(&self, server: &str) -> bool {
+        self.servers.contains_key(server)
+    }
+
+    fn server(&self, server: &str) -> Result<&Arc<McpServer>, McpError> {
+        self.servers
+            .get(server)
+            .ok_or_else(|| McpError::MissingServer(server.to_owned()))
+    }
+
+    /// 直接对某个服务调用工具，返回原始结果。
+    ///
+    /// 与 `call` 的区别是不走 `mcp__server__tool` 命名空间：插件页面拿到的
+    /// 是插件清单里的工具名，宿主必须自己确认这个服务属于这个插件——所以
+    /// 每个插件持有的是**它自己的** registry 实例，隔离靠的是实例边界，
+    /// 不是名字前缀。
+    pub async fn call_tool_on(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, McpError> {
+        self.server(server)?
+            .request("tools/call", json!({"name": tool, "arguments": arguments}))
+            .await
+    }
+
+    pub async fn list_resources(&self, server: &str) -> Result<Value, McpError> {
+        self.server(server)?
+            .request("resources/list", json!({}))
+            .await
+    }
+
+    pub async fn read_resource(&self, server: &str, uri: &str) -> Result<Value, McpError> {
+        self.server(server)?
+            .request("resources/read", json!({"uri": uri}))
+            .await
+    }
+
+    /// 订阅一条资源。服务不支持订阅时返回错误，调用方按"不支持"处理即可——
+    /// 宿主还有进入目的地与手动刷新两条读取时机，不做高频轮询。
+    pub async fn subscribe_resource(&self, server: &str, uri: &str) -> Result<(), McpError> {
+        self.server(server)?
+            .request("resources/subscribe", json!({"uri": uri}))
+            .await
+            .map(|_| ())
+    }
+}
+
+/// 从 `resources/read` 的结果里取出第一条内容的文本与 MIME。
+/// 结构是 MCP 标准的 `{"contents":[{"uri":..,"mimeType":..,"text":..}]}`。
+pub fn resource_text(result: &Value, expected_uri: &str) -> Option<(String, String)> {
+    let contents = result.get("contents")?.as_array()?;
+    let entry = contents
+        .iter()
+        .find(|item| item.get("uri").and_then(Value::as_str) == Some(expected_uri))
+        .or_else(|| contents.first())?;
+    let text = entry.get("text")?.as_str()?.to_owned();
+    let mime = entry
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("text/plain")
+        .to_owned();
+    Some((text, mime))
 }
 
 impl McpServer {

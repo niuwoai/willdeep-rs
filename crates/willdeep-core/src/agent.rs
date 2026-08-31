@@ -648,8 +648,17 @@ impl Agent {
                 Some(command) => Some(self.tools.approve_subagent_command(command).await?),
                 None => None,
             };
+            // 准入绑的是**档位**，不是工种名。`deep` 从工种正交化成
+            // WorkerTier::Expert 之后，这道闸必须跟着搬——否则 `profile="deep"`
+            // 只是换了个名字就绕过了票据。
+            let requested_tier = args
+                .worker_tier
+                .as_deref()
+                .and_then(crate::WorkerTier::parse)
+                .or_else(|| crate::WorkerTier::parse(&profile))
+                .unwrap_or_default();
             if let Some(routing) = &self.routing
-                && profile == "deep"
+                && requested_tier.requires_admission()
             {
                 routing
                     .authorize_deep(args.escalation.as_ref())
@@ -676,7 +685,8 @@ impl Agent {
             } else {
                 None
             };
-            if profile != "deep"
+            // 专家档自己不算「低档尝试」，别让它给自己攒证据。
+            if !requested_tier.requires_admission()
                 && let Some(routing) = &self.routing
             {
                 // Only count a lower-tier attempt after its task packet and
@@ -1241,7 +1251,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("workspace");
         let catalog = Arc::new(SubagentCatalog::new(
             &root,
-            crate::subagent::builtin_profiles(provider.clone(), provider.clone(), 128_000),
+            crate::subagent::builtin_profiles(provider.clone()),
             Arc::new(BackgroundTaskRegistry::default()),
         ));
         let agent = Agent::new(
@@ -1285,7 +1295,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("workspace");
         let catalog = Arc::new(SubagentCatalog::new(
             &root,
-            crate::subagent::builtin_profiles(provider.clone(), provider.clone(), 128_000),
+            crate::subagent::builtin_profiles(provider.clone()),
             Arc::new(BackgroundTaskRegistry::default()),
         ));
         let agent = Agent::new(

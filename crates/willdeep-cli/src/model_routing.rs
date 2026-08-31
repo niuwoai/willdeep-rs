@@ -10,13 +10,14 @@ use crate::config::{ConfigFile, LoadedConfig};
 
 pub const STALE_CONFIG_MESSAGE: &str = "model routing settings are stale; reload before saving";
 
+/// 与 `willdeep_core::PUBLIC_SUBAGENT_IDS` 同一份名单：五个职责，模型档位
+/// 是另一根轴（见 `willdeep_core::WorkerTier`）。
 const PROFILE_IDS: &[&str] = &[
-    "reader",
+    "generalist",
     "implementer",
     "tester",
+    "reviewer",
     "ops_runner",
-    "judge",
-    "deep",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -153,7 +154,10 @@ pub fn save(
         Some(update.max_deep_calls_per_harness.to_string()),
     );
     for profile in &update.profiles {
-        let section = format!("subagents.{}", profile.id);
+        let section = format!(
+            "subagents.{}",
+            configured_section_id(&current.file, &profile.id)
+        );
         patched = patch_key(
             &patched,
             Some(&section),
@@ -232,13 +236,39 @@ fn from_config(
     })
 }
 
+/// 这个工种改名前叫什么。已经写在别人 config 里的段落不该因为一次改名就失效。
+fn legacy_section_ids(id: &str) -> &'static [&'static str] {
+    match id {
+        "generalist" => &["reader", "deep"],
+        "reviewer" => &["judge"],
+        _ => &[],
+    }
+}
+
+/// 定位一个工种在 config 里实际使用的段落名：新名优先，其次是改名前的名字。
+/// 保存时也用它，免得写出一个新段落、把用户原来那段晾在旁边失效。
+fn configured_section_id(file: &ConfigFile, id: &str) -> String {
+    if file.subagents.contains_key(id) {
+        return id.to_owned();
+    }
+    legacy_section_ids(id)
+        .iter()
+        .find(|legacy| file.subagents.contains_key(**legacy))
+        .map(|legacy| (*legacy).to_owned())
+        .unwrap_or_else(|| id.to_owned())
+}
+
 fn profile_settings(
     file: &ConfigFile,
     id: &str,
     root_provider: &str,
     root_model: &str,
 ) -> Result<ProfileRoutingSettings> {
-    let configured = file.subagents.get(id);
+    let configured = file.subagents.get(id).or_else(|| {
+        legacy_section_ids(id)
+            .iter()
+            .find_map(|legacy| file.subagents.get(*legacy))
+    });
     let provider_profile = configured.and_then(|settings| settings.provider_profile.clone());
     let model = configured.and_then(|settings| settings.model.clone());
     let effective_provider = provider_profile
@@ -256,7 +286,7 @@ fn profile_settings(
     let provider_model = provider.model.as_deref().unwrap_or(root_model);
     let effective_model = model.clone().unwrap_or_else(|| {
         recommended_model.clone().unwrap_or_else(|| {
-            if is_some_im && id != "deep" {
+            if is_some_im {
                 "glm-5".to_owned()
             } else {
                 provider_model.to_owned()
@@ -325,12 +355,18 @@ fn safe_bare_key(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
+/// 工种的默认上下文预算。
+///
+/// 这些是**职责**各自需要多少材料，与 [`willdeep_core::WorkerTier`] 的档位预算
+/// 是两回事：档位说的是「这一档最多给多少」，这里说的是「这个职责默认要多少」，
+/// 显式配置覆盖两者。
 fn default_context_window(id: &str) -> u64 {
     match id {
-        "reader" | "ops_runner" | "judge" => 49_152,
-        "tester" => 65_536,
+        // 调查要跨文件跟线索，材料量本来就比有界工种大。
+        "generalist" => willdeep_core::WorkerTier::Standard.context_budget(),
         "implementer" => 262_144,
-        "deep" => 1_000_000,
+        "tester" => 65_536,
+        "reviewer" | "ops_runner" => 49_152,
         _ => 32_768,
     }
 }
@@ -547,32 +583,38 @@ future_desktop_field = "preserved"
         let path = root.join("config.toml");
         std::fs::write(&path, sample()).expect("sample config");
         let settings = load(&path, None).expect("load settings");
-        assert_eq!(settings.profiles[0].effective_model, "someim-32b-reader");
+        // 七个旧工种别名已收敛到基础档：职责提示词随请求走，网关不再
+        // 按工种各铺一条链。
+        assert_eq!(settings.profiles[0].effective_model, "someim-32b");
         let mut update = settings.to_update();
         update.default_provider = "local".to_owned();
         update.root_model = "local-coder-v2".to_owned();
         update.max_deep_calls_per_harness = 0;
-        let reader = update
+        // 样例 config 里写的是改名前的 `[subagents.reader]`。它必须继续被读到，
+        // 保存也必须落回同一个段落——否则一次改名就让别人的配置变成死字，
+        // 界面上还多出一个空的新段落。
+        let generalist = update
             .profiles
             .iter_mut()
-            .find(|profile| profile.id == "reader")
-            .expect("reader update");
-        reader.provider_profile = Some("some-im".to_owned());
-        reader.model = Some("custom-reader".to_owned());
+            .find(|profile| profile.id == "generalist")
+            .expect("generalist update");
+        generalist.provider_profile = Some("some-im".to_owned());
+        generalist.model = Some("custom-reader".to_owned());
         let saved = save(&path, None, &update).expect("save settings");
         assert_eq!(saved.default_provider, "local");
         assert_eq!(saved.root_model, "local-coder-v2");
         assert_eq!(saved.max_deep_calls_per_harness, 0);
-        let reader = saved
+        let generalist = saved
             .profiles
             .iter()
-            .find(|profile| profile.id == "reader")
-            .expect("saved reader");
-        assert_eq!(reader.model.as_deref(), Some("custom-reader"));
+            .find(|profile| profile.id == "generalist")
+            .expect("saved generalist");
+        assert_eq!(generalist.model.as_deref(), Some("custom-reader"));
+        let written = std::fs::read_to_string(&path).expect("saved config");
+        assert!(written.contains("# preserve worker comments"));
         assert!(
-            std::fs::read_to_string(&path)
-                .expect("saved config")
-                .contains("# preserve worker comments")
+            written.contains("[subagents.reader]") && !written.contains("[subagents.generalist]"),
+            "the existing section must be updated in place, not duplicated under the new name"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

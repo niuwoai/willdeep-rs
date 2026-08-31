@@ -91,25 +91,34 @@ impl SubagentShell {
     }
 }
 
-/// Public trades shown to people and advertised in the tool schema. Legacy
-/// specialist IDs remain executable for automatic routing and saved flows.
-pub const PUBLIC_SUBAGENT_IDS: [&str; 6] = [
-    "reader",
+/// Public trades shown to people and advertised in the tool schema.
+///
+/// Five responsibilities, mirroring macOS Xedit's `AgentWorkerRole`: 调查 /
+/// 实现 / 验证 / 审查 / 运维. Legacy specialist IDs remain executable for
+/// automatic routing and saved flows.
+///
+/// `deep` is deliberately absent. It used to be both a responsibility
+/// ("complex investigation") and a model choice ("run the parent's expensive
+/// model"); those are now separate axes — the responsibility is `generalist`,
+/// the model is [`crate::WorkerTier::Expert`]. A trade list that doubles as a
+/// price list makes every new responsibility cost a new model binding.
+pub const PUBLIC_SUBAGENT_IDS: [&str; 5] = [
+    "generalist",
     "implementer",
     "tester",
+    "reviewer",
     "ops_runner",
-    "judge",
-    "deep",
 ];
 
 pub fn public_profile_id(id: &str) -> Option<&'static str> {
     match id.trim().to_ascii_lowercase().as_str() {
-        "scout" | "reader" | "log_inspector" | "git_detective" => Some("reader"),
+        "scout" | "reader" | "generalist" | "log_inspector" | "git_detective" | "deep" => {
+            Some("generalist")
+        }
         "editor" | "implementer" | "test_fixer" | "build_fixer" => Some("implementer"),
-        "tester" | "reviewer" | "small_reviewer" => Some("tester"),
+        "tester" | "small_reviewer" => Some("tester"),
         "ops_runner" | "terminal_operator" => Some("ops_runner"),
-        "security_guard" | "judge" => Some("judge"),
-        "deep" => Some("deep"),
+        "security_guard" | "judge" | "reviewer" => Some("reviewer"),
         _ => None,
     }
 }
@@ -180,6 +189,24 @@ pub struct SubagentCatalog {
     safety_judge: Option<Arc<dyn SafetyJudge>>,
     /// Skill library used to resolve `task.skill` at dispatch time.
     skills: Option<Arc<crate::skills::SkillCatalog>>,
+    /// 每一档兑现成哪个 provider。准入在上一层（[`crate::WorkerTier::requires_admission`]），
+    /// 这里只负责兑现：档位说「这活儿值得贵一次」，绑定说「贵成什么样」。
+    ///
+    /// 没配的档不换模型，只放宽预算——票据白拿不到东西，好过静默降级到一个
+    /// 谁也没指定的模型。
+    tier_bindings: BTreeMap<crate::WorkerTier, TierBinding>,
+}
+
+/// 一个档位兑现出来的模型。
+#[derive(Clone)]
+pub struct TierBinding {
+    pub provider: Arc<dyn Provider>,
+    /// 展示与遥测用的模型名；`None` 表示沿用 provider 自己配的那个。
+    pub model: Option<String>,
+    /// 这一档的上下文预算下限。
+    pub window: u64,
+    /// 这个模型是否由网关托管职责提示词（见 [`crate::worker_tier::hosts_job_prompt`]）。
+    pub hosted_job_prompt: bool,
 }
 
 /// The structured half of a dispatch: what the parent already knows, so the
@@ -321,6 +348,9 @@ pub(crate) struct SpawnAgentArgs {
     pub target_command: Option<String>,
     pub task: Option<TaskPacket>,
     pub escalation: Option<EscalationTicket>,
+    /// 模型档位，与职责正交（`standard` / `advanced` / `expert`）。缺省走最便宜
+    /// 那档；`expert` 与旧名 `deep` 一样需要升级票据。
+    pub worker_tier: Option<String>,
 }
 
 impl SpawnAgentArgs {
@@ -368,6 +398,7 @@ impl SubagentCatalog {
             claimed_files: Arc::new(Mutex::new(BTreeSet::new())),
             safety_judge: None,
             skills: None,
+            tier_bindings: BTreeMap::new(),
         }
     }
 
@@ -376,6 +407,20 @@ impl SubagentCatalog {
     pub fn with_skills(mut self, skills: Arc<crate::skills::SkillCatalog>) -> Self {
         self.skills = Some(skills);
         self
+    }
+
+    /// 给某一档绑定兑现用的 provider。
+    ///
+    /// 三档都可绑：基础档默认沿用工种自己的模型，进阶与专家档由 harness 按
+    /// 网关默认表或用户的 `[worker_tiers.*]` 配置填进来。
+    pub fn with_tier_binding(mut self, tier: crate::WorkerTier, binding: TierBinding) -> Self {
+        self.tier_bindings.insert(tier, binding);
+        self
+    }
+
+    /// 这一档兑现成什么。没绑就是 `None`。
+    pub fn tier_binding(&self, tier: crate::WorkerTier) -> Option<&TierBinding> {
+        self.tier_bindings.get(&tier)
     }
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
@@ -444,12 +489,27 @@ impl SubagentCatalog {
     }
 
     pub(crate) fn has_profile(&self, id: &str) -> bool {
-        self.profiles.contains_key(&id.trim().to_ascii_lowercase())
+        self.resolve_profile_id(id).is_some()
+    }
+
+    /// 把一个可能是旧名的工种解析成目录里真实存在的那个。
+    ///
+    /// 直接命中优先——内部工种（`scout`、`editor` 等）仍然可以精确点名；
+    /// 命不中再走公开名映射，让 `reader`、`judge`、`deep` 这些改名前的写法
+    /// 继续可用。别人保存的流程不该因为我们换了个称呼就断掉。
+    fn resolve_profile_id(&self, id: &str) -> Option<String> {
+        let id = id.trim().to_ascii_lowercase();
+        if self.profiles.contains_key(&id) {
+            return Some(id);
+        }
+        public_profile_id(&id)
+            .map(str::to_owned)
+            .filter(|resolved| self.profiles.contains_key(resolved))
     }
 
     fn profile(&self, id: Option<&str>) -> Option<&SubagentProfile> {
-        let id = id.unwrap_or("deep").trim().to_ascii_lowercase();
-        self.profiles.get(&id)
+        let resolved = self.resolve_profile_id(id.unwrap_or("generalist"))?;
+        self.profiles.get(&resolved)
     }
 
     pub(crate) async fn run(
@@ -493,9 +553,9 @@ impl SubagentCatalog {
             .unwrap_or("deep")
             .trim()
             .to_ascii_lowercase();
-        if profile_id == "deep" {
+        if crate::WorkerTier::parse(&profile_id).is_some_and(|tier| tier.requires_admission()) {
             return Err(AgentError::Subagent(
-                "external deep spawn is disabled; the parent Agent must provide a runtime-validated escalation ticket"
+                "external expert-tier spawn is disabled; the parent Agent must provide a runtime-validated escalation ticket"
                     .to_owned(),
             ));
         }
@@ -545,10 +605,31 @@ impl SubagentCatalog {
         approved_targets: Option<BTreeSet<PathBuf>>,
         approved_command: Option<String>,
     ) -> Result<String, AgentError> {
-        let profile = self
+        let mut profile = self
             .profile(args.profile.as_deref())
             .ok_or_else(|| AgentError::Subagent("no subagent profiles configured".to_owned()))?
             .clone();
+        // 职责给提示词、工具和写入边界，档位给模型和上下文预算。
+        //
+        // 预算只放宽不收窄：工种自己声明的窗口是它完成职责的下限，implementer
+        // 的 256K 不该因为跑在基础档上被砍掉。换模型则走档位绑定——专家档已经
+        // 在 agent 层过了票据与预算，到这里只负责兑现。
+        if let Some(tier) = args
+            .worker_tier
+            .as_deref()
+            .and_then(crate::WorkerTier::parse)
+        {
+            profile.context_window = profile.context_window.max(tier.context_budget());
+            if let Some(binding) = self.tier_bindings.get(&tier) {
+                profile.provider = binding.provider.clone();
+                profile.model = binding.model.clone();
+                profile.context_window = profile.context_window.max(binding.window);
+                // 提示词的归属跟着模型走，不跟着工种走。工种默认绑在托管别名上、
+                // 档位又把它换成别的模型时，这份提示词必须重新由客户端发送，
+                // 否则 Worker 只剩边界段落、不知道自己是干什么的。
+                profile.hosted_job_prompt = binding.hosted_job_prompt;
+            }
+        }
         let requested_command = args
             .target_command
             .as_deref()
@@ -1736,43 +1817,42 @@ const PAYLOAD_LIMIT_BALANCED: usize = 5 * 1024;
 const PAYLOAD_LIMIT_WIDE: usize = 6 * 1024;
 const PAYLOAD_LIMIT_IMPLEMENTER: usize = 16 * 1024;
 
-/// Prefix of the some.im virtual models that host the trade job prompts.
+/// Prefix of the some.im virtual models that used to host trade job prompts.
 /// `someim-32b` is a *tier* name, not a context promise: the model behind it
 /// is the same cheap model, and the small-window discipline stays on this
 /// side of the wire.
 pub const HOSTED_WORKER_MODEL_PREFIX: &str = "someim-32b";
 
-/// The virtual model that hosts `id`'s job prompt, or `None` for trades the
-/// relay does not host (`deep` runs the parent model; anything absent from
-/// this list has no server-side prompt to prepend).
+/// The hosted model a trade runs on, or `None` when the trade has no default
+/// binding on this gateway.
 ///
-/// Mirrors macOS Xedit's `AgentSubagentJobPrompts.hostedModel(for:)` — same
-/// gateway, same accounts, so the two clients must resolve the same trade to
-/// the same model or the same operator gets two different workers depending
-/// on which app they opened. Catalog ids are snake_case, model names are
-/// hyphenated.
+/// Every trade now resolves to the shared base model rather than its own
+/// `someim-32b-<trade>` chain. Those per-trade chains existed to prepend a job
+/// prompt server-side, but the job prompt travels with the request from
+/// [`builtin_profiles`] — keeping both means the worker gets its instructions
+/// twice, and it means every new responsibility needs a new chain provisioned
+/// on the relay before it can ship.
+///
+/// Mirrors macOS Xedit's `AgentSubagentModelCompatibility.recommendedModel` —
+/// same gateway, same accounts, so the two clients must resolve the same trade
+/// to the same model or the same operator gets two different workers depending
+/// on which app they opened.
 pub fn hosted_worker_model(id: &str) -> Option<String> {
-    const HOSTED: &[&str] = &[
-        "scout",
-        "reader",
-        "editor",
-        "test_fixer",
-        "build_fixer",
-        "log_inspector",
-        "git_detective",
-    ];
-    HOSTED
-        .contains(&id)
-        .then(|| format!("{HOSTED_WORKER_MODEL_PREFIX}-{}", id.replace('_', "-")))
+    // `generalist` 合并了 scout / reader / log_inspector / git_detective 四个
+    // 基础档窄工种，它在这个网关上的默认自然也是基础档。想要更强的，走
+    // WorkerTier::Expert——那一档要票据。
+    let base = crate::worker_tier::LEGACY_HOSTED_TRADES.contains(&id) || id == "generalist";
+    base.then(|| crate::worker_tier::HOSTED_BASE_MODEL.to_owned())
 }
 
-/// Every profile the catalog ships with. `context_window` is the *session's*
-/// window and is used only by `deep`; every worker gets its own tier.
-pub fn builtin_profiles(
-    parent: Arc<dyn Provider>,
-    cheap: Arc<dyn Provider>,
-    context_window: u64,
-) -> Vec<SubagentProfile> {
+/// Every profile the catalog ships with.
+///
+/// One provider is enough now: each responsibility declares its own context
+/// budget, and the session window belongs to the expert tier — which the
+/// catalog receives separately through [`SubagentCatalog::with_expert_tier`]
+/// because reaching it costs a ticket.
+pub fn builtin_profiles(worker: Arc<dyn Provider>) -> Vec<SubagentProfile> {
+    let cheap = worker;
     vec![
         profile(
             cheap.clone(),
@@ -1846,9 +1926,13 @@ pub fn builtin_profiles(
             },
         ),
         profile(
-            parent,
+            cheap.clone(),
             ProfileSpec {
-                id: "deep",
+                // 旧名 `deep`：它当年既表示「复杂调查」这个职责，也表示
+                // 「用最贵的模型 + 整个会话窗口」这个档位。正交化之后职责留在
+                // 这里并**默认走便宜档**——贵模型只能经 WorkerTier::Expert 拿到，
+                // 而那一档要票据。否则改个名字就等于白送一次升档。
+                id: "generalist",
                 shell: SubagentShell::Reviewed,
                 purpose: "Complex investigation across files and repository state.",
                 tools: &[
@@ -1861,8 +1945,10 @@ pub fn builtin_profiles(
                 ],
                 prompt: "Your trade is INVESTIGATION. Follow evidence across files and state what you could not confirm.",
                 max_turns: 12,
-                context_window,
-                tool_output_limit: None,
+                // 默认基础档预算。整个会话窗口是专家档兑现的东西，不是这个
+                // 职责与生俱来的——否则「调查」这个名字就等于一张免费的贵模型券。
+                context_window: crate::WorkerTier::Standard.context_budget(),
+                tool_output_limit: Some(PAYLOAD_LIMIT_WIDE),
                 write_scope: SubagentWriteScope::None,
                 timeout_seconds: 300,
                 worktree: SubagentWorktreePolicy::Shared,
@@ -1990,7 +2076,9 @@ pub fn builtin_profiles(
         profile(
             cheap,
             ProfileSpec {
-                id: "judge",
+                // 旧名 `judge`。改叫 reviewer 是为了与 Xedit 的五职责同名；
+                // `judge` 与 `security_guard` 继续路由到这里。
+                id: "reviewer",
                 shell: SubagentShell::None,
                 purpose: "Review correctness, risk, and policy boundaries without shell or writes.",
                 tools: &[
@@ -2137,11 +2225,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
         let background = Arc::new(BackgroundTaskRegistry::default());
         (
-            SubagentCatalog::new(
-                &root,
-                builtin_profiles(provider.clone(), provider, 128_000),
-                background,
-            ),
+            SubagentCatalog::new(&root, builtin_profiles(provider), background),
             root,
         )
     }
@@ -2292,7 +2376,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(PromptProbe(seen.clone()));
         let catalog = SubagentCatalog::new(
             &root,
-            builtin_profiles(provider.clone(), provider, 128_000),
+            builtin_profiles(provider),
             Arc::new(BackgroundTaskRegistry::default()),
         )
         .with_skills(Arc::new(crate::skills::SkillCatalog::discover(&root, &[])));
@@ -2364,7 +2448,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(DigestProvider(seen.clone()));
         let catalog = SubagentCatalog::new(
             &root,
-            builtin_profiles(provider.clone(), provider, 128_000),
+            builtin_profiles(provider),
             Arc::new(BackgroundTaskRegistry::default()),
         );
         catalog
@@ -2408,24 +2492,25 @@ mod tests {
     /// The trade→model table is shared with the macOS app. One operator, one
     /// gateway: if the two clients disagree here, the same trade quietly runs
     /// on two different models depending on which app was opened.
+    /// 七条 per-trade 模型链已经收敛到一个基础档。它们当年存在的理由是
+    /// 服务端 prepend 职责提示词，而职责提示词现在随请求走——留着就是双重
+    /// 注入，而且每加一种职责都得先在网关上铺一条链才能发版。
     #[test]
-    fn hosted_trades_resolve_to_the_relay_virtual_models() {
+    fn every_hosted_trade_resolves_to_the_shared_base_model() {
+        for trade in crate::worker_tier::LEGACY_HOSTED_TRADES {
+            assert_eq!(
+                hosted_worker_model(trade).as_deref(),
+                Some("someim-32b"),
+                "{trade} should resolve to the shared base tier"
+            );
+        }
+        // generalist 合并了四个基础档窄工种，默认也落在基础档。
         assert_eq!(
-            hosted_worker_model("test_fixer").as_deref(),
-            Some("someim-32b-test-fixer")
+            hosted_worker_model("generalist").as_deref(),
+            Some("someim-32b")
         );
-        assert_eq!(
-            hosted_worker_model("scout").as_deref(),
-            Some("someim-32b-scout")
-        );
-        assert_eq!(
-            hosted_worker_model("git_detective").as_deref(),
-            Some("someim-32b-git-detective")
-        );
-        // `deep` runs the parent model, and a trade the relay does not host
-        // must fall back rather than invent a model name the gateway would
-        // refuse.
-        assert_eq!(hosted_worker_model("deep"), None);
+        // 没有默认绑定的工种仍然返回 None，而不是凭空造一个网关会拒绝的名字：
+        // implementer 是日常编码主力，跑的是更强的那一档。
         assert_eq!(hosted_worker_model("implementer"), None);
         assert_eq!(hosted_worker_model("ops_runner"), None);
     }
@@ -2461,7 +2546,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(PromptProbe(seen.clone()));
         let root = std::env::temp_dir().join(format!("willdeep-hosted-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("workspace");
-        let mut profiles = builtin_profiles(provider.clone(), provider, 128_000);
+        let mut profiles = builtin_profiles(provider);
         for profile in &mut profiles {
             profile.hosted_job_prompt = profile.id == "scout";
         }
@@ -2652,7 +2737,7 @@ mod tests {
         });
         let background = Arc::new(BackgroundTaskRegistry::default());
         let sink = Arc::new(CaptureSink::default());
-        let mut profiles = builtin_profiles(provider.clone(), provider, 128_000);
+        let mut profiles = builtin_profiles(provider);
         for profile in &mut profiles {
             profile.model = Some("old-model".to_owned());
         }
@@ -2779,7 +2864,7 @@ mod tests {
         });
         let catalog = SubagentCatalog::new(
             &root,
-            builtin_profiles(provider.clone(), provider, 128_000),
+            builtin_profiles(provider),
             Arc::new(BackgroundTaskRegistry::default()),
         );
         let report = catalog
@@ -2893,7 +2978,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
         let catalog = SubagentCatalog::new(
             &root,
-            builtin_profiles(provider.clone(), provider, 128_000),
+            builtin_profiles(provider),
             Arc::new(BackgroundTaskRegistry::default()),
         )
         .with_safety_judge(Arc::new(AllowingJudge));
@@ -3006,11 +3091,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("workspace");
         let catalog = SubagentCatalog::new(
             &root,
-            builtin_profiles(
-                Arc::new(ReportProvider) as Arc<dyn Provider>,
-                Arc::new(ReportProvider),
-                128_000,
-            ),
+            builtin_profiles(Arc::new(ReportProvider) as Arc<dyn Provider>),
             Arc::new(BackgroundTaskRegistry::default()),
         )
         .with_safety_judge(Arc::new(AllowingJudge));
@@ -3046,14 +3127,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("willdeep-brief-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("workspace");
         std::fs::write(root.join("target.rs"), "fn broken() {}\n").expect("fixture");
-        let profile = builtin_profiles(
-            Arc::new(ReportProvider) as Arc<dyn Provider>,
-            Arc::new(ReportProvider),
-            128_000,
-        )
-        .into_iter()
-        .find(|profile| profile.id == "test_fixer")
-        .expect("test_fixer profile");
+        let profile = builtin_profiles(Arc::new(ReportProvider) as Arc<dyn Provider>)
+            .into_iter()
+            .find(|profile| profile.id == "test_fixer")
+            .expect("test_fixer profile");
         let brief = compose_brief(
             "fix it",
             Some(&TaskPacket {
@@ -3119,14 +3196,19 @@ mod tests {
 
     /// Deployable windows are asserted rather than left to drift: narrow
     /// trades stay within 32K-64K, implementer owns the 256K daily-coding
-    /// tier, and only `deep` inherits the session window.
+    /// tier, and `generalist` gets the 128K base budget. Nothing inherits the
+    /// session window by default any more — that is what the expert tier
+    /// cashes in, and it costs a ticket.
     #[test]
     fn workers_run_in_deployable_windows_with_capped_payloads() {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
-        for profile in builtin_profiles(provider.clone(), provider, 200_000) {
-            if profile.id == "deep" {
-                assert_eq!(profile.context_window, 200_000);
-                assert_eq!(profile.tool_output_limit, None);
+        for profile in builtin_profiles(provider) {
+            if profile.id == "generalist" {
+                assert_eq!(
+                    profile.context_window,
+                    crate::WorkerTier::Standard.context_budget()
+                );
+                assert_eq!(profile.tool_output_limit, Some(PAYLOAD_LIMIT_WIDE));
                 continue;
             }
             if profile.id == "implementer" {
@@ -3153,12 +3235,182 @@ mod tests {
         }
     }
 
+    /// 档位换模型，职责不变。这条盯着正交化本身：`deep` 曾经既是职责也是
+    /// 价格，把它拆开之后，一个便宜的调查工种不能因为换了个名字就白拿父模型。
+    #[tokio::test]
+    async fn the_expert_tier_swaps_the_model_without_changing_the_responsibility() {
+        let cheap: Arc<dyn Provider> = Arc::new(ReportProvider);
+        let expert: Arc<dyn Provider> = Arc::new(ReportProvider);
+        let catalog = SubagentCatalog::new(
+            std::env::temp_dir(),
+            builtin_profiles(cheap),
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_tier_binding(
+            crate::WorkerTier::Expert,
+            TierBinding {
+                provider: expert,
+                model: Some("gpt-5.6-sol".to_owned()),
+                window: 200_000,
+                hosted_job_prompt: false,
+            },
+        );
+
+        let generalist = catalog.profile(Some("generalist")).expect("generalist");
+        // 默认这一档是便宜的：贵模型要过 agent 层的票据才拿得到。
+        assert!(generalist.context_window <= crate::WorkerTier::Standard.context_budget());
+
+        // 旧名仍然解析得到，别人保存的流程不该断。
+        assert!(catalog.has_profile("deep"));
+        assert!(catalog.has_profile("reader"));
+        assert!(catalog.has_profile("judge"));
+        assert_eq!(
+            catalog.profile(Some("deep")).map(|p| p.id.as_str()),
+            Some("generalist")
+        );
+        assert_eq!(
+            catalog.profile(Some("judge")).map(|p| p.id.as_str()),
+            Some("reviewer")
+        );
+    }
+
+    /// 三档都能各绑各的模型，而且真的走到那个 provider 上。
+    ///
+    /// 只断言绑定存进去了是不够的——它得在派工路径上兑现出来，否则用户在
+    /// `[worker_tiers.*]` 里写的东西就是一句空话（这正是 0.51 的毛病）。
+    #[tokio::test]
+    async fn every_tier_cashes_its_own_binding_at_dispatch() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let base: Arc<dyn Provider> = Arc::new(ModelProvider {
+            model: "someim-32b".to_owned(),
+            seen: seen.clone(),
+        });
+        let root = std::env::temp_dir().join(format!("willdeep-tiers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let mut catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(base),
+            Arc::new(BackgroundTaskRegistry::default()),
+        );
+        for (tier, model) in [
+            (crate::WorkerTier::Advanced, "deepseek-v4-flash"),
+            (crate::WorkerTier::Expert, "opus-5"),
+        ] {
+            catalog = catalog.with_tier_binding(
+                tier,
+                TierBinding {
+                    provider: Arc::new(ModelProvider {
+                        model: model.to_owned(),
+                        seen: seen.clone(),
+                    }),
+                    model: Some(model.to_owned()),
+                    window: tier.context_budget(),
+                    hosted_job_prompt: false,
+                },
+            );
+        }
+
+        for tier in ["standard", "advanced", "expert"] {
+            catalog
+                .run(
+                    SpawnAgentArgs {
+                        prompt: "look".to_owned(),
+                        profile: Some("generalist".to_owned()),
+                        worker_tier: Some(tier.to_owned()),
+                        run_in_background: Some(false),
+                        ..SpawnAgentArgs::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("run");
+        }
+
+        // 同一个职责，三档三个模型。基础档没绑定，留在工种自己的模型上。
+        assert_eq!(
+            seen.lock().expect("models").as_slice(),
+            ["someim-32b", "deepseek-v4-flash", "opus-5"]
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// 档位换掉一个托管工种的模型时，客户端必须把职责提示词补回来。
+    ///
+    /// 这是最容易漏的一条：工种绑在网关托管的别名上（提示词由服务端 prepend，
+    /// 客户端因此不发），档位又把模型换成了别处的 `opus-5`——两边都不发，
+    /// Worker 就只剩边界段落，完全不知道自己该干什么。
+    #[tokio::test]
+    async fn switching_tiers_hands_the_job_prompt_back_to_the_client() {
+        struct PromptProbe(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Provider for PromptProbe {
+            async fn complete(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<Completion, ProviderError> {
+                self.0.lock().unwrap().push(messages[0].content.clone());
+                Ok(Completion {
+                    content: "report".to_owned(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    usage: None,
+                })
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(PromptProbe(seen.clone()));
+        let root =
+            std::env::temp_dir().join(format!("willdeep-tierprompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        let mut profiles = builtin_profiles(provider.clone());
+        for profile in &mut profiles {
+            // 模拟一个绑在 `someim-32b-scout` 上的托管工种：提示词由服务端发。
+            profile.hosted_job_prompt = profile.id == "scout";
+        }
+        let catalog =
+            SubagentCatalog::new(&root, profiles, Arc::new(BackgroundTaskRegistry::default()))
+                .with_tier_binding(
+                    crate::WorkerTier::Expert,
+                    TierBinding {
+                        provider,
+                        model: Some("opus-5".to_owned()),
+                        window: 200_000,
+                        // opus-5 不是托管别名，服务端不会 prepend 任何东西。
+                        hosted_job_prompt: false,
+                    },
+                );
+
+        catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "look".to_owned(),
+                    profile: Some("scout".to_owned()),
+                    worker_tier: Some("expert".to_owned()),
+                    run_in_background: Some(false),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .expect("run");
+
+        let prompts = seen.lock().expect("prompts").clone();
+        assert!(
+            prompts[0].contains("LOCATION"),
+            "换掉托管模型之后职责提示词必须由客户端补上，实际收到：{}",
+            prompts[0]
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[test]
-    fn public_catalog_is_six_trades_while_legacy_profiles_remain_executable() {
+    fn public_catalog_is_five_responsibilities_while_legacy_profiles_remain_executable() {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
         let catalog = SubagentCatalog::new(
             std::env::temp_dir(),
-            builtin_profiles(provider.clone(), provider, 200_000),
+            builtin_profiles(provider),
             Arc::new(BackgroundTaskRegistry::default()),
         );
         let description = catalog.description();
@@ -3177,10 +3429,15 @@ mod tests {
             assert!(catalog.has_profile(legacy));
             assert!(!description.contains(&format!("`{legacy}`")));
         }
-        assert_eq!(public_profile_id("git_detective"), Some("reader"));
+        assert_eq!(public_profile_id("git_detective"), Some("generalist"));
         assert_eq!(public_profile_id("build_fixer"), Some("implementer"));
         assert_eq!(public_profile_id("terminal_operator"), Some("ops_runner"));
-        assert_eq!(public_profile_id("security_guard"), Some("judge"));
+        assert_eq!(public_profile_id("security_guard"), Some("reviewer"));
+        // 改名前的公开名继续路由，别人保存的流程不该在这次改动里断掉。
+        assert_eq!(public_profile_id("reader"), Some("generalist"));
+        assert_eq!(public_profile_id("judge"), Some("reviewer"));
+        // `deep` 现在是档位而不是工种：它的职责部分落在 generalist 上。
+        assert_eq!(public_profile_id("deep"), Some("generalist"));
     }
 
     /// The digest is what a small-window worker gets to read of a long log:

@@ -266,6 +266,7 @@ async fn collect(options: &DoctorOptions) -> DoctorReport {
     check_workspace(options, &mut checks);
     check_git(options, &mut checks);
     check_web_assets(&mut checks);
+    check_plugins(options, &mut checks).await;
     check_runtime(options, &mut checks).await;
     let overall = if checks.iter().any(|check| check.status == CheckStatus::Fail) {
         CheckStatus::Fail
@@ -481,6 +482,37 @@ fn check_git(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
             "available; workspace is not a Git worktree"
         },
     ));
+}
+
+/// 插件宿主状态。装了几个、启用几个、有没有装坏的包——想知道插件在不在，
+/// 不该只能靠点开界面撞一次。
+async fn check_plugins(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
+    let (status, summary) = match willdeep_core::plugin::PluginHost::discover(&options.home) {
+        Ok(host) => {
+            let installed = host.packages().len();
+            let failures = host.failures().len();
+            let mut enabled = 0usize;
+            for package in host.packages() {
+                if host.is_enabled(&package.id).await {
+                    enabled += 1;
+                }
+            }
+            let summary =
+                format!("{installed} installed, {enabled} enabled, {failures} unreadable");
+            let status = if failures > 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Pass
+            };
+            (status, summary)
+        }
+        // 注册表读不出来时插件全都跑不了，但聊天照常——所以是 Warning 不是 Fail。
+        Err(error) => (
+            CheckStatus::Warning,
+            format!("registry unavailable: {error}"),
+        ),
+    };
+    checks.push(check("plugins", status, summary));
 }
 
 fn check_web_assets(checks: &mut Vec<DoctorCheck>) {

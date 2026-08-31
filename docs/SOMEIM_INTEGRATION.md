@@ -53,7 +53,7 @@ willdeep --onboarding
 export WILLDEEP_API_BASE="https://api.niuwoai.com/v1"
 ```
 
-`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认 Root 模型为 `glm-5`。1M 的 `deepseek-v4-flash` 只作为通过升级票据后的 Deep 档使用。
+`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认 Root 模型为 `glm-5`。`deepseek-v4-flash` 是 Worker 的进阶档；最贵的专家档 `gpt-5.6-sol` 只在通过升级票据后使用。
 
 ## 请求头
 
@@ -113,7 +113,7 @@ vision_model = "qwen3-vl-plus"
 
 ## 子 Agent 的廉价模型
 
-Provider 为 some.im 时，七个托管窄工种自动绑定各自的 `someim-32b-<trade>`，未托管工种回落 `glm-5`；`implementer` 使用 GLM-5，`deep` 推荐显式绑定 `deepseek-v4-flash`。可以在 `[subagents.*]` 中显式覆盖，见 [子 Agent 与后台任务](SUBAGENTS.md)。
+Provider 为 some.im 时，`generalist` 与七个内部窄工种绑定基础档 `someim-32b`，其余工种回落 `glm-5`。模型档位由 `worker_tier` 单独选（基础 `someim-32b` / 进阶 `deepseek-v4-flash` / 专家 `gpt-5.6-sol`），专家档需要升级票据。两根轴各有各的覆盖入口：`[subagents.*]` 改「这个职责平时用什么」，`[worker_tiers.*]` 改「某一档兑现成什么」，见 [子 Agent 与后台任务](SUBAGENTS.md#换掉某一档的模型)。
 
 ## 上下文压缩模型
 

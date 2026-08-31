@@ -5,6 +5,7 @@ import { App } from "./App";
 import "./styles.css";
 import "./routing.css";
 import "./attachments.css";
+import "./plugins.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode><ChakraProvider value={defaultSystem}><App /></ChakraProvider></StrictMode>,
