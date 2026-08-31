@@ -15,6 +15,64 @@ pub(super) enum RoutingSettingsAction {
     Save(crate::model_routing::ModelRoutingUpdate),
 }
 
+/// 面板里的一行。三段共用一个扁平索引：主模型、五个职责、三个档位。
+///
+/// 抽成枚举是因为原来每处都在写 `selected - 1`——中间再插一段，每一处都要
+/// 同步改，漏一处就是「按 `[` 改的是隔壁那行的上下文」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Row {
+    Root,
+    Profile(usize),
+    Tier(usize),
+}
+
+fn row_at(settings: &crate::model_routing::ModelRoutingSettings, selected: usize) -> Row {
+    let Some(index) = selected.checked_sub(1) else {
+        return Row::Root;
+    };
+    match index.checked_sub(settings.profiles.len()) {
+        Some(tier) => Row::Tier(tier),
+        None => Row::Profile(index),
+    }
+}
+
+impl RoutingSettingsState {
+    fn row_count(&self) -> usize {
+        1 + self.settings.profiles.len() + self.settings.tiers.len()
+    }
+
+    fn row(&self) -> Row {
+        row_at(&self.settings, self.selected)
+    }
+
+    /// 当前行显示的模型，供编辑器预填。
+    fn current_model(&self) -> String {
+        match self.row() {
+            Row::Root => self.settings.root_model.clone(),
+            Row::Profile(index) => {
+                self.settings
+                    .profiles
+                    .get(index)
+                    .map_or_else(String::new, |profile| {
+                        profile
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| profile.effective_model.clone())
+                    })
+            }
+            Row::Tier(index) => self
+                .settings
+                .tiers
+                .get(index)
+                .map_or_else(String::new, |tier| {
+                    tier.model
+                        .clone()
+                        .unwrap_or_else(|| tier.effective_model.clone())
+                }),
+        }
+    }
+}
+
 impl App {
     pub(super) fn open_routing_settings(
         &mut self,
@@ -79,13 +137,20 @@ impl App {
                                 .to_owned(),
                         );
                     } else {
-                        if state.selected == 0 {
-                            state.settings.root_model = model;
-                        } else if let Some(profile) =
-                            state.settings.profiles.get_mut(state.selected - 1)
-                        {
-                            profile.model = Some(model);
-                            profile.automatic = false;
+                        match row_at(&state.settings, state.selected) {
+                            Row::Root => state.settings.root_model = model,
+                            Row::Profile(index) => {
+                                if let Some(profile) = state.settings.profiles.get_mut(index) {
+                                    profile.model = Some(model);
+                                    profile.automatic = false;
+                                }
+                            }
+                            Row::Tier(index) => {
+                                if let Some(tier) = state.settings.tiers.get_mut(index) {
+                                    tier.model = Some(model);
+                                    tier.automatic = false;
+                                }
+                            }
                         }
                         state.editor = None;
                         refresh_effective(&mut state.settings);
@@ -118,37 +183,36 @@ impl App {
         {
             return RoutingSettingsAction::Save(state.settings.to_update());
         }
-        let row_count = state.settings.profiles.len() + 1;
+        let row_count = state.row_count();
         match key.code {
             KeyCode::Up => state.selected = state.selected.checked_sub(1).unwrap_or(row_count - 1),
             KeyCode::Down => state.selected = (state.selected + 1) % row_count,
             KeyCode::Left => cycle_provider(&mut state.settings, state.selected, -1),
             KeyCode::Right | KeyCode::Tab => cycle_provider(&mut state.settings, state.selected, 1),
             KeyCode::Enter => {
-                let model = if state.selected == 0 {
-                    state.settings.root_model.clone()
-                } else {
-                    state
-                        .settings
-                        .profiles
-                        .get(state.selected - 1)
-                        .and_then(|profile| profile.model.clone())
-                        .unwrap_or_else(|| {
-                            state.settings.profiles[state.selected - 1]
-                                .effective_model
-                                .clone()
-                        })
-                };
+                let model = state.current_model();
                 let mut editor = PromptEditor::default();
                 editor.insert(&model);
                 state.editor = Some(editor);
                 state.error = None;
             }
-            KeyCode::Char(' ') if state.selected > 0 => {
-                if let Some(profile) = state.settings.profiles.get_mut(state.selected - 1) {
-                    profile.provider_profile = None;
-                    profile.model = None;
-                    profile.automatic = true;
+            KeyCode::Char(' ') => {
+                match row_at(&state.settings, state.selected) {
+                    Row::Root => {}
+                    Row::Profile(index) => {
+                        if let Some(profile) = state.settings.profiles.get_mut(index) {
+                            profile.provider_profile = None;
+                            profile.model = None;
+                            profile.automatic = true;
+                        }
+                    }
+                    Row::Tier(index) => {
+                        if let Some(tier) = state.settings.tiers.get_mut(index) {
+                            tier.provider_profile = None;
+                            tier.model = None;
+                            tier.automatic = true;
+                        }
+                    }
                 }
                 refresh_effective(&mut state.settings);
             }
@@ -166,12 +230,8 @@ impl App {
                 state.settings.max_deep_calls_per_harness =
                     state.settings.max_deep_calls_per_harness.saturating_sub(1)
             }
-            KeyCode::Char('[') if state.selected > 0 => {
-                cycle_context_window(&mut state.settings, state.selected - 1, -1)
-            }
-            KeyCode::Char(']') if state.selected > 0 => {
-                cycle_context_window(&mut state.settings, state.selected - 1, 1)
-            }
+            KeyCode::Char('[') => cycle_context_window(&mut state.settings, state.selected, -1),
+            KeyCode::Char(']') => cycle_context_window(&mut state.settings, state.selected, 1),
             _ => {}
         }
         RoutingSettingsAction::None
@@ -197,23 +257,44 @@ fn cycle_provider(
         if !settings.providers[next].model.is_empty() {
             settings.root_model = settings.providers[next].model.clone();
         }
-    } else if let Some(profile) = settings.profiles.get_mut(selected - 1) {
-        let current = profile
-            .provider_profile
-            .as_ref()
-            .and_then(|id| {
-                settings
-                    .providers
-                    .iter()
-                    .position(|provider| &provider.id == id)
-            })
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let next = wrapped_index(current, settings.providers.len() + 1, delta);
-        profile.provider_profile = next
-            .checked_sub(1)
-            .map(|index| settings.providers[index].id.clone());
-        profile.automatic = profile.provider_profile.is_none() && profile.model.is_none();
+    } else {
+        // `providers.len() + 1` 的那个 +1 是「跟随主模型」这一档，索引 0。
+        let position = |current: &Option<String>| {
+            current
+                .as_ref()
+                .and_then(|id| {
+                    settings
+                        .providers
+                        .iter()
+                        .position(|provider| &provider.id == id)
+                })
+                .map(|index| index + 1)
+                .unwrap_or(0)
+        };
+        let count = settings.providers.len() + 1;
+        let ids = settings
+            .providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        match row_at(settings, selected) {
+            Row::Root => {}
+            Row::Profile(index) => {
+                if let Some(profile) = settings.profiles.get_mut(index) {
+                    let next = wrapped_index(position(&profile.provider_profile), count, delta);
+                    profile.provider_profile = next.checked_sub(1).map(|index| ids[index].clone());
+                    profile.automatic =
+                        profile.provider_profile.is_none() && profile.model.is_none();
+                }
+            }
+            Row::Tier(index) => {
+                if let Some(tier) = settings.tiers.get_mut(index) {
+                    let next = wrapped_index(position(&tier.provider_profile), count, delta);
+                    tier.provider_profile = next.checked_sub(1).map(|index| ids[index].clone());
+                    tier.automatic = tier.provider_profile.is_none() && tier.model.is_none();
+                }
+            }
+        }
     }
     refresh_effective(settings);
 }
@@ -228,22 +309,37 @@ fn wrapped_index(current: usize, count: usize, delta: isize) -> usize {
 
 fn cycle_context_window(
     settings: &mut crate::model_routing::ModelRoutingSettings,
-    profile_index: usize,
+    selected: usize,
     delta: isize,
 ) {
-    let Some(profile) = settings.profiles.get_mut(profile_index) else {
-        return;
+    let step = |current: u64| {
+        let index = CONTEXT_WINDOWS
+            .iter()
+            .position(|window| *window == current)
+            .unwrap_or_else(|| {
+                CONTEXT_WINDOWS
+                    .iter()
+                    .position(|window| *window > current)
+                    .unwrap_or(CONTEXT_WINDOWS.len() - 1)
+            });
+        CONTEXT_WINDOWS[wrapped_index(index, CONTEXT_WINDOWS.len(), delta)]
     };
-    let current = CONTEXT_WINDOWS
-        .iter()
-        .position(|window| *window == profile.context_window)
-        .unwrap_or_else(|| {
-            CONTEXT_WINDOWS
-                .iter()
-                .position(|window| *window > profile.context_window)
-                .unwrap_or(CONTEXT_WINDOWS.len() - 1)
-        });
-    profile.context_window = CONTEXT_WINDOWS[wrapped_index(current, CONTEXT_WINDOWS.len(), delta)];
+    match row_at(settings, selected) {
+        Row::Root => {}
+        Row::Profile(index) => {
+            if let Some(profile) = settings.profiles.get_mut(index) {
+                profile.context_window = step(profile.context_window);
+            }
+        }
+        Row::Tier(index) => {
+            if let Some(tier) = settings.tiers.get_mut(index) {
+                tier.context_window = step(tier.context_window);
+                // 改过窗口就不再是「跟随档位默认预算」了，得写进 config，
+                // 否则保存之后这一格会弹回默认值。
+                tier.automatic = false;
+            }
+        }
+    }
 }
 
 fn refresh_effective(settings: &mut crate::model_routing::ModelRoutingSettings) {
@@ -271,6 +367,33 @@ fn refresh_effective(settings: &mut crate::model_routing::ModelRoutingSettings) 
         });
         profile.automatic = profile.provider_profile.is_none() && profile.model.is_none();
     }
+    for tier in &mut settings.tiers {
+        let provider_id = tier
+            .provider_profile
+            .as_deref()
+            .unwrap_or(&settings.default_provider);
+        let provider = settings
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id);
+        let some_im = provider.is_some_and(|provider| provider.provider == "some-im");
+        tier.effective_provider = provider_id.to_owned();
+        // 基础档在网关上就是工种自己的模型，没有独立的「档位默认」可推荐。
+        tier.recommended_model = (some_im && tier.id != "standard")
+            .then(|| {
+                willdeep_core::WorkerTier::parse(&tier.id)
+                    .map(|parsed| parsed.default_hosted_model().to_owned())
+            })
+            .flatten();
+        tier.effective_model = tier.model.clone().unwrap_or_else(|| {
+            tier.recommended_model.clone().unwrap_or_else(|| {
+                provider
+                    .map(|provider| provider.model.clone())
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or_else(|| settings.root_model.clone())
+            })
+        });
+    }
 }
 
 pub(super) fn render_routing_settings(f: &mut ratatui::Frame<'_>, app: &mut App) {
@@ -279,7 +402,14 @@ pub(super) fn render_routing_settings(f: &mut ratatui::Frame<'_>, app: &mut App)
         return;
     };
     let width = f.area().width.min(112);
-    let height = f.area().height.min(22);
+    // 3 行表头 + 主模型 + 五个职责 + 档位小标题 + 三个档位 + 提示行 + 上下边框。
+    // 此前这里写死 22，加了档位那一段之后正好被裁掉——弹层高度必须跟着行数走，
+    // 否则每次加一行都要有人记得回来改这个数字。
+    let rows = 3 + 1 + state.settings.profiles.len() + 1 + state.settings.tiers.len() + 1 + 2;
+    let height = f
+        .area()
+        .height
+        .min(u16::try_from(rows).unwrap_or(u16::MAX).max(12));
     let popup = Rect {
         x: f.area().x + f.area().width.saturating_sub(width) / 2,
         y: f.area().y + f.area().height.saturating_sub(height) / 2,
@@ -364,6 +494,38 @@ pub(super) fn render_routing_settings(f: &mut ratatui::Frame<'_>, app: &mut App)
             selected_style(state.selected == index + 1),
         ));
     }
+    lines.push(Line::styled(
+        routing_row(
+            language.text("档位", "tier", "ティア"),
+            "Provider",
+            language.text("模型", "model", "モデル"),
+            language.text("预算", "budget", "予算"),
+            language.text("模式", "mode", "モード"),
+        ),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ));
+    for (index, tier) in state.settings.tiers.iter().enumerate() {
+        let mode = if tier.requires_admission {
+            // 专家档绑到多贵的模型都还有票据兜着，这件事必须在选它的地方说。
+            language.text("需票据", "ticket", "チケット")
+        } else if tier.automatic {
+            language.text("推荐", "recommended", "推奨")
+        } else {
+            language.text("覆盖", "override", "上書き")
+        };
+        lines.push(Line::styled(
+            routing_row(
+                tier_label(&tier.id, language),
+                &tier.effective_provider,
+                &tier.effective_model,
+                &format_context(tier.context_window),
+                mode,
+            ),
+            selected_style(state.selected == state.settings.profiles.len() + index + 1),
+        ));
+    }
     if let Some(editor) = state.editor.as_ref() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -423,6 +585,15 @@ fn selected_style(selected: bool) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
+    }
+}
+
+fn tier_label(id: &str, language: Language) -> &'static str {
+    match id {
+        "standard" => language.text("基础", "Standard", "標準"),
+        "advanced" => language.text("进阶", "Advanced", "上位"),
+        "expert" => language.text("专家", "Expert", "エキスパート"),
+        _ => language.text("未知", "Unknown", "不明"),
     }
 }
 
@@ -517,12 +688,107 @@ mod tests {
                 effective_model: "custom".to_owned(),
                 recommended_model: None,
             }],
+            tiers: tier_fixture(),
         };
         settings.profiles[0].provider_profile = None;
         settings.profiles[0].model = None;
         refresh_effective(&mut settings);
         assert!(settings.profiles[0].automatic);
         assert_eq!(settings.profiles[0].effective_model, "someim-32b");
+    }
+
+    fn tier_fixture() -> Vec<crate::model_routing::TierRoutingSettings> {
+        willdeep_core::WorkerTier::ALL
+            .iter()
+            .map(|tier| crate::model_routing::TierRoutingSettings {
+                id: tier.as_str().to_owned(),
+                provider_profile: None,
+                model: None,
+                context_window: tier.context_budget(),
+                automatic: true,
+                effective_provider: "some-im".to_owned(),
+                effective_model: String::new(),
+                recommended_model: None,
+                requires_admission: tier.requires_admission(),
+            })
+            .collect()
+    }
+
+    /// 档位在面板上必须解析成和运行时同一个模型。
+    ///
+    /// 这是 0.51 那个毛病的复发点：一张只写在文档里的表，让界面显示一个运行时
+    /// 根本不会用的模型。基础档没有独立的档位默认——它就是工种自己的模型——
+    /// 所以那一行不该凭空冒出一个推荐值。
+    #[test]
+    fn tier_rows_resolve_to_the_same_models_the_runtime_uses() {
+        let mut settings = crate::model_routing::ModelRoutingSettings {
+            revision: "r1".to_owned(),
+            default_provider: "some-im".to_owned(),
+            active_provider_override: None,
+            root_model: "glm-5".to_owned(),
+            small_model_routing: true,
+            auto_dispatch_read_only: true,
+            max_deep_calls_per_harness: 1,
+            providers: vec![crate::model_routing::ModelProviderOption {
+                id: "some-im".to_owned(),
+                provider: "some-im".to_owned(),
+                model: "glm-5".to_owned(),
+            }],
+            profiles: Vec::new(),
+            tiers: tier_fixture(),
+        };
+        refresh_effective(&mut settings);
+        assert_eq!(
+            settings.tiers[0].recommended_model, None,
+            "基础档没有独立的档位默认"
+        );
+        assert_eq!(settings.tiers[0].effective_model, "glm-5");
+        assert_eq!(
+            settings.tiers[1].effective_model,
+            willdeep_core::WorkerTier::Advanced.default_hosted_model()
+        );
+        assert_eq!(
+            settings.tiers[2].effective_model,
+            willdeep_core::WorkerTier::Expert.default_hosted_model()
+        );
+        // 专家档要票据这件事必须一路带到界面上。
+        assert!(settings.tiers[2].requires_admission);
+        assert!(!settings.tiers[0].requires_admission);
+    }
+
+    /// 改了档位的窗口就不再是「跟随默认预算」，否则保存之后会弹回默认值。
+    #[test]
+    fn nudging_a_tier_budget_marks_it_as_an_override() {
+        let mut settings = crate::model_routing::ModelRoutingSettings {
+            revision: "r1".to_owned(),
+            default_provider: "some-im".to_owned(),
+            active_provider_override: None,
+            root_model: "glm-5".to_owned(),
+            small_model_routing: true,
+            auto_dispatch_read_only: true,
+            max_deep_calls_per_harness: 1,
+            providers: vec![crate::model_routing::ModelProviderOption {
+                id: "some-im".to_owned(),
+                provider: "some-im".to_owned(),
+                model: "glm-5".to_owned(),
+            }],
+            profiles: Vec::new(),
+            tiers: tier_fixture(),
+        };
+        // 没有职责行时，索引 1 就是第一个档位。
+        assert_eq!(row_at(&settings, 1), Row::Tier(0));
+        let before = settings.tiers[0].context_window;
+        cycle_context_window(&mut settings, 1, 1);
+        assert_ne!(settings.tiers[0].context_window, before);
+        assert!(!settings.tiers[0].automatic);
+        // automatic 的档不写回 context_window，改过的要写。
+        let update = settings.to_update();
+        let tiers = update.tiers.expect("tiers");
+        assert_eq!(
+            tiers[0].context_window,
+            Some(settings.tiers[0].context_window)
+        );
+        assert_eq!(tiers[1].context_window, None);
     }
 
     /// 光标必须和它正在编辑的那行字在同一行。
@@ -556,6 +822,9 @@ mod tests {
                 effective_model: "someim-32b-scout".to_owned(),
                 recommended_model: None,
             }],
+            // 带上档位那一段：弹层高度此前写死 22 行，加了这三行之后正好被裁掉，
+            // 光标又会掉回内容外面。这条测试顺带守住高度跟着行数走。
+            tiers: tier_fixture(),
         };
         let mut app = App::new(Vec::new(), Language::ZhCn);
         app.open_routing_settings(settings);

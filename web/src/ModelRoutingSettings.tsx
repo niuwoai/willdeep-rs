@@ -13,6 +13,17 @@ type ProfileSetting = {
   effective_model: string;
   recommended_model: string | null;
 };
+type TierSetting = {
+  id: string;
+  provider_profile: string | null;
+  model: string | null;
+  context_window: number;
+  automatic: boolean;
+  effective_provider: string;
+  effective_model: string;
+  recommended_model: string | null;
+  requires_admission: boolean;
+};
 type Settings = {
   revision: string;
   default_provider: string;
@@ -23,6 +34,7 @@ type Settings = {
   max_deep_calls_per_harness: number;
   providers: ProviderOption[];
   profiles: ProfileSetting[];
+  tiers: TierSetting[];
 };
 
 /// 可以自带触发按钮，也可以由外部控制开关。侧栏把它收进设置面板后走的是
@@ -76,6 +88,27 @@ export function ModelRoutingSettings({
     } : current);
   }
 
+  function updateTier(index: number, patch: Partial<TierSetting>) {
+    setSaved(false);
+    setSettings((current) => current ? {
+      ...current,
+      tiers: current.tiers.map((tier, itemIndex) => {
+        if (itemIndex !== index) return tier;
+        const next = { ...tier, ...patch };
+        // 改过窗口也算覆盖：不然保存时不写 context_window，这一格会弹回默认值。
+        const touchedWindow = Object.hasOwn(patch, "context_window")
+          ? next.context_window !== tier.context_window
+          : !tier.automatic;
+        return {
+          ...next,
+          automatic: Object.hasOwn(patch, "automatic")
+            ? next.automatic
+            : next.provider_profile === null && next.model === null && !touchedWindow,
+        };
+      }),
+    } : current);
+  }
+
   async function save() {
     if (!settings) return;
     setSaving(true); setError(""); setSaved(false);
@@ -91,6 +124,11 @@ export function ModelRoutingSettings({
           auto_dispatch_read_only: settings.auto_dispatch_read_only,
           max_deep_calls_per_harness: settings.max_deep_calls_per_harness,
           profiles: settings.profiles.map(({ id, provider_profile, model, context_window }) => ({ id, provider_profile, model, context_window })),
+          // automatic 的档不写 context_window：写了就等于把当前默认值钉死，
+          // 以后档位预算改了这里也跟不上。
+          tiers: settings.tiers.map(({ id, provider_profile, model, context_window, automatic }) => ({
+            id, provider_profile, model, context_window: automatic ? null : context_window,
+          })),
         }),
       });
       const value = await response.json() as Settings & { error?: string };
@@ -106,11 +144,21 @@ export function ModelRoutingSettings({
 
   function profileLabel(id: string) {
     const labels: Record<string, string> = {
+      // generalist / reviewer 是 0.51 改名后的两个公开职责。漏掉它们，
+      // 表里那两行的名字就是「—」——名单换了、标签没跟上。
+      generalist: t.routingProfileGeneralist, reviewer: t.routingProfileReviewer,
       scout: t.routingProfileScout, reader: t.routingProfileReader, editor: t.routingProfileEditor,
       implementer: t.routingProfileImplementer, test_fixer: t.routingProfileTestFixer,
       tester: t.routingProfileTester, ops_runner: t.routingProfileOpsRunner, judge: t.routingProfileJudge,
       build_fixer: t.routingProfileBuildFixer, log_inspector: t.routingProfileLogInspector,
       git_detective: t.routingProfileGitDetective, deep: t.routingProfileDeep,
+    };
+    return labels[id] || t.unknownValue;
+  }
+
+  function tierLabel(id: string) {
+    const labels: Record<string, string> = {
+      standard: t.routingTierStandard, advanced: t.routingTierAdvanced, expert: t.routingTierExpert,
     };
     return labels[id] || t.unknownValue;
   }
@@ -151,6 +199,18 @@ export function ModelRoutingSettings({
                     <td><input value={profile.model || ""} placeholder={profile.recommended_model || t.routingProviderDefault} onChange={(event) => updateProfile(index, { model: event.target.value.trim() ? event.target.value : null })} /></td>
                     <td><input type="number" min={4000} max={1000000} value={profile.context_window} onChange={(event) => updateProfile(index, { context_window: Number(event.target.value) })} /></td>
                     <td><Text fontSize="xs" color="#8fa4ba">{profile.effective_provider} · {profile.effective_model}</Text></td>
+                  </tr>)}
+                </tbody></table></Box>
+                <Text fontSize="sm" fontWeight="semibold" mt="5" mb="1">{t.routingTiers}</Text>
+                <Text fontSize="xs" color="#8290a3" mb="3">{t.routingTierHint}</Text>
+                <Box overflowX="auto"><table className="routing-table"><thead><tr><th>{t.routingTier}</th><th>{t.routingRecommended}</th><th>{t.routingProvider}</th><th>{t.routingModel}</th><th>{t.routingTierBudget}</th><th>{t.routingEffective}</th></tr></thead><tbody>
+                  {settings.tiers.map((tier, index) => <tr key={tier.id}>
+                    <td>{tierLabel(tier.id)}{tier.requires_admission && <Text as="span" fontSize="xs" color="#d8b168" ml="2" title={t.routingTierTicket}>🎟</Text>}</td>
+                    <td><input aria-label={`${t.routingRecommended} ${tierLabel(tier.id)}`} type="checkbox" checked={tier.automatic} onChange={(event) => updateTier(index, event.target.checked ? { provider_profile: null, model: null, automatic: true } : { model: tier.effective_model, automatic: false })} /></td>
+                    <td><select value={tier.provider_profile || ""} onChange={(event) => updateTier(index, { provider_profile: event.target.value || null })}><option value="">{t.routingInheritRoot}</option>{settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}</select></td>
+                    <td><input value={tier.model || ""} placeholder={tier.recommended_model || t.routingProviderDefault} onChange={(event) => updateTier(index, { model: event.target.value.trim() ? event.target.value : null })} /></td>
+                    <td><input type="number" min={4000} max={1000000} value={tier.context_window} onChange={(event) => updateTier(index, { context_window: Number(event.target.value) })} /></td>
+                    <td><Text fontSize="xs" color="#8fa4ba">{tier.effective_provider} · {tier.effective_model}</Text></td>
                   </tr>)}
                 </tbody></table></Box>
               </>}
