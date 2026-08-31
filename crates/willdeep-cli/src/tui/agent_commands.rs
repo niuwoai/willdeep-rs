@@ -30,7 +30,7 @@ fn parse_agent_command(arguments: &str) -> Result<AgentCommand<'_>> {
     let (action, arguments) = split_head(arguments).context("missing Agent action")?;
     if action == "spawn" {
         let (profile, prompt) = split_head(arguments).context("missing Agent profile")?;
-        if !matches!(profile, "reader" | "judge") {
+        if !matches!(profile, "generalist" | "reviewer" | "reader" | "judge") {
             bail!("unsupported external Agent profile");
         }
         if prompt.is_empty() {

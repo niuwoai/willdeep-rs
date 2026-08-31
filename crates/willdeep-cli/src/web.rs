@@ -43,7 +43,10 @@ pub struct WebConfig {
 struct WebState {
     config_path: PathBuf,
     profile: Option<String>,
-    workspaces: Vec<PathBuf>,
+    /// 浏览器端能看到的工作区白名单。Web 模式没有应用层鉴权，所以这份名单
+    /// 就是边界本身——不在名单里的目录，前端连列都列不出来。回环监听时允许
+    /// 从界面往里加（与模型路由设置同一条既有语义），因此需要可变。
+    workspaces: std::sync::RwLock<Vec<PathBuf>>,
     home: PathBuf,
     language: Language,
     harness_slots: Arc<Semaphore>,
@@ -65,6 +68,10 @@ struct ChatRequest {
 struct SessionSummary {
     id: String,
     title: String,
+    /// 标题还是占位符时，列表拿它来区分会话。标题正常时不下发，
+    /// 免得给前端两个都能显示的字段、让它自己去猜该用哪个。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
     workspace: String,
     updated_at: u64,
     pinned_at: Option<u64>,
@@ -272,7 +279,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     let state = Arc::new(WebState {
         config_path: config.config_path,
         profile: config.profile,
-        workspaces: config.workspaces,
+        workspaces: std::sync::RwLock::new(config.workspaces.clone()),
         home: config.home,
         language: config.language,
         harness_slots: Arc::new(Semaphore::new(2)),
@@ -296,7 +303,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/unpin", post(unpin_session))
         .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/turns/{id}/stop", post(stop_turn))
-        .route("/api/workspaces", get(workspaces))
+        .route("/api/workspaces", get(workspaces).post(add_workspace))
         .route("/api/runtime/activity", get(runtime_activity))
         .route(
             "/api/runtime/approvals/{id}/resolve",
@@ -319,15 +326,33 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         )
         .route("/api/composer", get(composer))
         .route("/", get(index))
+        // 单页应用的 catch-all。插件的 /plugin-host/... 比它更具体，
+        // 路由树按具体度匹配，所以不会被这一条吞掉。
         .route("/{*path}", get(asset))
-        .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn(server_version_header))
         .with_state(state.clone());
+    // 插件宿主自带一套路由与状态。发现失败不该让整个 Web 起不来——
+    // 一个装坏的插件包不能变成"聊天也用不了"。
+    let app = match willdeep_core::plugin::PluginHost::discover(&state.home) {
+        Ok(host) => app.merge(crate::plugin_web::router(Arc::new(
+            crate::plugin_web::PluginWebState::new(
+                Arc::new(host),
+                state.config_path.clone(),
+                state.home.clone(),
+            ),
+        ))),
+        Err(error) => {
+            eprintln!("warning: plugin host unavailable: {error}");
+            app
+        }
+    };
+    let app = app
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(server_version_header));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind Web server at {}", config.listen))?;
     println!("WillDeep Web: http://{}", config.listen);
-    for workspace in &state.workspaces {
+    for workspace in &config.workspaces {
         println!("Workspace: {}", workspace.display());
     }
     if !config.listen.ip().is_loopback() {
@@ -437,6 +462,80 @@ async fn workspaces(
         })
         .collect();
     Ok(Json(values))
+}
+
+#[derive(Deserialize)]
+struct AddWorkspaceRequest {
+    path: String,
+}
+
+/// 往浏览器端的工作区白名单里加一个目录。
+///
+/// 只在回环监听时开放，与模型路由设置同一条既有语义：Web 模式没有应用层鉴权，
+/// 能连到端口的人就是「这个用户」。对外暴露的实例上，能加工作区就等于能让
+/// Agent 去读写机器上任意目录——那条边界必须留在启动命令里（`--web-workspace`）。
+async fn add_workspace(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<AddWorkspaceRequest>,
+) -> Result<Json<WorkspaceSummary>, WebError> {
+    if !state.settings_writable {
+        return Err(WebError::bad_request(
+            "adding a workspace from the browser is only available when the Web server \
+             listens on a loopback address; start it with --web-workspace <path> instead",
+        ));
+    }
+    let requested = PathBuf::from(shellexpand_home(request.path.trim()));
+    if requested.as_os_str().is_empty() {
+        return Err(WebError::bad_request("workspace path cannot be empty"));
+    }
+    // 先规范化再注册：符号链接与 `..` 在这里解掉，之后 allowlist 比对的是
+    // 真实路径，不是用户打进来的那串字。
+    let root = requested.canonicalize().map_err(|error| {
+        WebError::bad_request(format!("cannot resolve {}: {error}", requested.display()))
+    })?;
+    if !root.is_dir() {
+        return Err(WebError::bad_request(format!(
+            "{} is not a directory",
+            root.display()
+        )));
+    }
+    let workspace = crate::daemon::ensure_remote_workspace(&state.home, &root)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    {
+        let mut allowed = state
+            .workspaces
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if !allowed.contains(&workspace.root) {
+            allowed.push(workspace.root.clone());
+        }
+    }
+    Ok(Json(WorkspaceSummary {
+        id: workspace.id.to_string(),
+        path: workspace.root.display().to_string(),
+        name: workspace.name,
+        active: workspace.active,
+        access: match workspace.access {
+            crate::daemon::WorkspaceAccess::ReadOnly => "read_only",
+            crate::daemon::WorkspaceAccess::Smart => "smart",
+            crate::daemon::WorkspaceAccess::WorkspaceWrite => "workspace_write",
+        },
+    }))
+}
+
+/// 只展开开头的 `~`。不做通配符与变量展开：这是一个路径，不是一条 shell 命令。
+fn shellexpand_home(value: &str) -> String {
+    let Some(rest) = value.strip_prefix('~') else {
+        return value.to_owned();
+    };
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return value.to_owned();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{rest}", home.to_string_lossy()),
+        None => value.to_owned(),
+    }
 }
 
 async fn runtime_activity(
@@ -696,9 +795,13 @@ fn validate_agent_spawn(
     action: WebAgentSpawnAction,
 ) -> Result<(String, String, Option<String>), WebError> {
     let profile = action.profile.trim().to_owned();
-    if !matches!(profile.as_str(), "reader" | "judge") {
+    // 只读的两个公开职责。旧名一并接受：别人保存的流程与脚本不该因为改名断掉。
+    if !matches!(
+        profile.as_str(),
+        "generalist" | "reviewer" | "reader" | "judge"
+    ) {
         return Err(WebError::bad_request(
-            "external spawn permits the public read-only reader or judge trade; command and writing trades require the parent Agent safety chain",
+            "external spawn permits the public read-only generalist or reviewer trade; command and writing trades require the parent Agent safety chain",
         ));
     }
     let prompt = action.prompt.trim().to_owned();
@@ -822,9 +925,16 @@ async fn sessions(
                 .get(&session.id)
                 .copied()
                 .unwrap_or((false, false, None));
+            // 标题生成没跑成的会话在列表里长得一模一样。给它一段首条用户
+            // 消息，比一排 `New session` 强，也比直接把它们藏起来诚实——
+            // 那些会话是有内容的。
+            let preview = willdeep_core::session_title::is_placeholder(&session.title)
+                .then_some(session.preview)
+                .flatten();
             SessionSummary {
                 id: session.id.to_string(),
                 title: session.title,
+                preview,
                 workspace: session.workspace.display().to_string(),
                 updated_at: session.updated_at,
                 pinned_at: session.pinned_at,
@@ -1517,6 +1627,16 @@ async fn send_event_at(
     }
 }
 
+/// 读一份白名单快照。锁被毒化时也要拿到里面的值——把一个中毒的锁变成
+/// 「所有工作区都不可用」，比继续用那份数据更糟。
+fn allowed_workspaces(state: &WebState) -> Vec<PathBuf> {
+    state
+        .workspaces
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
 async fn registered_web_workspaces(
     state: &WebState,
 ) -> Result<Vec<crate::daemon::RuntimeWorkspace>, WebError> {
@@ -1524,7 +1644,7 @@ async fn registered_web_workspaces(
         .await
         .map_err(WebError::from_anyhow)?
         .into_iter()
-        .filter(|workspace| state.workspaces.contains(&workspace.root))
+        .filter(|workspace| allowed_workspaces(state).contains(&workspace.root))
         .collect())
 }
 
@@ -1645,6 +1765,20 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_leading_tilde_is_expanded_in_a_workspace_path() {
+        // SAFETY: 测试单线程运行，这里只为断言 `~` 展开取一个确定的 HOME。
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+        assert_eq!(shellexpand_home("~"), "/home/tester");
+        assert_eq!(shellexpand_home("~/Sites/app"), "/home/tester/Sites/app");
+        // 这是路径不是 shell 命令：`~other`、变量与通配符一律原样留着，
+        // 交给 canonicalize 去失败，而不是在这里猜用户想要什么。
+        assert_eq!(shellexpand_home("~other/app"), "~other/app");
+        assert_eq!(shellexpand_home("$HOME/app"), "$HOME/app");
+        assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
+        assert_eq!(shellexpand_home("relative/path"), "relative/path");
+    }
 
     fn workspace(path: &str, active: bool) -> crate::daemon::RuntimeWorkspace {
         crate::daemon::RuntimeWorkspace {
@@ -2061,7 +2195,9 @@ mod tests {
         };
         assert!(validate_agent_spawn(judge).is_ok());
 
-        for profile in ["deep", "editor", "scout", "writer", "shell"] {
+        // `deep` 不在这里了：它现在是档位别名，档位的准入由 Agent 层的票据
+        // 把关，不归这条工种白名单管。
+        for profile in ["implementer", "editor", "scout", "writer", "shell"] {
             let action = WebAgentSpawnAction {
                 workspace: "/allowed".to_owned(),
                 session_id,

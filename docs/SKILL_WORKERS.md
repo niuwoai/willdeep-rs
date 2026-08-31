@@ -211,7 +211,8 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | 冲突文件集 | 排队 | 拒绝并点名 | 有意分歧（见上文） |
 | 只读工种引用抽查 | ✅ 1.264.0-rc1 回流 | ✅ 本版新增 | **已对齐**（Xedit 侧第四个指标 Citation Accuracy） |
 | 实弹靶场 | ✅ 1.264.0-rc1 回流（5 样本） | ✅ 12 样本 | **已对齐**（样本各按语言，判定纪律逐字一致） |
-| 六个公开工种 | ✅ Reader / Implementer / Tester / Ops Runner / Judge / Deep | ✅ 同目录；旧 ID 内部兼容 | **已对齐** |
+| 五个公开职责 | ✅ 调查 generalist / 实现 implementer / 验证 tester / 审查 reviewer / 运维 ops_runner | ✅ 同名单（`AgentWorkerRole`）；旧 ID 内部兼容 | **已对齐**（0.50.0-rc1 ↔ 1.312.0-rc1） |
+| Worker 三档（基础/进阶/专家） | ✅ `WorkerTier`，与职责正交；专家档沿用 Deep 的票据与预算 | ✅ `AgentWorkerTier`，档位在设置里配 | **已对齐**；准入控制是 rs 独有 |
 | Workflow 步骤绑工种 | ✅ 派工率第一刀 | ❌ 无 workflow 引擎 | 结构性差异，rs 侧对应抓手是 Goal Teams |
 | 沙箱档（seatbelt / 凭证档） | ✅ | ❌ 无 seatbelt | 平台差异 |
 

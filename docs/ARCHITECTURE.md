@@ -123,6 +123,22 @@ Core 的 `Approver` 同时承载结构化 `ApprovalDecision`（AllowOnce / Deny 
 
 Always Allow 使用可撤销的窄签名。当前 Shell 仅保存无组合操作符的完整规范化命令，MCP 保存精确工具名；没有安全签名的调用不会向前端提供 AlwaysAllow。规则保存在 `$WILLDEEP_HOME/always-allow.json`，可用 CLI 列出或清空。后续 Swift App 复用 Rust Core 时，可替换规则存储适配器而保持相同决策语义。
 
+### 插件宿主
+
+插件是 Harness 之外的一层：它不进 Agent Loop，也拿不到工具注册表。一个插件贡献的是
+**目的地**——一级入口、配套侧栏、中央页面与工具栏绑成同一个不可分割的导航状态；
+真实业务能力走插件自带的 MCP 服务，宿主只回答"谁能跑、跑什么、拿得到什么上下文"。
+
+包住在 `~/.willdeep/plugins/<id>/<version>/`，与 macOS 版共享；启用状态与权限审批
+存 `~/.willdeep/plugin-registry.web.json`，**不共享**。分界线是"内容 vs 判断"：
+包内容是同一份东西，而两个宿主的沙箱边界不同，一侧的审批不能替另一侧点头。这与
+Always Allow 只共享精确命令、不共享命令族是同一条原则。
+
+Web 宿主把页面放进 `sandbox="allow-scripts"` 的 iframe（opaque origin），CSP
+`connect-src 'none'` 断掉它的一切网络出口，于是页面唯一能让宿主做事的通道是
+postMessage 到父窗口，而父窗口只接受清单里声明过的命令 ID。分层与安全不变量见
+[插件系统](PLUGINS.md)。
+
 ## 尚未满足的长期架构要求
 
 阶段 0 文档要求的 ACP 双轨验证、crate 级复用清单、协议 Schema 与跨客户端会话均尚未完成。当前实现是原生 Harness 起点，不能视为完整阶段 0 或阶段 1 产品。

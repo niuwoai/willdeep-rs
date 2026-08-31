@@ -4,7 +4,8 @@ import type { Messages } from "./i18n";
 import { RuntimeDetailPanel, type RuntimeDetailTarget } from "./RuntimeDetailPanel";
 import { agentDuration, isSidebarAgent } from "./runtimeAgents";
 
-export type AgentSpawnProfile = "reader" | "judge";
+/// 只读的两个公开职责。写入与命令类必须走父 Agent 的安全链。
+export type AgentSpawnProfile = "generalist" | "reviewer";
 
 export type RuntimeTool = {
   id: string;
@@ -110,7 +111,7 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [multiAnswers, setMultiAnswers] = useState<Record<string, string[]>>({});
   const [controlBusy, setControlBusy] = useState(false);
-  const [spawnProfile, setSpawnProfile] = useState<AgentSpawnProfile>("reader");
+  const [spawnProfile, setSpawnProfile] = useState<AgentSpawnProfile>("generalist");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [detail, setDetail] = useState<RuntimeDetailTarget | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -148,8 +149,8 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
       <Text fontSize="xs" color="#8290a3" mb="1">{t.newReadOnlyAgent}</Text>
       <NativeSelect.Root mb="1">
         <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
-          <option value="reader">{t.agentProfileReader}</option>
-          <option value="judge">{t.agentProfileJudge}</option>
+          <option value="generalist">{t.agentProfileGeneralist}</option>
+          <option value="reviewer">{t.agentProfileReviewer}</option>
         </NativeSelect.Field>
         <NativeSelect.Indicator />
       </NativeSelect.Root>

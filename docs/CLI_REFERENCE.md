@@ -18,6 +18,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `attach` | 附着到持久 Runtime 事件流 |
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
 | `integrations` | 查看和管理可选外部集成 |
+| `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
 | `doctor` | 不联系 Provider 的本地就绪诊断 |
 | `completions` | 生成 Shell 补全脚本 |
 | `man` | 输出 roff man page |
@@ -205,6 +206,25 @@ willdeep doctor --bundle ./willdeep-diagnostic.zip
 ```
 
 `--bundle` 导出不含日志和本地路径的私有脱敏 ZIP，便于提交问题报告。详见 [故障排查](TROUBLESHOOTING.md)。
+
+## `willdeep plugin`
+
+```bash
+willdeep plugin list [--json]
+willdeep plugin info <id>
+willdeep plugin install <目录> [--enable]
+willdeep plugin import [目录] [--enable]     # 批量导入 macOS 版自带的第一方插件
+willdeep plugin approve <id>                 # 打印权限、来源、digest 与要起的进程，再记录审批
+willdeep plugin enable <id>
+willdeep plugin disable <id>
+willdeep plugin remove <id> --yes
+```
+
+安装器**不执行**包里的任何东西：没有 postinstall、没有 npm/yarn install、没有构建步骤。
+同一个版本内容不同时拒绝覆盖——覆盖会让一份已批准的 digest 在用户不知情时被换掉。
+
+批准与启用分两步：批准是对**内容**的判断，启用是对**此刻要不要跑**的判断。
+包与 macOS 版共享 `~/.willdeep/plugins/`，审批与启用状态各存各的，理由见[插件系统](PLUGINS.md)。
 
 ## `willdeep integrations`
 

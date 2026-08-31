@@ -1,0 +1,512 @@
+/* 插件宿主的界面。沿用主界面那套深色 token，不给插件另立一套主题——
+   插件的入口和宿主的入口必须看起来是同一个应用的两个位置。 */
+
+.plugin-rail {
+  width: 76px;
+  flex: 0 0 76px;
+  background: #070b10;
+  border-right: 1px solid #1a232d;
+  padding: 12px 6px;
+  gap: 4px;
+  overflow: visible;
+}
+
+.rail-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 9px 2px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #7c8b9e;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.rail-button:hover { background: #101922; color: #b9c6d6; }
+/* 选中只用灰度表达：插件品牌色不参与，否则一栏入口会看不出当前位置。 */
+.rail-button.active { background: #16212c; color: #e7edf4; }
+
+.rail-label {
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-divider { height: 1px; background: #1a232d; margin: 6px 8px; }
+
+.rail-overflow { position: relative; }
+
+.rail-overflow-menu {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 0;
+  z-index: 20;
+  min-width: 200px;
+  padding: 6px;
+  background: #101820;
+  border: 1px solid #2b3948;
+  border-radius: 10px;
+  box-shadow: 0 12px 32px #0009;
+}
+
+.rail-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #c8d4e2;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-overflow-item:hover { background: #16212c; }
+.rail-overflow-item.active { background: #1d2a37; color: #e7edf4; }
+
+/* ---------------------------------------------------------------- 页面 */
+
+.plugin-toolbar {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #1a232d;
+  background: #0b1118;
+  flex: 0 0 auto;
+}
+
+.plugin-title { font-size: 14px; font-weight: 600; color: #e7edf4; }
+
+.plugin-toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b99aa;
+  cursor: pointer;
+}
+
+.plugin-toolbar-button:hover:not(:disabled) { background: #16212c; color: #e7edf4; }
+.plugin-toolbar-button:disabled { opacity: 0.45; cursor: default; }
+
+.plugin-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #0d1319;
+}
+
+.plugin-error {
+  padding: 8px 16px;
+  color: #ff8f8f;
+  font-size: 13px;
+  background: #1b1013;
+  border-bottom: 1px solid #3a1d22;
+}
+
+/* ---------------------------------------------------------------- 侧栏 */
+
+.plugin-sidebar {
+  width: 282px;
+  flex: 0 0 282px;
+  padding: 18px 16px;
+  background: #0b1118;
+  border-right: 1px solid #202a35;
+  overflow-y: auto;
+}
+
+.plugin-sidebar-title {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6d7c90;
+  margin-bottom: 12px;
+}
+
+.plugin-sidebar-section { margin-bottom: 16px; }
+
+.plugin-sidebar-heading {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #7b8b9f;
+  margin-bottom: 6px;
+}
+
+.plugin-sidebar-list { display: flex; flex-direction: column; gap: 2px; }
+
+.plugin-sidebar-row {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  min-height: 30px;
+}
+
+.plugin-sidebar-row.clickable { cursor: pointer; }
+.plugin-sidebar-row.clickable:hover { background: #131e28; }
+.plugin-sidebar-row.selected { background: #1a2734; }
+
+.plugin-sidebar-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #c8d4e2;
+  min-width: 0;
+}
+
+.plugin-sidebar-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-sidebar-label small { color: #6d7c90; font-size: 11px; }
+
+.plugin-sidebar-badge {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #e7edf4;
+  background: #17222d;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.plugin-sidebar-status { font-size: 12px; color: #8b99aa; }
+
+.plugin-sidebar-progress {
+  height: 4px;
+  width: 100%;
+  background: #17222d;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.plugin-sidebar-progress-fill { height: 100%; background: #5c7d9e; }
+
+.plugin-sidebar-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid #2b3948;
+  border-radius: 7px;
+  background: transparent;
+  color: #c8d4e2;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plugin-sidebar-button:hover { background: #16212c; }
+
+.plugin-sidebar-disclosure summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #8b99aa;
+  padding: 4px 0;
+}
+
+.plugin-sidebar-separator { height: 1px; background: #1a232d; margin: 8px 0; }
+
+.plugin-sidebar-state { font-size: 12px; color: #77879a; padding: 6px 0; }
+.plugin-sidebar-state.errorState { color: #d8a06a; }
+
+/* ------------------------------------------------------------ 插件中心 */
+
+.plugin-center {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 28px 32px 60px;
+}
+
+.plugin-center-hint { color: #8b99aa; font-size: 13px; margin-bottom: 18px; max-width: 68ch; }
+
+.plugin-card {
+  border: 1px solid #202a35;
+  border-radius: 12px;
+  background: #0b1118;
+  padding: 16px 18px;
+  margin-bottom: 12px;
+}
+
+.plugin-card-name { font-size: 15px; font-weight: 600; color: #e7edf4; }
+.plugin-card-version { font-size: 12px; color: #8b99aa; font-variant-numeric: tabular-nums; }
+.plugin-card-source { font-size: 11px; color: #6d7c90; }
+.plugin-card-about { font-size: 13px; color: #9dabbd; margin-top: 5px; max-width: 74ch; }
+.plugin-card-meta { font-size: 12px; color: #8b99aa; margin-top: 7px; }
+
+.plugin-card-digest {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #4f5d6e;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 52ch;
+}
+
+.plugin-chip-row { gap: 5px; margin-top: 9px; }
+
+.plugin-chip {
+  font-size: 11px;
+  color: #cbd6e3;
+  background: #17222d;
+  border: 1px solid #26333f;
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+.plugin-chip.quiet { color: #6d7c90; background: transparent; }
+.plugin-chip.mcp { color: #9db6cc; }
+
+.plugin-gap { font-size: 12px; color: #d8a06a; }
+
+/* 推动安装流程的主要操作用黑底白字，在一片灰度里保持明确的视觉优先级。 */
+.plugin-primary-button {
+  background: #e7edf4;
+  color: #0b1118;
+}
+
+.plugin-primary-button:hover { background: #ffffff; }
+
+.plugin-code {
+  display: inline-block;
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #c8d4e2;
+  background: #101820;
+  border: 1px solid #26333f;
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.plugin-settings { margin-top: 14px; border-top: 1px solid #1a232d; padding-top: 12px; }
+.plugin-setting-row { padding: 6px 0; }
+.plugin-setting-title { font-size: 13px; color: #d8e2ec; }
+.plugin-setting-about { font-size: 11px; color: #77879a; }
+
+.plugin-setting-input {
+  width: 220px;
+  padding: 5px 9px;
+  font-size: 13px;
+  color: #d8e2ec;
+  background: #0f1720;
+  border: 1px solid #2b3948;
+  border-radius: 7px;
+}
+
+
+/* ---------------------------------------------------------- 侧栏设置入口 */
+
+.sidebar-settings { position: relative; flex: 0 0 auto; }
+
+.sidebar-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b99aa;
+  cursor: pointer;
+}
+
+.sidebar-settings-button:hover,
+.sidebar-settings-button.active { background: #16212c; color: #e7edf4; }
+
+.sidebar-settings-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  width: 232px;
+  padding: 11px 12px 9px;
+  background: #101820;
+  border: 1px solid #2b3948;
+  border-radius: 10px;
+  box-shadow: 0 16px 40px #000a;
+}
+
+.sidebar-settings-label {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  color: #8290a3;
+  margin-bottom: 5px;
+}
+
+.sidebar-settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #d8e2ec;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-settings-item:hover { background: #1a2734; }
+.sidebar-settings-item span { color: #6d7c90; }
+
+.workspace-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #2b3948;
+  border-radius: 7px;
+  background: transparent;
+  color: #8b99aa;
+  cursor: pointer;
+}
+
+.workspace-add:hover,
+.workspace-add.active { background: #16212c; color: #e7edf4; border-color: #3d4d5e; }
+
+/* 标题还没生成的会话，列表显示的是首条用户消息。做淡一档，
+   让「这是正文不是标题」一眼看得出来。 */
+.session-untitled { color: #92a1b4; font-style: italic; }
+.session-row.selected .session-untitled,
+.session-row:hover .session-untitled { color: #c8d4e2; }
+
+/* ------------------------------------------------------------ 菜单贡献点 */
+
+.plugin-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: #000a;
+  display: flex;
+  justify-content: center;
+  padding-top: 14vh;
+}
+
+.plugin-palette {
+  width: min(560px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: #101820;
+  border: 1px solid #2b3948;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px #000c;
+  overflow: hidden;
+}
+
+.plugin-palette-input {
+  padding: 13px 16px;
+  font-size: 15px;
+  color: #e7edf4;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #202a35;
+  outline: none;
+}
+
+.plugin-palette-input::placeholder { color: #667587; }
+
+.plugin-palette-list { overflow-y: auto; padding: 6px; }
+
+.plugin-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #c8d4e2;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plugin-palette-item.active { background: #1a2734; color: #e7edf4; }
+.plugin-palette-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-palette-source { font-size: 11px; color: #6d7c90; }
+.plugin-palette-empty { padding: 14px 12px; font-size: 13px; color: #77879a; }
+
+.plugin-popup {
+  position: fixed;
+  z-index: 45;
+  min-width: 190px;
+  padding: 5px;
+  background: #101820;
+  border: 1px solid #2b3948;
+  border-radius: 10px;
+  box-shadow: 0 14px 36px #000a;
+}
+
+.plugin-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #c8d4e2;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plugin-popup-item:hover { background: #1a2734; color: #e7edf4; }
+.plugin-popup-item small { margin-left: auto; font-size: 11px; color: #6d7c90; }
+
+.composer-more {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #2b3948;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b99aa;
+  cursor: pointer;
+}
+
+.composer-more:hover { background: #16212c; color: #e7edf4; }
+
+/* 有插件贡献 composer.more 时，「Enter 发送」提示要让开这个按钮的位置，
+   否则两者叠在一起谁也读不清。没有插件贡献时按钮不渲染，提示回到原位。 */
+.composer-more + .send-hint { left: 48px; }
+
+@media (max-width: 900px) {
+  .plugin-sidebar { display: none; }
+  .plugin-center { padding: 20px 16px 48px; }
+}

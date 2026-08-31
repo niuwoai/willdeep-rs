@@ -20,6 +20,75 @@ use crate::{
     resolve_base, resolve_dialect, resolve_provider,
 };
 
+/// 把三个 Worker 档位各自解析成一个模型绑定。
+///
+/// 优先级从高到低：
+///
+/// 1. 用户显式写的 `[worker_tiers.<档>]`——这是调用点的意志，压过一切默认；
+/// 2. some.im 网关上这一档的默认模型（[`willdeep_core::WorkerTier::default_hosted_model`]），
+///    与 Xedit 同一张表：同一个人换个客户端不该换个 Worker；
+/// 3. 专家档在非网关 provider 上回落父模型——别处没有那张表里的模型，回落到
+///    会话自己的模型至少还是「更强的那个」；
+/// 4. 其余不绑定：只放宽预算，不偷偷换模型。
+///
+/// 基础档默认不绑定。它已经是工种自己的模型了，再绑一次只会把用户在
+/// `[subagents.*]` 里的选择覆盖掉。
+fn resolve_tier_bindings(
+    file: &crate::config::ConfigFile,
+    parent: &ProviderConfig,
+    kind: ProviderKind,
+    session_window: u64,
+) -> Result<Vec<(willdeep_core::WorkerTier, willdeep_core::TierBinding)>> {
+    let mut bindings = Vec::new();
+    for tier in willdeep_core::WorkerTier::ALL {
+        let configured = file.worker_tiers.get(tier.as_str());
+        let mut provider_config =
+            match configured.and_then(|value| value.provider_profile.as_deref()) {
+                // 这里是 fail-fast：绑了却建不起来（多半是那个 Profile 的密钥
+                // 没配）就不让会话启动。静默跳过更糟——票据照扣，档没升，而
+                // 用户要等到某次派工完成之后才可能发现。
+                Some(name) => provider_config_from_profile(file, name).with_context(|| {
+                    format!("resolve worker_tiers.{}.provider_profile", tier.as_str())
+                })?,
+                None => parent.clone(),
+            };
+        let explicit_model = configured.and_then(|value| value.model.as_deref());
+        let default_model = (kind == ProviderKind::SomeIm
+            && tier != willdeep_core::WorkerTier::Standard)
+            .then(|| tier.default_hosted_model());
+        let Some(model) = explicit_model
+            .or(default_model)
+            .map(str::to_owned)
+            .or_else(|| {
+                // 专家档在别的 provider 上没有网关那张表可查，回落父模型——这是
+                // 正交化之前的行为，保住它至少不会让票据白扣。
+                (tier == willdeep_core::WorkerTier::Expert).then(|| parent.model.clone())
+            })
+        else {
+            continue;
+        };
+        provider_config.model = model.clone();
+        let window = configured
+            .and_then(|value| value.context_window)
+            .unwrap_or_else(|| match tier {
+                // 专家档兑现的是整个会话预算——这一档贵到要票据，就是因为它
+                // 把会话窗口整个交给一个 Worker。
+                willdeep_core::WorkerTier::Expert => tier.context_budget().max(session_window),
+                _ => tier.context_budget(),
+            });
+        let binding = willdeep_core::TierBinding {
+            provider: build_provider(provider_config).with_context(|| {
+                format!("initialize {} worker tier model {model}", tier.as_str())
+            })?,
+            hosted_job_prompt: willdeep_core::hosts_job_prompt(&model),
+            model: Some(model),
+            window,
+        };
+        bindings.push((tier, binding));
+    }
+    Ok(bindings)
+}
+
 /// The some.im alias whose safety policy is managed on the gateway. It is a
 /// reasoning model: it emits a long private rationale before the verdict tag,
 /// which is why the judge must never cap its output tightly (see
@@ -603,28 +672,22 @@ pub(crate) async fn build(
     } else {
         provider.clone()
     };
-    let mut subagent_profiles = builtin_profiles(provider.clone(), cheap_provider, context_window);
+    let mut subagent_profiles = builtin_profiles(cheap_provider);
     for subagent in &mut subagent_profiles {
-        // On some.im each trade runs its own relay-hosted virtual model
-        // (`someim-32b-<trade>`), exactly as the macOS app binds it: same
-        // gateway, same account, so the same trade must resolve to the same
-        // model in both clients. The relay prepends that trade's job prompt,
-        // so the client stops sending its own copy. Trades the relay does not
-        // host fall back to the base cheap model with the client prompt.
+        // some.im 上基础档统一是 `someim-32b`：同一个网关、同一批账号，同一个
+        // 职责在两个客户端必须解析到同一个模型。历史上的 `someim-32b-<工种>`
+        // 已经退役，职责提示词改由客户端随请求发送。
         let hosted = (kind == ProviderKind::SomeIm)
             .then(|| willdeep_core::subagent::hosted_worker_model(&subagent.id))
             .flatten();
-        subagent.model = Some(if subagent.id == "deep" {
-            model.clone()
-        } else {
-            hosted.clone().unwrap_or_else(|| cheap_model.clone())
-        });
+        // 每个工种都走自己的托管绑定，没有绑定时回落便宜模型。没有哪个职责
+        // 天生配父模型——那是 WorkerTier::Expert 的事，而那一档要票据。
+        subagent.model = Some(hosted.clone().unwrap_or_else(|| cheap_model.clone()));
         if let Some(hosted_model) = &hosted {
             let mut configured = parent_provider_config.clone();
             configured.model = hosted_model.clone();
             subagent.provider = build_provider(configured)
                 .with_context(|| format!("initialize hosted subagent model {hosted_model}"))?;
-            subagent.hosted_job_prompt = true;
         }
         if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
             if let Some(provider_name) = settings.provider_profile.as_deref() {
@@ -633,17 +696,12 @@ pub(crate) async fn build(
                     configured.model = model.clone();
                 }
                 subagent.model = Some(configured.model.clone());
-                subagent.hosted_job_prompt = hosted.as_deref() == Some(configured.model.as_str());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             } else if let Some(model) = &settings.model {
                 let mut configured = parent_provider_config.clone();
                 configured.model = model.clone();
                 subagent.model = Some(model.clone());
-                // An explicitly bound model carries no hosted job prompt, so
-                // the client sends its own again — a trade must never end up
-                // with no job description at all.
-                subagent.hosted_job_prompt = hosted.as_deref() == Some(model.as_str());
                 subagent.provider = build_provider(configured)
                     .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
             }
@@ -675,6 +733,13 @@ pub(crate) async fn build(
                 };
             }
         }
+        // 判定放在所有覆盖之后，跟着**最终**解析出的模型走。跟着工种名走是
+        // 错的：工种绑成 `someim-32b` 时网关并不会 prepend 职责提示词，客户端
+        // 若也把自己那份省掉，Worker 就只剩边界段落、不知道自己是干什么的。
+        subagent.hosted_job_prompt = subagent
+            .model
+            .as_deref()
+            .is_some_and(willdeep_core::hosts_job_prompt);
     }
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
         .with_worktree_root(home.join("worktrees").join("subagents"))
@@ -682,6 +747,12 @@ pub(crate) async fn build(
         // worker never spends turns fetching its own instructions.
         .with_skills(skills.clone())
         .with_event_sink(sink.clone());
+    // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
+    for (tier, binding) in
+        resolve_tier_bindings(&loaded.file, &parent_provider_config, kind, context_window)?
+    {
+        catalog = catalog.with_tier_binding(tier, binding);
+    }
     // Verifier commands run unattended, with no approval card to fall back
     // on. They go through the same judge the main agent's shell does.
     if let Some(judge) = safety_judge {
@@ -901,6 +972,126 @@ fn resolve_sandbox(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parent_config(kind: ProviderKind, model: &str) -> ProviderConfig {
+        ProviderConfig::new(
+            kind,
+            ApiDialect::ChatCompletions,
+            "https://some.im/v1".to_owned(),
+            "placeholder".to_owned(),
+            model.to_owned(),
+        )
+    }
+
+    fn bound_models(
+        source: &str,
+        kind: ProviderKind,
+        parent_model: &str,
+    ) -> Vec<(String, String, u64)> {
+        let file: crate::config::ConfigFile =
+            toml::from_str(source).expect("parse tier config fixture");
+        resolve_tier_bindings(&file, &parent_config(kind, parent_model), kind, 400_000)
+            .expect("resolve tier bindings")
+            .into_iter()
+            .map(|(tier, binding)| {
+                (
+                    tier.as_str().to_owned(),
+                    binding.model.unwrap_or_default(),
+                    binding.window,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_gateway_tier_table_is_wired_not_just_documented() {
+        // 0.51 的毛病：`default_hosted_model()` 那张表只有测试引用，运行时
+        // 压根没查过它，于是进阶档不换模型、专家档默默用了会话自己的模型。
+        let bound = bound_models("version = 1\n", ProviderKind::SomeIm, "glm-5");
+        assert_eq!(
+            bound,
+            vec![
+                (
+                    "advanced".to_owned(),
+                    "deepseek-v4-flash".to_owned(),
+                    262_144
+                ),
+                // 专家档兑现整个会话预算，这正是它要票据的理由。
+                ("expert".to_owned(), "gpt-5.6-sol".to_owned(), 400_000),
+            ],
+            "基础档不该被绑定——那会盖掉用户在 [subagents.*] 里的选择"
+        );
+    }
+
+    #[test]
+    fn other_providers_keep_the_parent_model_for_the_expert_tier() {
+        // 别处没有网关那张表里的模型。回落父模型是正交化之前的行为，保住它
+        // 至少不会让票据白扣；进阶档则宁可不换，也不偷偷换成一个没人指定的。
+        let bound = bound_models("version = 1\n", ProviderKind::Anthropic, "opus-5");
+        assert_eq!(
+            bound,
+            vec![("expert".to_owned(), "opus-5".to_owned(), 400_000)]
+        );
+    }
+
+    #[test]
+    fn explicit_worker_tier_config_outranks_the_gateway_defaults() {
+        let bound = bound_models(
+            r#"
+version = 1
+
+[worker_tiers.standard]
+model = "qwen3-32b"
+context_window = 131072
+
+[worker_tiers.expert]
+model = "opus-5"
+context_window = 500000
+"#,
+            ProviderKind::SomeIm,
+            "glm-5",
+        );
+        assert_eq!(
+            bound,
+            vec![
+                ("standard".to_owned(), "qwen3-32b".to_owned(), 131_072),
+                // 没配的档仍然回落网关默认表。
+                (
+                    "advanced".to_owned(),
+                    "deepseek-v4-flash".to_owned(),
+                    262_144
+                ),
+                ("expert".to_owned(), "opus-5".to_owned(), 500_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tier_bound_to_a_legacy_alias_still_defers_to_the_relay_prompt() {
+        // 用户仍然可以显式指回那七个退役别名。指回去了，网关就还是会 prepend
+        // 职责提示词，客户端这时必须闭嘴，否则同一份职责说两遍。
+        let file: crate::config::ConfigFile =
+            toml::from_str("version = 1\n[worker_tiers.advanced]\nmodel = \"someim-32b-reader\"\n")
+                .expect("parse legacy alias config");
+        let bindings = resolve_tier_bindings(
+            &file,
+            &parent_config(ProviderKind::SomeIm, "glm-5"),
+            ProviderKind::SomeIm,
+            400_000,
+        )
+        .expect("resolve tier bindings");
+        let advanced = bindings
+            .iter()
+            .find(|(tier, _)| *tier == willdeep_core::WorkerTier::Advanced)
+            .expect("advanced tier");
+        assert!(advanced.1.hosted_job_prompt);
+        // 而网关默认的那两个模型都不是托管别名。
+        let expert = bindings
+            .iter()
+            .find(|(tier, _)| *tier == willdeep_core::WorkerTier::Expert)
+            .expect("expert tier");
+        assert!(!expert.1.hosted_job_prompt);
+    }
 
     #[test]
     fn someim_sessions_judge_with_the_managed_security_guard() {
