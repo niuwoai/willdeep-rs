@@ -146,13 +146,17 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 输入 `/routing` 打开持久化模型与路由面板。它与 `/model` 的边界不同：`/model`
 只切换当前 Session，`/routing` 修改 `config.toml` 中后续 Harness/子 Agent 的默认策略。
 
+面板分三段：Root、五个**职责**、三个**模型档位**。职责选做什么，档位选用多贵的
+模型——两根轴各自配置，见 [子 Agent 与后台任务](SUBAGENTS.md#换掉某一档的模型)。
+专家档那行标着「需票据」：绑到多贵的模型，都还有升级票据那道闸门兜着。
+
 | 按键 | 行为 |
 |---|---|
-| `↑` / `↓` | 选择 Root 或子 Agent 工种 |
-| `←` / `→` / `Tab` | 切换 Provider；Worker 的空 Provider 表示继承 Root |
+| `↑` / `↓` | 在 Root、职责、档位三段之间选择 |
+| `←` / `→` / `Tab` | 切换 Provider；空 Provider 表示继承 Root |
 | `Enter` | 编辑选中行的模型 ID |
-| `Space` | 清除 Worker 的 Provider/模型覆盖，恢复 some.im 推荐托管映射或继承 Root |
-| `[` / `]` | 切换 32K、48K、64K、128K、256K、1M 上下文档位 |
+| `Space` | 清除该行的 Provider/模型覆盖，恢复推荐默认或继承 Root |
+| `[` / `]` | 切换 32K、48K、64K、128K、256K、1M 上下文档位（档位行改的是这一档的预算） |
 | `R` / `A` | 开关小模型路由 / 高置信度只读自动派工 |
 | `+` / `-` | 调整每个 Harness 的 Deep 调用预算 |
 | `Ctrl+S` / `Cmd+S` | 原子保存；配置已被手工修改时拒绝覆盖并要求重载 |

@@ -53,11 +53,19 @@ TUI 中可以用 `/webapp` 拉起一个 Web 子进程：
 
 ### 模型与路由设置
 
-左栏“模型与路由”打开持久化设置弹窗，可修改 Root Provider/模型，以及 Reader、
-Implementer、Tester、Ops Runner、Judge、Deep 六个公开工种的 Provider/模型/上下文窗口、
-小模型优先与只读自动派工开关，以及 Deep 调用预算。
-勾选“推荐默认”会清除该工种的显式 Provider/模型：Root 为 some.im 时恢复
-`someim-32b-<trade>`，其他 Provider 则继承 Root/Provider 默认模型。
+设置齿轮里的“模型与路由”打开持久化设置弹窗，可修改 Root Provider/模型、小模型
+优先与只读自动派工开关、Deep 调用预算，以及两张表：
+
+- **工种表**：调查、实现、测试与审核、审查、运维执行五个公开职责的
+  Provider/模型/上下文窗口，写入 `[subagents.*]`。
+- **档位表**：基础、进阶、专家三个模型档位，写入 `[worker_tiers.*]`。专家档带
+  🎟 标记——它需要升级票据，绑到多贵的模型都还有那道闸门兜着。
+
+职责选做什么，档位选用多贵的模型。想让某次派工更贵是在 `spawn_agent` 传
+`worker_tier`；给某个职责绑贵模型是让它每次都贵。
+
+勾选“推荐默认”会清除该行的显式 Provider/模型：Root 为 some.im 时，职责恢复基础档
+`someim-32b`、档位恢复网关默认表，其他 Provider 则继承 Root/Provider 默认模型。
 
 设置直接原子更新启动时选中的 `config.toml`，并用版本指纹防止覆盖用户同时进行的
 手工编辑。保存后对新 Harness/子 Agent 生效，正在运行的任务不变。Web 没有应用层

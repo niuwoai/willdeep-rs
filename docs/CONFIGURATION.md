@@ -232,10 +232,20 @@ Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage
 - Web 左栏点击“模型与路由”。
 
 两者编辑同一个 `config.toml`，覆盖 Root Provider/模型、`[agent]` 路由开关与 Deep
-预算，以及六个公开工种 `reader` / `implementer` / `tester` / `ops_runner` / `judge` /
-`deep` 的 Provider、模型和上下文窗口。空的 Worker Provider/模型表示采用推荐默认：
-some.im 已托管的旧窄工种仍使用 `someim-32b-<trade>`，其余情况继承 Root/Provider。
-旧专门工种配置不会被设置页删除，继续服务自动路由和已保存流程；显式值始终优先。
+预算，以及两根正交的轴：
+
+- **五个公开职责**（`[subagents.*]`）：`generalist` / `implementer` / `tester` /
+  `reviewer` / `ops_runner` 的 Provider、模型和上下文窗口——「这个职责平时用什么」。
+- **三个模型档位**（`[worker_tiers.*]`）：基础 / 进阶 / 专家的 Provider、模型和
+  上下文预算——「派工时说要贵一档，贵成什么样」。专家档标着「需票据」。
+
+空的 Provider/模型表示采用推荐默认：职责在 some.im 上落到基础档 `someim-32b`，
+档位落到网关默认表（`someim-32b` / `deepseek-v4-flash` / `gpt-5.6-sol`），其余情况
+继承 Root/Provider。旧专门工种配置不会被设置页删除，继续服务自动路由和已保存流程；
+显式值始终优先。
+
+想让**某次派工**更贵是传 `worker_tier`，给某个职责绑贵模型是让它**每次**都贵——
+别用第二种去达成第一种。
 
 保存使用配置内容指纹检测并发修改，并通过 `0600` 临时文件原子替换；不会重写无关
 字段或整份文件的注释。若页面打开后又手改了文件，保存会失败，重新打开设置即可。
