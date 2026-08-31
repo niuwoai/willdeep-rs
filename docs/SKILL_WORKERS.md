@@ -65,8 +65,8 @@ Provider 是 some.im 时，七个工种各自跑网关托管的虚拟模型 `som
   "prompt": "修到绿，别动公开接口",
   "task": {
     "goal": "修复 subagent::tests::verifier_loop 失败",
-    "read_files": ["crates/willdeep-core/src/subagent.rs", "crates/willdeep-core/src/agent.rs"],
-    "write_files": ["crates/willdeep-core/src/subagent.rs"],
+    "read_files": ["crates/willdeep-core/src/subagent/runner.rs", "crates/willdeep-core/src/agent.rs"],
+    "write_files": ["crates/willdeep-core/src/subagent/runner.rs"],
     "known_facts": ["失败始于 f936618", "断言是 attempts=3 实得 1"],
     "constraints": ["不改 SubagentProfile 的公开字段"],
     "verifier": { "command": "cargo test -p willdeep-core subagent", "expected_exit_code": 0 },
