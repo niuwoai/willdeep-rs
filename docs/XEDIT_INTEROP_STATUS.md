@@ -109,6 +109,11 @@ Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定�
 Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工具后端，
 与本 Runtime 控制面无关（Xedit `docs/GOAL_TEAMS_ROLES_DESIGN.md:35`）。
 
+**契约演进备忘（rs 0.55.0-rc1）**：`RuntimeTask` 新增可选字段 `prompt_excerpt`
+（打码 + 120 字符截断的提示词摘要，任务标识用），`public-api-v1.json` fixture
+已带上。字段可空，Swift 解码器未同步也不会断（未知键忽略、Optional 缺省
+nil）；Xedit 下次同步 fixture 时在 `WillDeepRuntimeProtocol.swift` 补上即可。
+
 ## 网关实况（2026-08-21 逐档实弹探活）
 
 `/v1/models` **不列出虚拟模型链**（连在用的 `someim-security-guard`、

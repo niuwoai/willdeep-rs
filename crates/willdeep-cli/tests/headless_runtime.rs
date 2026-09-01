@@ -56,6 +56,11 @@ fn task_diagnostics_reports_the_failing_tool_that_events_redact() {
         .and_then(|task| task["id"].as_str())
         .expect("one Runtime task")
         .to_owned();
+    assert_eq!(
+        tasks["data"][0]["prompt_excerpt"].as_str(),
+        Some("read a file that is not there"),
+        "task.list 必须带提示词摘要当任务标识"
+    );
 
     let params = root.join("diagnostics.json");
     std::fs::write(&params, format!(r#"{{"id":"{task_id}"}}"#)).expect("write params");
@@ -580,7 +585,10 @@ fn runtime_provider_failure_preserves_the_documented_exit_code() {
         "Provider failures returned through Runtime must keep exit code 3; stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(provider.requests(), 1);
+    // 503 属于该重发的那一类，所以这里看到的是重试预算跑满（willdeep-core 的
+    // MAX_ATTEMPTS）而不是一次就走。重试改变的只是敲门次数——一直不成，
+    // 对外仍旧是同一个退出码 3。
+    assert_eq!(provider.requests(), 3);
 }
 
 #[test]

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::common::{client, decode_success, endpoint, openai_auth};
+use super::common::{client, endpoint, openai_auth, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
@@ -47,7 +47,7 @@ impl Provider for ResponsesProvider {
         };
         let request =
             openai_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
-        let bytes = decode_success(request.send().await?, &self.config).await?;
+        let bytes = send_retrying(request, &self.config).await?;
         let response: ResponsesResponse = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
 

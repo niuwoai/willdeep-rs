@@ -104,7 +104,7 @@ impl RuntimeEventSink {
                 return;
             }
             let workspace = self.agent_workspace(agent_id).await;
-            if let Ok(capture) = diff_review::capture(&workspace) {
+            if let Ok(capture) = diff_review::capture_blocking(workspace.clone()).await {
                 self.diff_baselines
                     .lock()
                     .await
@@ -583,6 +583,9 @@ pub(crate) struct RuntimeTask {
     profile: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// 打码 + 截断后的提示词前缀，进公共 DTO 当任务标识；见 `task_prompt_excerpt`。
+    #[serde(default)]
+    prompt_excerpt: Option<String>,
     pid: Option<u32>,
     created_at: u64,
     started_at: Option<u64>,
@@ -591,6 +594,26 @@ pub(crate) struct RuntimeTask {
     #[serde(default)]
     failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     error: Option<String>,
+}
+
+/// 提示词进公共 Task DTO 前的摘要化。三道处理都不可省：凭据按命令审批
+/// 同一套规则打码（用户完全可能把 token 粘进提示词）、空白压平（打码器
+/// 顺手做了）、按**字符**截断防止在多字节中间切一刀。列表和 Inbox 详情
+/// 要的是「认得出是哪个任务」，不是全文——全文仍是私有请求内容。
+const TASK_PROMPT_EXCERPT_MAX_CHARS: usize = 120;
+
+fn task_prompt_excerpt(prompt: &str) -> Option<String> {
+    let redacted = willdeep_core::judge::redact_credentials(prompt);
+    if redacted.is_empty() {
+        return None;
+    }
+    let mut chars = redacted.chars();
+    let excerpt: String = chars.by_ref().take(TASK_PROMPT_EXCERPT_MAX_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1684,6 +1707,36 @@ async fn upgrade(
             health.version, state.pid
         ));
     }
+    // 先把「等人回应」的任务点出来再动手。它们不拦交接，但会跟着旧 Runtime 一起
+    // 走——用户有权在看到这句话之后决定是先去把审批处理掉，还是就这么升上去。
+    if let Ok(response) = runtime_client(&state)?.tasks().await
+        && let Ok(tasks) = response.into_result()
+    {
+        let waiting = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    willdeep_runtime_protocol::TaskStatus::WaitingApproval
+                        | willdeep_runtime_protocol::TaskStatus::WaitingAnswer
+                )
+            })
+            .collect::<Vec<_>>();
+        if !waiting.is_empty() {
+            report(format!(
+                "{} task(s) are waiting on you and will be dropped by this handoff:",
+                waiting.len()
+            ));
+            for task in waiting {
+                report(format!(
+                    "  {} {:?} {}",
+                    task.id,
+                    task.status,
+                    task.workspace.as_deref().unwrap_or("-")
+                ));
+            }
+        }
+    }
     let internal_drain = internal_transport::InternalRuntimeClient::from_state(&state)?
         .post_empty("/v1/internal/drain")
         .await;
@@ -2238,6 +2291,23 @@ async fn drain_handler(
     }
     let tasks = state.tasks.clone();
     let shutdown = state.shutdown.clone();
+    // 等人的任务不拦 drain，但它们会随这次交接一起没掉，所以得留下痕迹——
+    // 静默放弃和无限期挂起一样难查。
+    let abandoned = tasks.tasks_awaiting_a_human().await;
+    if !abandoned.is_empty() {
+        let _ = state.events.append(
+            "daemon.draining.abandoned",
+            format!(
+                "count={} tasks={}",
+                abandoned.len(),
+                abandoned
+                    .iter()
+                    .map(uuid::Uuid::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+    }
     tokio::spawn(async move {
         tasks.wait_until_idle().await;
         let _ = shutdown.send(true);
@@ -2856,6 +2926,7 @@ impl TaskManager {
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
             model: request.model.clone(),
+            prompt_excerpt: task_prompt_excerpt(&request.prompt),
             pid: None,
             created_at: now(),
             started_at: None,
@@ -3051,12 +3122,29 @@ impl TaskManager {
                 .read()
                 .await
                 .values()
-                .any(|task| runtime_task_status_is_active(task.status));
+                .any(|task| runtime_task_status_blocks_drain(task.status));
             if !has_active_tasks {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// 那些不会拦住 drain、但会随交接一起没掉的任务——全在等人回应。
+    async fn tasks_awaiting_a_human(&self) -> Vec<uuid::Uuid> {
+        let mut waiting = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .filter(|task| {
+                runtime_task_status_is_active(task.status)
+                    && !runtime_task_status_blocks_drain(task.status)
+            })
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        waiting.sort();
+        waiting
     }
 
     async fn insert_and_persist(&self, task: RuntimeTask) -> Result<()> {
@@ -3207,6 +3295,22 @@ fn runtime_task_status_is_active(status: RuntimeTaskStatus) -> bool {
             | RuntimeTaskStatus::Cancelling
             | RuntimeTaskStatus::WaitingApproval
             | RuntimeTaskStatus::WaitingAnswer
+    )
+}
+
+/// drain 该不该为这个状态的任务等下去。
+///
+/// 比[「还没到终态」][runtime_task_status_is_active]窄一圈，少的正是那两个在等人的
+/// 状态。区别在于终点：排队、执行、取消中都会自己走到头，而等审批、等回答要等到
+/// 有人来点一下——可能是十秒，也可能是这台机器今天没人再碰了。
+///
+/// 早先两者共用一个判定，于是一个卡在审批上的任务能把 `daemon upgrade` 无限期钉住，
+/// 命令还一直宣称「it will stop after active work finishes」——那句话永远不会兑现。
+/// 等人的任务不是在干活，是已经停下来了。
+fn runtime_task_status_blocks_drain(status: RuntimeTaskStatus) -> bool {
+    matches!(
+        status,
+        RuntimeTaskStatus::Queued | RuntimeTaskStatus::Running | RuntimeTaskStatus::Cancelling
     )
 }
 

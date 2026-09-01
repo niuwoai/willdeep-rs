@@ -630,7 +630,23 @@ pub(crate) async fn runtime_snapshot(
     };
     let workspace = workspace.canonicalize()?;
     let response = runtime_client(&state)?.agents().await?;
-    let mut agents = api_data(response)?
+    let raw_agents = api_data(response)?;
+    // 任务的 Inbox 详情只有一个 UUID 时等于没自我介绍——把它归属 Agent 的
+    // 标签和在途工具留一份，弹窗里能回答「现在在跑什么」。
+    let agent_activity = raw_agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.id,
+                AgentActivity {
+                    label: agent.label.clone(),
+                    current_turn: agent.current_turn,
+                    current_tool: agent.current_tool.clone(),
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut agents = raw_agents
         .into_iter()
         .filter(|agent| {
             agent
@@ -705,7 +721,10 @@ pub(crate) async fn runtime_snapshot(
         .filter(|task| visible_tasks.contains_key(&task.id))
         .filter(|task| runtime_task_visible(task, now()))
         .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
-        .map(runtime_task_attention)
+        .map(|task| {
+            let activity = task.agent_id.and_then(|id| agent_activity.get(&id));
+            runtime_task_attention(task, activity)
+        })
         .collect::<Vec<_>>();
     // 审批和提问会弹成独占对话框，还能被就地解掉——归属别的会话的，绝不能在这里
     // 弹出来：那等于替一条你没看见上下文的命令签字。没有会话归属的任务（例如
@@ -941,8 +960,17 @@ fn gate_belongs_here(viewer: Option<uuid::Uuid>, owner: Option<&Option<uuid::Uui
     }
 }
 
+/// 一个任务归属 Agent 的「现在在干什么」：标签、轮次和在途工具。
+/// 提示词是私有请求内容，不进公共 DTO，也就不在这里。
+struct AgentActivity {
+    label: Option<String>,
+    current_turn: u64,
+    current_tool: Option<String>,
+}
+
 fn runtime_task_attention(
     task: willdeep_runtime_protocol::RuntimeTask,
+    activity: Option<&AgentActivity>,
 ) -> willdeep_core::AttentionItem {
     use willdeep_runtime_protocol::TaskStatus;
 
@@ -955,19 +983,40 @@ fn runtime_task_attention(
         TaskStatus::Failed | TaskStatus::Interrupted => willdeep_core::RuntimeStatus::Failed,
         TaskStatus::Cancelled => willdeep_core::RuntimeStatus::Cancelled,
     };
+    // 标题优先用提示词摘要（0.55.0-rc1 起 Daemon 产出）：弹窗和 Inbox 行
+    // 第一眼就该回答「这是哪个任务」。旧 Daemon 没有摘要，退回 UUID 标题。
+    let title = match task.prompt_excerpt.as_deref() {
+        Some(excerpt) => excerpt.to_owned(),
+        None => format!("Runtime task {}", task.id),
+    };
     willdeep_core::AttentionItem {
         id: format!("runtime-task:{}", task.id),
         source: willdeep_core::AttentionSource::BackgroundShell,
         status,
-        title: format!("Runtime task {}", task.id),
+        title,
         // 退出码和失败域本来就在手上，早先却被扔掉——一条失败任务只写
-        // 「Status: Failed」，看了等于没看。
+        // 「Status: Failed」，看了等于没看。运行中的任务同理：只有 UUID 和
+        // 「Running」认不出是哪个任务，把 Agent 标签、轮次和在途工具带上。
         detail: [
+            // 摘要占了标题位时，UUID 挪进正文——对账、`task stop` 还要用它。
+            task.prompt_excerpt
+                .is_some()
+                .then(|| format!("Task: {}", task.id)),
             Some(format!(
                 "Workspace: {}",
                 task.workspace.as_deref().unwrap_or("-")
             )),
             Some(format!("Status: {:?}", task.status)),
+            activity
+                .and_then(|activity| activity.label.as_deref())
+                .filter(|label| *label != "root")
+                .map(|label| format!("Agent: {label}")),
+            activity
+                .filter(|activity| activity.current_turn > 0)
+                .map(|activity| format!("Turn: {}", activity.current_turn)),
+            activity
+                .and_then(|activity| activity.current_tool.as_deref())
+                .map(|tool| format!("Current tool: {tool}")),
             task.exit_code.map(|code| format!("Exit code: {code}")),
             task.failure_domain
                 .map(|domain| format!("Failure domain: {domain:?}")),
@@ -1074,5 +1123,54 @@ mod tests {
         assert!(gate_belongs_here(None, Some(&Some(theirs))));
         // 不在本工作区的任务，连看都看不到。
         assert!(!gate_belongs_here(Some(mine), None));
+    }
+
+    fn attention_task(
+        prompt_excerpt: Option<&str>,
+    ) -> willdeep_runtime_protocol::RuntimeTask {
+        willdeep_runtime_protocol::RuntimeTask {
+            id: uuid::Uuid::nil(),
+            session_id: None,
+            turn_id: None,
+            agent_id: None,
+            event_start_sequence: 0,
+            status: willdeep_runtime_protocol::TaskStatus::Running,
+            workspace: Some("/workspace".to_owned()),
+            profile: None,
+            prompt_excerpt: prompt_excerpt.map(str::to_owned),
+            created_at: 1,
+            started_at: None,
+            completed_at: None,
+            exit_code: None,
+            failure_domain: None,
+        }
+    }
+
+    /// 弹窗第一眼要回答「这是哪个任务、在干什么」：标题给提示词摘要，
+    /// UUID 挪进正文（对账和 `task stop` 还要用）；旧 Daemon 没有摘要时
+    /// 退回 UUID 标题，不能出现空标题。
+    #[test]
+    fn attention_title_prefers_the_prompt_excerpt_over_the_uuid() {
+        let activity = AgentActivity {
+            label: Some("root".to_owned()),
+            current_turn: 15,
+            current_tool: Some("run_command".to_owned()),
+        };
+        let item = runtime_task_attention(attention_task(Some("发布 Xedit 新版本")), Some(&activity));
+        assert_eq!(item.title, "发布 Xedit 新版本");
+        assert!(item.detail.contains(&format!("Task: {}", uuid::Uuid::nil())));
+        assert!(item.detail.contains("Turn: 15"));
+        assert!(item.detail.contains("Current tool: run_command"));
+        assert!(
+            !item.detail.contains("Agent: root"),
+            "无信息量的 root 标签不进详情"
+        );
+
+        let fallback = runtime_task_attention(attention_task(None), None);
+        assert_eq!(fallback.title, format!("Runtime task {}", uuid::Uuid::nil()));
+        assert!(
+            !fallback.detail.contains("Task: "),
+            "标题已是 UUID 时正文不再重复"
+        );
     }
 }

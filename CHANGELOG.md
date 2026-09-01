@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.55.0-rc1] - 2026-09-01
+
+### Added
+- Runtime 任务现在能自我介绍：`RuntimeTask` 公共 DTO 新增可选字段 `prompt_excerpt`——提交时把提示词按命令审批同一套凭据规则打码（用户完全可能把 token 粘进提示词）、空白压平、按**字符**截断到 120 字的前缀。TUI 的 Inbox 条目标题与详情弹窗优先显示摘要，UUID 挪进正文（对账与 `task stop` 还要用它）；旧 Daemon 不产出该字段时退回 UUID 展示。
+
+  这是一次**经确认的隐私边界移动**：此前提示词属于私有请求内容，完全不进公共 DTO。移动后公开的仅是打码 + 截断的摘要；完整提示词与附件正文仍私有，`task.diagnostics` 的授权口径不变，Web Runtime Activity 适配层照旧不投影该字段——浏览器响应里仍无任何 Prompt 内容（`WebRuntimeTask` 是字段白名单投影，新字段不自动顺流）。边界口径同步写入 `docs/RUNTIME_CONTROL_API.md` §7。
+
+  协议 fixture `public-api-v1.json` 已带上该字段。Xedit 侧 Swift 解码器为 Optional 语义，未同步也不会断；演进备忘已记入 `docs/XEDIT_INTEROP_STATUS.md`。
+
+### Fixed
+- TUI 的耗时读数过了 120 秒不再继续堆秒数。「已运行 293.2s」这种读数得让人现场心算才知道是快五分钟——现在超过 120 秒改用分钟并保留一位小数（`4.9m`），超过 120 分钟同理换小时（`2.5h`）。统一收口在 `format_elapsed_span()`，覆盖工作摘要（已运行/已等待）、聊天标题（工作中）、活动流时间戳、状态栏就绪行、后台任务详情和 Inbox 行六处；120 秒以内维持各显示点原有精度不变。
+
+- Runtime 任务的 Inbox 详情弹窗不再只报 UUID。「后台命令 · 工作中 / Runtime task c6e3…」看了等于没看——是哪个任务、在干什么全靠猜。现在把任务归属 Agent 的标签（`root` 略去）、轮次和在途工具带进详情（`Turn: 15` / `Current tool: run_command`），能直接回答「现在在跑什么」；「这是哪个任务」则由上面 Added 的提示词摘要回答。
+
+## [0.54.0-rc3] - 2026-09-01
+
+### Fixed
+- `daemon upgrade` 不再被一个等审批的任务永久钉死。drain 判定此前直接复用「任务还没到终态」（`runtime_task_status_is_active`），而 `WaitingApproval` 与 `WaitingAnswer` 要等到有人来点一下才会离开那个状态——可能是十秒，也可能是这台机器今天没人再碰了。于是 300 秒超时之后 Runtime 停在 `draining`：既不接新活，也升不了级，而命令还一直宣称「it will stop after active work finishes」。
+
+  新增 `runtime_task_status_blocks_drain()` 把两种语义拆开：排队、执行、取消中都会自己走到头，drain 该等；等人的任务不是在干活，是已经停下来了，不该拦着交接。`runtime_task_status_is_active()` 语义不变，别处照旧。
+
+- 交接放弃的任务不再无声无息。drain 开始时把「等人回应」的任务写进 `daemon.draining.abandoned` 事件；`daemon upgrade` 在发出 drain **之前**先把它们逐条列给用户看——静默丢弃和无限期挂起一样难查，而这一步给了人一个选择：先去把审批处理掉，还是就这么升上去。
+
+## [0.54.0-rc2] - 2026-09-01
+
+### Fixed
+- 工具的 diff 基线捕获不再逐个文件 fork `git diff`，也不再把未跟踪文件整个读进内存。原先 `capture()` 对快照里的每个文件跑两次 `git diff`（工作区一次、暂存区一次）再读一遍全文，`snapshot_id()` 和 `enrich_untracked()` 又各把未跟踪文件读一遍——同一批内容一次快照读三遍。
+
+  代价平时看不见，直到工作区里出现一个被 `--untracked-files=all` 摊平的缓存目录。一个把 `GOCACHE` 指到仓库内的项目会展开成 6798 个未跟踪文件，实测一次 capture 要 **176 秒**：其中 13596 次 `git diff` 进程创建，外加三遍共约 2GB 的读盘。
+
+  改成用「长度 + mtime」做路径指纹后，同一个工作区上 capture 从 176 秒降到 **354 毫秒**。归因的置信度本来就是 `ToolWindow`——判断的是工具那段窗口里哪些路径动过，不是内容级比对；工具写文件必然推进 mtime，而 `DiffFile` 自身已经带着 staged/unstaged 与增删行数，全量 diff 的哈希也照旧钉在 `snapshot_id` 里。
+
+- 上面那 176 秒是**卡在事件写盘之前**的，这才是它真正的杀伤力。`RuntimeEventSink::emit` 的顺序是「记 tools.json → `observe_diff().await` → 追加 events.ndjson」，而 TUI 的活动流读的是 events.ndjson。于是每个可能改工作区的工具调用，前后各阻塞一次基线捕获，界面上就是「运行中 · 暂未收到新事件 143s」——任务没死，只是它的动静全堵在管道里。三分钟的命令里真正执行的部分不到 2%。
+
+- `capture()` 现在经 `capture_blocking()` 走 `spawn_blocking`。它内部全是 `git` 子进程和 `stat`，此前直接在 async worker 上跑，占着的线程同一个 runtime 还要拿去写事件和应答控制面接口。
+
+- Provider 请求的连接层失败和 5xx 现在会重发，最多三遍，退避 250ms / 500ms。此前握手掉一次就是 `failure_domain=provider`、整轮对话连同上下文一起丢——实测那条链路几秒后就恢复了，代价和收益完全不成比例。
+
+  重发的判定收在 `is_retryable()` 里，覆盖三种传输层失态：连不上（`tls handshake eof` 落在这儿）、超时、以及连上了但半路断（hyper 报 `IncompleteMessage`）。第三条是写测试时才补上的——最初只判了前两种，而模拟「接了连接就掐掉」的用例直接把这个洞照了出来。
+
+  4xx 一律不重发：密钥错了、模型名写错了、请求体不合法，重发多少遍都是同一个答案。429 同样不在重发之列——限流要照 `Retry-After` 的节奏走，用几百毫秒的退避去顶只会把限流顶得更死。流式请求（body 不可重放）自动跳过重试，发一次算一次。
+
+  三种 dialect（`chat_completions` / `responses` / `anthropic`）和 `list_models` 共用这一个出口。
+
+### Changed
+- 未跟踪文件超过 512 个时，不再逐个读内容判定二进制与行数（单个文件超过 4MB 时同样跳过，按二进制处理）。这是一处刻意放弃的展示精度：一次冒出上千个未跟踪文件，来源基本是构建缓存而不是人写的改动，diff 面板上那个 `+N` 不值得为它把整个目录读一遍。
+
 ## [0.54.0-rc1] - 2026-09-01
 
 ### Added

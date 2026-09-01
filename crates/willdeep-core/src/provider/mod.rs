@@ -174,7 +174,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, Provide
     } else {
         common::openai_auth(request, config)
     };
-    let bytes = common::decode_success(request.send().await?, config).await?;
+    let bytes = common::send_retrying(request, config).await?;
     parse_model_list(&bytes)
 }
 

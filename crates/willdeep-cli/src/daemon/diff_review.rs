@@ -7,6 +7,14 @@ use super::*;
 
 const MAX_DIFF_BYTES: usize = 512 * 1024;
 
+/// 未跟踪文件逐个读内容判定二进制与行数的条数上限。
+/// `git status --untracked-files=all` 会把 GOCACHE 之类指到仓库内的缓存目录
+/// 摊平成上万个文件；那些文件不是人写的改动，为它们读几百 MB 不值。
+const UNTRACKED_SCAN_MAX_FILES: usize = 512;
+
+/// 单个未跟踪文件参与内容扫描的大小上限，超过按二进制处理。
+const UNTRACKED_SCAN_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DiffFileKind {
@@ -1692,26 +1700,7 @@ pub(crate) fn capture(workspace: &Path) -> Result<DiffCapture> {
     for file in &snapshot.files {
         let mut hasher = DefaultHasher::new();
         file.hash(&mut hasher);
-        git(
-            workspace,
-            &["diff", "--binary", "--no-ext-diff", "--", &file.path],
-        )?
-        .hash(&mut hasher);
-        git(
-            workspace,
-            &[
-                "diff",
-                "--cached",
-                "--binary",
-                "--no-ext-diff",
-                "--",
-                &file.path,
-            ],
-        )?
-        .hash(&mut hasher);
-        if file.kind == DiffFileKind::Untracked {
-            std::fs::read(workspace.join(&file.path))?.hash(&mut hasher);
-        }
+        stat_fingerprint(workspace, &file.path, &mut hasher);
         fingerprints.insert(file.path.clone(), hasher.finish());
     }
     Ok(DiffCapture {
@@ -1720,13 +1709,39 @@ pub(crate) fn capture(workspace: &Path) -> Result<DiffCapture> {
     })
 }
 
+/// 把一个路径的「当前样子」压进 hasher：长度 + 修改时间。
+///
+/// 这里刻意不读文件内容。归因的置信度是 [`AttributionConfidence::ToolWindow`]
+/// ——判断的是「工具那段时间窗口里这个路径动没动」，不是内容级比对。工具改文件
+/// 一定会推进 mtime，而 [`DiffFile`] 自身已经带上了 staged/unstaged 与增删行数。
+/// 早先的实现为每个文件跑两次 `git diff` 再读一遍全文，在一个摊平成 6.8k 文件的
+/// 工作区里要跑三分钟，而这三分钟是卡在事件写盘之前的。
+fn stat_fingerprint(workspace: &Path, path: &str, hasher: &mut DefaultHasher) {
+    match std::fs::symlink_metadata(workspace.join(path)) {
+        Ok(metadata) => {
+            metadata.len().hash(hasher);
+            metadata.modified().ok().hash(hasher);
+        }
+        // 读不到（已删除、权限不足、路径是目录条目）本身也是一种可比对的状态。
+        Err(_) => None::<std::time::SystemTime>.hash(hasher),
+    }
+}
+
+/// 在阻塞线程池上跑 [`capture`]。
+///
+/// 里面全是 `git` 子进程和 `stat`，放在 async worker 上会占着线程不放——同一个
+/// runtime 还扛着事件写盘和控制面接口。
+pub(crate) async fn capture_blocking(workspace: PathBuf) -> Result<DiffCapture> {
+    tokio::task::spawn_blocking(move || capture(&workspace)).await?
+}
+
 pub(crate) async fn record_tool_attribution(
     home: &Path,
     before: DiffCapture,
     workspace: &Path,
     context: AttributionContext,
 ) -> Result<Option<DiffAttributionRecord>> {
-    let after = capture(workspace)?;
+    let after = capture_blocking(workspace.to_path_buf()).await?;
     if before.snapshot.id == after.snapshot.id {
         return Ok(None);
     }
@@ -1804,11 +1819,28 @@ pub(crate) fn workspace_change_artifacts(
 }
 
 fn enrich_untracked(workspace: &Path, files: &mut BTreeMap<String, DiffFile>) {
+    let untracked = files
+        .values()
+        .filter(|file| file.kind == DiffFileKind::Untracked)
+        .count();
+    // 一次冒出这么多未跟踪文件，来源基本是构建缓存或依赖目录而不是人写的改动。
+    // 行数和二进制标记只用来点缀 diff 面板，不值得为它们把整个目录读一遍。
+    if untracked > UNTRACKED_SCAN_MAX_FILES {
+        return;
+    }
     for file in files
         .values_mut()
         .filter(|file| file.kind == DiffFileKind::Untracked)
     {
-        let Ok(data) = std::fs::read(workspace.join(&file.path)) else {
+        let path = workspace.join(&file.path);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.len() > UNTRACKED_SCAN_MAX_BYTES {
+            file.binary = true;
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
             continue;
         };
         file.binary = data.contains(&0);
@@ -1923,13 +1955,14 @@ fn snapshot_id(workspace: &Path, status: &[u8]) -> Result<String> {
         &["diff", "--cached", "--binary", "--no-ext-diff"],
     )?
     .hash(&mut hasher);
+    // 未跟踪文件不在上面两条全量 diff 里，得单独记一笔。同样只取长度和 mtime：
+    // 读全文会让一个塞着构建缓存的工作区每次快照都吞掉几百 MB 的读盘。
     for file in parse_status(status)
         .into_values()
         .filter(|file| file.kind == DiffFileKind::Untracked)
     {
         file.path.hash(&mut hasher);
-        let data = std::fs::read(workspace.join(&file.path))?;
-        data.hash(&mut hasher);
+        stat_fingerprint(workspace, &file.path, &mut hasher);
     }
     Ok(format!("diff-{:016x}", hasher.finish()))
 }
@@ -2090,6 +2123,66 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// 一个塞满构建缓存的工作区（GOCACHE 指到仓库内是常见吃法）不该让快照退化成
+    /// 逐文件读盘。真实案例里 6.8k 个未跟踪文件让一次 capture 跑了三分钟，而它是
+    /// 卡在事件写盘前面的，界面上看着就是 Agent 死了。
+    #[test]
+    fn capture_stays_cheap_when_untracked_files_explode() {
+        let root = std::env::temp_dir().join(format!("willdeep-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".cache")).expect("workspace");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").expect("seed");
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "-m", "seed"]);
+        for index in 0..UNTRACKED_SCAN_MAX_FILES + 64 {
+            std::fs::write(
+                root.join(".cache").join(format!("{index}.bin")),
+                "payload\n",
+            )
+            .expect("cache entry");
+        }
+
+        let captured = capture(&root).expect("capture");
+        assert!(captured.snapshot.files.len() > UNTRACKED_SCAN_MAX_FILES);
+        // 越过阈值后不再逐个读内容，行数就停在 0——这是刻意放弃的展示精度。
+        assert!(
+            captured
+                .snapshot
+                .files
+                .iter()
+                .filter(|file| file.kind == DiffFileKind::Untracked)
+                .all(|file| file.additions == 0)
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// 指纹改用长度 + mtime 之后，未跟踪文件的内容变化仍要能落进归因。
+    #[test]
+    fn capture_still_notices_untracked_content_changes() {
+        let root = std::env::temp_dir().join(format!("willdeep-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("workspace");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").expect("seed");
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "-m", "seed"]);
+        std::fs::write(root.join("scratch.txt"), "alpha\n").expect("untracked");
+
+        let before = capture(&root).expect("before");
+        std::fs::write(root.join("scratch.txt"), "beta\n").expect("rewrite");
+        let after = capture(&root).expect("after");
+
+        assert_ne!(before.snapshot.id, after.snapshot.id);
+        assert_ne!(
+            before.fingerprints.get("scratch.txt"),
+            after.fingerprints.get("scratch.txt")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

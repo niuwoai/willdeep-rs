@@ -123,6 +123,7 @@
         "status": "running",
         "workspace": null,
         "profile": "default",
+        "prompt_excerpt": "Inspect the repository structure",
         "created_at": 130,
         "started_at": 131,
         "completed_at": null,

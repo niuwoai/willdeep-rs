@@ -315,7 +315,9 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         logical_hits.push((lines.len(), SidebarHit::Attention(item_index)));
                         let elapsed = item
                             .elapsed_millis
-                            .map(|millis| format!(" · {:.1}s", millis as f64 / 1000.0))
+                            .map(|millis| {
+                                format!(" · {}", format_elapsed_span(millis as f32 / 1000.0, 1))
+                            })
                             .unwrap_or_default();
                         lines.push(Line::styled(
                             format!(
