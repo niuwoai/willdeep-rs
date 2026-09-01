@@ -869,6 +869,7 @@ fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
         },
         workspace: Some(task.workspace.to_string_lossy().into_owned()),
         profile: task.profile,
+        prompt_excerpt: task.prompt_excerpt,
         created_at: task.created_at,
         started_at: task.started_at,
         completed_at: task.completed_at,

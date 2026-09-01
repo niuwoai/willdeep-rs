@@ -56,6 +56,11 @@ fn task_diagnostics_reports_the_failing_tool_that_events_redact() {
         .and_then(|task| task["id"].as_str())
         .expect("one Runtime task")
         .to_owned();
+    assert_eq!(
+        tasks["data"][0]["prompt_excerpt"].as_str(),
+        Some("read a file that is not there"),
+        "task.list 必须带提示词摘要当任务标识"
+    );
 
     let params = root.join("diagnostics.json");
     std::fs::write(&params, format!(r#"{{"id":"{task_id}"}}"#)).expect("write params");

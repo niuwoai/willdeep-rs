@@ -2856,6 +2856,7 @@ mod tests {
                 status: willdeep_runtime_protocol::TaskStatus::Failed,
                 workspace: Some("/workspace".to_owned()),
                 profile: None,
+                prompt_excerpt: None,
                 created_at: 1,
                 started_at: Some(1),
                 completed_at: Some(2),
@@ -2997,6 +2998,27 @@ mod tests {
         );
         assert!(silent.contains("暂未收到新事件"));
         assert!(silent.contains("已等待 31s"));
+
+        let long = format_working_summary(
+            Language::ZhCn,
+            true,
+            "Runtime · 正在使用 run_command",
+            Duration::from_secs(293),
+            Duration::from_secs(2),
+        );
+        assert!(long.contains("已运行 4.9m"), "got: {long}");
+    }
+
+    /// 过了 120 秒的读数换分钟、过了 120 分钟换小时，都保留一位小数；
+    /// 120 以内维持各显示点原有的秒精度。
+    #[test]
+    fn elapsed_span_switches_units_past_two_minutes() {
+        assert_eq!(format_elapsed_span(5.0, 1), "5.0s");
+        assert_eq!(format_elapsed_span(31.0, 0), "31s");
+        assert_eq!(format_elapsed_span(120.0, 1), "120.0s");
+        assert_eq!(format_elapsed_span(293.2, 1), "4.9m");
+        assert_eq!(format_elapsed_span(3_600.0, 1), "60.0m");
+        assert_eq!(format_elapsed_span(9_000.0, 0), "2.5h");
     }
 
     #[test]

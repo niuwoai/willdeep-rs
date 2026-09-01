@@ -583,6 +583,9 @@ pub(crate) struct RuntimeTask {
     profile: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// 打码 + 截断后的提示词前缀，进公共 DTO 当任务标识；见 `task_prompt_excerpt`。
+    #[serde(default)]
+    prompt_excerpt: Option<String>,
     pid: Option<u32>,
     created_at: u64,
     started_at: Option<u64>,
@@ -591,6 +594,26 @@ pub(crate) struct RuntimeTask {
     #[serde(default)]
     failure_domain: Option<willdeep_runtime_protocol::FailureDomain>,
     error: Option<String>,
+}
+
+/// 提示词进公共 Task DTO 前的摘要化。三道处理都不可省：凭据按命令审批
+/// 同一套规则打码（用户完全可能把 token 粘进提示词）、空白压平（打码器
+/// 顺手做了）、按**字符**截断防止在多字节中间切一刀。列表和 Inbox 详情
+/// 要的是「认得出是哪个任务」，不是全文——全文仍是私有请求内容。
+const TASK_PROMPT_EXCERPT_MAX_CHARS: usize = 120;
+
+fn task_prompt_excerpt(prompt: &str) -> Option<String> {
+    let redacted = willdeep_core::judge::redact_credentials(prompt);
+    if redacted.is_empty() {
+        return None;
+    }
+    let mut chars = redacted.chars();
+    let excerpt: String = chars.by_ref().take(TASK_PROMPT_EXCERPT_MAX_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2903,6 +2926,7 @@ impl TaskManager {
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
             model: request.model.clone(),
+            prompt_excerpt: task_prompt_excerpt(&request.prompt),
             pid: None,
             created_at: now(),
             started_at: None,

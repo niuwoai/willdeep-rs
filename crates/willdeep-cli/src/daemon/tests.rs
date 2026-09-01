@@ -70,6 +70,7 @@ fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
         status: willdeep_runtime_protocol::TaskStatus::Completed,
         workspace: Some(std::env::temp_dir().to_string_lossy().into_owned()),
         profile: None,
+        prompt_excerpt: None,
         created_at: 1,
         started_at: Some(10),
         completed_at: Some(completed_at),
@@ -78,6 +79,25 @@ fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
     };
     assert!(tui_bridge::runtime_task_visible(&task(700), 1_000));
     assert!(!tui_bridge::runtime_task_visible(&task(699), 1_000));
+}
+
+/// 摘要进公共 DTO 前的三道处理各自都要能单独兜住：凭据打码（用户会把
+/// token 粘进提示词）、空白压平、按字符截断（多字节中间切一刀是 panic）。
+#[test]
+fn task_prompt_excerpts_are_redacted_collapsed_and_char_truncated() {
+    assert_eq!(task_prompt_excerpt("   \n\t "), None);
+    assert_eq!(
+        task_prompt_excerpt("deploy   with\ntoken=abc123secret").as_deref(),
+        Some("deploy with token=[REDACTED]")
+    );
+
+    let exact = "a".repeat(TASK_PROMPT_EXCERPT_MAX_CHARS);
+    assert_eq!(task_prompt_excerpt(&exact).as_deref(), Some(exact.as_str()));
+
+    let long = "汉".repeat(TASK_PROMPT_EXCERPT_MAX_CHARS + 10);
+    let excerpt = task_prompt_excerpt(&long).expect("non-empty prompt yields an excerpt");
+    assert_eq!(excerpt.chars().count(), TASK_PROMPT_EXCERPT_MAX_CHARS + 1);
+    assert!(excerpt.ends_with('…'));
 }
 
 #[test]
@@ -759,6 +779,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
         workspace: root.clone(),
         profile: None,
         model: None,
+        prompt_excerpt: None,
         pid: Some(10),
         created_at: 1,
         started_at: Some(2),
@@ -817,6 +838,7 @@ fn task_recovery_survives_dangling_session_reference() {
         workspace: root.clone(),
         profile: None,
         model: None,
+        prompt_excerpt: None,
         pid: Some(10),
         created_at: 1,
         started_at: Some(2),
@@ -871,6 +893,7 @@ fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
                 workspace: root.clone(),
                 profile: None,
                 model: None,
+                prompt_excerpt: None,
                 pid: None,
                 created_at: 1,
                 started_at: Some(2),
@@ -969,6 +992,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
         workspace,
         profile: None,
         model: Some("restored-model".to_owned()),
+        prompt_excerpt: None,
         pid: Some(10),
         created_at: 1,
         started_at: Some(2),
@@ -1102,6 +1126,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
                     workspace,
                     profile: None,
                     model: None,
+                    prompt_excerpt: None,
                     pid: None,
                     created_at: index,
                     started_at: Some(index),
@@ -1152,6 +1177,7 @@ async fn drain_wait_ignores_stale_cancellation_for_terminal_task() {
             workspace: root.clone(),
             profile: None,
             model: None,
+            prompt_excerpt: None,
             pid: None,
             created_at: 1,
             started_at: Some(1),
@@ -1215,6 +1241,7 @@ async fn drain_does_not_wait_on_tasks_that_are_waiting_on_a_human() {
                 workspace: root.clone(),
                 profile: None,
                 model: None,
+                prompt_excerpt: None,
                 pid: None,
                 created_at: 1,
                 started_at: Some(1),
@@ -1267,6 +1294,7 @@ async fn drain_still_waits_for_work_that_finishes_on_its_own() {
             workspace: root.clone(),
             profile: None,
             model: None,
+            prompt_excerpt: None,
             pid: None,
             created_at: 1,
             started_at: Some(1),
@@ -1367,6 +1395,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
             workspace: root.clone(),
             profile: None,
             model: None,
+            prompt_excerpt: None,
             pid: Some(42),
             created_at: 1,
             started_at: Some(1),

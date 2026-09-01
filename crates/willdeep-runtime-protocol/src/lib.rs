@@ -588,6 +588,12 @@ pub struct RuntimeTask {
     pub status: TaskStatus,
     pub workspace: Option<String>,
     pub profile: Option<String>,
+    /// 提示词摘要：凭据按命令审批同一套规则打码、空白压平、按字符数截断后的
+    /// 前缀，给列表和 Inbox 详情当任务标识用——只有 UUID 的任务认不出是谁。
+    /// 完整提示词与附件正文仍是私有请求内容，不进公共 DTO；旧 Daemon 不产出
+    /// 该字段，客户端必须容忍 `null` 并退回 UUID 展示。
+    #[serde(default)]
+    pub prompt_excerpt: Option<String>,
     pub created_at: u64,
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
@@ -1534,6 +1540,7 @@ mod tests {
             status: TaskStatus::Running,
             workspace: Some("/workspace".to_owned()),
             profile: None,
+            prompt_excerpt: Some("Inspect the repository".to_owned()),
             created_at: 1,
             started_at: Some(2),
             completed_at: None,
@@ -1543,6 +1550,13 @@ mod tests {
         let json = serde_json::to_value(&task).unwrap();
         assert!(json.get("pid").is_none());
         assert!(json.get("error").is_none());
+        // 有意的边界移动（0.55.0-rc1）：Task 公开「摘要」，完整提示词仍私有。
+        // 摘要在 Daemon 侧生成时已打码 + 截断；这里只钉住字段存在与命名。
+        assert_eq!(
+            json.get("prompt_excerpt").and_then(|value| value.as_str()),
+            Some("Inspect the repository")
+        );
+        assert!(json.get("prompt").is_none());
         let mut future_task = json.clone();
         future_task["failure_domain"] = serde_json::json!("future_domain");
         assert_eq!(

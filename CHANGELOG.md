@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.55.0-rc1] - 2026-09-01
+
+### Added
+- Runtime 任务现在能自我介绍：`RuntimeTask` 公共 DTO 新增可选字段 `prompt_excerpt`——提交时把提示词按命令审批同一套凭据规则打码（用户完全可能把 token 粘进提示词）、空白压平、按**字符**截断到 120 字的前缀。TUI 的 Inbox 条目标题与详情弹窗优先显示摘要，UUID 挪进正文（对账与 `task stop` 还要用它）；旧 Daemon 不产出该字段时退回 UUID 展示。
+
+  这是一次**经确认的隐私边界移动**：此前提示词属于私有请求内容，完全不进公共 DTO。移动后公开的仅是打码 + 截断的摘要；完整提示词与附件正文仍私有，`task.diagnostics` 的授权口径不变，Web Runtime Activity 适配层照旧不投影该字段——浏览器响应里仍无任何 Prompt 内容（`WebRuntimeTask` 是字段白名单投影，新字段不自动顺流）。边界口径同步写入 `docs/RUNTIME_CONTROL_API.md` §7。
+
+  协议 fixture `public-api-v1.json` 已带上该字段。Xedit 侧 Swift 解码器为 Optional 语义，未同步也不会断；演进备忘已记入 `docs/XEDIT_INTEROP_STATUS.md`。
+
+### Fixed
+- TUI 的耗时读数过了 120 秒不再继续堆秒数。「已运行 293.2s」这种读数得让人现场心算才知道是快五分钟——现在超过 120 秒改用分钟并保留一位小数（`4.9m`），超过 120 分钟同理换小时（`2.5h`）。统一收口在 `format_elapsed_span()`，覆盖工作摘要（已运行/已等待）、聊天标题（工作中）、活动流时间戳、状态栏就绪行、后台任务详情和 Inbox 行六处；120 秒以内维持各显示点原有精度不变。
+
+- Runtime 任务的 Inbox 详情弹窗不再只报 UUID。「后台命令 · 工作中 / Runtime task c6e3…」看了等于没看——是哪个任务、在干什么全靠猜。现在把任务归属 Agent 的标签（`root` 略去）、轮次和在途工具带进详情（`Turn: 15` / `Current tool: run_command`），能直接回答「现在在跑什么」；「这是哪个任务」则由上面 Added 的提示词摘要回答。
+
 ## [0.54.0-rc3] - 2026-09-01
 
 ### Fixed

@@ -3158,7 +3158,7 @@ impl App {
             .map(|started| started.elapsed().as_secs_f32())
             .unwrap_or_default();
         self.progress_log
-            .push_back(format!("{elapsed:>5.1}s · {value}"));
+            .push_back(format!("{:>6} · {value}", format_elapsed_span(elapsed, 1)));
         while self.progress_log.len() > 12 {
             self.progress_log.pop_front();
         }
@@ -3831,6 +3831,18 @@ fn progress_spinner(elapsed: Duration) -> &'static str {
     PROGRESS_SPINNER[index]
 }
 
+/// 过了 120 秒还用秒读数（293.2s）就得让人心算，换成分钟保留一位小数；
+/// 过了 120 分钟同理换小时。`seconds_decimals` 沿用各显示点原有的秒精度。
+fn format_elapsed_span(seconds: f32, seconds_decimals: usize) -> String {
+    if seconds > 7200.0 {
+        format!("{:.1}h", seconds / 3600.0)
+    } else if seconds > 120.0 {
+        format!("{:.1}m", seconds / 60.0)
+    } else {
+        format!("{seconds:.seconds_decimals$}s")
+    }
+}
+
 fn format_working_summary(
     language: Language,
     runtime_turn: bool,
@@ -3840,13 +3852,13 @@ fn format_working_summary(
 ) -> String {
     let phase = if idle >= PROGRESS_STALE_AFTER {
         format!(
-            "{} {:.0}s",
+            "{} {}",
             language.text(
                 "暂未收到新事件 · 已等待",
                 "No new event yet · waiting",
                 "新しいイベントなし · 待機"
             ),
-            idle.as_secs_f32()
+            format_elapsed_span(idle.as_secs_f32(), 0)
         )
     } else if idle >= PROGRESS_WAITING_AFTER {
         language
@@ -3874,10 +3886,10 @@ fn format_working_summary(
         activity_line.to_owned()
     };
     format!(
-        "{} {phase} · {} {:.1}s",
+        "{} {phase} · {} {}",
         progress_spinner(elapsed),
         language.text("已运行", "elapsed", "経過"),
-        elapsed.as_secs_f32()
+        format_elapsed_span(elapsed.as_secs_f32(), 1)
     )
 }
 
@@ -3985,10 +3997,10 @@ fn draw(
         {
             let elapsed = started.elapsed();
             title.push_str(&format!(
-                " · {} {} {:.0}s",
+                " · {} {} {}",
                 progress_spinner(elapsed),
                 app.language.text("工作中", "working", "作業中"),
-                elapsed.as_secs_f32()
+                format_elapsed_span(elapsed.as_secs_f32(), 0)
             ));
         }
         let search_query = app
@@ -4216,12 +4228,14 @@ fn draw(
                 .unwrap_or_default();
             let context_tokens = app.context_tokens.max(input_tokens);
             let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
-            let elapsed = app
-                .turn_started
-                .map(|value| value.elapsed())
-                .or(app.last_elapsed)
-                .unwrap_or_default()
-                .as_secs_f32();
+            let elapsed = format_elapsed_span(
+                app.turn_started
+                    .map(|value| value.elapsed())
+                    .or(app.last_elapsed)
+                    .unwrap_or_default()
+                    .as_secs_f32(),
+                1,
+            );
             if app.running {
                 format!(
                     "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache}{queued} · Esc {} · F1",
@@ -4240,7 +4254,7 @@ fn draw(
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed} · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
@@ -4537,7 +4551,7 @@ fn draw(
         app.task_detail_rect = Rect::default();
         if let Some(detail) = &app.task_detail {
             let content = format!(
-                "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {:.1}s\n{}: {}\n{}: {}\n\n{}\n{}",
+                "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {}\n{}: {}\n{}: {}\n\n{}\n{}",
                 app.language.text("任务", "Task", "タスク"),
                 detail.snapshot.id,
                 app.language.text("类型", "Kind", "種類"),
@@ -4545,7 +4559,7 @@ fn draw(
                 app.language.text("状态", "Status", "状態"),
                 detail.snapshot.status,
                 app.language.text("耗时", "Elapsed", "経過時間"),
-                detail.snapshot.elapsed_millis as f64 / 1000.0,
+                format_elapsed_span(detail.snapshot.elapsed_millis as f32 / 1000.0, 1),
                 app.language.text("退出码", "Exit code", "終了コード"),
                 detail
                     .snapshot
