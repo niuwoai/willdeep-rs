@@ -193,13 +193,13 @@ impl Notifier {
         else {
             return Self::disabled();
         };
-        // Mirrors the app's User-Agent shape. The detector resolves any agent
-        // string containing "willdeep" to this vendor, so keeping the prefix
-        // is what makes a CLI event self-identifying at header level.
-        let user_agent = format!("some.im/WillDeep-{APP_VERSION} ({EXECUTOR})");
+        // One client name across every outgoing request. Vendor detection does
+        // not rest on this string: the app's detector reads the headers first,
+        // and `X-Agent-Source` / `X-Agent-Executor` below still carry the
+        // lowercase `willdeep` the classifier matches on.
         let Ok(client) = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(user_agent)
+            .user_agent(willdeep_core::CLIENT_USER_AGENT)
             .build()
         else {
             return Self::disabled();
@@ -824,8 +824,7 @@ mod tests {
         assert_eq!(headers["x-agent-event"], "attention_required");
         assert_eq!(headers["x-app-version"], APP_VERSION);
         assert_eq!(headers["content-type"], "application/json");
-        let user_agent = headers["user-agent"].to_str().expect("user agent");
-        assert!(user_agent.contains("WillDeep-"), "got {user_agent}");
+        assert_eq!(headers["user-agent"], willdeep_core::CLIENT_USER_AGENT);
 
         assert_eq!(body["schema_version"], "willdeep.webhook.v1");
         assert_eq!(body["event"], "attention_required");
