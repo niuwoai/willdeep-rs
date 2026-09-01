@@ -64,3 +64,13 @@ pub use types::{Message, MessageAttachment, Role, ToolCall};
 pub use worker_tier::{WorkerTier, hosts_job_prompt, normalize_hosted_model};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 客户端名。用作 Provider 请求的 `x-client-name`——那一头有 `x-client-version`
+/// 作搭档，名字就该是纯名字。
+pub const CLIENT_NAME: &str = "WillDeep Cli (some.im)";
+
+/// 每一次对外请求（Provider API、遥测、通知 webhook）自报的 `User-Agent`：
+/// 客户端名后面跟一个空格和版本号。`concat!` 在编译期拼好，省得每次建
+/// client 都 `format!` 一遍。
+pub const CLIENT_USER_AGENT: &str =
+    concat!("WillDeep Cli (some.im) ", env!("CARGO_PKG_VERSION"));

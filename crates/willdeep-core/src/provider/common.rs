@@ -1,14 +1,14 @@
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
 
 use super::{ProviderConfig, ProviderError, ProviderKind};
+use crate::{CLIENT_NAME, CLIENT_USER_AGENT};
 
 const ERROR_BODY_LIMIT: usize = 8 * 1024;
-const CLIENT_NAME: &str = "WillDeep CLI";
 
 pub fn client(config: &ProviderConfig) -> Result<Client, ProviderError> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(config.request_timeout_secs))
-        .user_agent(format!("willdeep/{}", crate::VERSION))
+        .user_agent(CLIENT_USER_AGENT)
         .build()
         .map_err(|error| ProviderError::Client(error.to_string()))
 }

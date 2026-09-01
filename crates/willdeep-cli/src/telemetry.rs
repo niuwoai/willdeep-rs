@@ -473,14 +473,7 @@ impl Telemetry {
         let payload = UploadPayload { events };
         let response = client
             .post(&self.endpoint)
-            .header(
-                "User-Agent",
-                format!(
-                    "some.im/willdeep-cli-{} ({})",
-                    willdeep_core::VERSION,
-                    os_name()
-                ),
-            )
+            .header("User-Agent", willdeep_core::CLIENT_USER_AGENT)
             .json(&payload)
             .send()
             .await;

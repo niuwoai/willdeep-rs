@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.54.0-rc1] - 2026-09-01
+
+### Added
+- 系统提示词新增「Version control」一条：Agent 写的每条 git commit message 末尾要空一行，再跟 `Co-Authored-By: WillDeep <noreply@willdeep.com>`。这是 Claude Code 那套做法——半年后翻 `git log`，谁也记不住哪几个提交是 Agent 敲的，尾注记得住。仓库里那些 `git commit` 调用全是测试夹具，真正写提交信息的是模型，所以规矩落在提示词而不是代码里，并加了断言把这行钉在缓存前缀里。
+
+### Changed
+- 对外请求的客户端名收敛成 `willdeep-core` 的两个常量：`CLIENT_NAME = "WillDeep Cli (some.im)"` 与 `CLIENT_USER_AGENT = "WillDeep Cli (some.im) <版本>"`（`concat!` 编译期拼好）。三个出口的 `User-Agent` 用后者，Provider 请求的 `x-client-name` 用前者：
+
+  | 出口 | 改前 | 改后 |
+  | --- | --- | --- |
+  | Provider API（含 `some.im/v1`）`User-Agent` | `willdeep/<版本>` | `WillDeep Cli (some.im) <版本>` |
+  | Provider API `x-client-name` | `WillDeep CLI` | `WillDeep Cli (some.im)` |
+  | 遥测上报 `User-Agent` | `some.im/willdeep-cli-<版本> (<系统>)` | `WillDeep Cli (some.im) <版本>` |
+  | 通知 webhook `User-Agent` | `some.im/WillDeep-<版本> (willdeep-cli)` | `WillDeep Cli (some.im) <版本>` |
+
+  此前三处出口三种拼法、大小写还不一致，服务端日志里看着像三个客户端。`x-client-name` 不带版本，是因为它身边就有 `x-client-version`——名字归名字，版本归版本。crate 名、二进制名、遥测 `app_id`、webhook 的 `X-Agent-Source` / `X-Agent-Executor` 等标识值一律不动：那些是给检测器匹配的键，不是展示名，app 侧的 `AgentWebhookFormatDetector` 依旧先读请求头再看 body。
+
 ## [0.53.0-rc1] - 2026-08-31
 
 ### Added

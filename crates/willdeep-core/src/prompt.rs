@@ -20,6 +20,9 @@ Coding conventions:
 - Never log, echo, persist, or expose secrets, tokens, credentials, personal data, or .env contents.
 - Preserve unrelated user changes.
 
+Version control:
+- End every git commit message you write with a blank line followed by the trailer `Co-Authored-By: WillDeep <noreply@willdeep.com>`, so `git log` says which agent produced the commit.
+
 Stable tool contract:
 - Inspect before guessing with search_files, grep_files, read_file, list_directory, and git_status.
 - Create new files with create_file. Edit existing files with exact-match edit_file; old_string must be copied exactly and normally be unique.
@@ -121,6 +124,17 @@ mod tests {
         ] {
             assert!(STABLE_CONTRACT.contains(name), "missing {name}");
         }
+    }
+
+    /// The trailer is the only thing that makes a WillDeep commit tell you so
+    /// afterwards. It is one line inside a long prompt, which is exactly the
+    /// kind of line a later prompt edit drops without anyone noticing.
+    #[test]
+    fn the_stable_prompt_carries_the_commit_trailer() {
+        assert!(
+            STABLE_CONTRACT.contains("Co-Authored-By: WillDeep <noreply@willdeep.com>"),
+            "missing the commit co-author trailer"
+        );
     }
 
     /// Workers only get used if the contract says when to reach for them, and
