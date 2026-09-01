@@ -104,7 +104,7 @@ impl RuntimeEventSink {
                 return;
             }
             let workspace = self.agent_workspace(agent_id).await;
-            if let Ok(capture) = diff_review::capture(&workspace) {
+            if let Ok(capture) = diff_review::capture_blocking(workspace.clone()).await {
                 self.diff_baselines
                     .lock()
                     .await

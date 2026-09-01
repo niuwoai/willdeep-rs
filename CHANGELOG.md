@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.54.0-rc2] - 2026-09-01
+
+### Fixed
+- 工具的 diff 基线捕获不再逐个文件 fork `git diff`，也不再把未跟踪文件整个读进内存。原先 `capture()` 对快照里的每个文件跑两次 `git diff`（工作区一次、暂存区一次）再读一遍全文，`snapshot_id()` 和 `enrich_untracked()` 又各把未跟踪文件读一遍——同一批内容一次快照读三遍。
+
+  代价平时看不见，直到工作区里出现一个被 `--untracked-files=all` 摊平的缓存目录。一个把 `GOCACHE` 指到仓库内的项目会展开成 6798 个未跟踪文件，实测一次 capture 要 **176 秒**：其中 13596 次 `git diff` 进程创建，外加三遍共约 2GB 的读盘。
+
+  改成用「长度 + mtime」做路径指纹后，同一个工作区上 capture 从 176 秒降到 **354 毫秒**。归因的置信度本来就是 `ToolWindow`——判断的是工具那段窗口里哪些路径动过，不是内容级比对；工具写文件必然推进 mtime，而 `DiffFile` 自身已经带着 staged/unstaged 与增删行数，全量 diff 的哈希也照旧钉在 `snapshot_id` 里。
+
+- 上面那 176 秒是**卡在事件写盘之前**的，这才是它真正的杀伤力。`RuntimeEventSink::emit` 的顺序是「记 tools.json → `observe_diff().await` → 追加 events.ndjson」，而 TUI 的活动流读的是 events.ndjson。于是每个可能改工作区的工具调用，前后各阻塞一次基线捕获，界面上就是「运行中 · 暂未收到新事件 143s」——任务没死，只是它的动静全堵在管道里。三分钟的命令里真正执行的部分不到 2%。
+
+- `capture()` 现在经 `capture_blocking()` 走 `spawn_blocking`。它内部全是 `git` 子进程和 `stat`，此前直接在 async worker 上跑，占着的线程同一个 runtime 还要拿去写事件和应答控制面接口。
+
+- Provider 请求的连接层失败和 5xx 现在会重发，最多三遍，退避 250ms / 500ms。此前握手掉一次就是 `failure_domain=provider`、整轮对话连同上下文一起丢——实测那条链路几秒后就恢复了，代价和收益完全不成比例。
+
+  重发的判定收在 `is_retryable()` 里，覆盖三种传输层失态：连不上（`tls handshake eof` 落在这儿）、超时、以及连上了但半路断（hyper 报 `IncompleteMessage`）。第三条是写测试时才补上的——最初只判了前两种，而模拟「接了连接就掐掉」的用例直接把这个洞照了出来。
+
+  4xx 一律不重发：密钥错了、模型名写错了、请求体不合法，重发多少遍都是同一个答案。429 同样不在重发之列——限流要照 `Retry-After` 的节奏走，用几百毫秒的退避去顶只会把限流顶得更死。流式请求（body 不可重放）自动跳过重试，发一次算一次。
+
+  三种 dialect（`chat_completions` / `responses` / `anthropic`）和 `list_models` 共用这一个出口。
+
+### Changed
+- 未跟踪文件超过 512 个时，不再逐个读内容判定二进制与行数（单个文件超过 4MB 时同样跳过，按二进制处理）。这是一处刻意放弃的展示精度：一次冒出上千个未跟踪文件，来源基本是构建缓存而不是人写的改动，diff 面板上那个 `+N` 不值得为它把整个目录读一遍。
+
 ## [0.54.0-rc1] - 2026-09-01
 
 ### Added
