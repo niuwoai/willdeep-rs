@@ -1175,6 +1175,147 @@ async fn drain_wait_ignores_stale_cancellation_for_terminal_task() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 一个等审批的任务曾经能把 `daemon upgrade` 永久钉死：drain 等的是「未终态」，
+/// 而等人的任务只有等到人来才会离开那个状态。真实后果是 300 秒超时之后
+/// Runtime 停在 draining，既不接新活也升不了级。
+#[tokio::test]
+async fn drain_does_not_wait_on_tasks_that_are_waiting_on_a_human() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-drain-awaiting-human-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: root.join("tasks.json"),
+        interactions_path: root.join("interactions.json"),
+        home: root.clone(),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: test_agent_store(&root),
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+    let mut waiting_ids = Vec::new();
+    for status in [
+        RuntimeTaskStatus::WaitingApproval,
+        RuntimeTaskStatus::WaitingAnswer,
+    ] {
+        let task_id = uuid::Uuid::new_v4();
+        waiting_ids.push(task_id);
+        manager
+            .insert_and_persist(RuntimeTask {
+                id: task_id,
+                session_id: None,
+                turn_id: None,
+                agent_id: None,
+                event_start_sequence: 0,
+                status,
+                workspace: root.clone(),
+                profile: None,
+                model: None,
+                pid: None,
+                created_at: 1,
+                started_at: Some(1),
+                completed_at: None,
+                exit_code: None,
+                failure_domain: None,
+                error: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    tokio::time::timeout(Duration::from_millis(200), manager.wait_until_idle())
+        .await
+        .expect("tasks waiting on a human must not pin the Runtime in draining");
+
+    // 不拦 drain，但必须点得出来——交接会把它们带走，静默丢弃是不能接受的。
+    waiting_ids.sort();
+    assert_eq!(manager.tasks_awaiting_a_human().await, waiting_ids);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 反过来，真正在跑的活还是要等——drain 的本意是别把它们腰斩。
+#[tokio::test]
+async fn drain_still_waits_for_work_that_finishes_on_its_own() {
+    let root =
+        std::env::temp_dir().join(format!("willdeep-drain-running-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: root.join("tasks.json"),
+        interactions_path: root.join("interactions.json"),
+        home: root.clone(),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: test_agent_store(&root),
+        sessions: test_runtime_session_store(&root),
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+    manager
+        .insert_and_persist(RuntimeTask {
+            id: uuid::Uuid::new_v4(),
+            session_id: None,
+            turn_id: None,
+            agent_id: None,
+            event_start_sequence: 0,
+            status: RuntimeTaskStatus::Running,
+            workspace: root.clone(),
+            profile: None,
+            model: None,
+            pid: None,
+            created_at: 1,
+            started_at: Some(1),
+            completed_at: None,
+            exit_code: None,
+            failure_domain: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.wait_until_idle())
+            .await
+            .is_err(),
+        "a running task must still hold the drain open"
+    );
+    assert!(manager.tasks_awaiting_a_human().await.is_empty());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn drain_blocking_statuses_exclude_everything_that_waits_on_a_human() {
+    for status in [
+        RuntimeTaskStatus::Queued,
+        RuntimeTaskStatus::Running,
+        RuntimeTaskStatus::Cancelling,
+    ] {
+        assert!(runtime_task_status_blocks_drain(status));
+    }
+    // 未终态但不拦 drain——这一条正是这次修复的分界线。
+    for status in [
+        RuntimeTaskStatus::WaitingApproval,
+        RuntimeTaskStatus::WaitingAnswer,
+    ] {
+        assert!(runtime_task_status_is_active(status));
+        assert!(!runtime_task_status_blocks_drain(status));
+    }
+    for status in [
+        RuntimeTaskStatus::Completed,
+        RuntimeTaskStatus::Failed,
+        RuntimeTaskStatus::Cancelled,
+        RuntimeTaskStatus::Interrupted,
+    ] {
+        assert!(!runtime_task_status_blocks_drain(status));
+    }
+}
+
 #[test]
 fn active_runtime_task_statuses_are_explicit() {
     for status in [

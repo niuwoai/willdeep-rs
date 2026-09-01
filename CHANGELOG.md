@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.54.0-rc3] - 2026-09-01
+
+### Fixed
+- `daemon upgrade` 不再被一个等审批的任务永久钉死。drain 判定此前直接复用「任务还没到终态」（`runtime_task_status_is_active`），而 `WaitingApproval` 与 `WaitingAnswer` 要等到有人来点一下才会离开那个状态——可能是十秒，也可能是这台机器今天没人再碰了。于是 300 秒超时之后 Runtime 停在 `draining`：既不接新活，也升不了级，而命令还一直宣称「it will stop after active work finishes」。
+
+  新增 `runtime_task_status_blocks_drain()` 把两种语义拆开：排队、执行、取消中都会自己走到头，drain 该等；等人的任务不是在干活，是已经停下来了，不该拦着交接。`runtime_task_status_is_active()` 语义不变，别处照旧。
+
+- 交接放弃的任务不再无声无息。drain 开始时把「等人回应」的任务写进 `daemon.draining.abandoned` 事件；`daemon upgrade` 在发出 drain **之前**先把它们逐条列给用户看——静默丢弃和无限期挂起一样难查，而这一步给了人一个选择：先去把审批处理掉，还是就这么升上去。
+
 ## [0.54.0-rc2] - 2026-09-01
 
 ### Fixed

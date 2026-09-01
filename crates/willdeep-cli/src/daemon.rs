@@ -1684,6 +1684,36 @@ async fn upgrade(
             health.version, state.pid
         ));
     }
+    // 先把「等人回应」的任务点出来再动手。它们不拦交接，但会跟着旧 Runtime 一起
+    // 走——用户有权在看到这句话之后决定是先去把审批处理掉，还是就这么升上去。
+    if let Ok(response) = runtime_client(&state)?.tasks().await
+        && let Ok(tasks) = response.into_result()
+    {
+        let waiting = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    willdeep_runtime_protocol::TaskStatus::WaitingApproval
+                        | willdeep_runtime_protocol::TaskStatus::WaitingAnswer
+                )
+            })
+            .collect::<Vec<_>>();
+        if !waiting.is_empty() {
+            report(format!(
+                "{} task(s) are waiting on you and will be dropped by this handoff:",
+                waiting.len()
+            ));
+            for task in waiting {
+                report(format!(
+                    "  {} {:?} {}",
+                    task.id,
+                    task.status,
+                    task.workspace.as_deref().unwrap_or("-")
+                ));
+            }
+        }
+    }
     let internal_drain = internal_transport::InternalRuntimeClient::from_state(&state)?
         .post_empty("/v1/internal/drain")
         .await;
@@ -2238,6 +2268,23 @@ async fn drain_handler(
     }
     let tasks = state.tasks.clone();
     let shutdown = state.shutdown.clone();
+    // 等人的任务不拦 drain，但它们会随这次交接一起没掉，所以得留下痕迹——
+    // 静默放弃和无限期挂起一样难查。
+    let abandoned = tasks.tasks_awaiting_a_human().await;
+    if !abandoned.is_empty() {
+        let _ = state.events.append(
+            "daemon.draining.abandoned",
+            format!(
+                "count={} tasks={}",
+                abandoned.len(),
+                abandoned
+                    .iter()
+                    .map(uuid::Uuid::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+    }
     tokio::spawn(async move {
         tasks.wait_until_idle().await;
         let _ = shutdown.send(true);
@@ -3051,12 +3098,29 @@ impl TaskManager {
                 .read()
                 .await
                 .values()
-                .any(|task| runtime_task_status_is_active(task.status));
+                .any(|task| runtime_task_status_blocks_drain(task.status));
             if !has_active_tasks {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// 那些不会拦住 drain、但会随交接一起没掉的任务——全在等人回应。
+    async fn tasks_awaiting_a_human(&self) -> Vec<uuid::Uuid> {
+        let mut waiting = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .filter(|task| {
+                runtime_task_status_is_active(task.status)
+                    && !runtime_task_status_blocks_drain(task.status)
+            })
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        waiting.sort();
+        waiting
     }
 
     async fn insert_and_persist(&self, task: RuntimeTask) -> Result<()> {
@@ -3207,6 +3271,22 @@ fn runtime_task_status_is_active(status: RuntimeTaskStatus) -> bool {
             | RuntimeTaskStatus::Cancelling
             | RuntimeTaskStatus::WaitingApproval
             | RuntimeTaskStatus::WaitingAnswer
+    )
+}
+
+/// drain 该不该为这个状态的任务等下去。
+///
+/// 比[「还没到终态」][runtime_task_status_is_active]窄一圈，少的正是那两个在等人的
+/// 状态。区别在于终点：排队、执行、取消中都会自己走到头，而等审批、等回答要等到
+/// 有人来点一下——可能是十秒，也可能是这台机器今天没人再碰了。
+///
+/// 早先两者共用一个判定，于是一个卡在审批上的任务能把 `daemon upgrade` 无限期钉住，
+/// 命令还一直宣称「it will stop after active work finishes」——那句话永远不会兑现。
+/// 等人的任务不是在干活，是已经停下来了。
+fn runtime_task_status_blocks_drain(status: RuntimeTaskStatus) -> bool {
+    matches!(
+        status,
+        RuntimeTaskStatus::Queued | RuntimeTaskStatus::Running | RuntimeTaskStatus::Cancelling
     )
 }
 
