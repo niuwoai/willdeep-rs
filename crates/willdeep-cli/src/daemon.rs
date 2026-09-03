@@ -25,6 +25,7 @@ const REQUEST_ID_HEADER: &str = "x-willdeep-request-id";
 const LOCK_STALE_AFTER_SECONDS: u64 = 10;
 const LOCK_HEARTBEAT_SECONDS: u64 = 2;
 const LOCK_RECOVERY_ATTEMPTS: usize = 120;
+const CONTROL_SERVER_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 
 mod agent_control;
 mod agent_store;
@@ -2118,18 +2119,37 @@ async fn run(home: &Path) -> Result<()> {
         std::process::id()
     );
     let tcp_shutdown = shutdown_receiver.clone();
-    let local_shutdown = shutdown_receiver;
+    let local_shutdown = shutdown_receiver.clone();
+    let shutdown_deadline = shutdown_receiver;
     let tcp_server =
         axum::serve(listener, app.clone()).with_graceful_shutdown(wait_for_shutdown(tcp_shutdown));
     let local_server =
         axum::serve(local_listener, app).with_graceful_shutdown(wait_for_shutdown(local_shutdown));
-    tokio::try_join!(tcp_server, local_server).context("run Runtime Daemon control servers")?;
+    tokio::select! {
+        result = async { tokio::try_join!(tcp_server, local_server) } => {
+            result.context("run Runtime Daemon control servers")?;
+        }
+        _ = wait_for_shutdown_deadline(
+            shutdown_deadline,
+            Duration::from_secs(CONTROL_SERVER_SHUTDOWN_GRACE_SECONDS),
+        ) => {
+            eprintln!(
+                "Runtime Daemon control connections exceeded the {}s shutdown grace; forcing them closed",
+                CONTROL_SERVER_SHUTDOWN_GRACE_SECONDS,
+            );
+        }
+    }
     tasks.cancel_all().await;
     events.append("daemon.stopped", format!("pid={}", std::process::id()))?;
     lock_heartbeat.abort();
     drop(cleanup);
     eprintln!("WillDeep Runtime Daemon stopped");
     Ok(())
+}
+
+async fn wait_for_shutdown_deadline(receiver: watch::Receiver<bool>, grace: Duration) {
+    wait_for_shutdown(receiver).await;
+    tokio::time::sleep(grace).await;
 }
 
 fn report_execution_resource_recovery(
@@ -3468,7 +3488,8 @@ fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()
 fn acquire_daemon_lock(path: &Path) -> Result<DaemonLock> {
     if let Ok(existing) = load_daemon_lock(path) {
         if now().saturating_sub(existing.created_at) > LOCK_STALE_AFTER_SECONDS {
-            remove_owned_lock(path, &existing.token);
+            try_remove_owned_lock(path, &existing.token)
+                .context("remove stale Runtime Daemon lock")?;
         } else {
             bail!("Runtime Daemon lock already exists");
         }
@@ -3510,9 +3531,15 @@ fn load_daemon_lock(path: &Path) -> Result<DaemonLock> {
 }
 
 fn remove_owned_lock(path: &Path, token: &str) {
+    let _ = try_remove_owned_lock(path, token);
+}
+
+fn try_remove_owned_lock(path: &Path, token: &str) -> Result<()> {
     if load_daemon_lock(path).is_ok_and(|lock| lock.token == token) {
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path)
+            .with_context(|| format!("remove Runtime Daemon lock at {}", path.display()))?;
     }
+    Ok(())
 }
 
 fn append_log(path: &Path) -> Result<File> {
