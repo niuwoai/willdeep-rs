@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.70.0-rc4] - 2026-09-04
+
+### Fixed
+- **粘贴文本不再被模型当成工作区里的文件。** 现场：用户贴了一段文本，模型回「paste-1.txt 的内容我看不到」，接着 `search_files`、`ls tmp` 满工作区找这个文件，24 轮耗尽后整轮判失败。实测网关（api.niuwoai.com / deepseek-v4-flash）对多段 content 是完整送达的，正文一直都在模型眼前——坏在包装只有一行 `[Pasted text: paste-1.txt]`，`.txt` 后缀让模型认定这是个文件路径。现在三种协议实现（chat completions、responses、anthropic）共用 `pasted_text_block`：明说「这是用户贴进聊天的文本，不是工作区文件，别去找，全文如下」，并用结束标记圈住正文。
+- **附件条目露出正文首行。** 此前只显示「Pasted text · 3 lines · 146 B」，贴错了东西发送前看不出来；现在追加「首行预览」，最多 36 个字符，超出加省略号。
+- **聊天区拖选松手不再自动复制到剪贴板。** 这正是上面那次事故的起点：先复制好网址，回到聊天区拖了一下看，剪贴板就被上一条回复顶掉，贴进去的自然不是网址。现在松手只选中，状态行提示选中字数，`Ctrl+C` / `y` 才复制，`q` 引用，`Esc` 取消。文档同步更新。
+
+### Notes
+- 排查中确认 `web_search` 工具对 `api.niuwoai.com` 返回 404（该网关没有 `/api/v1/customer/web-search`），对 `some.im` 返回 503「web search provider not configured」。这是网关侧未配置，不在本仓修。
+
+### Tests
+- 新增：chat completions 的文本附件携带正文并声明「不是文件」；附件摘要预览首个非空行、截断与空内容。
+- Bugfix 版本从 **0.70.0-rc3** 提升为 **0.70.0-rc4**。
+
 ## [0.70.0-rc3] - 2026-09-03
 
 ### Fixed
