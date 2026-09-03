@@ -3569,7 +3569,18 @@ impl App {
                 {
                     selection.head = point;
                 }
-                self.copy_chat_selection();
+                // 松手不再自动写剪贴板。拖一下看看就把刚复制好的网址顶掉，
+                // 之后贴进去的是上一条回复，谁也想不到——复制要人明确按键。
+                let chars = self.selected_chat_text().chars().count();
+                self.notice = Some(
+                    self.language
+                        .text(
+                            "已选中 {n} 字 · Ctrl+C 或 y 复制 · q 引用 · Esc 取消",
+                            "{n} chars selected · Ctrl+C or y copies · q quotes · Esc cancels",
+                            "{n} 文字を選択 · Ctrl+C か y でコピー · q で引用 · Esc で解除",
+                        )
+                        .replace("{n}", &chars.to_string()),
+                );
                 true
             }
             MouseEventKind::ScrollUp if self.selection_mode => {

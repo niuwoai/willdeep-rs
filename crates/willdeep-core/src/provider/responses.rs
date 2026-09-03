@@ -191,7 +191,7 @@ impl ResponseInputItem {
                 MessageAttachment::Text { name, content } => {
                     value.content.push(ResponseContent::text(
                         "input_text",
-                        format!("[Pasted text: {name}]\n{content}"),
+                        super::common::pasted_text_block(name, content),
                     ))
                 }
                 MessageAttachment::Image {

@@ -12,6 +12,19 @@ const MAX_ATTEMPTS: u32 = 3;
 /// 换掉的是「握手抖一下整个 task 就死」。
 const RETRY_BASE_DELAY_MS: u64 = 250;
 
+/// 粘贴文本附件送给模型时的包装。
+///
+/// 此前只有一行 `[Pasted text: paste-1.txt]` 打头。`.txt` 后缀让模型把它当成工作区
+/// 里的一个文件，转头去 `search_files`、`ls tmp` 找，找不到就宣布「内容我看不到」，
+/// 把轮次全耗在找一个不存在的文件上——而正文明明就在下一行。现在把「这是用户
+/// 贴进聊天的文本、不是文件、全文就在这里」说清楚，并用结束标记圈住正文，
+/// 免得正文里的内容与后面的消息混在一起。
+pub fn pasted_text_block(name: &str, content: &str) -> String {
+    format!(
+        "[Pasted text attachment \"{name}\": the user pasted this text directly into the chat. It is not a file in the workspace; do not search for it. Its full content follows.]\n{content}\n[End of pasted text \"{name}\"]"
+    )
+}
+
 pub fn client(config: &ProviderConfig) -> Result<Client, ProviderError> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(config.request_timeout_secs))

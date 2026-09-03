@@ -127,7 +127,7 @@ fn encode_messages(messages: &[Message]) -> (String, Vec<AnthropicMessage>) {
                         .iter()
                         .map(|attachment| match attachment {
                             MessageAttachment::Text { name, content } => AnthropicContent::Text {
-                                text: format!("[Pasted text: {name}]\n{content}"),
+                                text: super::common::pasted_text_block(name, content),
                             },
                             MessageAttachment::Image {
                                 media_type, data, ..
