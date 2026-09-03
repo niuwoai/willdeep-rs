@@ -3955,6 +3955,20 @@ fn progress_spinner(elapsed: Duration) -> &'static str {
 
 /// 过了 120 秒还用秒读数（293.2s）就得让人心算，换成分钟保留一位小数；
 /// 过了 120 分钟同理换小时。`seconds_decimals` 沿用各显示点原有的秒精度。
+/// 命令面板装不下时，从第几条开始画。
+///
+/// 选中项必须落在可视窗口里，否则用户按着 ↓ 却看不到光标去了哪——那正是让人
+/// 以为「后面没有了」的原因。窗口贴着底走：只有选中项越过下沿才滚，向上回来
+/// 时同样跟着走。
+fn command_window_offset(selected: usize, total: usize, visible: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(total - visible)
+}
+
 fn format_elapsed_span(seconds: f32, seconds_decimals: usize) -> String {
     if seconds > 7200.0 {
         format!("{:.1}h", seconds / 3600.0)
@@ -4516,6 +4530,11 @@ fn draw(
             app.command_selected = app.command_selected.min(command_matches.len() - 1);
             let width = areas[3].width.min(76);
             let height = (command_matches.len() as u16 + 2).min(10);
+            // 装不下就跟着选中项滚。此前这里把全部命中一次性交给 Paragraph，
+            // 超出高度的部分被静默裁掉：18 条命令只看得见前 8 条，↓ 到第 9 条
+            // 之后连箭头都跑到可视区外，界面看起来就像「后面没有了」。
+            let visible = height.saturating_sub(2) as usize;
+            let offset = command_window_offset(app.command_selected, command_matches.len(), visible);
             let popup = Rect {
                 x: areas[3].x,
                 y: areas[3].y.saturating_sub(height),
@@ -4526,6 +4545,8 @@ fn draw(
             let lines = command_matches
                 .iter()
                 .enumerate()
+                .skip(offset)
+                .take(visible)
                 .map(|(position, (command, description))| {
                     let prefix = if position == app.command_selected {
                         "▶"
@@ -4543,18 +4564,37 @@ fn draw(
                     ])
                 })
                 .collect::<Vec<_>>();
-            app.command_hits = (0..command_matches.len())
-                .map(|position| (popup.y + 1 + position as u16, position))
+            // 鼠标点击按屏幕行找命令，所以命中表必须跟着同一个窗口走，否则
+            // 滚动之后点第一行会插入一条根本没显示的命令。
+            app.command_hits = (offset..command_matches.len().min(offset + visible))
+                .map(|position| (popup.y + 1 + (position - offset) as u16, position))
                 .collect();
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(lines).block(
                     Block::default()
-                        .title(app.language.text(
-                            "命令 · ↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭",
-                            "Commands · ↑/↓ select · Enter/Tab insert · Esc close",
-                            "コマンド · ↑/↓ 選択 · Enter/Tab 挿入 · Esc 閉じる",
-                        ))
+                        // 装不下时把「第几条 / 共几条」写进标题：光有滚动，
+                        // 人还是不知道下面还有多少。
+                        .title(if command_matches.len() > visible {
+                            format!(
+                                "{} · {}/{}",
+                                app.language.text(
+                                    "命令 · ↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭",
+                                    "Commands · ↑/↓ select · Enter/Tab insert · Esc close",
+                                    "コマンド · ↑/↓ 選択 · Enter/Tab 挿入 · Esc 閉じる",
+                                ),
+                                app.command_selected + 1,
+                                command_matches.len()
+                            )
+                        } else {
+                            app.language
+                                .text(
+                                    "命令 · ↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭",
+                                    "Commands · ↑/↓ select · Enter/Tab insert · Esc close",
+                                    "コマンド · ↑/↓ 選択 · Enter/Tab 挿入 · Esc 閉じる",
+                                )
+                                .to_owned()
+                        })
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Magenta)),
                 ),
