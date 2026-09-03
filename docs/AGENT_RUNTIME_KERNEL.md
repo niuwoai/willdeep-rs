@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0-2 与并行任务 P1 已落地（0.58.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0-4 与并行任务 P1 已落地（0.59.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -76,7 +76,7 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 统一事件信封 | ✅ 0.56.0-rc1 契约与类型，0.57.0-rc1 接入主循环 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
 | 三档中断策略 | ✅ 0.57.0-rc1，含抢占取消 provider 请求 | `crates/willdeep-core/src/kernel.rs` |
 | 事件持久化与崩溃恢复 | ✅ 0.58.0-rc1 | `crates/willdeep-core/src/kernel_store.rs` |
-| lease / 双消费者语义 | ❌ 无 | — |
+| lease / 双消费者语义 | ✅ 0.59.0-rc1，含跨连接单一所有权 | `crates/willdeep-core/src/kernel.rs` |
 | 外部事件入站（Webhook / Relay / 邮件） | ❌ 只有**出站** `willdeep.webhook.v1` 通知 | `crates/willdeep-cli/src/notify.rs` |
 | 定时任务触发 | ❌ 无 | — |
 | 事件中心 UI | ❌ TUI 只有 Inbox，无事件来源/优先级/合并次数/处理结果 | — |
@@ -129,22 +129,24 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 
 **未做（留给阶段 5 与 6）**：唤醒预算的持久化要等阶段 5 有了预算本体；「归档会话拒绝迟到事件」要等阶段 6 接上会话生命周期，现在内核不知道哪个会话被归档了。
 
-### 阶段 3 · lease 与双消费者
+### 阶段 3 · lease 与双消费者 ✅ 0.59.0-rc1
 
-- 投递给模型前标 `leased`，provider 成功完成后才 `handled`；取消、传输失败、崩溃回 `pending`；
-- 「模型已处理」与「用户仍需处理」拆成两条状态轴——模型读过一封邮件不等于替用户回了；
-- 单一所有权：多客户端 / 多窗口共享唤醒额度，只有会话 owner 能拉起模型，其他连接不能提前 ACK 或释放 lease。
+- lease 往返与崩溃恢复、双 lane 互不代劳在阶段 1、2 已完成；
+- 本阶段补齐**单一所有权**：`claim_session` / `release_session` / `release_owner`，lease 记住取走它的消费者，`ack_as` / `release_as` 只结算自己的；
+- 不带身份的老方法等价于一个固定的默认消费者（`SOLE_CONSUMER`），单进程路径行为不变。
 
-**验收**：崩溃恢复 lease 回 pending、跨连接 lease 隔离、模型处理不清除用户待办。
+**验收**：已达成——认领不可抢占且可交还、跨连接 lease 隔离、断开连接交还 lease 与会话。
 
-### 阶段 4 · 信任与正文净化
+**唤醒额度的共享**（多客户端共用一份额度）留到阶段 5，那里才有额度本体。
 
-- `authority` 与 `content_provenance` 两条独立轴落到类型上（不要做成一个枚举）；
-- 外部正文限长 24,000 字符、32 个 metadata 项，净化模型控制标记，转义 rs 自己的 prompt frame 标记；
-- 外部正文以**宿主指令来源的用户消息**承载，绝不进 system prompt（Xedit 1.317.0-rc2 专门修过这条）；
-- 正文只作为数据，不授予任何工具权限、不绕过审批。
+### 阶段 4 · 信任与正文净化 ✅ 0.59.0-rc1
 
-**验收**：frame 注入防护、伪造 critical 的外部事件被降级、Worker 报告按不可信正文处理的用例。
+- 两条轴在阶段 0 就落在类型上，阶段 1 完成了 frame 转义与用户消息承载；
+- 本阶段补齐**入队剪枝**：标题、正文、metadata 条目数与值长度按契约上限钳制，模型控制标记（`<|im_start|>`、`[INST]`、`<<SYS>>` 等）中和为可见记号。
+
+**两者分工**（改之前先看）：入队剪枝管**体量与控制标记**，渲染转义管**frame 边界**。体量必须当场砍掉，否则几兆的正文会跟着每次落盘写一遍；frame 转义只在拼进对话时才有意义，存储保持原文，事件中心才显示得出用户实际收到的东西。
+
+**验收**：已达成——frame 注入防护、伪造 critical 降级、Worker 报告按不可信正文处理、入队剪枝后仍是合法信封、控制标记留痕中和。
 
 ### 阶段 5 · 外部事件入站
 
