@@ -2,6 +2,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod kernel_event;
+pub use kernel_event::{
+    ContentProvenance, DeliveryState, EventAudience, EventAuthority, EventDelivery, EventPriority,
+    EventSource, InterruptPolicy, KERNEL_EVENT_SCHEMA_VERSION, KernelEvent, KernelEventError,
+};
+
 pub mod model_catalog;
 pub use model_catalog::{
     CatalogApiDialect, CatalogModel, CatalogModelKind, CatalogProvider, CatalogRouting,

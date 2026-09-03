@@ -71,6 +71,11 @@ Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定�
   要写明理由，而不是让它自然漂移"。
 - canonical 文档跨仓分工：`MODEL_TIERS.md` 在 rs；`GOAL_TEAMS_ROLES_DESIGN.md`
   与 `LONG_HORIZON_AUTONOMY.md` 在 Xedit，rs 侧为引用与落地映射。
+- **内核事件信封 `agent-kernel-event.v1`：canonical 在 rs**（2026-09-03 定，
+  Xedit 为 mirror）。内核语义本身由 Xedit 1.315.0-rc15 首发实现，但字段契约
+  文本归 rs，移植计划见 [AGENT_RUNTIME_KERNEL.md](AGENT_RUNTIME_KERNEL.md)。
+  分工边界：外部事件的**云端中继归 Xedit 加 Go relay**，rs 只做本机入站
+  （daemon 端点、hooks、本机定时任务），因此 `collab-relay.v2` 不是双端共享面。
 - 指标与纪律双向回流：Xedit 的 Citation Audit、实弹靶场自 rs 回流；rs 的
   安全分类器、审批语义自 Xedit 移植。
 

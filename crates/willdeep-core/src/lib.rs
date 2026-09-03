@@ -61,7 +61,10 @@ pub use tools::{
     VerificationStatus, WebToolConfig, run_background_supervisor,
 };
 pub use types::{Message, MessageAttachment, Role, ToolCall};
-pub use worker_tier::{WorkerTier, hosts_job_prompt, normalize_hosted_model};
+pub use worker_tier::{
+    CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, SELECTABLE_CONTEXT_WINDOWS, WorkerTier,
+    context_window_label, hosts_job_prompt, normalize_hosted_model,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

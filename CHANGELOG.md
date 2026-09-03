@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.56.0-rc1] - 2026-09-03
+
+### Added
+- **Agent Runtime Kernel 的事件信封契约落地（`willdeep.agent-kernel-event.v1`），canonical 在本仓。** 这是把 macOS 版 1.315.0-rc15 起的内核语义移植过来的第一步：宿主 Runtime 负责接收信号、校验信任、限流、去重、持久化，主 Agent 只看得到宿主裁决过的通知，模型不拥有进程调度权。整套计划见新增的 `docs/AGENT_RUNTIME_KERNEL.md`。
+
+  本次只交付契约，不接线：`docs/schemas/agent-kernel-event.v1.schema.json` 是唯一事实来源，`crates/willdeep-runtime-protocol/src/kernel_event.rs` 是 Rust 侧类型与判定规则，七项守卫测试逐项对着契约断言——枚举取值、十个上限、authority 降级表、自动唤醒表、样例往返，改了一边没改另一边就红。
+
+  信封里 `authority`（能不能唤醒或抢占）与 `content_provenance`（正文从哪来）是**两条独立的轴**。宿主可以允许终端事件唤醒模型，但终端输出仍按 `tool` 净化；Worker 报告标 `model`，不因为宿主代为转发就冒充可信正文。降级放在入口而不是校验里：外部来源伪造 `preempt` 是日常流量不是异常，`clamp_to_authority()` 压到该档上限后照常投递，做成校验报错会直接丢事件。降级只压中断策略，不压优先级——伪造 critical 的外部通知仍排在前面，只是不许抢占。
+
+  **范围已定**：rs 只做本机入站（持 Runtime Token 的 daemon 端点、hooks、本机定时任务），云端中继归桌面端，不实现 `collab-relay.v2` 的任何一端。信封保留相关字段位置，将来要接不必翻 schema 版本。
+
+  命名上与现有的 `event.list` / `event.stream` 分开：那是 Runtime 出向的观察事件，内核事件是入向信号，方向相反，一律走 `kernel_event` 前缀。
+
+### Fixed
+- **面板上选得到的上下文预算，配置里存不进去。** Worker 档位面板最大那档是十进制 `1_000_000`，而 macOS 版的「1M」是 `1_048_576`；同一个标签在两个 App 里是两个数，最终却写进同一份 `config.toml`。对齐到 2^20 之后又撞上第二道坎：配置校验的上界也是 `1_000_000`，正好和旧面板擦边通过，抬了面板不抬上界，用户选完 1M 保存就撞 `must be between 4000 and 1000000`。现在档位表、标签规则和上下界统一收在 `willdeep_core::worker_tier`，TUI 与配置校验都从那里取，并有测试钉住「面板选得到的每一档都存得进配置」。
+
+  顺带修掉标签的两处失真：旧实现按 `>= 1_000_000` 判 M、其余一律除 1024，于是 `config.toml` 里钉的 400000 会显示成「390K」，界面和实际预算对不上。现在只对整除的值做单位换算，钉死的任意值按原数字显示。
+
+  32K 与 48K 两档保留为 rs 独有并写明理由：Skill Worker 的小上下文纪律要求有界任务钉在 32K，而 macOS 面板服务的不是同一批工种。共享的是每一档的数值口径，不是档位数量。
+
+### Tests
+- 新增 `kernel_event` 七项契约守卫、`worker_tier` 三项档位口径测试。工作区全量测试通过，唯一失败的 `notify::tests::failed_delivery_surfaces_an_error_without_breaking_the_caller` 在本次改动之前就失败（该用例向 TEST-NET-1 地址发请求并期待 6 秒内失败，本机网络环境下连接不在窗口内返回），已在干净树上复现确认与本次无关。
+- 功能新增版本从 **0.55.0-rc1** 提升为 **0.56.0-rc1**，rc 重置；Cargo 工作区与 Web 前端版本保持一致。
+
 ## [0.55.0-rc1] - 2026-09-01
 
 ### Added

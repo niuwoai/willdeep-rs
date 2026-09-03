@@ -1,0 +1,215 @@
+# Agent Runtime Kernel（willdeep-rs 移植任务书）
+
+> 状态：阶段 0 与并行任务 P1 已落地（0.56.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
+> 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
+
+---
+
+## 1. 上游发生了什么
+
+Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责」重新分层，对外叙事叫 **Agent OS**：不是自称操作系统，而是借操作系统的三个概念解释一层 Agent 运行时。
+
+| OS 概念 | WillDeep 对应物 |
+| --- | --- |
+| 进程 | 会话（Session） |
+| 中断 / 信号 | 内核事件（Worker 完成、终端退出、审批、定时任务、Webhook、邮件） |
+| `init` + `systemd` + 调度器 | 主 Agent：理解事件、派工、收报告、交付用户 |
+| 内核 | 宿主 Runtime：接收、鉴信、限流、去重、持久化，并决定何时唤醒或打断模型 |
+
+一句话的边界：**模型不拥有进程调度权**。它只能看到宿主已经裁决过、大小受限的事件通知。
+
+### 1.1 统一事件信封
+
+所有信号收敛成一个 `AgentKernelEvent`，字段包括目标会话、来源、类型、优先级、中断策略、调度权限、正文来源、用户/模型双 audience、去重键、待用户操作标记、生命周期时间戳。
+
+两条**独立**的轴，这是整套设计里最容易做错的地方：
+
+- `authority` 决定**能不能唤醒或抢占**；
+- `contentProvenance` 记录正文是 `host` / `model` / `tool` / `file` / `network` 中的哪一种。
+
+宿主可以允许终端完成事件唤醒模型，但终端输出仍按 `tool` 来源做注入净化；Worker 报告标 `model`，不因为宿主代为转发就冒充可信系统正文。
+
+### 1.2 三档中断
+
+| 策略 | 行为 | 典型来源 |
+| --- | --- | --- |
+| `enqueue` | 只入队，等别的原因启动下一轮 | 文件变化、仅供用户查看的记录、审批投影 |
+| `yield-at-boundary` | 当前模型或工具步骤结束后投递；会话空闲时立即唤醒 | Worker、终端、任务、媒体、工作流、外部消息 |
+| `preempt` | 取消当前 provider 步骤，保留 transcript 后继续 | 仅宿主签发的 critical 事件 |
+
+不可信或仅通过传输认证的外部事件，即使自称 `critical` / `preempt`，也强制降为 `yield-at-boundary`。Relay Token 只证明通道获准，不证明正文可信。
+
+### 1.3 持久化、恢复与配额
+
+- 按会话写入带 schema 版本的 `agent-events/<session-id>.json`，App 重启后继续投递；
+- 相同瞬时信号 5 秒窗口内合并；Relay 事件用日志周期幂等键，服务端 ACK 前重投不会二次启动模型；
+- 每会话 200 条、全局 1000 条上限，优先淘汰已处理与低优先级；
+- 投递给模型前取 **lease**，只有 provider 成功完成包含该事件的请求才标 handled；进程中途退出，未完成 lease 重启后回到 pending；
+- 「已由模型处理」与「仍待用户操作」是两条独立状态轴；
+- 已认证外部事件每会话 5 分钟最多主动唤醒 6 次，未认证事件只能排队；每会话最多同时挂 20 条外部待用户提醒；
+- 外部正文限长 24,000 字符、32 个 metadata 项，净化模型控制标记并转义 Runtime 自己的 XML frame；
+- 事件中心只是观察面，**不是权限中心**：终端、文件、浏览器、MCP 仍走各自原有的确定性授权路径。
+
+### 1.4 Worker 定义的三处改动
+
+1. **职责 × 档位正交**（rs 已在 0.51.0-rc1 落地）：五个公开职责 `generalist` / `implementer` / `tester` / `reviewer` / `ops_runner`，三档模型 `standard` / `advanced` / `expert`。
+2. **档位含义按用户最新口径收敛**：基础档是日常干活的主力（`someim-32b`、`qwen3.8-27b` 这一级），进阶档换的是**上下文**（1M 窗口），专家档换的是**智力**（`gpt-5.6-sol` / `opus-5` 这一级）。上下文预算档位由 128K/256K 两档扩到 **64K / 128K / 256K / 1M** 四档（Xedit 1.315.0-rc8）。预算只是「我们最多发多少」的上限，派发时仍与 provider 实际窗口取小。
+3. **`generalist` 成为真正的兜底通用 Worker**（Xedit 1.315.0-rc12）：新增可选精确写文件范围、四项受限终端工具、完整 Chrome 工具面、`list_mcp_servers` / `list_mcp_tools` / `call_mcp_tool` 动态 MCP 网关；路由无法判定工种时一律落到它，不再打回父 Agent。工具变多不等于扩权——写入仍要 `target_files`、终端改动仍走审核、MCP 调用仍按信任级别判定。
+
+配套还有：单会话后台 Worker 并发上限 3 → **5**；后台 Worker 获得完整父会话执行上下文（可见终端、精确批准命令、附加工作区、验证命令、命令/MCP/浏览器复核回调）；待办徽标改为逐请求计数。
+
+---
+
+## 2. willdeep-rs 现状盘点
+
+盘点结论：**地基有一半，内核没有**。
+
+| 能力 | rs 现状 | 位置 |
+| --- | --- | --- |
+| 五职责工种 | ✅ 已对齐 | `crates/willdeep-core/src/subagent/profiles.rs` |
+| 三档模型 + 逐档 provider/model 配置 | ✅ 已对齐（0.52.0-rc1） | `crates/willdeep-core/src/worker_tier.rs` |
+| 上下文预算档位 | ✅ 0.56.0-rc1 对齐口径：六档共享表 + 标签规则 + 可存性上界 | `worker_tier.rs` 的 `SELECTABLE_CONTEXT_WINDOWS` |
+| 后台任务事件 | ⚠️ 有 `broadcast` + `drain_pending`，进程内、无持久化、无优先级、无信任分级 | `crates/willdeep-core/src/background.rs` |
+| turn 边界注入 | ⚠️ `AgentInstructionInbox` 只有一条 lane、只收用户指令、不落盘 | `crates/willdeep-core/src/agent.rs:585` |
+| 注意力聚合 | ⚠️ `RuntimeStatus::priority` 是展示排序，不是调度裁决 | `crates/willdeep-core/src/attention.rs` |
+| 统一事件信封 | ✅ 0.56.0-rc1 契约与类型就位，尚未接线 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
+| 三档中断策略 | ⚠️ 枚举与降级规则已定，调度侧未实现 | 同上 |
+| 事件持久化与崩溃恢复 | ❌ 无 | — |
+| lease / 双消费者语义 | ❌ 无 | — |
+| 外部事件入站（Webhook / Relay / 邮件） | ❌ 只有**出站** `willdeep.webhook.v1` 通知 | `crates/willdeep-cli/src/notify.rs` |
+| 定时任务触发 | ❌ 无 | — |
+| 事件中心 UI | ❌ TUI 只有 Inbox，无事件来源/优先级/合并次数/处理结果 | — |
+
+**命名地雷**：rs 控制面已有 `event.list` / `event.stream`，那是 Runtime **出向**的观察事件（Runtime → 客户端）。本任务书的内核事件是**入向**信号（外界 → 主 Agent），方向相反。落地时统一用 `kernel_event` / `kernel.*` 前缀，不要复用 `event`，也不要把内核事件顺手灌进现有公共事件流。
+
+---
+
+## 3. 任务分解
+
+原则：每阶段独立可发布、独立有测试；先把内核语义做对，再谈外部事件；UI 最后接。
+
+### 阶段 0 · 契约先行 ✅ 0.56.0-rc1
+
+- `docs/schemas/agent-kernel-event.v1.schema.json` 定义信封字段与四个枚举（source / priority / interrupt / authority / provenance / delivery state），并把上限、authority 降级表、自动唤醒表分别收在 `x-limits`、`x-authority-interrupt-ceiling`、`x-auto-wake` 三个扩展块里；`docs/examples/agent-kernel-event.v1.json` 是四条覆盖不同判定分支的样例；
+- `crates/willdeep-runtime-protocol/src/kernel_event.rs` 是 Rust 侧类型、常量与判定规则，七项守卫测试逐项比对契约文件：枚举取值、十个上限、两张表、样例往返、伪造 preempt 的降级、未认证不唤醒、leased 必带 lease_id；
+- **canonical 归属：rs**（2026-09-03 rocky 拍板）。Xedit 侧为 mirror，其守卫测试待 Swift 落地时补，与 `WORKER_ROUTING_CONTRACT.json` 的归属方向相反；
+- 已在 [XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md) 的契约层一节登记。
+
+**两条落地时定死的判定**（改之前先看这里）：
+
+1. **降级在入口做，不在校验做**。`clamp_to_authority()` 把中断策略压到本档上限，`validate()` 才拒绝越权信封。外部来源伪造 `preempt` 是日常流量不是异常，降级后照常投递；做成校验报错会直接丢事件。
+2. **降级只压中断，不压优先级**。伪造 critical 的外部事件仍排在前面，只是不许抢占。两者一起压会让真正紧急的外部通知沉底。
+
+### 阶段 1 · 进程内事件内核
+
+- 新增 `crates/willdeep-core/src/kernel/`（`event.rs` 信封、`queue.rs` 队列与合并、`dispatch.rs` 调度）；
+- 把 `BackgroundTaskEvent` 与 `AgentInstructionInbox` 收敛为内核的两个生产者，**保留旧路径为兼容层**，并按资源 ID 去重，避免同一结果向模型投递两次（Xedit 踩过这一脚）；
+- 实现三档中断：`enqueue` / `yield_at_boundary` 在 `agent.rs` 的 turn 与工具边界投递；`preempt` 取消当前 provider 请求并保留 transcript；
+- 加权公平顺序（critical / urgent / normal / background），高优先级洪水不得饿死普通事件。
+
+**验收**：三档调度、优先级防饥饿、去重与 5 秒合并、preempt 后 transcript 完整的单测；空闲会话立即唤醒、忙碌会话边界投递各一条。
+
+### 阶段 2 · 持久化与恢复
+
+- 每会话日志 `~/.willdeep/agent-events/<session-id>.json`，带 schema 版本，0600 权限；
+- 每会话 200 / 全局 1000 上限，淘汰时**涉及的每个会话各自重写自己的日志**（否则重启后「删掉的事件诈尸」）；
+- 损坏或超限文件移入 `.corrupt-*` 隔离区，不阻塞启动；日志读取放后台，会话目录加载完成后才启动恢复调度；
+- 会话归档 / 删除同步清理事件日志与唤醒预算，且进程退出前等待删除队列完成。
+
+**验收**：重启后 pending 事件继续投递、损坏日志隔离不拖慢启动、归档会话拒绝迟到事件、淘汰后重启不复活。
+
+### 阶段 3 · lease 与双消费者
+
+- 投递给模型前标 `leased`，provider 成功完成后才 `handled`；取消、传输失败、崩溃回 `pending`；
+- 「模型已处理」与「用户仍需处理」拆成两条状态轴——模型读过一封邮件不等于替用户回了；
+- 单一所有权：多客户端 / 多窗口共享唤醒额度，只有会话 owner 能拉起模型，其他连接不能提前 ACK 或释放 lease。
+
+**验收**：崩溃恢复 lease 回 pending、跨连接 lease 隔离、模型处理不清除用户待办。
+
+### 阶段 4 · 信任与正文净化
+
+- `authority` 与 `content_provenance` 两条独立轴落到类型上（不要做成一个枚举）；
+- 外部正文限长 24,000 字符、32 个 metadata 项，净化模型控制标记，转义 rs 自己的 prompt frame 标记；
+- 外部正文以**宿主指令来源的用户消息**承载，绝不进 system prompt（Xedit 1.317.0-rc2 专门修过这条）；
+- 正文只作为数据，不授予任何工具权限、不绕过审批。
+
+**验收**：frame 注入防护、伪造 critical 的外部事件被降级、Worker 报告按不可信正文处理的用例。
+
+### 阶段 5 · 外部事件入站
+
+**范围已定（2026-09-03 rocky 拍板）：只做本机入站，云端中继留给桌面端。** rs 不连 `collab-relay.v2`，不实现 poll / ACK / 退避 / 中继统计，也不承接飞书、钉钉、邮件这类平台事件。那条路仍归 Xedit 加 Go relay。
+
+本机入站只有三个来源，共用同一个受限入口：
+
+- 已认证的本机 daemon 端点（持 Runtime Token，走现有控制面鉴权）；
+- hooks 与本机脚本注入（`crates/willdeep-core/src/hooks.rs` 已有落点）；
+- rs 自己产生的定时任务触发，如果阶段 6 之后要做。
+
+规则：
+
+- 入站正文一律按 `network` 或 `tool` 来源处理，持 Runtime Token 不提升正文信任，只提升调度权限；
+- 唤醒额度：已认证外部事件每会话 5 分钟 6 次，且**首次到达、启动恢复、provider slot 释放、turn 收尾走同一个额度出口**（Xedit 1.315.0-rc16 就是在补这条旁路）；只有真正启动新 provider turn 才记账；
+- 未认证来源永不自动唤醒；每会话最多 20 条外部待用户提醒；
+- 额度耗尽时安排一次去重的到期重试，不让事件无限搁置。
+
+留给未来的口子：信封本身保留 relay 相关字段的位置，将来若接云端中继不必改 schema 版本，但 rs 侧不实现对应路径。
+
+**验收**：Token 缺失即拒绝入站、同一去重键重投只投递一次、额度耗尽后重试去重、正文信任不随 Token 提升。
+
+### 阶段 6 · CLI / TUI 事件中心
+
+- TUI 在 Inbox 之外增加事件视图：来源、优先级、相对时间、合并次数、处理人、最终状态（投递中 / 模型已处理 / 用户已忽略 / 会话内已解决）；
+- 审批类事件**只投影**，原审批卡片仍是唯一决策源，关掉事件行不能伪造批准；
+- 待用户提醒计数按**逐请求**统计，多请求不缩水成 1；
+- 新增 `willdeep event list|show|ignore` 子命令。
+
+**验收**：审批投影不重复计数、事件行忽略不改变审批状态、TUI 快照测试。
+
+### 阶段 7 · 控制面与互操作
+
+- `kernel.list` / `kernel.get` / `kernel.ignore` 加入 [RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)，并进 `public-api-v1.json` fixture；
+- 脱敏口径按 §7 现有规则：正文默认不进公共 DTO，最多给一个与 `prompt_excerpt` 同规则的打码摘要；
+- 更新 `docs/XEDIT_INTEROP_STATUS.md`，标注两端 schema 版本与兼容窗口。
+
+**验收**：fixture 契约测试通过、Swift 解码器对新字段容忍缺失。
+
+### 并行任务（不依赖内核，可先做）
+
+| 任务 | 内容 | 参照 |
+| --- | --- | --- |
+| ~~P1 上下文预算档位对齐~~ ✅ 0.56.0-rc1 | 见下方更正 | Xedit 1.315.0-rc8 |
+| P2 档位语义对齐 | 进阶档明确为「1M 上下文」而非只放宽预算；专家档为「更聪明」。注意 0.52.0-rc1 的教训：只有测试引用的常量表等于文档不是代码，改完 grep 非 `cfg(test)` 调用点 | [worker-tier 记忆] |
+| P3 `generalist` 工具面 | 补 MCP 动态网关三件套、受限终端四工具、可选精确写文件范围；含糊请求兜底到 `generalist` 而非返回空 profile | Xedit 1.315.0-rc11 / rc12 |
+| P4 后台 Worker 并发 5 | 上限 3 → 5；带精确写文件集合的 Worker 仍前台锁定，不用扩容换文件冲突 | Xedit 1.315.0-rc13 |
+| P5 后台 Worker 继承父上下文 | 可见终端、精确批准命令、附加工作区、验证命令、复核回调；回调按 runtime ID 弱引用重解析，不强持已结束会话 | Xedit 1.317.0-rc2 |
+
+**P1 的更正（本文初版写错了，留档）**：初版说 rs「只有 128K / 256K 两档，要扩到四档」。那是照着 `TIER_WINDOW_STANDARD` / `TIER_WINDOW_EXTENDED` 两个常量下的判断，而**可选档位根本不在那里**——TUI 面板自带一份 `CONTEXT_WINDOWS` 字面量，本来就有六档。真正的问题不是数量而是口径：
+
+- 面板最大档写的是十进制 `1_000_000`，Xedit 的「1M」是 `1_048_576`。同一个标签在两个 App 里是两个数，而它最终进同一份 `config.toml`；
+- 配置校验的上界也是 `1_000_000`，正好和旧面板擦边通过。把面板对齐到 2^20 之后若不同时抬上界，用户选完 1M 保存就撞 `must be between`。这条现在有测试钉着（`every_selectable_window_is_storable`）；
+- 标签函数用 `value >= 1_000_000` 判 M、其余一律除 1024，于是 `config.toml` 里钉的 400000 会显示成「390K」，界面和实际预算对不上。
+
+落地方式是把档位表和标签规则提到 `willdeep_core::worker_tier`，TUI 与配置校验都从那里取。32K / 48K 两档保留为 rs 独有，理由写在常量注释里：Skill Worker 的小上下文纪律要求有界任务钉在 32K，而 Xedit 面板服务的不是同一批工种。**共享的是每一档的数值口径，不是档位数量。**
+
+---
+
+## 4. 明确不做的事
+
+- 不把内核事件当权限中心：授权路径一律保持现状；
+- 不因为宿主转发就提升正文信任；
+- 不做云端中继：rs 不实现 relay 服务端，也不做 `collab-relay.v2` 的客户端，平台消息与邮件类事件归桌面端；
+- 不改动 `spawn_agent` 的 profile 准入语义：准入跟档位走，不跟工种名走（0.51 踩过）；
+- 不给 `someim-32b-compressor` / `someim-32b-security-guard` 做工种归一化，它们不是工种别名。
+
+## 5. 风险登记
+
+1. **双 lane 状态被做成一条**：模型消费与用户待办合并会导致「模型读过就算办过」，Xedit 修过一次。类型上就要分开。
+2. **额度旁路**：任何一条新的「启动模型」路径都必须经过同一个唤醒策略函数，否则限流形同虚设。
+3. **命名撞车**：与现有 `event.*` 控制面操作混读会毒害协议演进。
+4. **契约只有测试引用**：档位模型表、事件枚举表若无运行时调用点，就是文档不是代码。
+5. **跳过的端到端测试**：写了跳过分支就必须另行验证它没在静默跳过（互操作记忆里的老账）。
+
+## 6. 版本与交付纪律
+
+按仓库规范：每个阶段合入时同步 `CHANGELOG.md` 与版本号，功能新增提 MINOR 并把 rc 重置为 rc1，bugfix 只递增 rc。涉及协议字段的阶段（0、7）必须同时更新 `public-api-v1.json` fixture 与 `docs/XEDIT_INTEROP_STATUS.md`。

@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://willdeep.dev/schemas/agent-kernel-event.v1.schema.json",
+  "title": "WillDeep agent kernel event v1",
+  "description": "宿主 Runtime 投递给主 Agent 的统一事件信封。canonical 在 willdeep-rs，Xedit 为 mirror。两侧各有一个守卫测试对着本文件断言：改了代码没改契约（或反过来）就红。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "session_id",
+    "source",
+    "kind",
+    "priority",
+    "interrupt",
+    "authority",
+    "content_provenance",
+    "audience",
+    "requires_user_action",
+    "title",
+    "created_at",
+    "delivery"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "willdeep.agent-kernel-event.v1"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "事件的目标会话。事件永远属于某一个会话，没有全局收件箱——跨会话投递是 Xedit 修过的一类串台故障。"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_.]*$",
+      "description": "来源内部的细分类型，例如 worker.completed、terminal.exited。调度不看它，只有展示和去重看。"
+    },
+    "priority": {
+      "$ref": "#/$defs/priority"
+    },
+    "interrupt": {
+      "$ref": "#/$defs/interrupt"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority",
+      "description": "决定能不能唤醒或抢占。与 content_provenance 是两条独立的轴。"
+    },
+    "content_provenance": {
+      "$ref": "#/$defs/provenance",
+      "description": "正文从哪来。宿主代为转发不提升正文信任：Worker 报告仍是 model，终端输出仍是 tool。"
+    },
+    "audience": {
+      "$ref": "#/$defs/audience"
+    },
+    "dedup_key": {
+      "type": ["string", "null"],
+      "maxLength": 200,
+      "description": "同键事件在合并窗口内合并，并作为重投幂等键。外部来源没有稳定 ID 时只在窗口内合并，不做永久去重——否则同标题的后续消息会被永久吞掉。"
+    },
+    "requires_user_action": {
+      "type": "boolean",
+      "description": "是否要人来处理。与 delivery.state 是两条独立状态轴：模型读过一封邮件不等于替用户回了。"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "body": {
+      "type": ["string", "null"],
+      "maxLength": 24000
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      },
+      "default": {}
+    },
+    "merge_count": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "本条信封合并掉的同键事件数，含自己。"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "delivery": {
+      "$ref": "#/$defs/delivery"
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "string",
+      "enum": [
+        "worker",
+        "terminal",
+        "task",
+        "workflow",
+        "approval",
+        "schedule",
+        "file",
+        "external",
+        "host"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "urgent", "normal", "background"],
+      "description": "投递给模型时按加权公平顺序取用：持续的高优先级流量不得永久饿死 normal 与 background。"
+    },
+    "interrupt": {
+      "type": "string",
+      "enum": ["enqueue", "yield_at_boundary", "preempt"],
+      "description": "enqueue 只入队等下一轮；yield_at_boundary 在模型或工具步骤边界投递，会话空闲时立即唤醒；preempt 取消当前 provider 步骤并保留 transcript。"
+    },
+    "authority": {
+      "type": "string",
+      "enum": ["host", "trusted_local", "authenticated_external", "untrusted"],
+      "description": "host 由宿主自己签发；trusted_local 是本机已认证调用方（持 Runtime Token 的 daemon 端点、hooks）；authenticated_external 只证明传输通道获准；untrusted 是其余一切。"
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["host", "model", "tool", "file", "network"]
+    },
+    "audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "user"],
+      "properties": {
+        "model": { "type": "boolean" },
+        "user": { "type": "boolean" }
+      },
+      "description": "两个消费者互相独立。审批类事件只投影给用户侧，原审批对象仍是唯一决策源。"
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["pending", "leased", "handled", "ignored", "resolved"],
+          "description": "leased 表示已交给某个 provider 请求但尚未确认；进程中途退出后必须回到 pending，绝不能停在 leased。"
+        },
+        "lease_id": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
+        "leased_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "handled_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "x-authority-interrupt-ceiling": {
+    "description": "每一档 authority 允许的最强中断策略。低于 host 的来源即使自称 preempt 也强制降级——传输认证只证明通道获准，不证明正文可信。",
+    "host": "preempt",
+    "trusted_local": "yield_at_boundary",
+    "authenticated_external": "yield_at_boundary",
+    "untrusted": "enqueue"
+  },
+  "x-auto-wake": {
+    "description": "哪一档 authority 允许主动拉起一个空闲会话的新 provider 轮次。未认证来源永不自动唤醒，只排队。",
+    "host": true,
+    "trusted_local": true,
+    "authenticated_external": true,
+    "untrusted": false
+  },
+  "x-limits": {
+    "description": "两端必须一致的硬上限。改这里等于改双端行为。",
+    "max_events_per_session": 200,
+    "max_events_global": 1000,
+    "merge_window_seconds": 5,
+    "max_title_chars": 200,
+    "max_body_chars": 24000,
+    "max_metadata_entries": 32,
+    "max_metadata_value_chars": 1024,
+    "external_wake_events": 6,
+    "external_wake_window_seconds": 300,
+    "max_external_user_alerts_per_session": 20
+  },
+  "x-scope": {
+    "description": "rs 与 Xedit 共享信封与判定规则，不共享传输。",
+    "willdeep-rs": "只做本机入站：持 Runtime Token 的 daemon 端点、hooks、本机定时任务。不实现 collab-relay.v2 的服务端或客户端。",
+    "xedit": "本机信号之外，另接 Go relay 的 collab-relay.v2，承接 Webhook、平台消息与邮件。"
+  }
+}
