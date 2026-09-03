@@ -3212,8 +3212,9 @@ mod tests {
             failure_domain: None,
         };
         let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.runtime_event_cursor = 100;
 
-        app.observe_runtime_tasks(std::slice::from_ref(&task), current_session);
+        assert!(!app.observe_runtime_tasks(std::slice::from_ref(&task), current_session, Some(100)));
 
         assert!(app.running);
         assert!(app.runtime_turn);
@@ -3221,11 +3222,84 @@ mod tests {
         assert!(app.activity_line.contains("重新连接 Runtime"));
 
         let mut other_session_app = App::new(Vec::new(), Language::ZhCn);
-        other_session_app.observe_runtime_tasks(&[task], uuid::Uuid::new_v4());
+        other_session_app.observe_runtime_tasks(&[task], uuid::Uuid::new_v4(), Some(100));
         assert!(
             !other_session_app.running,
             "another session's task must not mark this chat as busy"
         );
+    }
+
+    fn running_remote_task(session: uuid::Uuid) -> crate::daemon::tui_bridge::RemoteTask {
+        crate::daemon::tui_bridge::RemoteTask {
+            id: uuid::Uuid::new_v4(),
+            session_id: Some(session),
+            turn_id: Some(uuid::Uuid::new_v4()),
+            agent_id: Some(uuid::Uuid::new_v4()),
+            status: willdeep_runtime_protocol::TaskStatus::Running,
+            profile: None,
+            created_at: unix_now(),
+            started_at: Some(unix_now()),
+            completed_at: None,
+            exit_code: None,
+            failure_domain: None,
+        }
+    }
+
+    /// 快照在任务还在跑时拍下，却在 `turn.completed` 复位界面之后才送到：
+    /// 它的序号落后于本地事件游标，不能凭它再开一个永远结束不了的轮次。
+    #[test]
+    fn stale_runtime_snapshot_does_not_start_a_phantom_turn() {
+        let session = uuid::Uuid::new_v4();
+        let task = running_remote_task(session);
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.runtime_event_cursor = 4783;
+
+        assert!(!app.observe_runtime_tasks(std::slice::from_ref(&task), session, Some(4781)));
+        assert!(!app.running, "a snapshot older than the consumed events must not mark the chat busy");
+
+        // Runtime 不可达的空序号同样不算数。
+        assert!(!app.observe_runtime_tasks(std::slice::from_ref(&task), session, None));
+        assert!(!app.running);
+
+        // 序号追平游标的快照才有资格恢复忙碌状态。
+        assert!(!app.observe_runtime_tasks(std::slice::from_ref(&task), session, Some(4783)));
+        assert!(app.running);
+    }
+
+    /// 界面显示 Runtime 轮次在跑，新鲜快照却连续几份都没有本会话的活动任务：
+    /// 攒够次数就该去向 Runtime 求证；中途只要见到任务或者拿到旧快照，计数归零。
+    #[test]
+    fn repeated_fresh_snapshots_without_tasks_flag_a_stale_runtime_turn() {
+        let session = uuid::Uuid::new_v4();
+        let mut app = App::new(Vec::new(), Language::ZhCn);
+        app.runtime_event_cursor = 10;
+        app.ensure_runtime_turn();
+        assert!(app.running && app.runtime_turn);
+
+        for _ in 1..STALE_RUNTIME_TURN_SNAPSHOTS {
+            assert!(!app.observe_runtime_tasks(&[], session, Some(10)));
+        }
+        // 旧快照和不可达快照都不推进计数。
+        assert!(!app.observe_runtime_tasks(&[], session, Some(9)));
+        assert!(!app.observe_runtime_tasks(&[], session, None));
+        assert!(
+            app.observe_runtime_tasks(&[], session, Some(11)),
+            "enough fresh empty snapshots must ask the Runtime to confirm"
+        );
+        assert!(app.running, "flagging alone must not reset the turn; the Runtime confirms first");
+
+        // 看到活动任务就重新计数。
+        let task = running_remote_task(session);
+        assert!(!app.observe_runtime_tasks(std::slice::from_ref(&task), session, Some(12)));
+        assert_eq!(app.stale_runtime_turn_snapshots, 0);
+        assert!(!app.observe_runtime_tasks(&[], session, Some(12)));
+
+        // 本地轮次不归 Runtime 管，快照里没任务是正常的。
+        let mut local = App::new(Vec::new(), Language::ZhCn);
+        local.begin_turn(false, String::new());
+        for _ in 0..(STALE_RUNTIME_TURN_SNAPSHOTS + 1) {
+            assert!(!local.observe_runtime_tasks(&[], session, Some(1)));
+        }
     }
 
     #[test]

@@ -2203,6 +2203,7 @@ mod tests {
             tools: Vec::new(),
             artifacts: Vec::new(),
             runtime_version: None,
+            event_sequence: None,
         };
         assert!(snapshot_has_approval(&snapshot, approval_id));
         assert!(snapshot_has_question(&snapshot, question_id));

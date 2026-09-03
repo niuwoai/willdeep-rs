@@ -83,6 +83,32 @@ pub(super) async fn submit_turn(
     Ok(())
 }
 
+/// 快照连续几次都说本会话没有活动任务，而界面还显示 Runtime 轮次在跑：去问
+/// Runtime 一句，没有在途轮次就把残留的「工作中」复位——和 Esc 走的是同一个判据，
+/// 只是不用人去按。Runtime 说有，或者根本问不到，都按兵不动：宁可多等一秒，
+/// 也不复位一条真在跑的轮次。
+pub(super) async fn reconcile_stale_runtime_turn(
+    app: &mut App,
+    session: &Session,
+    runtime: &TuiRuntime,
+) {
+    match crate::daemon::remote_active_turn(&runtime.home, session.id).await {
+        Ok(None) => {
+            app.finish_turn();
+            app.append_transcript(format!(
+                "System: {}",
+                app.language.text(
+                    "Runtime 已无在途轮次，界面上残留的「工作中」已复位；排队的提示词继续发送",
+                    "Runtime has no active turn; the stale busy state was reset and queued prompts continue",
+                    "Runtime に進行中のターンはありません。残っていた実行中表示を戻し、キューのプロンプトを続行します",
+                )
+            ));
+        }
+        Ok(Some(_)) => app.stale_runtime_turn_snapshots = 0,
+        Err(_) => {}
+    }
+}
+
 /// Runtime 的 `session.create { id: Some(..) }` 是领养，不是凭空创建：对应 Core
 /// Session 必须先存在。空白 TUI 会话为了不污染历史列表而有意不在启动时落盘，所以
 /// 第一次真正提交恰好是补写它的最晚安全时机。
