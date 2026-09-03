@@ -35,7 +35,7 @@
 
 | 公开 Profile（职责） | 用途 | 默认工具 | 默认窗口 |
 |---|---|---|---:|
-| `generalist` | 跨文件与仓库状态的调查 | search / grep / read / list / git status / reviewed shell | 128K |
+| `generalist` | 跨文件与仓库状态的调查，以及没有更窄工种可选时的兜底 | search / grep / read / list / git status / reviewed shell / MCP 网关 /（带写集合时）create / edit | 128K |
 | `implementer` | 有界多文件功能、重构和新文件实现 | search / grep / list / read / create / edit / reviewed shell | 256K |
 | `tester` | 测试与行为审核，不改源码 | search / grep / read / git / reviewed shell | 64K |
 | `reviewer` | 独立正确性与安全边界审核 | search / grep / read / git diff，无 Shell | 48K |
@@ -48,6 +48,19 @@
 | `expert` | 会话窗口 | `gpt-5.6-sol` | **升级票据 + 每 Harness 预算** |
 
 档位只放宽预算、不收窄：`implementer` 的 256K 不会因为跑在基础档上被砍掉。
+
+三档换的是不同的东西，别只当成价格表：**基础档是日常干活的主力**（`someim-32b`、`qwen3.8-27b` 这一级，可私有化部署），**进阶档换的是上下文**（背后是 1M 窗口的模型，预算给 256K 是成本控制而不是能力上限），**专家档换的是智力**（`gpt-5.6-sol` / `opus-5` 这一级，因此要票据）。
+
+### 兜底工种的写权限与 MCP
+
+`generalist` 是路由判不出工种时的落点，所以它比别的调查工种多两样东西，但都带着门：
+
+- **写工具只在带了已批准写集合的那一次出现。** 没声明写范围时 `create_file` / `edit_file` 直接不进它的工具面——不是先给上再靠审批拦。给一个没有写集合的 Worker 注册写工具，等于把整个工作区交给它（写目标为空的语义是「不限制写到哪」，那是主 Agent 的用法）。
+- **MCP 是动态网关，不是免审批通道。** 它可以 `list_mcp_tools` 按需检索、`call_mcp_tool` 调用，外部副作用仍走审批；窄工种拿不到 MCP，因为窄工种的价值就在于范围窄。
+
+后台 Worker 与父会话**共享已批准的精确动作**（`~/.willdeep/always-allow.json`）。共享的是精确项不是命令族：父会话批过 `cargo test` 才等于 Worker 也能跑 `cargo test`，不等于它能跑任意 `cargo`。没有这条，一个后台 Worker 会在人刚刚批过的同一条命令上再卡一次，而它自己没有审批 UI，只能失败回来。
+
+一个会话最多同时挂 **5** 个后台 Worker（与 macOS 版一致）。这个数不管文件冲突：两个 Worker 同时写一个文件由逐路径认领挡下，写不同文件的两个 Worker 可以并行。
 
 ### 换掉某一档的模型
 

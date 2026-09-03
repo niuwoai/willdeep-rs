@@ -4,6 +4,9 @@ pub mod background;
 pub mod goal;
 pub mod hooks;
 pub mod judge;
+pub mod kernel;
+pub mod kernel_ingress;
+pub mod kernel_store;
 /// 实弹靶场：真 Provider、真缺陷、真退出码。仅测试构建，默认 `#[ignore]`。
 #[cfg(test)]
 mod livefire;
@@ -40,6 +43,7 @@ pub use goal::{
     RoundObservation, SoftStopReason,
 };
 pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
+pub use kernel::{DedupPolicy, EventKernel, LeasedEvent, PublishOutcome, host_event};
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use plugin::{
     ApprovalGap, CommandOutcome, DeclarativeDocument, HostError as PluginHostError, PluginHost,
@@ -61,7 +65,10 @@ pub use tools::{
     VerificationStatus, WebToolConfig, run_background_supervisor,
 };
 pub use types::{Message, MessageAttachment, Role, ToolCall};
-pub use worker_tier::{WorkerTier, hosts_job_prompt, normalize_hosted_model};
+pub use worker_tier::{
+    CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, SELECTABLE_CONTEXT_WINDOWS, WorkerTier,
+    context_window_label, hosts_job_prompt, normalize_hosted_model,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

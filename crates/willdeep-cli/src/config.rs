@@ -466,12 +466,18 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             bail!("unknown subagent profile: {name}");
         }
         // 4K is below any usable worker budget once the system prompt and
-        // tool schemas are paid for; past 1M nothing real is being described.
-        if subagent
-            .context_window
-            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
-        {
-            bail!("subagents.{name}.context_window must be between 4000 and 1000000");
+        // tool schemas are paid for; past the 1M ceiling nothing real is being
+        // described. The ceiling is 2^20, matching the largest budget the
+        // settings panel offers — a value the panel can pick must be storable.
+        if subagent.context_window.is_some_and(|value| {
+            !(willdeep_core::CONTEXT_WINDOW_MIN..=willdeep_core::CONTEXT_WINDOW_MAX)
+                .contains(&value)
+        }) {
+            bail!(
+                "subagents.{name}.context_window must be between {} and {}",
+                willdeep_core::CONTEXT_WINDOW_MIN,
+                willdeep_core::CONTEXT_WINDOW_MAX
+            );
         }
         if subagent
             .max_attempts
@@ -538,11 +544,15 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         if tier.model.as_deref().is_some_and(|value| value.is_empty()) {
             bail!("worker_tiers.{name}.model cannot be empty");
         }
-        if tier
-            .context_window
-            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
-        {
-            bail!("worker_tiers.{name}.context_window must be between 4000 and 1000000");
+        if tier.context_window.is_some_and(|value| {
+            !(willdeep_core::CONTEXT_WINDOW_MIN..=willdeep_core::CONTEXT_WINDOW_MAX)
+                .contains(&value)
+        }) {
+            bail!(
+                "worker_tiers.{name}.context_window must be between {} and {}",
+                willdeep_core::CONTEXT_WINDOW_MIN,
+                willdeep_core::CONTEXT_WINDOW_MAX
+            );
         }
         if let Some(provider) = &tier.provider_profile
             && !file.providers.contains_key(provider)

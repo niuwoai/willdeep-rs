@@ -312,6 +312,7 @@ async fn authorization_requires_exact_local_token() {
         }),
         tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
         work_gate: Arc::new(RwLock::new(false)),
+        kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
     });
     assert!(
         runtime_capabilities(&state)

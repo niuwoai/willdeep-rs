@@ -17,6 +17,7 @@ mod config;
 mod daemon;
 mod doctor;
 mod editor;
+mod event_cmd;
 mod harness;
 mod i18n;
 mod integrations;
@@ -212,6 +213,11 @@ enum CliCommand {
     Integrations {
         #[command(subcommand)]
         action: integrations::IntegrationAction,
+    },
+    /// Inspect the runtime event kernel: what arrived, what still needs you.
+    Event {
+        #[command(subcommand)]
+        action: event_cmd::EventAction,
     },
     /// Install, approve and enable plugins shared with the macOS app.
     Plugin {
@@ -462,6 +468,7 @@ async fn run() -> Result<()> {
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
+            CliCommand::Event { action } => event_cmd::run(action, &willdeep_home()?),
             CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
             CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {
@@ -690,6 +697,8 @@ async fn run() -> Result<()> {
             home,
             skills,
             relay_bridge,
+            built.kernel.clone(),
+            built.kernel_store.clone(),
             (
                 tui_tx,
                 tui_rx,
@@ -1351,6 +1360,9 @@ impl EventSink for TerminalSink {
                 auto_dispatched
             ),
             AgentEvent::TurnStarted { turn } if turn > 1 => eprintln!("[turn {turn}]"),
+            AgentEvent::TurnPreempted { turn } => {
+                eprintln!("[turn {turn}] preempted by a runtime event")
+            }
             AgentEvent::ToolRequested(call) => eprintln!("[tool] {}", call.name),
             AgentEvent::ToolCompleted {
                 call,
@@ -1472,6 +1484,9 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         }),
         AgentEvent::TurnStarted { turn } => {
             serde_json::json!({"type": "turn_started", "turn": turn})
+        }
+        AgentEvent::TurnPreempted { turn } => {
+            serde_json::json!({"type": "turn_preempted", "turn": turn})
         }
         AgentEvent::AssistantText(text) => {
             serde_json::json!({"type": "assistant_text", "text": text})

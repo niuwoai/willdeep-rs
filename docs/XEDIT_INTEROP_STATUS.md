@@ -71,6 +71,11 @@ Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定�
   要写明理由，而不是让它自然漂移"。
 - canonical 文档跨仓分工：`MODEL_TIERS.md` 在 rs；`GOAL_TEAMS_ROLES_DESIGN.md`
   与 `LONG_HORIZON_AUTONOMY.md` 在 Xedit，rs 侧为引用与落地映射。
+- **内核事件信封 `agent-kernel-event.v1`：canonical 在 rs**（2026-09-03 定，
+  Xedit 为 mirror）。内核语义本身由 Xedit 1.315.0-rc15 首发实现，但字段契约
+  文本归 rs，移植计划见 [AGENT_RUNTIME_KERNEL.md](AGENT_RUNTIME_KERNEL.md)。
+  分工边界：外部事件的**云端中继归 Xedit 加 Go relay**，rs 只做本机入站
+  （daemon 端点、hooks、本机定时任务），因此 `collab-relay.v2` 不是双端共享面。
 - 指标与纪律双向回流：Xedit 的 Citation Audit、实弹靶场自 rs 回流；rs 的
   安全分类器、审批语义自 Xedit 移植。
 
@@ -113,6 +118,12 @@ Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工
 （打码 + 120 字符截断的提示词摘要，任务标识用），`public-api-v1.json` fixture
 已带上。字段可空，Swift 解码器未同步也不会断（未知键忽略、Optional 缺省
 nil）；Xedit 下次同步 fixture 时在 `WillDeepRuntimeProtocol.swift` 补上即可。
+
+**契约演进备忘（rs 0.62.0-rc1）**：新增 `kernel.list` / `kernel.get` /
+`kernel.ignore` 三个操作与 `PublicKernelEvent` 投影，`public-api-v1.json`
+fixture 已带上。**事件正文不进公共 DTO**，只有打码截断的标题摘要。Swift 侧
+未同步不会断（新操作不调用即可），但要注意命名：Xedit 那边的内核事件与
+rs 控制面既有的 `event.*` 是两个方向，接的时候别把它们混成一个流。
 
 ## 网关实况（2026-08-21 逐档实弹探活）
 

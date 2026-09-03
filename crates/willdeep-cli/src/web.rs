@@ -143,6 +143,71 @@ struct RuntimeActivityQuery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RuntimeEventsQuery {
+    /// 只看这个会话的事件。Web 一次只展示当前会话——跨会话列表在浏览器上没有
+    /// 归属可校验，那正是白名单要挡住的东西。
+    session: uuid::Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IgnoreRuntimeEventBody {
+    session: uuid::Uuid,
+}
+
+/// 浏览器能看到的事件字段。
+///
+/// **正文不在里面**，标题也只是打码截断过的摘要。这是独立于
+/// `PublicKernelEvent` 的第二层白名单：协议那边加字段不会自动流到浏览器。
+#[derive(Serialize)]
+struct WebKernelEvent {
+    id: uuid::Uuid,
+    source: String,
+    kind: String,
+    priority: String,
+    title_excerpt: Option<String>,
+    requires_user_action: bool,
+    merge_count: u32,
+    created_at: String,
+    delivery_state: String,
+}
+
+fn web_kernel_event(event: &willdeep_runtime_protocol::KernelEvent) -> WebKernelEvent {
+    let public = event.to_public(willdeep_core::judge::redact_credentials);
+    WebKernelEvent {
+        id: public.id,
+        source: format!("{:?}", public.source).to_lowercase(),
+        kind: public.kind,
+        priority: format!("{:?}", public.priority).to_lowercase(),
+        title_excerpt: public.title_excerpt,
+        requires_user_action: public.requires_user_action,
+        merge_count: public.merge_count,
+        created_at: public.created_at,
+        delivery_state: format!("{:?}", public.delivery_state).to_lowercase(),
+    }
+}
+
+/// 会话必须属于白名单里的工作区，否则一律拒绝。
+///
+/// 与会话详情同一条门：浏览器端没有应用层鉴权，能看到什么完全由这份白名单
+/// 决定，事件不该是例外。
+async fn authorized_event_session(
+    state: &Arc<WebState>,
+    session_id: uuid::Uuid,
+) -> Result<(), WebError> {
+    let session = SessionStore::new(&state.home)
+        .load(session_id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !workspace_allowed(state, &session.workspace).await? {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WebWorkspaceAction {
     workspace: String,
 }
@@ -305,6 +370,11 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/turns/{id}/stop", post(stop_turn))
         .route("/api/workspaces", get(workspaces).post(add_workspace))
         .route("/api/runtime/activity", get(runtime_activity))
+        .route("/api/runtime/events", get(runtime_events))
+        .route(
+            "/api/runtime/events/{id}/ignore",
+            post(ignore_runtime_event),
+        )
         .route(
             "/api/runtime/approvals/{id}/resolve",
             post(resolve_runtime_approval),
@@ -536,6 +606,51 @@ fn shellexpand_home(value: &str) -> String {
         Some(home) => format!("{}{rest}", home.to_string_lossy()),
         None => value.to_owned(),
     }
+}
+
+/// 当前会话的运行时事件，最新在前。
+///
+/// 读事件日志而不是某个进程的内存：跑 Agent 的可能是 daemon，也可能是别的
+/// 前端，日志是它们之间唯一的共享事实。代价是最多落后一次刷盘。
+async fn runtime_events(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RuntimeEventsQuery>,
+) -> Result<Json<Vec<WebKernelEvent>>, WebError> {
+    authorized_event_session(&state, query.session).await?;
+    let store = willdeep_core::kernel_store::KernelStore::new(&state.home);
+    let mut events = store
+        .load_session(query.session)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::msg(error)))?;
+    events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    events.truncate(50);
+    Ok(Json(events.iter().map(web_kernel_event).collect()))
+}
+
+/// 把一条事件的**用户侧**标记掉。
+///
+/// 它不批准任何操作：审批仍然要在原来的审批卡片上回答。这里只是把「还等着
+/// 人」这个标记摘掉，事件本身留在日志里。
+async fn ignore_runtime_event(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<IgnoreRuntimeEventBody>,
+) -> Result<StatusCode, WebError> {
+    authorized_event_session(&state, body.session).await?;
+    let store = willdeep_core::kernel_store::KernelStore::new(&state.home);
+    let mut events = store
+        .load_session(body.session)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::msg(error)))?;
+    let Some(event) = events.iter_mut().find(|event| event.event_id == id) else {
+        return Err(WebError::not_found(
+            "Runtime event not found in this session",
+        ));
+    };
+    event.delivery.state = willdeep_runtime_protocol::DeliveryState::Ignored;
+    event.requires_user_action = false;
+    store
+        .save_session(body.session, &events)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::new(error)))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn runtime_activity(
@@ -1778,6 +1893,36 @@ mod tests {
         assert_eq!(shellexpand_home("$HOME/app"), "$HOME/app");
         assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
         assert_eq!(shellexpand_home("relative/path"), "relative/path");
+    }
+
+    /// 浏览器拿到的事件里不能有正文，标题也要打码截断。
+    ///
+    /// 这是第二层白名单：协议那边的 `PublicKernelEvent` 已经不带 body，但 Web
+    /// 仍然自己投影一次，好让协议将来加字段时不会自动流到浏览器。
+    #[test]
+    fn the_browser_projection_carries_no_event_body() {
+        let mut event = willdeep_core::kernel::host_event(
+            uuid::Uuid::nil(),
+            willdeep_runtime_protocol::EventSource::External,
+            "external.notice",
+            willdeep_runtime_protocol::EventPriority::Normal,
+            willdeep_core::kernel::InterruptPolicy::YieldAtBoundary,
+            "deploy failed: sk-abcdefghijklmnop0123",
+            Some("full log tail with secrets".to_owned()),
+            None,
+            true,
+        );
+        event.merge_count = 3;
+        let projected = web_kernel_event(&event);
+        let encoded = serde_json::to_string(&projected).expect("serialize");
+        assert!(!encoded.contains("full log tail"), "正文不进浏览器");
+        // 打码走的是命令审批那一套规则（`redact_credentials`），所以样例得是
+        // 它真的认得的形状：一个够长的 `sk-` 前缀密钥。
+        assert!(!encoded.contains("sk-abcdefghijklmnop0123"), "凭据要打码");
+        assert_eq!(projected.merge_count, 3);
+        assert!(projected.requires_user_action);
+        assert_eq!(projected.source, "external");
+        assert_eq!(projected.delivery_state, "pending");
     }
 
     fn workspace(path: &str, active: bool) -> crate::daemon::RuntimeWorkspace {

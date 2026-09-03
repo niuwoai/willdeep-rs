@@ -96,11 +96,34 @@ pub enum SubagentWriteScope {
     SingleFile,
     /// The set of files declared in the task packet, approved as one set.
     FileSet,
+    /// 声明了写文件集就能写，没声明就是只读。
+    ///
+    /// 给兜底通用工种用：一次含糊的请求可能只是查东西，也可能顺手要改一处，
+    /// 事先分不出来。**没声明就没有写工具**——工具面按实际范围裁剪，不是先
+    /// 给上再靠审批拦，否则「工具变多」就悄悄变成了「权限变大」。
+    OptionalFileSet,
 }
 
 impl SubagentWriteScope {
+    /// 这个工种**有可能**写。用于资格判断，不代表这一次真的能写。
     pub fn writes(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// 派工时必须带上已批准的写文件集，否则拒绝派发。
+    ///
+    /// 可选写范围不在此列：它没带就是只读，那是正常用法，不是配置错误。
+    pub fn requires_declared_targets(self) -> bool {
+        matches!(self, Self::SingleFile | Self::FileSet)
+    }
+
+    /// 给定这次派工是否带了已批准的目标，这一次到底能不能写。
+    pub fn writes_this_run(self, has_targets: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::SingleFile | Self::FileSet => true,
+            Self::OptionalFileSet => has_targets,
+        }
     }
 }
 
@@ -237,7 +260,9 @@ impl SpawnAgentArgs {
         match scope {
             SubagentWriteScope::None => Vec::new(),
             SubagentWriteScope::SingleFile => self.target_file.clone().into_iter().collect(),
-            SubagentWriteScope::FileSet => {
+            // 可选写范围与文件集走同一条：**没写就是没写**，返回空表，上游据此
+            // 把写工具摘掉。不要在这里给它补一个默认目标。
+            SubagentWriteScope::FileSet | SubagentWriteScope::OptionalFileSet => {
                 let mut files = self
                     .task
                     .as_ref()

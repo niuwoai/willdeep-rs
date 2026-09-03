@@ -60,7 +60,7 @@ use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
-use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt, dispatch_retitle};
+use dispatch::{dispatch_compress, dispatch_prompt, dispatch_retitle, wake_for_kernel_events};
 use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
@@ -221,6 +221,8 @@ struct App {
     background_tasks: Vec<BackgroundTaskSnapshot>,
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
+    /// 事件内核里仍待用户处理的那些，投影到 Inbox。只显示，不决策。
+    kernel_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     /// Version of the Runtime that actually executes tools, when one is
     /// reachable. `None` means no Runtime (everything runs in-process).
@@ -241,7 +243,6 @@ struct App {
     worktree_review: Option<crate::daemon::WorktreeReview>,
     diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
-    background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
     language: Language,
@@ -441,6 +442,7 @@ struct AskDialog {
     sender: oneshot::Sender<Option<String>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     agent: Arc<Agent>,
     mut session: Session,
@@ -448,6 +450,8 @@ pub async fn run(
     home: PathBuf,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
+    kernel: willdeep_core::EventKernel,
+    kernel_store: willdeep_core::kernel_store::KernelStore,
     ui: TuiRuntimeInputs,
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -465,6 +469,8 @@ pub async fn run(
         notifier: ui.7,
         skills,
         relay_bridge,
+        kernel,
+        kernel_store,
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
@@ -490,6 +496,9 @@ struct TuiRuntime {
     notifier: crate::notify::Notifier,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
+    /// 宿主事件内核。后台结果、入站通知都进这里，由主 Agent 在 turn 边界收走。
+    kernel: willdeep_core::EventKernel,
+    kernel_store: willdeep_core::kernel_store::KernelStore,
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
@@ -1150,9 +1159,10 @@ async fn event_loop(
             }
         }
         // 排队的提示词在这里续上：本轮正常结束、被 Esc 中断、或 Runtime 报失败，
-        // 都会走到这，不必在每个终态各写一遍。后台结果仍然优先。
+        // 都会走到这，不必在每个终态各写一遍。**待投递的运行时事件优先**——
+        // 用户排在后面的那句话，很可能正是基于还没看到的后台结果说的。
         if !app.running
-            && app.background_notices.is_empty()
+            && runtime.kernel.pending_wake_authority(session.id).is_none()
             && let Some(queued) = app.queued_prompts.pop_front()
         {
             app.attachments = queued.attachments;
@@ -1218,6 +1228,11 @@ async fn event_loop(
                 // dead endpoint shows up as a notice instead of silence.
                 if let Some(error)=runtime.notifier.take_error(){app.notice=Some(format!("{}: {error}",language.text("通知 Webhook","Notification webhook","通知 Webhook")));}
                 app.background_tasks=runtime.background_tasks.snapshots();
+                // 事件内核的用户侧投影跟着秒级刷新走：它是观察面，不需要自己
+                // 的通知通道。落盘也在这里收口——状态每变一次就写一次盘，
+                // 打字的时候会卡在磁盘上。
+                app.kernel_attention=runtime.kernel.pending_for_user().iter().map(AttentionItem::from_kernel_event).collect();
+                willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
                 let workspace=runtime.runtime_submit.workspace.clone();
@@ -1969,6 +1984,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在整理思路","Working through it","考えを整理中").to_owned();app.transient_thought=Some(compact_thought(&v));},
                 UiMessage::Agent(AgentEvent::RouteDecided{tier,profile,confidence,auto_dispatched,..})=>app.record_progress(format!("{} {} · {} · {confidence}%{}",language.text("模型路由","Model route","モデルルート"),tier.as_str(),profile.as_deref().unwrap_or("root"),if auto_dispatched{language.text(" · 已自动下发"," · auto-dispatched"," · 自動ディスパッチ済み")}else{""})),
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
+                UiMessage::Agent(AgentEvent::TurnPreempted{turn})=>app.record_progress(format!("{} {turn}",language.text("已被运行时事件打断 · 轮次","Preempted by a runtime event · turn","ランタイムイベントで中断 · ターン"))),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
@@ -1987,7 +2003,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
@@ -2010,10 +2026,17 @@ async fn event_loop(
             Ok(event)=background_rx.recv()=>{
                 let _=runtime.background_tasks.drain_pending();
                 app.background_tasks=runtime.background_tasks.snapshots();
-                app.background_notices.push_back(event.notice);
-                app.notice=Some(format!("{} finished · returning result to main harness",event.snapshot.id));
+                // 后台结果交给内核，不再自己排一条通知：两条路同时向模型投递
+                // 会让同一个结果讲两遍。正文由内核按来源净化后在 turn 边界注入。
+                runtime.kernel.publish(
+                    willdeep_core::kernel::background_task_event(session.id,&event.snapshot,event.notice),
+                    willdeep_core::DedupPolicy::Once,
+                );
+                willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
+                app.notice=Some(format!("{} finished · queued as a runtime event",event.snapshot.id));
                 execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
-                if !app.running && let Some(notice)=app.background_notices.pop_front(){dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}
+                // 忙的时候什么都不做：内核会在当前轮次的边界把它交出去。
+                if !app.running {wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;}
             },
         }
     }
@@ -2098,6 +2121,7 @@ impl App {
             background_tasks: Vec::new(),
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
+            kernel_attention: Vec::new(),
             runtime_gates: Vec::new(),
             runtime_version: None,
             runtime_version_warned: false,
@@ -2112,7 +2136,6 @@ impl App {
             worktree_review: None,
             diff_review: None,
             runtime_event_cursor: 0,
-            background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
             language,
@@ -5185,6 +5208,9 @@ fn attention_source_label(source: AttentionSource, language: Language) -> &'stat
         AttentionSource::Subagent => language.text("子 Agent", "Subagent", "サブエージェント"),
         AttentionSource::Worktree => language.text("Worktree", "Worktree", "Worktree"),
         AttentionSource::DiffReview => language.text("Diff 审查", "Diff review", "Diff レビュー"),
+        AttentionSource::RuntimeEvent => {
+            language.text("运行时事件", "Runtime event", "ランタイムイベント")
+        }
     }
 }
 

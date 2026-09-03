@@ -18,11 +18,67 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Skill Worker 的小上下文纪律档。只有 rs 有这两档：`docs/SKILL_WORKERS.md`
+/// 要求有界任务钉在 32K 攒真实成功率数据，Xedit 的设置面板从 64K 起步。
+pub const TIER_WINDOW_MINIMAL: u64 = 32_768;
+/// 32K 与 64K 之间的一格，给「32K 差一点、64K 又太阔」的工种。
+pub const TIER_WINDOW_SMALL: u64 = 49_152;
+/// 便宜小模型的省用额度。Xedit 1.315.0-rc8 把它加进可选档，理由是此前最低
+/// 只有 128K，想给小模型压一个更省的额度都压不下去。
+pub const TIER_WINDOW_COMPACT: u64 = 65_536;
 /// 基础档的上下文预算。128K 是开源权重的主流窗口下沿，也是这套体系要求
 /// 「私有机房也跑得起来」的那条线。
 pub const TIER_WINDOW_STANDARD: u64 = 131_072;
 /// 进阶与专家档的预算。
 pub const TIER_WINDOW_EXTENDED: u64 = 262_144;
+/// 1M 窗口模型（`kimi-k3`、`deepseek-v4-flash` 这一级）的满额预算。
+///
+/// **是 2^20 而不是 1,000,000。** 两端的设置面板都把这一档显示成「1M」，若
+/// 一边用十进制百万、另一边用 2^20，同一个「1M」在两个 App 里就是两个数，
+/// 而它最终会进同一份 `config.toml`。以 Xedit `AgentWorkerTierModels
+/// .maximumWindow` 为准。
+pub const TIER_WINDOW_MAXIMUM: u64 = 1_048_576;
+
+/// 设置面板可选的上下文预算，从小到大。
+///
+/// 预算只是**我们最多发多少**的上限，不是对模型的声明：派发时仍与 provider
+/// 实际支持的窗口取小，所以给一个 128K 的模型选 1M 不会造出必然超长的请求，
+/// 只是白选。
+///
+/// 与 Xedit `AgentWorkerTierModels.selectableWindows` 的关系：后四档逐值相同，
+/// 前两档（32K / 48K）是 rs 独有的小上下文纪律档。**共享的是每一档的数值口径，
+/// 不是档位数量**——两边的设置面板服务的不是同一批工种。
+pub const SELECTABLE_CONTEXT_WINDOWS: [u64; 6] = [
+    TIER_WINDOW_MINIMAL,
+    TIER_WINDOW_SMALL,
+    TIER_WINDOW_COMPACT,
+    TIER_WINDOW_STANDARD,
+    TIER_WINDOW_EXTENDED,
+    TIER_WINDOW_MAXIMUM,
+];
+
+/// 上下文预算能写进配置的上下界。
+///
+/// 上界必须容得下 [`TIER_WINDOW_MAXIMUM`]：面板上选得到、配置里存不下，是把
+/// 用户送进「保存即报错」的死胡同。
+pub const CONTEXT_WINDOW_MIN: u64 = 4_000;
+pub const CONTEXT_WINDOW_MAX: u64 = TIER_WINDOW_MAXIMUM;
+
+/// 把预算显示成 `64K` / `1M`。
+///
+/// 只对整除的值做单位换算。`config.toml` 里钉的任意值（比如 400000）按原数字
+/// 显示，不四舍五入成一个和实际预算对不上的档位名——界面上写着「391K」而运行
+/// 时按 400000 发，对账时没人说得清哪个是真的。与 Xedit
+/// `AgentWorkerTierModels.windowLabel(_:)` 同一套规则。
+pub fn context_window_label(tokens: u64) -> String {
+    if tokens > 0 && tokens.is_multiple_of(1_048_576) {
+        return format!("{}M", tokens / 1_048_576);
+    }
+    if tokens > 0 && tokens.is_multiple_of(1_024) {
+        return format!("{}K", tokens / 1_024);
+    }
+    tokens.to_string()
+}
 
 /// 基础档的托管模型。历史上的 `someim-32b-<工种>` 全部归一到它——那些别名
 /// 存在的理由是**服务端托管的职责提示词**，而职责提示词现在由客户端随请求
@@ -248,6 +304,56 @@ mod tests {
         assert_eq!(WorkerTier::Standard.context_budget(), 131_072);
         assert_eq!(WorkerTier::Advanced.context_budget(), 262_144);
         assert_eq!(WorkerTier::Expert.context_budget(), 262_144);
+    }
+
+    /// 面板选得到的每一档都必须存得进 `config.toml`。
+    ///
+    /// 这条钉的是一个真实的死胡同：面板最大档曾是十进制 1,000,000，而配置
+    /// 校验的上界也是 1,000,000，两个数正好擦边通过；把面板对齐到 Xedit 的
+    /// 2^20 之后，若上界不跟着抬，用户选完 1M 保存就撞 `must be between`。
+    #[test]
+    fn every_selectable_window_is_storable() {
+        for window in SELECTABLE_CONTEXT_WINDOWS {
+            assert!(
+                (CONTEXT_WINDOW_MIN..=CONTEXT_WINDOW_MAX).contains(&window),
+                "{window} 在面板上选得到却存不进配置"
+            );
+        }
+        assert!(
+            SELECTABLE_CONTEXT_WINDOWS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            SELECTABLE_CONTEXT_WINDOWS.last().copied(),
+            Some(CONTEXT_WINDOW_MAX)
+        );
+    }
+
+    /// 与 Xedit `AgentWorkerTierModels` 的四档逐值相同。
+    ///
+    /// 1M 必须是 2^20：两端的面板都把这一档写成「1M」，而它最终进同一份
+    /// `config.toml`；一边十进制一边二进制，同一个标签就是两个数。
+    #[test]
+    fn shared_windows_match_the_desktop_ladder() {
+        for window in [65_536_u64, 131_072, 262_144, 1_048_576] {
+            assert!(
+                SELECTABLE_CONTEXT_WINDOWS.contains(&window),
+                "{window} 是 Xedit 面板上的一档，rs 必须也有"
+            );
+        }
+        assert_eq!(TIER_WINDOW_MAXIMUM, 1 << 20);
+    }
+
+    /// 标签只对整除的值换算，其余原样显示。
+    #[test]
+    fn window_labels_never_round_a_pinned_value() {
+        assert_eq!(context_window_label(65_536), "64K");
+        assert_eq!(context_window_label(262_144), "256K");
+        assert_eq!(context_window_label(1_048_576), "1M");
+        // config.toml 里钉死的任意值：显示成 391K 会让界面和实际预算对不上。
+        assert_eq!(context_window_label(400_000), "400000");
+        assert_eq!(context_window_label(0), "0");
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use super::*;
 
-const CONTEXT_WINDOWS: &[u64] = &[32_768, 49_152, 65_536, 131_072, 262_144, 1_000_000];
+/// 面板上 `[` / `]` 循环的预算档位。表在 `willdeep_core::worker_tier`，两端
+/// 共用同一套数值口径——这里曾经自带一份字面量，最大那档写的是十进制
+/// 1,000,000，而 Xedit 的「1M」是 2^20，同一个标签在两个 App 里是两个数。
+const CONTEXT_WINDOWS: &[u64] = &willdeep_core::SELECTABLE_CONTEXT_WINDOWS;
 
 pub(super) struct RoutingSettingsState {
     pub(super) settings: crate::model_routing::ModelRoutingSettings,
@@ -652,11 +655,7 @@ fn pad_cell(value: &str, width: usize) -> String {
 }
 
 fn format_context(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else {
-        format!("{}K", value / 1024)
-    }
+    willdeep_core::context_window_label(value)
 }
 
 #[cfg(test)]

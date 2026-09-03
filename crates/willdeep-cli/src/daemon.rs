@@ -549,6 +549,10 @@ struct ServerState {
     local_transport: Option<LocalTransportState>,
     tools: Arc<tool_store::ToolStore>,
     work_gate: Arc<RwLock<bool>>,
+    /// 事件内核的日志。控制面读它而不是读某个进程的内存——跑 Agent 的可能是
+    /// 别的进程，日志是两者之间唯一的共享事实。代价是最多落后一次刷盘，这一
+    /// 条写在 `RUNTIME_CONTROL_API.md` 里。
+    kernel_store: willdeep_core::kernel_store::KernelStore,
 }
 
 type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
@@ -1913,6 +1917,7 @@ async fn run(home: &Path) -> Result<()> {
         local_transport: state.local_transport.clone(),
         tools: tasks.tools.clone(),
         work_gate: work_gate.clone(),
+        kernel_store: willdeep_core::kernel_store::KernelStore::new(home),
     });
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {

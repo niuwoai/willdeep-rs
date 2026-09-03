@@ -155,14 +155,24 @@ pub fn builtin_profiles(worker: Arc<dyn Provider>) -> Vec<SubagentProfile> {
                     "list_directory",
                     "git_status",
                     "run_command",
+                    // 只有带了已批准写集合的那一次才拿得到这两个：没声明写
+                    // 范围时它们在 `runner` 里被摘掉。
+                    "create_file",
+                    "edit_file",
+                    // 动态 MCP 网关。只有兜底工种有——窄工种的价值就是范围窄，
+                    // 给它们开一条通往任意外部服务的门等于把这个价值抵消掉。
+                    "list_mcp_tools",
+                    "call_mcp_tool",
                 ],
-                prompt: "Your trade is INVESTIGATION. Follow evidence across files and state what you could not confirm.",
+                prompt: "Your trade is INVESTIGATION, and you are the fallback worker when no narrower trade fits. Follow evidence across files and state what you could not confirm. You may write only the files that were approved for this run; without an approved set you have no write tools at all.",
                 max_turns: 12,
                 // 默认基础档预算。整个会话窗口是专家档兑现的东西，不是这个
                 // 职责与生俱来的——否则「调查」这个名字就等于一张免费的贵模型券。
                 context_window: crate::WorkerTier::Standard.context_budget(),
                 tool_output_limit: Some(PAYLOAD_LIMIT_WIDE),
-                write_scope: SubagentWriteScope::None,
+                // 兜底工种要能接住「顺手改一处」的活，但默认仍是只读：带了
+                // 已批准的写集合才有写工具。
+                write_scope: SubagentWriteScope::OptionalFileSet,
                 timeout_seconds: 300,
                 worktree: SubagentWorktreePolicy::Shared,
             },
@@ -386,6 +396,33 @@ mod tests {
     /// tier, and `generalist` gets the 128K base budget. Nothing inherits the
     /// session window by default any more — that is what the expert tier
     /// cashes in, and it costs a ticket.
+    /// 兜底工种默认只读：声明了写工具，但没批准写集合的那一次拿不到它们。
+    ///
+    /// 钉的是「工具变多不等于权限变大」。这条一旦破了，一次含糊的请求就能让
+    /// 一个不带写集合的 Worker 拿到整个工作区的写权限——`with_write_targets`
+    /// 传 `None` 的意思是「不限制写到哪」，正是主 Agent 的用法。
+    #[test]
+    fn the_fallback_worker_writes_only_what_was_approved() {
+        let provider: Arc<dyn Provider> = Arc::new(ReportProvider);
+        let generalist = builtin_profiles(provider)
+            .into_iter()
+            .find(|profile| profile.id == "generalist")
+            .expect("generalist ships");
+        assert_eq!(generalist.write_scope, SubagentWriteScope::OptionalFileSet);
+        assert!(
+            generalist.tool_names.iter().any(|name| name == "edit_file"),
+            "带写集合那一次要有写工具"
+        );
+        // 没带目标 = 这一次不写；带了 = 写。
+        assert!(!generalist.write_scope.writes_this_run(false));
+        assert!(generalist.write_scope.writes_this_run(true));
+        // 不带目标也不该被拒绝派发：那是正常用法，不是配置错误。
+        assert!(!generalist.write_scope.requires_declared_targets());
+        // 而窄的写工种仍然必须先声明。
+        assert!(SubagentWriteScope::FileSet.requires_declared_targets());
+        assert!(SubagentWriteScope::SingleFile.requires_declared_targets());
+    }
+
     #[test]
     fn workers_run_in_deployable_windows_with_capped_payloads() {
         let provider: Arc<dyn Provider> = Arc::new(ReportProvider);

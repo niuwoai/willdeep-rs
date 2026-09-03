@@ -178,11 +178,23 @@ pub(crate) enum HarnessFrontend {
     },
 }
 
+/// 因为有待处理的运行时事件而开的那一轮，用它当提示词。
+///
+/// 短，且不带任何事实：真正的内容由内核在 turn 顶部注入，正文经过净化并标明
+/// 了来源。把事件正文塞进提示词等于让它绕过那一层。
+pub(crate) const KERNEL_WAKE_PROMPT: &str =
+    "Runtime events arrived while you were away. Review them and continue.";
+
 pub(crate) struct BuiltHarness {
     pub agent: Arc<Agent>,
     pub workspace: PathBuf,
     pub skills: Arc<willdeep_core::SkillCatalog>,
     pub background_tasks: Arc<BackgroundTaskRegistry>,
+    /// 宿主事件内核。前端把后台任务、入站通知交给它，主 Agent 在 turn 边界
+    /// 收走——两条路只能留一条，否则同一个结果会向模型讲两遍。
+    pub kernel: willdeep_core::EventKernel,
+    /// 事件日志。前端在状态变化后刷盘，进程重启时由这里恢复。
+    pub kernel_store: willdeep_core::kernel_store::KernelStore,
     pub context_window: u64,
     pub provider_config: ProviderConfig,
     /// Built here so every frontend — TUI, headless run, runtime — shares one
@@ -391,14 +403,28 @@ pub(crate) async fn execute_noninteractive(
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         }
+        // 后台结果走事件内核，不再一条通知起一轮。
+        //
+        // 两个好处：同时结束的几个任务合成一轮交给模型，而不是逼它把同一段
+        // 上下文重读三遍；正文按来源净化过，Worker 的自述不会冒充系统消息。
+        // 这里**不再**把 notice 当提示词——那样等于同一个结果讲两遍。
         for event in events {
-            outcome = built
-                .agent
-                .run_with_history(session.messages.clone(), event.notice)
-                .await?;
-            session.messages = outcome.messages.clone();
-            store.save(session)?;
+            built.kernel.publish(
+                willdeep_core::kernel::background_task_event(
+                    session.id,
+                    &event.snapshot,
+                    event.notice,
+                ),
+                willdeep_core::DedupPolicy::Once,
+            );
         }
+        outcome = built
+            .agent
+            .run_with_history(session.messages.clone(), KERNEL_WAKE_PROMPT.to_owned())
+            .await?;
+        session.messages = outcome.messages.clone();
+        store.save(session)?;
+        willdeep_core::kernel_store::flush(&built.kernel, &built.kernel_store);
     }
     // L2：第一轮问答落地后跑一次摘要。放在通知之前，好让 webhook 带上的是
     // 整理过的标题而不是提示词前缀。
@@ -622,7 +648,7 @@ pub(crate) async fn build(
             record_approval_trace(&approval_log, &trace);
         })
         .with_skills(skills.clone())
-        .with_mcp(mcp)
+        .with_mcp(mcp.clone())
         .with_background_tasks(background_tasks.clone())
         .with_verification_reporter(move |verification| {
             let home = verification_home.clone();
@@ -746,6 +772,11 @@ pub(crate) async fn build(
         // Task packets may name a skill; the runtime inlines its body so the
         // worker never spends turns fetching its own instructions.
         .with_skills(skills.clone())
+        // 兜底工种能查已连接的 MCP 服务。窄工种拿不到：它们的价值就是范围窄。
+        .with_mcp(mcp)
+        // Worker 与父会话共享已批准的精确动作。没有这条，后台 Worker 会在人
+        // 刚刚批过的同一条命令上再卡一次，而它自己没有审批 UI。
+        .with_always_allow_store(home.join("always-allow.json"))
         .with_event_sink(sink.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in
@@ -764,6 +795,18 @@ pub(crate) async fn build(
         background_tasks.clone(),
         subagents.clone(),
     )?;
+    // 事件内核先于 Agent 建起来，并立刻把上一次运行没投递完的事件读回来。
+    // 读不出来不挡启动：事件是通知不是账本，为一份坏日志让整个 Runtime 起不
+    // 来才是真的坏。
+    let kernel = willdeep_core::EventKernel::new();
+    let kernel_store = willdeep_core::kernel_store::KernelStore::new(home);
+    let restored = willdeep_core::kernel_store::restore_into(&kernel, &kernel_store);
+    for (path, reason) in &restored.quarantined {
+        eprintln!(
+            "willdeep: quarantined a damaged event log ({reason}); kept at {}",
+            path.display()
+        );
+    }
     let goal_continuation = Arc::new(willdeep_core::GoalContinuation::new());
     if let Some(goal) = resumed.and_then(|session| session.goal.as_deref()) {
         goal_continuation.activate(goal, willdeep_core::GoalBudget::default());
@@ -781,7 +824,8 @@ pub(crate) async fn build(
     .with_event_sink(sink)
     .with_subagents(subagents)
     .with_goal_continuation(goal_continuation.clone())
-    .with_background_tasks(background_tasks.clone());
+    .with_background_tasks(background_tasks.clone())
+    .with_event_kernel(kernel.clone());
     if loaded.file.agent.small_model_routing.unwrap_or(true) {
         let mut routing = RoutingGuard::new(RoutingPolicy {
             auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
@@ -855,6 +899,8 @@ pub(crate) async fn build(
         workspace,
         skills,
         background_tasks,
+        kernel,
+        kernel_store,
         context_window,
         provider_config: parent_provider_config,
         notifier,

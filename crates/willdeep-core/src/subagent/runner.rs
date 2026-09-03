@@ -63,11 +63,24 @@ impl EventSink for ChildEventSink {
     }
 }
 
+/// 会改动工作区的工具。没有已批准写集合时，它们不进 Worker 的工具面。
+const WRITE_TOOLS: &[&str] = &["create_file", "edit_file", "create_worktree"];
+
 /// Files one running worker has claimed. Released on drop, so a panic, a
 /// timeout or a cancelled run never leaves a file locked behind it.
 struct FileClaim {
     claimed: Arc<Mutex<BTreeSet<PathBuf>>>,
     files: BTreeSet<PathBuf>,
+}
+
+/// 让 catalog 的测试够得着这道锁：并发上限与写冲突是两条独立的门，测试要能
+/// 分别按一按，才说得清哪条在起作用。
+#[cfg(test)]
+pub(super) fn acquire_file_claim_for_test(
+    claimed: &Arc<Mutex<BTreeSet<PathBuf>>>,
+    files: &BTreeSet<PathBuf>,
+) -> Result<Option<impl Sized>, AgentError> {
+    FileClaim::acquire(claimed, files)
 }
 
 impl FileClaim {
@@ -126,6 +139,12 @@ pub(super) struct SubagentRun {
     pub(super) skills: Option<Arc<crate::skills::SkillCatalog>>,
     pub(super) safety_judge: Option<Arc<dyn SafetyJudge>>,
     pub(super) approved_command: Option<String>,
+    /// 已连接的 MCP 服务。只有兜底工种拿得到（在 catalog 那边决定），因为窄
+    /// 工种的价值就在于范围窄。
+    pub(super) mcp: Option<Arc<crate::mcp::McpRegistry>>,
+    /// 父会话的 always-allow 存储路径，见
+    /// [`SubagentCatalog::with_always_allow_store`](super::catalog::SubagentCatalog::with_always_allow_store)。
+    pub(super) always_allow_store: Option<PathBuf>,
 }
 
 /// Run a worker to a verdict.
@@ -155,6 +174,8 @@ pub(super) async fn run_subagent(
         skills,
         safety_judge,
         approved_command,
+        mcp,
+        always_allow_store,
     } = run;
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
@@ -210,6 +231,8 @@ pub(super) async fn run_subagent(
             safety_judge.clone(),
             approved_command.clone(),
             command_review_context.clone(),
+            mcp.clone(),
+            always_allow_store.clone(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -292,6 +315,8 @@ async fn run_once(
     safety_judge: Option<Arc<dyn SafetyJudge>>,
     approved_command: Option<String>,
     command_review_context: String,
+    mcp: Option<Arc<crate::mcp::McpRegistry>>,
+    always_allow_store: Option<PathBuf>,
 ) -> Result<String, AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
@@ -300,9 +325,31 @@ async fn run_once(
     } else {
         ApprovalMode::Strict
     };
+    // 可选写范围的工种没带目标时，写工具当场从工具面上摘掉。
+    //
+    // 只靠 `with_write_targets(None)` 是不够的：那个 `None` 的意思是「不限制
+    // 写到哪」，正是主 Agent 的用法。给一个没声明写集合的 Worker 注册写工具，
+    // 等于把整个工作区交给它——**工具变多不等于权限变大**这句话得由这里兑现。
+    let has_targets = approved_targets
+        .as_ref()
+        .is_some_and(|targets| !targets.is_empty());
+    let mut allowed = profile.tool_names.clone();
+    if !profile.write_scope.writes_this_run(has_targets) {
+        allowed.retain(|name| !WRITE_TOOLS.contains(&name.as_str()));
+    }
     let mut tools = ToolRegistry::new(workspace, approval)?
-        .with_allowed_tools(profile.tool_names.clone())
+        .with_allowed_tools(allowed)
         .with_write_targets(approved_targets.clone());
+    if let Some(path) = always_allow_store {
+        // 坏掉的规则文件不该让一次派工失败：Worker 退回「什么都要批」，而它
+        // 没有审批 UI，于是照常报告哪一步被拦下，由父会话去请人批。
+        tools = tools.with_always_allow_store(path)?;
+    }
+    if let Some(mcp) = mcp {
+        // 动态网关：Worker 按需检索工具，而不是每一轮都为整份目录付上下文。
+        // 调用仍走各自的审批路径——多一条查询通道不等于多一份权限。
+        tools = tools.with_mcp(mcp);
+    }
     if let Some(judge) = safety_judge {
         tools = tools.with_safety_judge(judge);
     }
