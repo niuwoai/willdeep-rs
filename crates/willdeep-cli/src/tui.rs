@@ -264,6 +264,9 @@ struct App {
     skill_menu_dismissed: bool,
     command_selected: usize,
     command_menu_dismissed: bool,
+    /// `/exit` 请求退出。事件循环下一圈读到它就收尾——命令处理器只报告
+    /// 「用户想走」，真正拆终端的活儿留在它原来的地方，免得两处都能关。
+    quit_requested: bool,
     focus: FocusPane,
     sidebar_visible: bool,
     sidebar_selected: usize,
@@ -1962,6 +1965,7 @@ async fn event_loop(
                                 let previous_goal=app.goal.clone();
                                 if app.handle_slash_command(&prompt,&runtime.skills){
                                     if app.goal!=previous_goal{session.goal=app.goal.clone();store.save(session)?;}
+                                    if app.quit_requested{break;}
                                     continue;
                                 }
                             }
@@ -2160,6 +2164,7 @@ impl App {
             skill_menu_dismissed: false,
             command_selected: 0,
             command_menu_dismissed: false,
+            quit_requested: false,
             focus: FocusPane::Prompt,
             // Hidden by default: the transcript is what the user came for,
             // and the status column is a lookup surface, not a permanent
@@ -3751,6 +3756,14 @@ impl App {
         }
         match command {
             "/help" => self.append_transcript(help_text(self.language)),
+            "/exit" => {
+                self.quit_requested = true;
+                self.append_transcript(format!(
+                    "System: {}",
+                    self.language
+                        .text("正在退出…", "Exiting…", "終了しています…")
+                ));
+            }
             "/goal" if args.trim().eq_ignore_ascii_case("off") => {
                 self.goal = None;
                 self.append_transcript("System: Goal mode disabled".to_owned());
