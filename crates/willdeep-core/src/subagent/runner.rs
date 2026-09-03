@@ -420,6 +420,14 @@ async fn run_once(
     } else {
         run.await?
     };
+    // 子 Agent 触顶同样交部分结果，但父 Agent 得知道它没收敛，
+    // 否则会把一份半成品当成经过验证的答案。
+    if outcome.stop_reason == crate::agent::AgentStopReason::MaxTurns {
+        return Ok(format!(
+            "{}\n\n[Note: this child agent hit its {}-turn limit before finishing; the result above is partial and may be incomplete.]",
+            outcome.final_text, outcome.turns
+        ));
+    }
     Ok(outcome.final_text)
 }
 

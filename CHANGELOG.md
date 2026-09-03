@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.70.0-rc5] - 2026-09-04
+
+### Changed
+- **主 Agent 默认轮次上限从 24 提到 64。** 一次「先问一句、再改十个文件、再查一下」的正常任务就能把 24 轮用光，而触顶是整轮判失败，写好的东西一句都不给看。`--max-turns` 与 `[agent].max_turns` 仍可覆盖，合法范围不变（1–100）。`config.example.toml` 与 `docs/CONFIGURATION.md` 的示例同步改为 64。
+- 子 Agent 各 profile 的上限不动：它们按职责各有预算，不该跟着主 Agent 一起放宽。
+- **触顶不再把整轮判失败，改为交出部分结果。** 此前主循环用尽轮次直接返回 `AgentError::MaxTurns`，Runtime 标成 `turn.failed`，模型改好的十个文件、写到一半的结论一句都不给看，用户只看到一行「reached the maximum of N turns」。现在 Agent 返回 `AgentStopReason::MaxTurns`，`final_text` 取最后一段可见的助手文字；Harness 在前面加一句「⚠ 轮次上限 N 已用尽，任务未收敛…改动已落盘但可能不完整；继续对话可接着做」，同时把这句写进会话历史，下一轮模型也知道上一轮是被掐断的。子 Agent 触顶时给父 Agent 的结果尾部追加「partial, may be incomplete」说明，免得半成品被当成验证过的答案。
+
+### Notes
+- 已有配置文件里若写死了 `max_turns = 24`，会覆盖新默认值，需要手动改。
+- `AgentError::MaxTurns` 保留给退出码与遥测映射，主循环不再产生它。
+
+### Tests
+- 新增：轮次用尽时返回 `MaxTurns` 停机原因、`final_text` 取最后一段助手文字、工具调用历史完整保留。
+- 版本从 **0.70.0-rc4** 提升为 **0.70.0-rc5**。
+
 ## [0.70.0-rc4] - 2026-09-04
 
 ### Fixed

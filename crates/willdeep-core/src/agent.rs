@@ -227,6 +227,9 @@ pub enum AgentStopReason {
     GoalComplete,
     /// 目标未达但预算耗尽，已按收尾引导产出交接快照。
     BudgetLimited,
+    /// 轮次上限用尽，模型没来得及给终稿。`final_text` 是它最后一段可见文字，
+    /// 只是部分结果；改好的文件、跑过的命令都还在，只是没收敛。
+    MaxTurns,
 }
 
 #[derive(Debug)]
@@ -645,7 +648,27 @@ impl Agent {
                 messages.push(Message::tool(&call, output));
             }
         }
-        Err(AgentError::MaxTurns(self.config.max_turns))
+        // 触顶不再判失败。此前这里返回 `AgentError::MaxTurns`，整轮标成失败，
+        // 模型改好的十个文件、写到一半的结论一句都不给看，用户只看到一行
+        // 「reached the maximum of N turns」。现在把最后一段可见文字当部分结果
+        // 交出去，`stop_reason` 标成 `MaxTurns`，由展示层说明它没收敛。
+        let final_text = messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == crate::types::Role::Assistant && !message.content.trim().is_empty()
+            })
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        Ok(AgentOutcome {
+            final_text,
+            turns: self.config.max_turns,
+            messages,
+            stop_reason: AgentStopReason::MaxTurns,
+            input_tokens,
+            output_tokens,
+            first_response_millis,
+        })
     }
 
     /// 取一批待投递事件，渲染进对话，返回它们的 lease。
@@ -1253,6 +1276,65 @@ mod tests {
             std::env::temp_dir().join(format!("willdeep-agent-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("workspace");
         ToolRegistry::new(root, ApprovalMode::Strict).expect("registry")
+    }
+
+    /// 每一轮都只发工具调用、永远不给终稿的模型。
+    struct EndlessToolProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for EndlessToolProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok(Completion {
+                content: format!("still working, step {call}"),
+                tool_calls: vec![crate::types::ToolCall {
+                    id: format!("call-{call}"),
+                    name: "list_directory".to_owned(),
+                    arguments: r#"{"path":"."}"#.to_owned(),
+                }],
+                finish_reason: Some("tool_calls".to_owned()),
+                usage: None,
+            })
+        }
+    }
+
+    /// 轮次用尽不再是错误：交出最后一段可见文字，停机原因标 `MaxTurns`，
+    /// 历史里的工具往返一条不少——改动都在，只是没收敛。
+    #[tokio::test]
+    async fn exhausting_turns_returns_the_partial_result_instead_of_failing() {
+        let agent = Agent::new(
+            Arc::new(EndlessToolProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            registry("max-turns-partial"),
+            AgentConfig {
+                max_turns: 3,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        );
+
+        let outcome = agent
+            .run("keep going")
+            .await
+            .expect("hitting the turn limit must not be an error");
+
+        assert_eq!(outcome.stop_reason, AgentStopReason::MaxTurns);
+        assert_eq!(outcome.turns, 3);
+        assert_eq!(outcome.final_text, "still working, step 3");
+        let tool_results = outcome
+            .messages
+            .iter()
+            .filter(|message| message.role == crate::types::Role::Tool)
+            .count();
+        assert_eq!(tool_results, 3, "every tool round trip stays in the history");
     }
 
     #[tokio::test]
