@@ -1,0 +1,153 @@
+/* 两套配色，一张对照表。
+ *
+ * 界面里不再出现字面色值：所有颜色都从这里取。深色是原来那套的收敛结果——
+ * 122 个只差一两个色阶的近邻归并成了 34 个层次，肉眼几乎看不出差别，但换来
+ * 「一个层次改一处」而不是逐个组件猜。
+ *
+ * 三档主题：`data-theme="dark"` / `"light"` 固定，缺省跟随系统。跟随系统那档
+ * 靠 `prefers-color-scheme` 媒体查询实现，所以用户在系统里切换时页面立刻跟上，
+ * 不需要刷新。
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg-page: #080d12;
+  --bg-surface: #0b1118;
+  --bg-raised: #0f1720;
+  --bg-panel: #16212c;
+  --bg-panel-hover: #1d2a38;
+  --bg-panel-strong: #253342;
+  --bg-elevated: #26364a;
+
+  --border-subtle: #263242;
+  --border: #2b3948;
+  --border-strong: #3d4d5e;
+
+  --text-strong: #f2f6fa;
+  --text: #e7edf4;
+  --text-soft: #c8d4e2;
+  --text-muted: #b6c3d1;
+  --text-dim: #8b99aa;
+  --text-faint: #77879a;
+  --text-ghost: #5f6d7c;
+
+  --accent: #78a9ff;
+  --accent-strong: #2f5fae;
+  --accent-dim: #5b718a;
+  --accent-surface: #173455;
+  --accent-border: #28507a;
+  --accent-glow: #6ea8fe20;
+
+  --danger: #ef6a6a;
+  --danger-text: #ff8f8f;
+  --danger-surface: #47222d;
+  --danger-border: #a54343;
+  --success: #5d9475;
+  --warning: #e5b96f;
+  --warning-surface: #725e2d;
+
+  /* 强调色按钮上的前景。两套主题都是白字：那个按钮在浅色下也是深蓝底，
+     跟着文字色走会在浅色主题里变成黑字压蓝底。 */
+  --on-accent: #ffffff;
+
+  --surface-blur: #0d141ce6;
+  --shadow-soft: #00000055;
+  --shadow: #00000099;
+  --shadow-strong: #000000cc;
+}
+
+/* 浅色。不是深色的机械反转：背景层次拉开得更细（浅底上 2% 的差别就看得见），
+ * 文字层次压得更紧（浅底上过淡的灰会直接读不出来），强调色加深以保住对比度。 */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-page: #f4f7fb;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-panel: #eef2f8;
+  --bg-panel-hover: #e3eaf4;
+  --bg-panel-strong: #dae3ef;
+  --bg-elevated: #cfdaea;
+
+  --border-subtle: #e4e9f1;
+  --border: #d2dbe7;
+  --border-strong: #b4c1d2;
+
+  --text-strong: #0b1219;
+  --text: #1b2632;
+  --text-soft: #33404f;
+  --text-muted: #455363;
+  --text-dim: #5d6b7c;
+  --text-faint: #6f7d8e;
+  --text-ghost: #8a97a6;
+
+  --accent: #1f6feb;
+  --accent-strong: #1a5fd0;
+  --accent-dim: #5b7ba6;
+  --accent-surface: #dceafe;
+  --accent-border: #a6c8f7;
+  --accent-glow: #1f6feb26;
+
+  --danger: #d64545;
+  --danger-text: #b02a2a;
+  --danger-surface: #fde4e4;
+  --danger-border: #e2a1a1;
+  --success: #2f7d55;
+  --warning: #9a6b12;
+  --warning-surface: #fbeecd;
+
+  --on-accent: #ffffff;
+  --surface-blur: #ffffffe6;
+  --shadow-soft: #0f172a14;
+  --shadow: #0f172a24;
+  --shadow-strong: #0f172a33;
+}
+
+/* 缺省跟随系统：只有在没有显式选择时才让媒体查询说话。 */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) {
+    color-scheme: light;
+
+    --bg-page: #f4f7fb;
+    --bg-surface: #ffffff;
+    --bg-raised: #ffffff;
+    --bg-panel: #eef2f8;
+    --bg-panel-hover: #e3eaf4;
+    --bg-panel-strong: #dae3ef;
+    --bg-elevated: #cfdaea;
+
+    --border-subtle: #e4e9f1;
+    --border: #d2dbe7;
+    --border-strong: #b4c1d2;
+
+    --text-strong: #0b1219;
+    --text: #1b2632;
+    --text-soft: #33404f;
+    --text-muted: #455363;
+    --text-dim: #5d6b7c;
+    --text-faint: #6f7d8e;
+    --text-ghost: #8a97a6;
+
+    --accent: #1f6feb;
+    --accent-strong: #1a5fd0;
+    --accent-dim: #5b7ba6;
+    --accent-surface: #dceafe;
+    --accent-border: #a6c8f7;
+    --accent-glow: #1f6feb26;
+
+    --danger: #d64545;
+    --danger-text: #b02a2a;
+    --danger-surface: #fde4e4;
+    --danger-border: #e2a1a1;
+    --success: #2f7d55;
+    --warning: #9a6b12;
+    --warning-surface: #fbeecd;
+
+    --on-accent: #ffffff;
+    --surface-blur: #ffffffe6;
+    --shadow-soft: #0f172a14;
+    --shadow: #0f172a24;
+    --shadow-strong: #0f172a33;
+  }
+}

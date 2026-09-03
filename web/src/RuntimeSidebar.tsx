@@ -146,10 +146,10 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
     setControlBusy(true);
     try { if (await onSpawnAgent(spawnProfile, task)) setSpawnPrompt(""); } finally { setControlBusy(false); }
   }
-  return <Box mt="4" p="3" border="1px solid" borderColor="#202a35" borderRadius="md" bg="#101820">
+  return <Box mt="4" p="3" border="1px solid" borderColor="var(--bg-panel-hover)" borderRadius="md" bg="var(--bg-raised)">
     <Flex justify="space-between" align="center">
-      <Text fontSize="xs" color="#a7b4c4">{t.runtimeActivity}</Text>
-      <Button size="2xs" variant="ghost" color="#91a0b2" aria-expanded={expanded} aria-label={expanded ? t.collapse : t.expand} onClick={() => setExpanded((current) => !current)}>{expanded ? t.collapse : t.expand}</Button>
+      <Text fontSize="xs" color="var(--text-muted)">{t.runtimeActivity}</Text>
+      <Button size="2xs" variant="ghost" color="var(--text-dim)" aria-expanded={expanded} aria-label={expanded ? t.collapse : t.expand} onClick={() => setExpanded((current) => !current)}>{expanded ? t.collapse : t.expand}</Button>
     </Flex>
     {expanded && <>
     <Flex gap="3" wrap="wrap">
@@ -164,19 +164,19 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
       <Text fontSize="sm">{t.runtimeEvents}: {pendingEvents.length}</Text>
     </Flex>
     {pendingEvents.length > 0 && <VStack align="stretch" gap="2" mt="3">
-      <Text fontSize="xs" color="#8290a3">{t.runtimeEventsPending}</Text>
-      {pendingEvents.slice(0, 5).map((event) => <Box key={event.id} p="2" borderRadius="sm" bg="#171d24">
+      <Text fontSize="xs" color="var(--text-dim)">{t.runtimeEventsPending}</Text>
+      {pendingEvents.slice(0, 5).map((event) => <Box key={event.id} p="2" borderRadius="sm" bg="var(--bg-panel)">
         <Flex justify="space-between" gap="2" align="center">
-          <Text fontSize="2xs" color="#8290a3">{event.source} · {event.priority}{event.merge_count > 1 ? ` ×${event.merge_count}` : ""}</Text>
+          <Text fontSize="2xs" color="var(--text-dim)">{event.source} · {event.priority}{event.merge_count > 1 ? ` ×${event.merge_count}` : ""}</Text>
           {/* 忽略只结算「还等着人」这一侧，不批准任何操作：审批仍在它自己的卡片上回答。 */}
           <Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onIgnoreEvent(event.id))}>{t.ignoreEvent}</Button>
         </Flex>
         <Text fontSize="xs" lineClamp="2">{event.title_excerpt ?? event.kind}</Text>
-        <Text fontSize="2xs" color="#718096">{event.delivery_state === "handled" ? t.eventSeenByAgent : t.eventNotDelivered}</Text>
+        <Text fontSize="2xs" color="var(--text-faint)">{event.delivery_state === "handled" ? t.eventSeenByAgent : t.eventNotDelivered}</Text>
       </Box>)}
     </VStack>}
-    <Box mt="3" p="2" borderRadius="sm" bg="#171d24">
-      <Text fontSize="xs" color="#8290a3" mb="1">{t.newReadOnlyAgent}</Text>
+    <Box mt="3" p="2" borderRadius="sm" bg="var(--bg-panel)">
+      <Text fontSize="xs" color="var(--text-dim)" mb="1">{t.newReadOnlyAgent}</Text>
       <NativeSelect.Root mb="1">
         <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
           <option value="generalist">{t.agentProfileGeneralist}</option>
@@ -188,11 +188,11 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
       <Flex mt="1" justify="flex-end">
         <Button size="2xs" disabled={!canSpawnAgent || !spawnPrompt.trim() || controlBusy} onClick={() => void spawnAgent()}>{t.spawnAgent}</Button>
       </Flex>
-      {!canSpawnAgent && <Text mt="1" fontSize="2xs" color="#718096">{t.activeSessionRequired}</Text>}
+      {!canSpawnAgent && <Text mt="1" fontSize="2xs" color="var(--text-faint)">{t.activeSessionRequired}</Text>}
     </Box>
     {activity.gates.length > 0 && <VStack align="stretch" gap="2" mt="3">
-      {activity.gates.slice(0, 3).map((gate) => <Box key={gate.id} p="2" borderRadius="sm" bg="#171d24">
-        <Flex justify="space-between" gap="2"><Text fontSize="xs" color="#e5b96f">{gate.kind === "approval" ? t.waitingApproval : t.waitingAnswer}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "task", id: gate.task_id })}>{t.details}</Button></Flex>
+      {activity.gates.slice(0, 3).map((gate) => <Box key={gate.id} p="2" borderRadius="sm" bg="var(--bg-panel)">
+        <Flex justify="space-between" gap="2"><Text fontSize="xs" color="var(--warning)">{gate.kind === "approval" ? t.waitingApproval : t.waitingAnswer}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "task", id: gate.task_id })}>{t.details}</Button></Flex>
         <Text fontSize="xs" lineClamp="2">{gate.kind === "approval" ? gate.description : gate.question}</Text>
         {gate.kind === "approval" ? <Flex gap="1" mt="2" wrap="wrap">
           <Button size="2xs" disabled={controlBusy} onClick={() => void runControl(() => onResolveApproval(gate.id, "allow_once"))}>{t.allowOnce}</Button>
@@ -210,24 +210,24 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
       </Box>)}
     </VStack>}
     {activity.tasks.length > 0 && <VStack align="stretch" gap="1" mt="3">
-      <Text fontSize="2xs" color="#8290a3">{t.tasks}</Text>
-      {activity.tasks.slice(0, 4).map((task) => <Box key={task.id} p="1" borderRadius="sm" bg="#131a22">
+      <Text fontSize="2xs" color="var(--text-dim)">{t.tasks}</Text>
+      {activity.tasks.slice(0, 4).map((task) => <Box key={task.id} p="1" borderRadius="sm" bg="var(--bg-raised)">
         <Flex justify="space-between" gap="2" align="center">
           <Text fontSize="xs" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{task.profile || t.task}</Text>
           <Flex align="center" gap="1" flexShrink="0">
-            <Text fontSize="2xs" color="#8290a3">{runtimeStatus(task.status, t)} · {task.elapsed_seconds}{t.secondsUnit}</Text>
+            <Text fontSize="2xs" color="var(--text-dim)">{runtimeStatus(task.status, t)} · {task.elapsed_seconds}{t.secondsUnit}</Text>
             <Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "task", id: task.id })}>{t.details}</Button>
           </Flex>
         </Flex>
-        {(task.exit_code !== null || task.failure_domain) && <Text fontSize="2xs" color="#718096">
+        {(task.exit_code !== null || task.failure_domain) && <Text fontSize="2xs" color="var(--text-faint)">
           {task.exit_code !== null ? `${t.exitCode}: ${task.exit_code}` : ""}{task.exit_code !== null && task.failure_domain ? " · " : ""}{task.failure_domain ? `${t.failureDomain}: ${failureDomain(task.failure_domain, t)}` : ""}
         </Text>}
       </Box>)}
     </VStack>}
     {sidebarAgents.length > 0 && <VStack align="stretch" gap="1" mt="3">
       {sidebarAgents.slice(0, 4).map((agent) => <Box key={agent.id} pl={agent.parent_id ? "3" : "0"}>
-        <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Flex align="center" gap="1" flexShrink="0"><Text color="#8290a3">{runtimeStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "agent", id: agent.id })}>{t.details}</Button></Flex></Flex>
-        <Text fontSize="2xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
+        <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Flex align="center" gap="1" flexShrink="0"><Text color="var(--text-dim)">{runtimeStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "agent", id: agent.id })}>{t.details}</Button></Flex></Flex>
+        <Text fontSize="2xs" color="var(--text-faint)" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
         {agent.background && <Flex gap="1" mt="1">
           {agent.status === "working" && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "prompt"))}>{t.instruct}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "stop"))}>{t.stop}</Button></>}
           {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry"))}>{t.retry}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry_model", agent.model))}>{t.changeModel}</Button></>}
@@ -235,7 +235,7 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
       </Box>)}
     </VStack>}
     {detail && <RuntimeDetailPanel activity={activity} messages={t} target={detail} onClose={() => setDetail(null)} />}
-    {activity.tools[0] && <Text mt="2" fontSize="xs" color="#718096" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
+    {activity.tools[0] && <Text mt="2" fontSize="xs" color="var(--text-faint)" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
       {activity.tools[0].name} · {activity.tools[0].status === "running" ? t.toolRunning : activity.tools[0].status === "completed" ? t.toolDone : t.toolFailed}
     </Text>}
     </>}

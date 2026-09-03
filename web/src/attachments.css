@@ -1,13 +1,13 @@
 .attachment-row { gap: 8px; padding: 10px 10px 0; overflow-x: auto; }
-.attachment-chip { position: relative; display: flex; align-items: center; gap: 7px; min-width: 110px; max-width: 190px; height: 48px; padding: 5px 28px 5px 5px; border: 1px solid #354556; border-radius: 9px; background: #15202b; }
+.attachment-chip { position: relative; display: flex; align-items: center; gap: 7px; min-width: 110px; max-width: 190px; height: 48px; padding: 5px 28px 5px 5px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-panel); }
 .attachment-chip img, .text-attachment { width: 36px; height: 36px; border-radius: 6px; object-fit: cover; flex: none; }
-.text-attachment { display: grid; place-items: center; background: #253445; color: #9db1c8; font-size: 9px; font-weight: 700; }
-.attachment-chip p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #b6c3d1; }
-.attachment-chip button { position: absolute; right: 5px; top: 4px; width: 19px; height: 19px; border: 0; border-radius: 50%; background: #293746; color: #b8c4d0; line-height: 16px; cursor: pointer; }
-.attachment-chip button:hover { background: #a54343; color: white; }
-.suggestions button strong { display: block; color: #dce8f5; font-size: 13px; }
-.suggestions button small { display: block; margin-top: 2px; overflow: hidden; color: #7f8fa1; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.suggestion-empty { padding: 8px 10px; color: #718096; font-size: 12px; }
+.text-attachment { display: grid; place-items: center; background: var(--bg-panel-strong); color: var(--text-dim); font-size: 9px; font-weight: 700; }
+.attachment-chip p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-muted); }
+.attachment-chip button { position: absolute; right: 5px; top: 4px; width: 19px; height: 19px; border: 0; border-radius: 50%; background: var(--bg-panel-strong); color: var(--text-muted); line-height: 16px; cursor: pointer; }
+.attachment-chip button:hover { background: var(--danger-border); color: white; }
+.suggestions button strong { display: block; color: var(--text); font-size: 13px; }
+.suggestions button small { display: block; margin-top: 2px; overflow: hidden; color: var(--text-faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-empty { padding: 8px 10px; color: var(--text-faint); font-size: 12px; }
 .chat-viewport { overscroll-behavior: contain; scrollbar-gutter: stable; }
 .chat-viewport::-webkit-scrollbar { width: 9px; }
-.chat-viewport::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #344454; background-clip: padding-box; }
+.chat-viewport::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: var(--border); background-clip: padding-box; }

@@ -5,6 +5,7 @@ import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type Runt
 import { Markdown } from "./Markdown";
 import { SidebarSettings } from "./SidebarSettings";
 import { QuickSettings } from "./QuickSettings";
+import { applyThemeMode, storedThemeMode, type ThemeMode } from "./theme";
 import { PluginCenter } from "./PluginCenter";
 import { PluginPage } from "./PluginPage";
 import { PluginRail, type RailSelection } from "./PluginRail";
@@ -17,7 +18,24 @@ import { SfIcon } from "./sfSymbols";
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
 type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
-type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed" };
+type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed"; startedAt: number; elapsedMs?: number };
+
+/// 一步花了多久。
+///
+/// 毫秒级的步骤写成 `120ms`，秒级保留一位小数。**只在这一步真的结束之后才
+/// 显示**：还在跑的步骤给一个跳动的数字，人反而会盯着它看。
+function formatStepElapsed(elapsedMs: number) {
+  if (elapsedMs < 1000) return `${Math.max(1, Math.round(elapsedMs))}ms`;
+  if (elapsedMs < 120_000) return `${(elapsedMs / 1000).toFixed(1)}s`;
+  return `${(elapsedMs / 60_000).toFixed(1)}m`;
+}
+
+/// 把还在跑的那些步骤收尾，并记下各自的耗时。
+function settleActiveSteps(steps: RunStep[], now: number): RunStep[] {
+  return steps.map((step) => step.status === "active"
+    ? { ...step, status: "done" as const, elapsedMs: step.elapsedMs ?? now - step.startedAt }
+    : step);
+}
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
 type ComposerSkill = { identifier: string; name: string; description: string };
@@ -145,12 +163,16 @@ function RunCard({ steps, messages: t }: { steps: RunStep[]; messages: Messages 
   const visible = steps.slice(hidden);
   return <Box className="run-card">
     {hidden > 0 && <Text className="run-collapsed">{t.earlierSteps.replace("{count}", String(hidden))}</Text>}
-    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text>{step.detail && <Text className="run-step-detail" title={step.detail}>{step.detail}</Text>}</Flex>)}
+    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text>{step.detail && <Text className="run-step-detail" title={step.detail}>{step.detail}</Text>}{step.elapsedMs !== undefined && <Text className="run-step-elapsed">{formatStepElapsed(step.elapsedMs)}</Text>}</Flex>)}
   </Box>;
 }
 
 export function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage); const t = messages[language];
+  const [theme, setTheme] = useState<ThemeMode>(storedThemeMode);
+  // 主题写在根元素上，样式表按 data-theme 取变量；跟随系统那档不写属性，交给
+  // prefers-color-scheme。
+  useEffect(() => { applyThemeMode(theme); }, [theme]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
   const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
@@ -367,21 +389,26 @@ export function App() {
       setActivity(event.label || t.thinking);
       const stepId = event.id || `turn-${event.cursor ?? nextId("turn")}`;
       updateRun(runId, (steps) => {
-        const updated = steps.map((step) => step.status === "active" ? { ...step, status: "done" as const } : step);
-        return updated.some((step) => step.id === stepId) ? updated : [...updated, { id: stepId, label: event.label || t.thinking, status: "active" }];
+        const now = Date.now();
+        const updated = settleActiveSteps(steps, now);
+        return updated.some((step) => step.id === stepId) ? updated : [...updated, { id: stepId, label: event.label || t.thinking, status: "active", startedAt: now }];
       });
     }
     else if (event.type === "tool_requested") {
       setActivity(event.label || t.toolRunning);
       const stepId = event.id || `tool-${event.cursor ?? nextId("tool")}`;
-      updateRun(runId, (steps) => steps.some((step) => step.id === stepId) ? steps : [...steps, { id: stepId, label: event.label || t.toolRunning, detail: event.detail, status: "active" }]);
+      updateRun(runId, (steps) => steps.some((step) => step.id === stepId) ? steps : [...steps, { id: stepId, label: event.label || t.toolRunning, detail: event.detail, status: "active", startedAt: Date.now() }]);
     }
     else if (event.type === "tool_completed") {
       setActivity(event.label || (event.is_error ? t.toolFailed : t.toolDone));
       const stepId = event.id || `tool-${event.cursor ?? nextId("tool")}`;
-      updateRun(runId, (steps) => steps.some((step) => step.id === stepId)
-        ? steps.map((step) => step.id === stepId ? { ...step, label: event.label || step.label, detail: event.detail ?? step.detail, status: event.is_error ? "failed" : "done" } : step)
-        : [...steps, { id: stepId, label: event.label || (event.is_error ? t.toolFailed : t.toolDone), detail: event.detail, status: event.is_error ? "failed" : "done" }]);
+      updateRun(runId, (steps) => {
+        const now = Date.now();
+        return steps.some((step) => step.id === stepId)
+          ? steps.map((step) => step.id === stepId ? { ...step, label: event.label || step.label, detail: event.detail ?? step.detail, status: event.is_error ? "failed" : "done", elapsedMs: now - step.startedAt } : step)
+          // 没见过 requested 就直接 completed：这一步的耗时无从谈起，留空比编一个 0 好。
+          : [...steps, { id: stepId, label: event.label || (event.is_error ? t.toolFailed : t.toolDone), detail: event.detail, status: event.is_error ? "failed" : "done", startedAt: now }];
+      });
     }
     else setActivity(event.label || event.type);
     return { terminal: false as const };
@@ -392,7 +419,7 @@ export function App() {
     if (!response.ok) throw new Error(await response.text());
     abortRef.current?.abort(); setActivity(t.stopped); setBusy(false); abortRef.current = null; activeTurnRef.current = null; activeSessionRef.current = null;
     setActiveRuntimeSessionId("");
-    if (activeRunRef.current) updateRun(activeRunRef.current, (steps) => steps.map((step) => step.status === "active" ? { ...step, label: t.stopped, status: "failed" } : step));
+    if (activeRunRef.current) updateRun(activeRunRef.current, (steps) => steps.map((step) => step.status === "active" ? { ...step, label: t.stopped, status: "failed" as const, elapsedMs: Date.now() - step.startedAt } : step));
   }
 
   async function stop() {
@@ -460,7 +487,12 @@ export function App() {
           retryDelay = Math.min(retryDelay * 2, 5000);
         }
       }
-      updateRun(runId, (steps) => steps.map((step) => step.status === "active" ? { ...step, status: terminalError ? "failed" : "done" } : step));
+      updateRun(runId, (steps) => {
+        const now = Date.now();
+        return steps.map((step) => step.status === "active"
+          ? { ...step, status: terminalError ? "failed" as const : "done" as const, elapsedMs: now - step.startedAt }
+          : step);
+      });
       if (!controller.signal.aborted) {
         const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`);
         applySessionDetail(detail);
@@ -691,7 +723,7 @@ export function App() {
         }
       });
       if (!terminal) throw new Error(t.streamDisconnected);
-      updateRun(runId, (steps) => steps.map((step) => step.status === "active" ? { ...step, status: "done" } : step));
+      updateRun(runId, (steps) => settleActiveSteps(steps, Date.now()));
       setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: answer || t.emptyReply }]);
       refreshSessions().catch(() => undefined);
     } catch (reason) {
@@ -715,7 +747,7 @@ export function App() {
   const railNav = <PluginRail entries={pluginEntries} selection={rail} messages={t} onSelect={(next) => { setPluginSelectedItem(null); setRail(next); }} />;
 
   if (rail.kind === "center") {
-    return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
+    return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
       {railNav}
       <PluginCenter plugins={plugins} failures={pluginFailures} messages={t} onChanged={() => setPluginReloadToken((current) => current + 1)} />
       {pluginOverlays}
@@ -724,7 +756,7 @@ export function App() {
 
   if (rail.kind === "plugin" && activePlugin) {
     const { plugin, destination } = activePlugin;
-    return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
+    return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
       {railNav}
       {destination.sidebar?.mode === "declarative" && <PluginSidebar plugin={plugin} destination={destination} locale={language} messages={t} reloadToken={pluginReloadToken} onNavigate={navigateToDestination} onSelectItem={setPluginSelectedItem} selectedItemId={pluginSelectedItem} onRowContextMenu={(event, componentId, commands) => {
         const entries = menuEntries(plugins, "plugin.sidebar.row.context").filter((entry) => entry.pluginId === plugin.id && (!commands.length || commands.includes(entry.commandId)));
@@ -737,41 +769,41 @@ export function App() {
     </Flex>;
   }
 
-  return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
+  return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
     {railNav}
     {/* 侧栏本身不滚动：只有会话列表滚。这样列表能吃掉全部剩余高度，
         而不是被上面几块设置挤到下半屏。 */}
-    <Box as="aside" w={{ base: "0", md: "282px" }} display={{ base: "none", md: "flex" }} flexDir="column" borderRight="1px solid" borderColor="#202a35" p="5" bg="#0b1118" overflow="hidden">
+    <Box as="aside" w={{ base: "0", md: "282px" }} display={{ base: "none", md: "flex" }} flexDir="column" borderRight="1px solid" borderColor="var(--bg-panel-hover)" p="5" bg="var(--bg-surface)" overflow="hidden">
       <Flex justify="space-between" align="flex-start" mb="5">
         <Box minW="0">
           <Heading size="md" lineHeight="1.2">{t.appName}</Heading>
-          <Text color="#718096" fontSize="xs">{t.webHarness}</Text>
+          <Text color="var(--text-faint)" fontSize="xs">{t.webHarness}</Text>
         </Box>
         <SidebarSettings messages={t} language={language} onLanguageChange={setLanguage} />
       </Flex>
       {/* 工作区收成一行：选择器占满，加号贴右。标签文字省掉——下拉里
           显示的就是工作区名和访问模式，再顶一行「工作区」是废话。 */}
       <Flex gap="1" align="center">
-        <NativeSelect.Root size="sm" flex="1" minW="0"><NativeSelect.Field aria-label={t.workspace} title={workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948" color="#d8e2ec">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.accessReadOnly : item.access === "smart" ? t.accessSmart : t.accessWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
+        <NativeSelect.Root size="sm" flex="1" minW="0"><NativeSelect.Field aria-label={t.workspace} title={workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="var(--bg-raised)" borderColor="var(--border)" color="var(--text)">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.accessReadOnly : item.access === "smart" ? t.accessSmart : t.accessWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
         <button type="button" className={`workspace-add${addingWorkspace ? " active" : ""}`} title={addingWorkspace ? t.cancel : t.addWorkspace} aria-label={addingWorkspace ? t.cancel : t.addWorkspace} aria-expanded={addingWorkspace} onClick={() => { setAddingWorkspace((current) => !current); setWorkspaceError(""); }}>
           <SfIcon name={addingWorkspace ? "sf:x.mark" : "sf:plus.circle"} size={15} />
         </button>
       </Flex>
       {addingWorkspace && <Box mt="2">
-        <Input size="sm" autoFocus value={newWorkspacePath} placeholder={t.addWorkspacePlaceholder} aria-label={t.addWorkspace} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568"
+        <Input size="sm" autoFocus value={newWorkspacePath} placeholder={t.addWorkspacePlaceholder} aria-label={t.addWorkspace} color="var(--text)" _placeholder={{ color: "var(--text-ghost)" }} bg="var(--bg-raised)" borderColor="var(--border-strong)"
           onChange={(event) => setNewWorkspacePath(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter") void addWorkspace(); if (event.key === "Escape") { setAddingWorkspace(false); setWorkspaceError(""); } }} />
-        <Text fontSize="2xs" color="#6d7c90" mt="1">{t.addWorkspaceHint}</Text>
-        {workspaceError && <Text fontSize="xs" color="#ff9d9d" mt="1">{workspaceError}</Text>}
+        <Text fontSize="2xs" color="var(--text-faint)" mt="1">{t.addWorkspaceHint}</Text>
+        {workspaceError && <Text fontSize="xs" color="var(--danger-text)" mt="1">{workspaceError}</Text>}
       </Box>}
       <RuntimeSidebar activity={runtimeActivity} events={runtimeEvents} onIgnoreEvent={ignoreRuntimeEvent} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
       {/* 会话区吃掉剩余高度。minH=0 是必须的：没有它，flex 子项的最小高度是
           内容高度，列表撑破容器而不是内部滚动。 */}
       <Flex direction="column" flex="1" minH="0" mt="5">
-        <Flex mb="2" justify="space-between" align="baseline"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" color="#9dabbd" _hover={{ bg: "#16212c", color: "#f2f6fa" }} disabled={busy} onClick={() => { localStorage.removeItem(`${lastSessionPrefix}${workspace}`); setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
-        <Input size="sm" mb="2" flex="0 0 auto" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568" />
+        <Flex mb="2" justify="space-between" align="baseline"><Text fontSize="xs" color="var(--text-dim)">{t.session}</Text><Button size="xs" variant="ghost" color="var(--text-dim)" _hover={{ bg: "var(--bg-panel)", color: "var(--text-strong)" }} disabled={busy} onClick={() => { localStorage.removeItem(`${lastSessionPrefix}${workspace}`); setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
+        <Input size="sm" mb="2" flex="0 0 auto" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="var(--text)" _placeholder={{ color: "var(--text-ghost)" }} bg="var(--bg-raised)" borderColor="var(--border-strong)" />
         <Box className="session-list" flex="1" minH="0">
-          <VStack align="stretch" gap="1">{liveSessions.map(sessionRow)}{!liveSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
+          <VStack align="stretch" gap="1">{liveSessions.map(sessionRow)}{!liveSessions.length && <Text color="var(--text-faint)" fontSize="sm">{t.noSessions}</Text>}</VStack>
           {archivedSessions.length > 0 && <Box mt="2">
             <button type="button" className="archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((current) => !current)}>
               <span className={`archived-caret${showArchived ? " open" : ""}`}>▸</span>{t.archived} ({archivedSessions.length})
@@ -781,22 +813,22 @@ export function App() {
         </Box>
         {selectedSession && <Flex mt="2" gap="1" wrap="wrap" flex="0 0 auto"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
       </Flex>
-      <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="#202a35" color="#627184" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
+      <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="var(--bg-panel-hover)" color="var(--text-ghost)" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
       {/* closeOnInteractOutside 必须显式写：zag 对 role="alertdialog" 默认关掉外部点击，
           于是这个框只认 Esc，点旁边的输入框什么也不发生。删除仍要点「删除」才发生，
           点外面等同取消，没有误删风险。 */}
       <Dialog.Root role="alertdialog" closeOnInteractOutside open={deleteTarget !== null} onOpenChange={(details) => { if (!details.open) setDeleteTarget(null); }}>
         <Portal>
-          <Dialog.Backdrop bg="#000a" />
+          <Dialog.Backdrop bg="var(--shadow)" />
           <Dialog.Positioner>
-            <Dialog.Content bg="#101820" color="#e7edf4" border="1px solid" borderColor="#2b3948" borderRadius="12px" maxW="360px">
+            <Dialog.Content bg="var(--bg-raised)" color="var(--text)" border="1px solid" borderColor="var(--border)" borderRadius="12px" maxW="360px">
               <Dialog.Header><Dialog.Title fontSize="md">{t.deleteDialogTitle}</Dialog.Title></Dialog.Header>
               <Dialog.Body>
                 <Text fontWeight="600" mb="2" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{deleteTarget?.title}</Text>
-                <Text fontSize="sm" color="#8b99aa">{t.deleteConfirm}</Text>
+                <Text fontSize="sm" color="var(--text-dim)">{t.deleteConfirm}</Text>
               </Dialog.Body>
               <Dialog.Footer gap="2">
-                <Button size="sm" variant="outline" borderColor="#3a4859" color="#d8e2ec" onClick={() => setDeleteTarget(null)}>{t.cancel}</Button>
+                <Button size="sm" variant="outline" borderColor="var(--border-strong)" color="var(--text)" onClick={() => setDeleteTarget(null)}>{t.cancel}</Button>
                 <Button size="sm" colorPalette="red" onClick={() => void confirmDeleteSession()}>{t.confirmDelete}</Button>
               </Dialog.Footer>
             </Dialog.Content>
@@ -805,11 +837,11 @@ export function App() {
       </Dialog.Root>
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
-      <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
+      <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="var(--text-dim)">{t.welcomeBody}</Text></Box>}
         <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <RunCard key={message.id} steps={message.steps ?? []} messages={t} /> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
-        {error && <Text color="#ff8f8f" py="4">{error}</Text>}<div ref={endRef} />
+        {error && <Text color="var(--danger-text)" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
-      <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} />
+      <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} theme={theme} onThemeChange={setTheme} />
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
           `source` 固定 "chat.selection"，与 macOS 宿主传的两个参数一致。 */}
       {chatSelection && chatSelectionEntries.length > 0 && (
