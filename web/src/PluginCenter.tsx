@@ -83,7 +83,7 @@ export function PluginCenter({ plugins, failures, messages, onChanged }: Props) 
 
       {plugins.length === 0 && (
         <Box className="plugin-card">
-          <Text color="#8b99aa">{messages.pluginNoneInstalled}</Text>
+          <Text color="var(--text-dim)">{messages.pluginNoneInstalled}</Text>
           <code className="plugin-code">willdeep plugin import</code>
         </Box>
       )}
@@ -146,8 +146,8 @@ export function PluginCenter({ plugins, failures, messages, onChanged }: Props) 
                   <Button
                     size="sm"
                     variant="outline"
-                    borderColor="#3a4859"
-                    color="#d8e2ec"
+                    borderColor="var(--border-strong)"
+                    color="var(--text)"
                     disabled={isBusy}
                     onClick={() => void act(plugin.id, () => setPluginEnabled(plugin.id, !plugin.enabled))}
                   >
@@ -175,7 +175,7 @@ export function PluginCenter({ plugins, failures, messages, onChanged }: Props) 
                       </Button>
                     </Flex>
                   ) : (
-                    <Button size="xs" variant="ghost" color="#8b99aa" onClick={() => setConfirmRemove(plugin.id)}>
+                    <Button size="xs" variant="ghost" color="var(--text-dim)" onClick={() => setConfirmRemove(plugin.id)}>
                       {messages.pluginRemove}
                     </Button>
                   ))}

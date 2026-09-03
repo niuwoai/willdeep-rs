@@ -68,17 +68,17 @@ function taskArtifacts(activity: RuntimeActivity, id: string) {
 function StructuredTimeline({ tools, artifacts, messages: t }: { tools: RuntimeTool[]; artifacts: RuntimeArtifact[]; messages: Messages }) {
   const sortedTools = [...tools].sort((left, right) => right.started_at_ms - left.started_at_ms).slice(0, 12);
   const sortedArtifacts = [...artifacts].sort((left, right) => right.created_at - left.created_at).slice(0, 8);
-  if (!sortedTools.length && !sortedArtifacts.length) return <Text fontSize="xs" color="#718096">{t.noStructuredActivity}</Text>;
+  if (!sortedTools.length && !sortedArtifacts.length) return <Text fontSize="xs" color="var(--text-faint)">{t.noStructuredActivity}</Text>;
   return <VStack align="stretch" gap="1">
-    {sortedTools.length > 0 && <Text fontSize="2xs" color="#8290a3">{t.structuredToolLog}</Text>}
+    {sortedTools.length > 0 && <Text fontSize="2xs" color="var(--text-dim)">{t.structuredToolLog}</Text>}
     {sortedTools.map((tool) => <Flex key={tool.id} justify="space-between" gap="2" fontSize="xs">
       <Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{tool.name}</Text>
-      <Text color="#8290a3" flexShrink="0">{statusLabel(tool.status, t)} · {toolDuration(tool)}{t.secondsUnit}</Text>
+      <Text color="var(--text-dim)" flexShrink="0">{statusLabel(tool.status, t)} · {toolDuration(tool)}{t.secondsUnit}</Text>
     </Flex>)}
-    {sortedArtifacts.length > 0 && <Text mt="1" fontSize="2xs" color="#8290a3">{t.diffArtifacts}</Text>}
+    {sortedArtifacts.length > 0 && <Text mt="1" fontSize="2xs" color="var(--text-dim)">{t.diffArtifacts}</Text>}
     {sortedArtifacts.map((artifact) => <Flex key={artifact.id} justify="space-between" gap="2" fontSize="xs">
       <Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{artifact.title}</Text>
-      <Text color="#8290a3" flexShrink="0">{artifact.item_count} {t.changedItems}</Text>
+      <Text color="var(--text-dim)" flexShrink="0">{artifact.item_count} {t.changedItems}</Text>
     </Flex>)}
   </VStack>;
 }
@@ -91,26 +91,26 @@ export function RuntimeDetailPanel({ activity, messages: t, target, onClose }: P
   if (target.kind === "task" && !task) return null;
   const tools = agent ? agentTools(activity, agent) : taskTools(activity, target.id);
   const artifacts = agent ? agentArtifacts(activity, agent) : taskArtifacts(activity, target.id);
-  return <Box mt="3" p="2" border="1px solid" borderColor="#2b3948" borderRadius="sm" bg="#0b1118">
+  return <Box mt="3" p="2" border="1px solid" borderColor="var(--border)" borderRadius="sm" bg="var(--bg-surface)">
     <Flex justify="space-between" align="center" gap="2" mb="2">
       <Text fontSize="xs" fontWeight="semibold">{agent ? t.agentDetails : t.taskDetails}</Text>
       <Button size="2xs" variant="ghost" aria-label={t.closeDetails} title={t.closeDetails} onClick={onClose}>×</Button>
     </Flex>
     {agent && <VStack align="stretch" gap="1" mb="2">
-      <Flex justify="space-between" gap="2" fontSize="xs"><Text>{agent.label || agent.profile || t.agent}</Text><Text color="#8290a3">{statusLabel(agent.status, t)}</Text></Flex>
-      <Text fontSize="2xs" color="#718096">{agent.profile || t.unknownValue} · {agent.model || t.unknownValue}</Text>
-      <Text fontSize="2xs" color="#718096">{t.turn} {agent.current_turn} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}</Text>
-      {agent.current_tool && <Text fontSize="2xs" color="#718096">{t.currentTool}: {agent.current_tool}</Text>}
-      {agent.dedicated_worktree && <Text fontSize="2xs" color="#718096">{t.worktree}: {agent.worktree_branch || t.unknownValue}</Text>}
+      <Flex justify="space-between" gap="2" fontSize="xs"><Text>{agent.label || agent.profile || t.agent}</Text><Text color="var(--text-dim)">{statusLabel(agent.status, t)}</Text></Flex>
+      <Text fontSize="2xs" color="var(--text-faint)">{agent.profile || t.unknownValue} · {agent.model || t.unknownValue}</Text>
+      <Text fontSize="2xs" color="var(--text-faint)">{t.turn} {agent.current_turn} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}</Text>
+      {agent.current_tool && <Text fontSize="2xs" color="var(--text-faint)">{t.currentTool}: {agent.current_tool}</Text>}
+      {agent.dedicated_worktree && <Text fontSize="2xs" color="var(--text-faint)">{t.worktree}: {agent.worktree_branch || t.unknownValue}</Text>}
     </VStack>}
     {task && <VStack align="stretch" gap="1" mb="2">
-      <Flex justify="space-between" gap="2" fontSize="xs"><Text>{task.profile || t.task}</Text><Text color="#8290a3">{statusLabel(task.status, t)}</Text></Flex>
-      <Text fontSize="2xs" color="#718096">{t.duration}: {formatDuration(task.elapsed_seconds, t)}</Text>
-      {task.exit_code !== null && <Text fontSize="2xs" color="#718096">{t.exitCode}: {task.exit_code}</Text>}
-      {task.failure_domain && <Text fontSize="2xs" color="#718096">{t.failureDomain}: {failureDomainLabel(task.failure_domain, t)}</Text>}
+      <Flex justify="space-between" gap="2" fontSize="xs"><Text>{task.profile || t.task}</Text><Text color="var(--text-dim)">{statusLabel(task.status, t)}</Text></Flex>
+      <Text fontSize="2xs" color="var(--text-faint)">{t.duration}: {formatDuration(task.elapsed_seconds, t)}</Text>
+      {task.exit_code !== null && <Text fontSize="2xs" color="var(--text-faint)">{t.exitCode}: {task.exit_code}</Text>}
+      {task.failure_domain && <Text fontSize="2xs" color="var(--text-faint)">{t.failureDomain}: {failureDomainLabel(task.failure_domain, t)}</Text>}
     </VStack>}
     {gate && <Text fontSize="xs" mb="2">{gate.kind === "approval" ? t.waitingApproval : t.waitingAnswer}</Text>}
     <StructuredTimeline tools={tools} artifacts={artifacts} messages={t} />
-    <Text mt="2" fontSize="2xs" color="#596575">{t.structuredLogPrivacy}</Text>
+    <Text mt="2" fontSize="2xs" color="var(--text-ghost)">{t.structuredLogPrivacy}</Text>
   </Box>;
 }
