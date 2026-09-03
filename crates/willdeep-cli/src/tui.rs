@@ -211,6 +211,14 @@ struct App {
     /// 掐这个 Task——没有它，`/local` 跑飞了就只剩退出 TUI 一条路。
     local_turn: Option<tokio::task::JoinHandle<()>>,
     latest_usage: Usage,
+    /// 本轮累计用量与第一次响应回来的时刻。
+    ///
+    /// `latest_usage` 是**最后一次请求**的用量，状态栏要的是那个；本轮账目要
+    /// 的是整轮加起来，两者不能互相顶替。Runtime 路径没有 `AgentOutcome`，
+    /// 只能靠这里累计。
+    turn_input_tokens: u64,
+    turn_output_tokens: u64,
+    turn_first_reply: Option<Duration>,
     turn_started: Option<Instant>,
     last_progress_at: Option<Instant>,
     runtime_turn: bool,
@@ -1987,7 +1995,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::TurnPreempted{turn})=>app.record_progress(format!("{} {turn}",language.text("已被运行时事件打断 · 轮次","Preempted by a runtime event · turn","ランタイムイベントで中断 · ターン"))),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
-                UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
+                UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.record_turn_usage(&v);app.latest_usage=v;},
                 UiMessage::Agent(AgentEvent::CompressionStarted{estimated_tokens})=>{app.context_tokens=estimated_tokens;app.record_progress(language.text("正在压缩上下文","Compressing context","コンテキストを圧縮中").to_owned());},
                 UiMessage::Agent(AgentEvent::CompressionCompleted{estimated_tokens,dropped_messages})=>{app.context_tokens=estimated_tokens;let compressed=language.text("上下文已压缩","Context compressed","コンテキストを圧縮しました");app.record_progress(if dropped_messages>0{language.pick(format!("{compressed} · 本轮请求丢弃 {dropped_messages} 条最旧消息（存档不受影响）"),format!("{compressed} · dropped {dropped_messages} oldest message(s) from this request (the archive is untouched)"),format!("{compressed} · 今回のリクエストから最も古い {dropped_messages} 件を破棄（アーカイブは無変更）"))}else{compressed.to_owned()});},
                 UiMessage::Agent(AgentEvent::BackgroundShellStarted{id})=>app.record_progress(format!("{} {id}",language.text("后台命令已启动","Background command started","バックグラウンドコマンド開始"))),
@@ -2003,7 +2011,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));app.append_turn_stats(Some(&outcome));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
@@ -2111,6 +2119,9 @@ impl App {
             queued_prompts: VecDeque::new(),
             local_turn: None,
             latest_usage: Usage::default(),
+            turn_input_tokens: 0,
+            turn_output_tokens: 0,
+            turn_first_reply: None,
             turn_started: None,
             last_progress_at: None,
             runtime_turn: false,
@@ -2904,6 +2915,91 @@ impl App {
             _ => false,
         }
     }
+    /// 收下一次请求的用量：累进本轮账目，并记住第一次响应的时刻。
+    ///
+    /// 用量事件是在**请求返回之后**发出的，所以第一次收到它的时刻就是「等了
+    /// 多久才有第一个可用结果」。这不是首 token 耗时：Provider 接口一问一答，
+    /// 没有流式，量不到第一个 token 什么时候到。
+    fn record_turn_usage(&mut self, usage: &Usage) {
+        self.turn_input_tokens = self
+            .turn_input_tokens
+            .saturating_add(usage.input_tokens.unwrap_or(0));
+        self.turn_output_tokens = self
+            .turn_output_tokens
+            .saturating_add(usage.output_tokens.unwrap_or(0));
+        if self.turn_first_reply.is_none()
+            && let Some(started) = self.turn_started
+        {
+            self.turn_first_reply = Some(started.elapsed());
+        }
+    }
+
+    /// 一行浅色的本轮账目，跟在回答后面。
+    ///
+    /// 四个数各回答一件事：**首答**是等了多久才有第一个可用结果，**总耗时**
+    /// 是这一轮从头到尾，两者的差就是工具与后续轮次花掉的时间；输入含系统
+    /// 提示词与整段历史，所以它比「你打的那句话」大得多是正常的。
+    ///
+    /// 首答**不是首 token 耗时**：Provider 接口一问一答，没有流式，量不到第
+    /// 一个 token 什么时候到。名字如实叫「首答」，不借用一个做不到的指标名。
+    /// 传 `Some(outcome)` 用本地轮次自己报的数（更权威，Provider 不报用量时
+    /// 也仍有首答耗时）；Runtime 轮次没有 `AgentOutcome`，传 `None` 走本轮
+    /// 累计。
+    fn append_turn_stats(&mut self, outcome: Option<&willdeep_core::AgentOutcome>) {
+        let total = self
+            .turn_started
+            .map(|value| value.elapsed())
+            .or(self.last_elapsed);
+        let input = outcome.map_or(self.turn_input_tokens, |value| value.input_tokens);
+        let output = outcome.map_or(self.turn_output_tokens, |value| value.output_tokens);
+        let first_reply = outcome
+            .and_then(|value| value.first_response_millis)
+            .map(Duration::from_millis)
+            .or(self.turn_first_reply);
+        let turns = outcome.map(|value| value.turns);
+        // 一个数都没有就别占一行。
+        if total.is_none() && input == 0 && output == 0 {
+            return;
+        }
+        let mut parts = Vec::new();
+        if let Some(first) = first_reply {
+            parts.push(format!(
+                "{} {}",
+                self.language.text("首答", "first reply", "初回応答"),
+                format_elapsed_span(first.as_secs_f32(), 2)
+            ));
+        }
+        if let Some(total) = total {
+            parts.push(format!(
+                "{} {}",
+                self.language.text("总耗时", "total", "合計"),
+                format_elapsed_span(total.as_secs_f32(), 2)
+            ));
+        }
+        // Provider 不报用量时整段隐藏，而不是印一个像「真的用了 0 个 token」
+        // 的 0——与状态栏对缓存率的处理同一条规矩。
+        if input > 0 || output > 0 {
+            parts.push(format!(
+                "{} {}",
+                self.language.text("输入", "in", "入力"),
+                format_token_count(input)
+            ));
+            parts.push(format!(
+                "{} {}",
+                self.language.text("输出", "out", "出力"),
+                format_token_count(output)
+            ));
+        }
+        if let Some(turns) = turns.filter(|turns| *turns > 1) {
+            parts.push(format!(
+                "{} {}",
+                self.language.text("轮次", "turns", "ターン"),
+                turns
+            ));
+        }
+        self.append_transcript(format!("· {}", parts.join(" · ")));
+    }
+
     fn finish_turn(&mut self) {
         if let Some(started) = self.turn_started.take() {
             self.last_elapsed = Some(started.elapsed());
@@ -2924,6 +3020,9 @@ impl App {
         self.turn_started = Some(now);
         self.last_progress_at = Some(now);
         self.last_elapsed = None;
+        self.turn_input_tokens = 0;
+        self.turn_output_tokens = 0;
+        self.turn_first_reply = None;
         self.progress_log.clear();
         self.record_progress(initial_progress);
     }

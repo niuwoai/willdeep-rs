@@ -20,7 +20,10 @@ pub(super) fn colored_transcript_at_width(
             lines.extend(render_assistant_markdown(content, width));
             continue;
         }
-        let style = if value.starts_with("You:") {
+        // 「· 」开头的是本轮账目：它是给人瞥一眼的，不该跟对话正文抢注意力。
+        let style = if value.starts_with("· ") {
+            Style::default().fg(Color::DarkGray)
+        } else if value.starts_with("You:") {
             Style::default().fg(Color::Cyan)
         } else if value.starts_with("Error:") {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)

@@ -239,6 +239,14 @@ pub struct AgentOutcome {
     /// 调用方拿它做用量展示与遥测，不必自己去挂 `AgentEvent::Usage` 收集器。
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// 第一次 provider 响应回来用了多久，毫秒。
+    ///
+    /// **这不是首 token 耗时。** Provider 接口是一问一答的，没有流式，所以
+    /// 拿不到「第一个 token 什么时候到」；这里量的是「等了多久才有第一个可用
+    /// 结果」。一轮里如果调了工具，后面还有第二、第三次请求，那些不算在内。
+    /// 两个数放在一起才有意义：它大、总耗时也大，是模型慢；它小而总耗时大，
+    /// 时间花在工具上。
+    pub first_response_millis: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -494,6 +502,11 @@ impl Agent {
         let mut output_tokens = 0_u64;
         // 自上次续推判定以来成功发起的工具调用数——续推判定的「进展证据」。
         let mut tools_since_check = 0_usize;
+        // 第一次 provider 响应回来用了多久。非流式接口下这是「等了多久才有
+        // 第一个可用结果」，不是首 token 耗时；与总耗时一起看才分得清慢在
+        // 模型还是慢在工具。
+        let mut first_response_millis: Option<u64> = None;
+        let run_started = std::time::Instant::now();
         for turn in 1..=self.config.max_turns {
             self.append_pending_instructions(&mut messages);
             // 事件在这里进对话，而不是在工具与工具之间：一次 assistant 的
@@ -508,6 +521,8 @@ impl Agent {
             {
                 Ok(Some(completion)) => {
                     self.settle_leases(&leases, LeaseOutcome::Delivered);
+                    first_response_millis
+                        .get_or_insert_with(|| run_started.elapsed().as_millis() as u64);
                     completion
                 }
                 Ok(None) => {
@@ -593,6 +608,7 @@ impl Agent {
                                 },
                                 input_tokens,
                                 output_tokens,
+                                first_response_millis,
                             });
                         }
                         None => {}
@@ -605,6 +621,7 @@ impl Agent {
                     stop_reason: AgentStopReason::Finished,
                     input_tokens,
                     output_tokens,
+                    first_response_millis,
                 });
             }
             tools_since_check = tools_since_check.saturating_add(completion.tool_calls.len());
