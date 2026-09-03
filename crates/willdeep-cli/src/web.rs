@@ -1717,6 +1717,9 @@ fn client_event(value: serde_json::Value, language: Language) -> Option<serde_js
     Some(serde_json::json!({
         "type":kind,
         "label":label,
+        // 这一步具体在干什么。摘要在 `tool_detail` 那边就收敛并打码过了，这里
+        // 只负责原样带出去——界面把它显示成一行淡色小字。
+        "detail":value.get("detail").and_then(|item| item.as_str()),
         "id":value.get("id").and_then(|item| item.as_str()),
         "name":value.get("name").and_then(|item| item.as_str()),
         "is_error":value.get("is_error").and_then(|item| item.as_bool()),
