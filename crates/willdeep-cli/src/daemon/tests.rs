@@ -15,6 +15,27 @@ fn test_turn_scheduler() -> tokio::sync::mpsc::UnboundedSender<uuid::Uuid> {
     tokio::sync::mpsc::unbounded_channel().0
 }
 
+#[tokio::test]
+async fn control_server_shutdown_deadline_starts_after_shutdown_signal() {
+    let (shutdown, receiver) = watch::channel(false);
+    let waiter = tokio::spawn(wait_for_shutdown_deadline(
+        receiver,
+        Duration::from_millis(20),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        !waiter.is_finished(),
+        "the grace deadline must not run while the Daemon is healthy"
+    );
+
+    shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_millis(200), waiter)
+        .await
+        .expect("shutdown deadline should finish after the signal")
+        .expect("shutdown deadline task should not panic");
+}
+
 fn initialize_git_workspace(root: &Path) {
     let status = Command::new("git")
         .args(["init"])
