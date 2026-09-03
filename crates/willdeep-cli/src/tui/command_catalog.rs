@@ -38,7 +38,7 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 19] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
@@ -60,6 +60,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
             "/diff",
             "/skills",
             "/clear",
+            "/exit",
         ],
         Language::En => [
             "/help",
@@ -80,6 +81,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
             "/diff",
             "/skills",
             "/clear",
+            "/exit",
         ],
         Language::Ja => [
             "/help",
@@ -100,6 +102,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
             "/diff",
             "/skills",
             "/clear",
+            "/exit",
         ],
     };
     // 用法与说明按同一顺序声明，配错了就是把说明贴到别的命令上。
@@ -116,7 +119,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 18] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 18] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 19] {
     [
         (
             "/help",
@@ -249,6 +252,10 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         (
             "/clear",
             language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
+        ),
+        (
+            "/exit",
+            language.text("退出 TUI", "Exit the TUI", "TUI を終了"),
         ),
     ]
 }

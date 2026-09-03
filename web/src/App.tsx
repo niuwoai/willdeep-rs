@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Portal, Text, Textarea, VStack } from "@chakra-ui/react";
-import { detectLanguage, messages, type Language } from "./i18n";
+import { detectLanguage, messages, type Language, type Messages } from "./i18n";
 import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
 import { Markdown } from "./Markdown";
 import { SidebarSettings } from "./SidebarSettings";
@@ -128,6 +128,21 @@ function waitForReconnect(delay: number, signal: AbortSignal) {
     const timer = window.setTimeout(resolve, delay);
     signal.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true });
   });
+}
+
+/// 一轮里最多显示几条进度。
+///
+/// 一次长任务动辄几十步，全列出来会把整个聊天区顶满，而人真正关心的只有
+/// 「现在在干什么、刚才几步是什么」。折起来的部分只报个数，不留一长串。
+const VISIBLE_RUN_STEPS = 5;
+
+function RunCard({ steps, messages: t }: { steps: RunStep[]; messages: Messages }) {
+  const hidden = Math.max(0, steps.length - VISIBLE_RUN_STEPS);
+  const visible = steps.slice(hidden);
+  return <Box className="run-card">
+    {hidden > 0 && <Text className="run-collapsed">{t.earlierSteps.replace("{count}", String(hidden))}</Text>}
+    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}
+  </Box>;
 }
 
 export function App() {
@@ -786,8 +801,8 @@ export function App() {
       </Dialog.Root>
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
-      <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="6" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id} className="run-card">{message.steps?.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
+      <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="#8b99aa">{t.welcomeBody}</Text></Box>}
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <RunCard key={message.id} steps={message.steps ?? []} messages={t} /> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="#ff8f8f" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
