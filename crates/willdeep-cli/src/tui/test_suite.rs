@@ -53,6 +53,35 @@ mod command_tests {
         assert!(line.contains("total"));
     }
 
+    /// `/exit` 本地处理，并请求退出。
+    ///
+    /// 命令处理器只报告「用户想走」，真正拆终端的活儿留在事件循环原来的地方：
+    /// 两处都能关终端的话，谁负责恢复终端状态就说不清了。
+    #[test]
+    fn exit_command_requests_a_quit_locally() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+
+        assert!(!app.quit_requested);
+        assert!(app.handle_slash_command("/exit", &skills));
+        assert!(app.quit_requested);
+        assert!(
+            app.transcript
+                .last()
+                .is_some_and(|line| line.contains("Exiting")),
+            "退出要有回执，否则按下去像没反应"
+        );
+    }
+
+    /// 别的命令不会顺手把 TUI 关掉。
+    #[test]
+    fn other_commands_do_not_request_a_quit() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+        app.handle_slash_command("/help", &skills);
+        assert!(!app.quit_requested);
+    }
+
     /// 命令面板装不下时要跟着选中项滚，而不是把后面的静默裁掉。
     ///
     /// 这是一个真实的错觉来源：18 条命令、面板只画得下 8 行，用户看到的最后
@@ -85,7 +114,7 @@ mod command_tests {
             .into_iter()
             .map(|(command, _)| command)
             .collect();
-        assert_eq!(commands.len(), 18);
+        assert_eq!(commands.len(), 19);
         // 面板一屏只画得下 8 条，后面这些此前完全看不到。
         for command in [
             "/daemon",
