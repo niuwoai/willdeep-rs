@@ -53,6 +53,56 @@ mod command_tests {
         assert!(line.contains("total"));
     }
 
+    /// 命令面板装不下时要跟着选中项滚，而不是把后面的静默裁掉。
+    ///
+    /// 这是一个真实的错觉来源：18 条命令、面板只画得下 8 行，用户看到的最后
+    /// 一条是 `/sidebar`，会以为命令就这些。
+    #[test]
+    fn the_command_menu_scrolls_to_keep_the_selection_visible() {
+        // 装得下就不滚。
+        assert_eq!(command_window_offset(0, 6, 8), 0);
+        assert_eq!(command_window_offset(5, 6, 8), 0);
+        // 选中项还在第一屏里，窗口不动。
+        assert_eq!(command_window_offset(7, 18, 8), 0);
+        // 越过下沿才滚，且只滚到刚好把选中项露出来。
+        assert_eq!(command_window_offset(8, 18, 8), 1);
+        // 滚到底就停住，不会把窗口拉出列表之外。
+        assert_eq!(command_window_offset(17, 18, 8), 10);
+        // 每个选中项都必须落在窗口里，一个都不能漏。
+        for selected in 0..18 {
+            let offset = command_window_offset(selected, 18, 8);
+            assert!(
+                (offset..offset + 8).contains(&selected),
+                "selected {selected} fell outside the window at offset {offset}"
+            );
+        }
+    }
+
+    /// 全部命令都在目录里，`/sidebar` 不是最后一条。
+    #[test]
+    fn the_catalog_carries_every_command() {
+        let commands: Vec<&str> = crate::tui::command_catalog::command_candidates(Language::En)
+            .into_iter()
+            .map(|(command, _)| command)
+            .collect();
+        assert_eq!(commands.len(), 18);
+        // 面板一屏只画得下 8 条，后面这些此前完全看不到。
+        for command in [
+            "/daemon",
+            "/runtime",
+            "/local",
+            "/session",
+            "/history",
+            "/workspace",
+            "/agent",
+            "/diff",
+            "/skills",
+            "/clear",
+        ] {
+            assert!(commands.contains(&command), "{command} 不在命令目录里");
+        }
+    }
+
     /// Runtime 轮次没有 AgentOutcome，账目走本轮累计的用量。
     ///
     /// 这条路径此前完全没有账目：daemon 模式下的回答后面什么也不显示。
