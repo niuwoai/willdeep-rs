@@ -5,6 +5,7 @@ pub mod goal;
 pub mod hooks;
 pub mod judge;
 pub mod kernel;
+pub mod kernel_store;
 /// 实弹靶场：真 Provider、真缺陷、真退出码。仅测试构建，默认 `#[ignore]`。
 #[cfg(test)]
 mod livefire;

@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0、阶段 1 与并行任务 P1 已落地（0.57.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0-2 与并行任务 P1 已落地（0.58.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -75,7 +75,7 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 注意力聚合 | ⚠️ `RuntimeStatus::priority` 是展示排序，不是调度裁决 | `crates/willdeep-core/src/attention.rs` |
 | 统一事件信封 | ✅ 0.56.0-rc1 契约与类型，0.57.0-rc1 接入主循环 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
 | 三档中断策略 | ✅ 0.57.0-rc1，含抢占取消 provider 请求 | `crates/willdeep-core/src/kernel.rs` |
-| 事件持久化与崩溃恢复 | ❌ 无 | — |
+| 事件持久化与崩溃恢复 | ✅ 0.58.0-rc1 | `crates/willdeep-core/src/kernel_store.rs` |
 | lease / 双消费者语义 | ❌ 无 | — |
 | 外部事件入站（Webhook / Relay / 邮件） | ❌ 只有**出站** `willdeep.webhook.v1` 通知 | `crates/willdeep-cli/src/notify.rs` |
 | 定时任务触发 | ❌ 无 | — |
@@ -118,14 +118,16 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 
 **验收**：已达成——三档调度、优先级防饥饿、两种去重、lease 往返与重启回收、双 lane 互不代劳、伪造抢占降级、frame 注入防护、上限淘汰；主循环侧三项接线测试。
 
-### 阶段 2 · 持久化与恢复
+### 阶段 2 · 持久化与恢复 ✅ 0.58.0-rc1
 
-- 每会话日志 `~/.willdeep/agent-events/<session-id>.json`，带 schema 版本，0600 权限；
-- 每会话 200 / 全局 1000 上限，淘汰时**涉及的每个会话各自重写自己的日志**（否则重启后「删掉的事件诈尸」）；
-- 损坏或超限文件移入 `.corrupt-*` 隔离区，不阻塞启动；日志读取放后台，会话目录加载完成后才启动恢复调度；
-- 会话归档 / 删除同步清理事件日志与唤醒预算，且进程退出前等待删除队列完成。
+- `crates/willdeep-core/src/kernel_store.rs`：每会话一个 0600 文件、原子替换、带 schema 版本；
+- `EventKernel::restore` 把 lease 变回待投递并重新记住去重键；`take_dirty_sessions` + `flush` 负责写回；
+- 全局淘汰牵连到的会话各自标脏重写；会话被遗忘时标脏，下次刷盘删文件；
+- 整份解不出来的文件改名 `.corrupt-<时间戳>` 隔离，单条坏事件只丢自己，加载失败不阻塞启动。
 
-**验收**：重启后 pending 事件继续投递、损坏日志隔离不拖慢启动、归档会话拒绝迟到事件、淘汰后重启不复活。
+**验收**：已达成，九项测试覆盖。
+
+**未做（留给阶段 5 与 6）**：唤醒预算的持久化要等阶段 5 有了预算本体；「归档会话拒绝迟到事件」要等阶段 6 接上会话生命周期，现在内核不知道哪个会话被归档了。
 
 ### 阶段 3 · lease 与双消费者
 

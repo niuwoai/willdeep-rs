@@ -120,6 +120,8 @@ struct KernelState {
     credits: [u32; 4],
     seen_once: HashSet<String>,
     seen_order: VecDeque<String>,
+    /// 自上次落盘后内容变过的会话。
+    dirty: HashSet<Uuid>,
 }
 
 /// 进程内事件内核。
@@ -191,6 +193,7 @@ impl EventKernel {
             event,
             received: now,
         });
+        state.dirty.insert(session);
         evict(&mut state, session);
         let preempts = has_pending_preemption(&state);
         drop(state);
@@ -257,10 +260,12 @@ impl EventKernel {
             record.event.delivery.state = DeliveryState::Leased;
             record.event.delivery.lease_id = Some(lease_id);
             record.event.delivery.leased_at = Some(now_iso8601());
+            let session = record.event.session_id;
             taken.push(LeasedEvent {
                 event: record.event.clone(),
                 lease_id,
             });
+            state.dirty.insert(session);
         }
         drop(state);
         self.refresh_preempt_pending();
@@ -275,6 +280,7 @@ impl EventKernel {
         let mut state = self.state.lock().expect("kernel state");
         let stamp = now_iso8601();
         let mut acked = 0;
+        let mut touched = Vec::new();
         for record in state.records.iter_mut() {
             if record.event.delivery.state == DeliveryState::Leased
                 && record
@@ -286,9 +292,11 @@ impl EventKernel {
                 record.event.delivery.state = DeliveryState::Handled;
                 record.event.delivery.handled_at = Some(stamp.clone());
                 record.event.delivery.lease_id = None;
+                touched.push(record.event.session_id);
                 acked += 1;
             }
         }
+        state.dirty.extend(touched);
         acked
     }
 
@@ -296,6 +304,7 @@ impl EventKernel {
     pub fn release(&self, lease_ids: &[Uuid]) -> usize {
         let mut state = self.state.lock().expect("kernel state");
         let mut released = 0;
+        let mut touched = Vec::new();
         for record in state.records.iter_mut() {
             if record.event.delivery.state == DeliveryState::Leased
                 && record
@@ -307,13 +316,65 @@ impl EventKernel {
                 record.event.delivery.state = DeliveryState::Pending;
                 record.event.delivery.lease_id = None;
                 record.event.delivery.leased_at = None;
+                touched.push(record.event.session_id);
                 released += 1;
             }
         }
+        state.dirty.extend(touched);
         drop(state);
         // 放回去的可能正是一条抢占事件，标志要跟着回来。
         self.refresh_preempt_pending();
         released
+    }
+
+    /// 把一份从磁盘读回的事件装进队列。
+    ///
+    /// 三件事一起做，缺一个都会出问题：lease 一律回 pending（上一次运行留下的
+    /// `leased` 是「投递到一半断电」，不是「已经处理」）；去重键重新记住（否则
+    /// 重启后同一个 Worker 结果会再讲一遍）；已经终态的事件照原样留着，事件
+    /// 中心还要显示它们。
+    pub fn restore(&self, events: Vec<KernelEvent>) {
+        {
+            let mut state = self.state.lock().expect("kernel state");
+            let now = Instant::now();
+            for mut event in events {
+                if event.delivery.state == DeliveryState::Leased {
+                    event.delivery.state = DeliveryState::Pending;
+                    event.delivery.lease_id = None;
+                    event.delivery.leased_at = None;
+                }
+                if let Some(key) = event.dedup_key.clone() {
+                    remember_key(&mut state, key);
+                }
+                state.records.push_back(Record {
+                    event,
+                    received: now,
+                });
+            }
+        }
+        self.refresh_preempt_pending();
+    }
+
+    /// 有哪些会话的事件自上次落盘后变过。
+    ///
+    /// 取走即清空：调用方拿到之后负责把它们写下去。返回的是会话 ID 而不是
+    /// 事件，因为**一次要重写的是整个会话的文件**——尤其是全局淘汰时，被牵
+    /// 连的每个会话都要各自重写，否则重启后被淘汰的事件会从别人的文件里
+    /// 回来。
+    pub fn take_dirty_sessions(&self) -> Vec<Uuid> {
+        let mut state = self.state.lock().expect("kernel state");
+        state.dirty.drain().collect()
+    }
+
+    /// 某个会话此刻的全部事件，用于落盘。
+    pub fn session_events(&self, session_id: Uuid) -> Vec<KernelEvent> {
+        let state = self.state.lock().expect("kernel state");
+        state
+            .records
+            .iter()
+            .filter(|record| record.event.session_id == session_id)
+            .map(|record| record.event.clone())
+            .collect()
     }
 
     /// 所有 lease 一律放回 pending。进程启动时先做这一步：上一次运行留下的
@@ -395,6 +456,8 @@ impl EventKernel {
         record.event.delivery.state = state_value;
         record.event.delivery.handled_at = Some(now_iso8601());
         record.event.delivery.lease_id = None;
+        let session = record.event.session_id;
+        state.dirty.insert(session);
         true
     }
 
@@ -405,6 +468,9 @@ impl EventKernel {
         state
             .records
             .retain(|record| record.event.session_id != session_id);
+        // 标脏，好让落盘那一步把这个会话的文件删掉：内存里清了、磁盘上还在，
+        // 归档会话的正文就会在下次启动时回来。
+        state.dirty.insert(session_id);
         before - state.records.len()
     }
 
@@ -503,7 +569,12 @@ fn evict(state: &mut KernelState, session: Uuid) {
         let Some(index) = victim(state, None) else {
             break;
         };
-        state.records.remove(index);
+        // 全局淘汰会牵连别的会话。被牵连的那个会话必须跟着重写自己的文件，
+        // 否则重启之后这条事件会从它的旧文件里回来——「删掉的事件诈尸」正是
+        // 这么来的。
+        if let Some(record) = state.records.remove(index) {
+            state.dirty.insert(record.event.session_id);
+        }
     }
 }
 
