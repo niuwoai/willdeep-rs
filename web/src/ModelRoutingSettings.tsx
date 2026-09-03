@@ -166,18 +166,18 @@ export function ModelRoutingSettings({
   return <>
     {/* 受控时按钮由调用方提供。Chakra 的 outline 变体在这套深底上把文字压到
         近乎看不见，所以这里显式给前景与描边色，别依赖主题默认值。 */}
-    {!controlled && <Button size="sm" variant="outline" width="100%" mb="5" color="#d8e2ec" borderColor="#3a4859" _hover={{ bg: "#16212c", color: "#f2f6fa", borderColor: "#4c5d72" }} onClick={() => setOpen(true)}>{t.modelRouting}</Button>}
+    {!controlled && <Button size="sm" variant="outline" width="100%" mb="5" color="var(--text)" borderColor="var(--border-strong)" _hover={{ bg: "var(--bg-panel)", color: "var(--text-strong)", borderColor: "var(--border-strong)" }} onClick={() => setOpen(true)}>{t.modelRouting}</Button>}
     <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)} size="xl">
       <Portal>
-        <Dialog.Backdrop bg="#000c" />
+        <Dialog.Backdrop bg="var(--shadow-strong)" />
         <Dialog.Positioner>
-          <Dialog.Content className="routing-dialog" bg="#0d151e" color="#e7edf4" border="1px solid" borderColor="#33465a" borderRadius="12px">
+          <Dialog.Content className="routing-dialog" bg="var(--bg-surface)" color="var(--text)" border="1px solid" borderColor="var(--bg-elevated)" borderRadius="12px">
             <Dialog.Header><Dialog.Title>{t.modelRouting}</Dialog.Title></Dialog.Header>
             <Dialog.Body>
-              {loading && <Text color="#8290a3">{t.routingLoading}</Text>}
-              {error && <Text color="#ff8f8f" mb="3">{error}</Text>}
+              {loading && <Text color="var(--text-dim)">{t.routingLoading}</Text>}
+              {error && <Text color="var(--danger-text)" mb="3">{error}</Text>}
               {settings && <>
-                <Text fontSize="sm" color="#8290a3" mb="4">{t.routingApplyHint}</Text>
+                <Text fontSize="sm" color="var(--text-dim)" mb="4">{t.routingApplyHint}</Text>
                 {settings.active_provider_override && <Text className="routing-warning">{t.routingOverrideHint}: {settings.active_provider_override}</Text>}
                 <Box className="routing-grid routing-root-grid">
                   <label><span>{t.routingRootProvider}</span><NativeSelect.Root><NativeSelect.Field value={settings.default_provider} onChange={(event) => {
@@ -198,24 +198,24 @@ export function ModelRoutingSettings({
                     <td><select value={profile.provider_profile || ""} onChange={(event) => updateProfile(index, { provider_profile: event.target.value || null })}><option value="">{t.routingInheritRoot}</option>{settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}</select></td>
                     <td><input value={profile.model || ""} placeholder={profile.recommended_model || t.routingProviderDefault} onChange={(event) => updateProfile(index, { model: event.target.value.trim() ? event.target.value : null })} /></td>
                     <td><input type="number" min={4000} max={1000000} value={profile.context_window} onChange={(event) => updateProfile(index, { context_window: Number(event.target.value) })} /></td>
-                    <td><Text fontSize="xs" color="#8fa4ba">{profile.effective_provider} · {profile.effective_model}</Text></td>
+                    <td><Text fontSize="xs" color="var(--text-dim)">{profile.effective_provider} · {profile.effective_model}</Text></td>
                   </tr>)}
                 </tbody></table></Box>
                 <Text fontSize="sm" fontWeight="semibold" mt="5" mb="1">{t.routingTiers}</Text>
-                <Text fontSize="xs" color="#8290a3" mb="3">{t.routingTierHint}</Text>
+                <Text fontSize="xs" color="var(--text-dim)" mb="3">{t.routingTierHint}</Text>
                 <Box overflowX="auto"><table className="routing-table"><thead><tr><th>{t.routingTier}</th><th>{t.routingRecommended}</th><th>{t.routingProvider}</th><th>{t.routingModel}</th><th>{t.routingTierBudget}</th><th>{t.routingEffective}</th></tr></thead><tbody>
                   {settings.tiers.map((tier, index) => <tr key={tier.id}>
-                    <td>{tierLabel(tier.id)}{tier.requires_admission && <Text as="span" fontSize="xs" color="#d8b168" ml="2" title={t.routingTierTicket}>🎟</Text>}</td>
+                    <td>{tierLabel(tier.id)}{tier.requires_admission && <Text as="span" fontSize="xs" color="var(--warning)" ml="2" title={t.routingTierTicket}>🎟</Text>}</td>
                     <td><input aria-label={`${t.routingRecommended} ${tierLabel(tier.id)}`} type="checkbox" checked={tier.automatic} onChange={(event) => updateTier(index, event.target.checked ? { provider_profile: null, model: null, automatic: true } : { model: tier.effective_model, automatic: false })} /></td>
                     <td><select value={tier.provider_profile || ""} onChange={(event) => updateTier(index, { provider_profile: event.target.value || null })}><option value="">{t.routingInheritRoot}</option>{settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}</select></td>
                     <td><input value={tier.model || ""} placeholder={tier.recommended_model || t.routingProviderDefault} onChange={(event) => updateTier(index, { model: event.target.value.trim() ? event.target.value : null })} /></td>
                     <td><input type="number" min={4000} max={1000000} value={tier.context_window} onChange={(event) => updateTier(index, { context_window: Number(event.target.value) })} /></td>
-                    <td><Text fontSize="xs" color="#8fa4ba">{tier.effective_provider} · {tier.effective_model}</Text></td>
+                    <td><Text fontSize="xs" color="var(--text-dim)">{tier.effective_provider} · {tier.effective_model}</Text></td>
                   </tr>)}
                 </tbody></table></Box>
               </>}
             </Dialog.Body>
-            <Dialog.Footer><Flex gap="2" align="center"><Text fontSize="sm" color="#74d69a">{saved ? t.routingSaved : ""}</Text><Button variant="ghost" onClick={() => setOpen(false)}>{t.cancel}</Button><Button disabled={!settings || saving || loading} onClick={() => void save()}>{saving ? t.routingSaving : t.routingSave}</Button></Flex></Dialog.Footer>
+            <Dialog.Footer><Flex gap="2" align="center"><Text fontSize="sm" color="var(--success)">{saved ? t.routingSaved : ""}</Text><Button variant="ghost" onClick={() => setOpen(false)}>{t.cancel}</Button><Button disabled={!settings || saving || loading} onClick={() => void save()}>{saving ? t.routingSaving : t.routingSave}</Button></Flex></Dialog.Footer>
           </Dialog.Content>
         </Dialog.Positioner>
       </Portal>

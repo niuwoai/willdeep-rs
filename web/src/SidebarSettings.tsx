@@ -58,9 +58,9 @@ export function SidebarSettings({ messages, language, onLanguageChange }: Props)
               aria-label={messages.language}
               value={language}
               onChange={(event) => onLanguageChange(event.target.value as Language)}
-              bg="#0f1720"
-              borderColor="#2b3948"
-              color="#d8e2ec"
+              bg="var(--bg-raised)"
+              borderColor="var(--border)"
+              color="var(--text)"
             >
               {languages.map((code) => (
                 <option key={code} value={code}>

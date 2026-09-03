@@ -4,8 +4,8 @@
 .plugin-rail {
   width: 76px;
   flex: 0 0 76px;
-  background: #070b10;
-  border-right: 1px solid #1a232d;
+  background: var(--bg-page);
+  border-right: 1px solid var(--bg-panel);
   padding: 12px 6px;
   gap: 4px;
   overflow: visible;
@@ -21,14 +21,14 @@
   border: 0;
   border-radius: 10px;
   background: transparent;
-  color: #7c8b9e;
+  color: var(--text-faint);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 
-.rail-button:hover { background: #101922; color: #b9c6d6; }
+.rail-button:hover { background: var(--bg-raised); color: var(--text-soft); }
 /* 选中只用灰度表达：插件品牌色不参与，否则一栏入口会看不出当前位置。 */
-.rail-button.active { background: #16212c; color: #e7edf4; }
+.rail-button.active { background: var(--bg-panel); color: var(--text); }
 
 .rail-label {
   font-size: 10px;
@@ -40,7 +40,7 @@
   white-space: nowrap;
 }
 
-.rail-divider { height: 1px; background: #1a232d; margin: 6px 8px; }
+.rail-divider { height: 1px; background: var(--bg-panel); margin: 6px 8px; }
 
 .rail-overflow { position: relative; }
 
@@ -51,10 +51,10 @@
   z-index: 20;
   min-width: 200px;
   padding: 6px;
-  background: #101820;
-  border: 1px solid #2b3948;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px #0009;
+  box-shadow: 0 12px 32px var(--shadow);
 }
 
 .rail-overflow-item {
@@ -66,14 +66,14 @@
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #c8d4e2;
+  color: var(--text-soft);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
-.rail-overflow-item:hover { background: #16212c; }
-.rail-overflow-item.active { background: #1d2a37; color: #e7edf4; }
+.rail-overflow-item:hover { background: var(--bg-panel); }
+.rail-overflow-item.active { background: var(--bg-panel-hover); color: var(--text); }
 
 /* ---------------------------------------------------------------- 页面 */
 
@@ -82,12 +82,12 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 16px;
-  border-bottom: 1px solid #1a232d;
-  background: #0b1118;
+  border-bottom: 1px solid var(--bg-panel);
+  background: var(--bg-surface);
   flex: 0 0 auto;
 }
 
-.plugin-title { font-size: 14px; font-weight: 600; color: #e7edf4; }
+.plugin-title { font-size: 14px; font-weight: 600; color: var(--text); }
 
 .plugin-toolbar-button {
   display: inline-flex;
@@ -98,11 +98,11 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #8b99aa;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
-.plugin-toolbar-button:hover:not(:disabled) { background: #16212c; color: #e7edf4; }
+.plugin-toolbar-button:hover:not(:disabled) { background: var(--bg-panel); color: var(--text); }
 .plugin-toolbar-button:disabled { opacity: 0.45; cursor: default; }
 
 .plugin-frame {
@@ -110,15 +110,15 @@
   height: 100%;
   border: 0;
   display: block;
-  background: #0d1319;
+  background: var(--bg-surface);
 }
 
 .plugin-error {
   padding: 8px 16px;
-  color: #ff8f8f;
+  color: var(--danger-text);
   font-size: 13px;
-  background: #1b1013;
-  border-bottom: 1px solid #3a1d22;
+  background: var(--danger-surface);
+  border-bottom: 1px solid var(--danger-surface);
 }
 
 /* ---------------------------------------------------------------- 侧栏 */
@@ -127,8 +127,8 @@
   width: 282px;
   flex: 0 0 282px;
   padding: 18px 16px;
-  background: #0b1118;
-  border-right: 1px solid #202a35;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--bg-panel-hover);
   overflow-y: auto;
 }
 
@@ -136,7 +136,7 @@
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #6d7c90;
+  color: var(--text-faint);
   margin-bottom: 12px;
 }
 
@@ -146,7 +146,7 @@
   font-size: 11px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #7b8b9f;
+  color: var(--text-faint);
   margin-bottom: 6px;
 }
 
@@ -162,69 +162,69 @@
 }
 
 .plugin-sidebar-row.clickable { cursor: pointer; }
-.plugin-sidebar-row.clickable:hover { background: #131e28; }
-.plugin-sidebar-row.selected { background: #1a2734; }
+.plugin-sidebar-row.clickable:hover { background: var(--bg-panel); }
+.plugin-sidebar-row.selected { background: var(--bg-panel-hover); }
 
 .plugin-sidebar-label {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #c8d4e2;
+  color: var(--text-soft);
   min-width: 0;
 }
 
 .plugin-sidebar-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plugin-sidebar-label small { color: #6d7c90; font-size: 11px; }
+.plugin-sidebar-label small { color: var(--text-faint); font-size: 11px; }
 
 .plugin-sidebar-badge {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  color: #e7edf4;
-  background: #17222d;
+  color: var(--text);
+  background: var(--bg-panel);
   border-radius: 6px;
   padding: 2px 7px;
   white-space: nowrap;
 }
 
-.plugin-sidebar-status { font-size: 12px; color: #8b99aa; }
+.plugin-sidebar-status { font-size: 12px; color: var(--text-dim); }
 
 .plugin-sidebar-progress {
   height: 4px;
   width: 100%;
-  background: #17222d;
+  background: var(--bg-panel);
   border-radius: 2px;
   overflow: hidden;
 }
 
-.plugin-sidebar-progress-fill { height: 100%; background: #5c7d9e; }
+.plugin-sidebar-progress-fill { height: 100%; background: var(--accent-dim); }
 
 .plugin-sidebar-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border: 1px solid #2b3948;
+  border: 1px solid var(--border);
   border-radius: 7px;
   background: transparent;
-  color: #c8d4e2;
+  color: var(--text-soft);
   font-size: 12px;
   cursor: pointer;
 }
 
-.plugin-sidebar-button:hover { background: #16212c; }
+.plugin-sidebar-button:hover { background: var(--bg-panel); }
 
 .plugin-sidebar-disclosure summary {
   cursor: pointer;
   font-size: 12px;
-  color: #8b99aa;
+  color: var(--text-dim);
   padding: 4px 0;
 }
 
-.plugin-sidebar-separator { height: 1px; background: #1a232d; margin: 8px 0; }
+.plugin-sidebar-separator { height: 1px; background: var(--bg-panel); margin: 8px 0; }
 
-.plugin-sidebar-state { font-size: 12px; color: #77879a; padding: 6px 0; }
-.plugin-sidebar-state.errorState { color: #d8a06a; }
+.plugin-sidebar-state { font-size: 12px; color: var(--text-faint); padding: 6px 0; }
+.plugin-sidebar-state.errorState { color: var(--warning); }
 
 /* ------------------------------------------------------------ 插件中心 */
 
@@ -236,26 +236,26 @@
   padding: 28px 32px 60px;
 }
 
-.plugin-center-hint { color: #8b99aa; font-size: 13px; margin-bottom: 18px; max-width: 68ch; }
+.plugin-center-hint { color: var(--text-dim); font-size: 13px; margin-bottom: 18px; max-width: 68ch; }
 
 .plugin-card {
-  border: 1px solid #202a35;
+  border: 1px solid var(--bg-panel-hover);
   border-radius: 12px;
-  background: #0b1118;
+  background: var(--bg-surface);
   padding: 16px 18px;
   margin-bottom: 12px;
 }
 
-.plugin-card-name { font-size: 15px; font-weight: 600; color: #e7edf4; }
-.plugin-card-version { font-size: 12px; color: #8b99aa; font-variant-numeric: tabular-nums; }
-.plugin-card-source { font-size: 11px; color: #6d7c90; }
-.plugin-card-about { font-size: 13px; color: #9dabbd; margin-top: 5px; max-width: 74ch; }
-.plugin-card-meta { font-size: 12px; color: #8b99aa; margin-top: 7px; }
+.plugin-card-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.plugin-card-version { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.plugin-card-source { font-size: 11px; color: var(--text-faint); }
+.plugin-card-about { font-size: 13px; color: var(--text-dim); margin-top: 5px; max-width: 74ch; }
+.plugin-card-meta { font-size: 12px; color: var(--text-dim); margin-top: 7px; }
 
 .plugin-card-digest {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
-  color: #4f5d6e;
+  color: var(--border-strong);
   margin-top: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -267,50 +267,50 @@
 
 .plugin-chip {
   font-size: 11px;
-  color: #cbd6e3;
-  background: #17222d;
-  border: 1px solid #26333f;
+  color: var(--text-soft);
+  background: var(--bg-panel);
+  border: 1px solid var(--bg-panel-strong);
   border-radius: 999px;
   padding: 2px 9px;
 }
 
-.plugin-chip.quiet { color: #6d7c90; background: transparent; }
-.plugin-chip.mcp { color: #9db6cc; }
+.plugin-chip.quiet { color: var(--text-faint); background: transparent; }
+.plugin-chip.mcp { color: var(--text-dim); }
 
-.plugin-gap { font-size: 12px; color: #d8a06a; }
+.plugin-gap { font-size: 12px; color: var(--warning); }
 
 /* 推动安装流程的主要操作用黑底白字，在一片灰度里保持明确的视觉优先级。 */
 .plugin-primary-button {
-  background: #e7edf4;
-  color: #0b1118;
+  background: var(--text);
+  color: var(--bg-surface);
 }
 
-.plugin-primary-button:hover { background: #ffffff; }
+.plugin-primary-button:hover { background: var(--text-strong); }
 
 .plugin-code {
   display: inline-block;
   margin-top: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: #c8d4e2;
-  background: #101820;
-  border: 1px solid #26333f;
+  color: var(--text-soft);
+  background: var(--bg-raised);
+  border: 1px solid var(--bg-panel-strong);
   border-radius: 6px;
   padding: 4px 8px;
 }
 
-.plugin-settings { margin-top: 14px; border-top: 1px solid #1a232d; padding-top: 12px; }
+.plugin-settings { margin-top: 14px; border-top: 1px solid var(--bg-panel); padding-top: 12px; }
 .plugin-setting-row { padding: 6px 0; }
-.plugin-setting-title { font-size: 13px; color: #d8e2ec; }
-.plugin-setting-about { font-size: 11px; color: #77879a; }
+.plugin-setting-title { font-size: 13px; color: var(--text); }
+.plugin-setting-about { font-size: 11px; color: var(--text-faint); }
 
 .plugin-setting-input {
   width: 220px;
   padding: 5px 9px;
   font-size: 13px;
-  color: #d8e2ec;
-  background: #0f1720;
-  border: 1px solid #2b3948;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 7px;
 }
 
@@ -328,12 +328,12 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #8b99aa;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
 .sidebar-settings-button:hover,
-.sidebar-settings-button.active { background: #16212c; color: #e7edf4; }
+.sidebar-settings-button.active { background: var(--bg-panel); color: var(--text); }
 
 .sidebar-settings-panel {
   position: absolute;
@@ -342,16 +342,16 @@
   z-index: 30;
   width: 232px;
   padding: 11px 12px 9px;
-  background: #101820;
-  border: 1px solid #2b3948;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 16px 40px #000a;
+  box-shadow: 0 16px 40px var(--shadow);
 }
 
 .sidebar-settings-label {
   font-size: 11px;
   letter-spacing: 0.03em;
-  color: #8290a3;
+  color: var(--text-dim);
   margin-bottom: 5px;
 }
 
@@ -364,14 +364,14 @@
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #d8e2ec;
+  color: var(--text);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
-.sidebar-settings-item:hover { background: #1a2734; }
-.sidebar-settings-item span { color: #6d7c90; }
+.sidebar-settings-item:hover { background: var(--bg-panel-hover); }
+.sidebar-settings-item span { color: var(--text-faint); }
 
 .workspace-add {
   display: inline-flex;
@@ -380,21 +380,21 @@
   flex: 0 0 auto;
   width: 30px;
   height: 30px;
-  border: 1px solid #2b3948;
+  border: 1px solid var(--border);
   border-radius: 7px;
   background: transparent;
-  color: #8b99aa;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
 .workspace-add:hover,
-.workspace-add.active { background: #16212c; color: #e7edf4; border-color: #3d4d5e; }
+.workspace-add.active { background: var(--bg-panel); color: var(--text); border-color: var(--border-strong); }
 
 /* 标题还没生成的会话，列表显示的是首条用户消息。做淡一档，
    让「这是正文不是标题」一眼看得出来。 */
-.session-untitled { color: #92a1b4; font-style: italic; }
+.session-untitled { color: var(--text-dim); font-style: italic; }
 .session-row.selected .session-untitled,
-.session-row:hover .session-untitled { color: #c8d4e2; }
+.session-row:hover .session-untitled { color: var(--text-soft); }
 
 /* ------------------------------------------------------------ 菜单贡献点 */
 
@@ -402,7 +402,7 @@
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: #000a;
+  background: var(--shadow);
   display: flex;
   justify-content: center;
   padding-top: 14vh;
@@ -413,24 +413,24 @@
   max-height: 60vh;
   display: flex;
   flex-direction: column;
-  background: #101820;
-  border: 1px solid #2b3948;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 24px 64px #000c;
+  box-shadow: 0 24px 64px var(--shadow-strong);
   overflow: hidden;
 }
 
 .plugin-palette-input {
   padding: 13px 16px;
   font-size: 15px;
-  color: #e7edf4;
+  color: var(--text);
   background: transparent;
   border: 0;
-  border-bottom: 1px solid #202a35;
+  border-bottom: 1px solid var(--bg-panel-hover);
   outline: none;
 }
 
-.plugin-palette-input::placeholder { color: #667587; }
+.plugin-palette-input::placeholder { color: var(--text-ghost); }
 
 .plugin-palette-list { overflow-y: auto; padding: 6px; }
 
@@ -443,26 +443,26 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #c8d4e2;
+  color: var(--text-soft);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
-.plugin-palette-item.active { background: #1a2734; color: #e7edf4; }
+.plugin-palette-item.active { background: var(--bg-panel-hover); color: var(--text); }
 .plugin-palette-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plugin-palette-source { font-size: 11px; color: #6d7c90; }
-.plugin-palette-empty { padding: 14px 12px; font-size: 13px; color: #77879a; }
+.plugin-palette-source { font-size: 11px; color: var(--text-faint); }
+.plugin-palette-empty { padding: 14px 12px; font-size: 13px; color: var(--text-faint); }
 
 .plugin-popup {
   position: fixed;
   z-index: 45;
   min-width: 190px;
   padding: 5px;
-  background: #101820;
-  border: 1px solid #2b3948;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 14px 36px #000a;
+  box-shadow: 0 14px 36px var(--shadow);
 }
 
 .plugin-popup-item {
@@ -474,14 +474,14 @@
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #c8d4e2;
+  color: var(--text-soft);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
-.plugin-popup-item:hover { background: #1a2734; color: #e7edf4; }
-.plugin-popup-item small { margin-left: auto; font-size: 11px; color: #6d7c90; }
+.plugin-popup-item:hover { background: var(--bg-panel-hover); color: var(--text); }
+.plugin-popup-item small { margin-left: auto; font-size: 11px; color: var(--text-faint); }
 
 .composer-more {
   position: absolute;
@@ -493,14 +493,14 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid #2b3948;
+  border: 1px solid var(--border);
   border-radius: 8px;
   background: transparent;
-  color: #8b99aa;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
-.composer-more:hover { background: #16212c; color: #e7edf4; }
+.composer-more:hover { background: var(--bg-panel); color: var(--text); }
 
 /* 有插件贡献 composer.more 时，「Enter 发送」提示要让开这个按钮的位置，
    否则两者叠在一起谁也读不清。没有插件贡献时按钮不渲染，提示回到原位。 */

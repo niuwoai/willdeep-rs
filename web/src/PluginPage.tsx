@@ -285,7 +285,7 @@ export function PluginPage({
   const toolbar = destination.toolbar_commands;
 
   return (
-    <Flex direction="column" flex="1" minW="0" h="100vh" bg="#080d12">
+    <Flex direction="column" flex="1" minW="0" h="100vh" bg="var(--bg-page)">
       <Flex className="plugin-toolbar">
         <Text className="plugin-title">{destination.title}</Text>
         <Flex gap="1">
@@ -337,7 +337,7 @@ export function PluginPage({
         </Box>
       ) : (
         <Flex flex="1" align="center" justify="center">
-          <Text color="#77879a">{messages.pluginPageUnavailable}</Text>
+          <Text color="var(--text-faint)">{messages.pluginPageUnavailable}</Text>
         </Flex>
       )}
     </Flex>
