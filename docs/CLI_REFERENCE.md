@@ -17,6 +17,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `api` | 用 JSON 请求信封调用一个稳定 Runtime 操作 |
 | `attach` | 附着到持久 Runtime 事件流 |
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
+| `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `integrations` | 查看和管理可选外部集成 |
 | `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
 | `doctor` | 不联系 Provider 的本地就绪诊断 |
@@ -206,6 +207,20 @@ willdeep doctor --bundle ./willdeep-diagnostic.zip
 ```
 
 `--bundle` 导出不含日志和本地路径的私有脱敏 ZIP，便于提交问题报告。详见 [故障排查](TROUBLESHOOTING.md)。
+
+## `willdeep event` — 运行时事件
+
+```bash
+willdeep event list [--session <UUID>] [--pending] [--json] [--limit 30]
+willdeep event show <事件 ID>
+willdeep event ignore <事件 ID>
+```
+
+后台任务、Worker 结果与本机入站通知统一进入事件内核，由主 Agent 在轮次边界收走。这条命令读的是事件日志（`~/.willdeep/agent-events/`），因此在 Agent 没跑的时候也能查。
+
+列表里的投递状态有两段，中间用 `/` 分开：前一段是**模型侧**（`queued` / `sending` / `seen`），后一段 `you` 表示**这条还等着人**。两者互不代劳，模型读过一封外部通知不等于替你回了。
+
+`ignore` 只结算你这一侧，事件本身留着：忽略是「我看过了」，不是「这件事没发生过」。**它不批准任何操作**——审批仍然要在它被提出的地方回答，终端、文件、浏览器与 MCP 各自的授权路径不受影响。
 
 ## `willdeep plugin`
 

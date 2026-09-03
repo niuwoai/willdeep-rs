@@ -236,6 +236,8 @@ mod tests {
             notifier: crate::notify::Notifier::disabled(),
             skills: Arc::new(SkillCatalog::default()),
             relay_bridge: RelayBridge::new(),
+            kernel: willdeep_core::EventKernel::new(),
+            kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
             context_window: 128_000,
             background_tasks: Arc::new(BackgroundTaskRegistry::default()),
             runtime_submit: crate::daemon::RuntimeSubmitOptions {

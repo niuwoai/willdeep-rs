@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0-5（内核侧）与并行任务 P1 已落地（0.60.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0-6 与并行任务 P1 已落地（0.61.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -70,7 +70,7 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 五职责工种 | ✅ 已对齐 | `crates/willdeep-core/src/subagent/profiles.rs` |
 | 三档模型 + 逐档 provider/model 配置 | ✅ 已对齐（0.52.0-rc1） | `crates/willdeep-core/src/worker_tier.rs` |
 | 上下文预算档位 | ✅ 0.56.0-rc1 对齐口径：六档共享表 + 标签规则 + 可存性上界 | `worker_tier.rs` 的 `SELECTABLE_CONTEXT_WINDOWS` |
-| 后台任务事件 | ⚠️ 有 `broadcast` + `drain_pending`，进程内、无持久化、无优先级、无信任分级 | `crates/willdeep-core/src/background.rs` |
+| 后台任务事件 | ✅ 0.61.0-rc1 起统一走内核，旧通知队列退役 | `crates/willdeep-core/src/background.rs` |
 | turn 边界注入 | ⚠️ `AgentInstructionInbox` 只有一条 lane、只收用户指令、不落盘 | `crates/willdeep-core/src/agent.rs:585` |
 | 注意力聚合 | ⚠️ `RuntimeStatus::priority` 是展示排序，不是调度裁决 | `crates/willdeep-core/src/attention.rs` |
 | 统一事件信封 | ✅ 0.56.0-rc1 契约与类型，0.57.0-rc1 接入主循环 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
@@ -79,7 +79,7 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | lease / 双消费者语义 | ✅ 0.59.0-rc1，含跨连接单一所有权 | `crates/willdeep-core/src/kernel.rs` |
 | 本机入站与唤醒额度 | ✅ 0.60.0-rc1（端点待阶段 7）；云端中继不做 | `crates/willdeep-core/src/kernel_ingress.rs` |
 | 定时任务触发 | ❌ 无 | — |
-| 事件中心 UI | ❌ TUI 只有 Inbox，无事件来源/优先级/合并次数/处理结果 | — |
+| 事件中心 UI | ✅ 0.61.0-rc1：Inbox 投影 + `willdeep event` | `crates/willdeep-cli/src/event_cmd.rs` |
 
 **命名地雷**：rs 控制面已有 `event.list` / `event.stream`，那是 Runtime **出向**的观察事件（Runtime → 客户端）。本任务书的内核事件是**入向**信号（外界 → 主 Agent），方向相反。落地时统一用 `kernel_event` / `kernel.*` 前缀，不要复用 `event`，也不要把内核事件顺手灌进现有公共事件流。
 
@@ -173,14 +173,22 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 
 **验收**：已达成内核侧——未认证不唤醒、已认证按额度并给出重试时刻、窗口滑过后额度回来、跨消费者共用同一份额度、正文信任不随 Token 提升。
 
-### 阶段 6 · CLI / TUI 事件中心
+### 阶段 6 · CLI / TUI 事件中心与生产者切换 ✅ 0.61.0-rc1
 
-- TUI 在 Inbox 之外增加事件视图：来源、优先级、相对时间、合并次数、处理人、最终状态（投递中 / 模型已处理 / 用户已忽略 / 会话内已解决）；
-- 审批类事件**只投影**，原审批卡片仍是唯一决策源，关掉事件行不能伪造批准；
-- 待用户提醒计数按**逐请求**统计，多请求不缩水成 1；
-- 新增 `willdeep event list|show|ignore` 子命令。
+- **生产者切换完成**（阶段 1 推迟的那一半）：TUI 与非交互 CLI 的后台通知队列退役，结果统一进内核，由主 Agent 在轮次边界收走；
+- 唤醒额度收口在 `wake_for_kernel_events` 一个函数里，所有会开新一轮的路径都走它；
+- Inbox 增加运行时事件投影（`AttentionSource::RuntimeEvent`），带来源、合并次数与模型侧状态；
+- 新增 `willdeep event list|show|ignore`，读日志而不是连内核，Agent 没跑时也能查。
 
-**验收**：审批投影不重复计数、事件行忽略不改变审批状态、TUI 快照测试。
+**三条落地时定死的判定**：
+
+1. **待投递事件优先于排队的用户提示词。** 用户排在后面那句话，很可能正是基于还没看到的后台结果说的。
+2. **「模型已经看过」与「还要人处理」在界面上必须分开显示**，否则用户会以为 Agent 读过就等于办过了。CLI 的投递标签写成 `seen/you` 就是为此。
+3. **`event ignore` 只结算用户这一侧**，事件留着，且命令输出里明说它不批准任何操作——这条命令最容易被当成批准。
+
+**验收**：已达成——投影只显示不决策、忽略后落盘且事件仍在、未知 ID 明确报错、投递标签分得开两条 lane。
+
+**未做**：`AttentionSource::RuntimeEvent` 的 TUI 渲染沿用现有 Inbox 行，没有单独的事件中心面板；相对时间与「处理人」两列留到有真实使用反馈之后再决定要不要加。
 
 ### 阶段 7 · 控制面与互操作
 

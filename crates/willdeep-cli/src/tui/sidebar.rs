@@ -148,6 +148,7 @@ impl App {
             items.extend(self.workspace_attention.iter().cloned());
         }
         items.extend(self.runtime_attention.iter().cloned());
+        items.extend(self.kernel_attention.iter().cloned());
         items.retain(|item| !self.attention_read.contains(&item.id));
         sort_attention_items(&mut items);
         items

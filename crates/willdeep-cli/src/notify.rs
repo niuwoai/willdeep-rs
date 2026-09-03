@@ -471,6 +471,7 @@ fn source_label(source: AttentionSource) -> &'static str {
         AttentionSource::Subagent => "subagent",
         AttentionSource::Worktree => "worktree",
         AttentionSource::DiffReview => "diff_review",
+        AttentionSource::RuntimeEvent => "runtime_event",
     }
 }
 

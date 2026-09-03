@@ -60,6 +60,11 @@ pub enum AttentionSource {
     Subagent,
     Worktree,
     DiffReview,
+    /// 事件内核里仍待用户处理的一条。
+    ///
+    /// **它是投影，不是决策点。** 审批类事件的唯一决策源仍是原来的审批卡片；
+    /// 在这里把一行关掉不等于批准了什么。
+    RuntimeEvent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +168,33 @@ impl AttentionItem {
             detail: format!("{:?}", task.status),
             status,
             elapsed_millis: Some(task.elapsed_millis),
+        }
+    }
+}
+
+impl AttentionItem {
+    /// 把一条待用户处理的内核事件投影成 Inbox 里的一行。
+    ///
+    /// 详情里带上来源、合并次数和模型侧的处理状态：**「模型已经看过」与
+    /// 「还要人处理」是两件事**，用户需要一眼分得清，否则会以为 Agent 读过
+    /// 就等于办过了。
+    pub fn from_kernel_event(event: &willdeep_runtime_protocol::KernelEvent) -> Self {
+        let mut detail = format!("{:?}", event.source).to_lowercase();
+        if event.merge_count > 1 {
+            detail.push_str(&format!(" ×{}", event.merge_count));
+        }
+        detail.push_str(match event.delivery.state {
+            willdeep_runtime_protocol::DeliveryState::Handled => " · seen by the agent",
+            willdeep_runtime_protocol::DeliveryState::Leased => " · being delivered",
+            _ => " · not yet delivered",
+        });
+        Self {
+            id: format!("kernel:{}", event.event_id),
+            source: AttentionSource::RuntimeEvent,
+            title: event.title.clone(),
+            detail,
+            status: RuntimeStatus::Blocked,
+            elapsed_millis: None,
         }
     }
 }
