@@ -402,6 +402,7 @@ mod tests {
             relay_bridge: RelayBridge::new(),
             kernel: willdeep_core::EventKernel::new(),
             kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
+            detached_jobs: willdeep_core::DetachedJobStore::new(&root),
             context_window: 128_000,
             background_tasks: Arc::new(BackgroundTaskRegistry::default()),
             runtime_submit: crate::daemon::RuntimeSubmitOptions {

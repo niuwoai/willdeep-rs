@@ -650,6 +650,9 @@ pub(crate) async fn build(
         .with_skills(skills.clone())
         .with_mcp(mcp.clone())
         .with_background_tasks(background_tasks.clone())
+        // 显式后台命令脱离父进程：Runtime 升级或重启之后，回来取结果就行，
+        // 不必把一条跑了半小时的命令再跑一遍。
+        .with_detached_jobs(Arc::new(willdeep_core::DetachedJobStore::new(home)))
         .with_verification_reporter(move |verification| {
             let home = verification_home.clone();
             let workspace = verification_workspace.clone();

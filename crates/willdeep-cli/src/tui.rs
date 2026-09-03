@@ -475,12 +475,15 @@ pub async fn run(
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
     ui.7.set_session(&session.id.to_string(), Some(session.title.as_str()));
+    // 作业记录与事件日志同一个家目录。
+    let kernel_store_home = home.clone();
     let mut runtime = TuiRuntime {
         home,
         notifier: ui.7,
         skills,
         relay_bridge,
         kernel,
+        detached_jobs: willdeep_core::DetachedJobStore::new(&kernel_store_home),
         kernel_store,
         context_window: ui.2,
         background_tasks: ui.3,
@@ -510,6 +513,9 @@ struct TuiRuntime {
     /// 宿主事件内核。后台结果、入站通知都进这里，由主 Agent 在 turn 边界收走。
     kernel: willdeep_core::EventKernel,
     kernel_store: willdeep_core::kernel_store::KernelStore,
+    /// 脱离父进程的后台作业。它们活得比这个进程久，所以完成与否只能靠轮询
+    /// 磁盘上的记录，没有可等的句柄。
+    detached_jobs: willdeep_core::DetachedJobStore,
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
@@ -1243,6 +1249,7 @@ async fn event_loop(
                 // 的通知通道。落盘也在这里收口——状态每变一次就写一次盘，
                 // 打字的时候会卡在磁盘上。
                 app.kernel_attention=runtime.kernel.pending_for_user().iter().map(AttentionItem::from_kernel_event).collect();
+                publish_finished_jobs(runtime,session.id);
                 willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
@@ -3973,6 +3980,48 @@ fn progress_spinner(elapsed: Duration) -> &'static str {
 /// 选中项必须落在可视窗口里，否则用户按着 ↓ 却看不到光标去了哪——那正是让人
 /// 以为「后面没有了」的原因。窗口贴着底走：只有选中项越过下沿才滚，向上回来
 /// 时同样跟着走。
+/// 把已经有结论的脱离作业交给事件内核。
+///
+/// 这些作业没有可等的句柄——进程早就脱离了，父进程甚至可能是重启之后的新
+/// 进程。所以只能按记录轮询，靠去重键保证同一个作业只讲一遍：`Once` 那档正是
+/// 为「同一个资源的同一次结束」准备的。
+///
+/// 「不知道」不当成失败上报：失败是有退出码的，进程没留下退出码只说明我们
+/// 不知道它怎么结束的，把它说成失败会让人去查一个并不存在的错误。
+fn publish_finished_jobs(runtime: &TuiRuntime, session_id: uuid::Uuid) {
+    use willdeep_core::JobState;
+    for job in runtime.detached_jobs.list() {
+        let state = runtime.detached_jobs.state(&job);
+        let (kind, title) = match state {
+            JobState::Running => continue,
+            JobState::Finished { exit_code: 0 } => ("job.completed", "后台作业完成"),
+            JobState::Finished { .. } => ("job.failed", "后台作业失败"),
+            JobState::Vanished => ("job.vanished", "后台作业没有留下结论"),
+        };
+        let detail = runtime.detached_jobs.output(&job.id, 4 * 1024);
+        let mut event = willdeep_core::host_event(
+            session_id,
+            willdeep_runtime_protocol::EventSource::Task,
+            kind,
+            if matches!(state, JobState::Finished { exit_code: 0 }) {
+                willdeep_runtime_protocol::EventPriority::Normal
+            } else {
+                willdeep_runtime_protocol::EventPriority::Urgent
+            },
+            willdeep_core::kernel::InterruptPolicy::YieldAtBoundary,
+            format!("{title} · {}", job.label.lines().next().unwrap_or(&job.id)),
+            Some(detail),
+            Some(format!("job:{}", job.id)),
+            false,
+        );
+        // 命令输出是工具产出，不因为宿主转发就变成可信正文。
+        event.content_provenance = willdeep_runtime_protocol::ContentProvenance::Tool;
+        runtime
+            .kernel
+            .publish(event, willdeep_core::DedupPolicy::Once);
+    }
+}
+
 fn command_window_offset(selected: usize, total: usize, visible: usize) -> usize {
     if visible == 0 || total <= visible {
         return 0;
