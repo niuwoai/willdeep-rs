@@ -61,8 +61,14 @@ pub(super) async fn submit_turn(
     // Persist ownership before scheduling the Turn. A very fast Harness must
     // never be overwritten by this client's stale history.
     store.save(session)?;
-    crate::daemon::submit_runtime_turn(&runtime.home, remote_session.id, prompt, attachments)
-        .await?;
+    crate::daemon::submit_runtime_turn(
+        &runtime.home,
+        remote_session.id,
+        prompt,
+        attachments,
+        crate::Surface::Tui,
+    )
+    .await?;
     app.tools.reset();
     app.begin_turn(
         true,

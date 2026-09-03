@@ -396,6 +396,13 @@ pub struct SubmitTurnParams {
     pub prompt: String,
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
+    /// 谁提交的这一轮。
+    ///
+    /// 审批与提问要弹回**发起的那一端**,而不是所有打开着同一个会话的端:两处
+    /// 都弹的话,谁先答谁算数,另一边只看到问题凭空消失。旧客户端不带这个字段,
+    /// 那时回落到按会话判定——那正是这个字段出现之前唯一存在的口径。
+    #[serde(default)]
+    pub origin_client: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -628,6 +635,10 @@ pub struct RuntimeTask {
     /// 该字段，客户端必须容忍 `null` 并退回 UUID 展示。
     #[serde(default)]
     pub prompt_excerpt: Option<String>,
+    /// 提交这次轮次的客户端标识,用于把审批弹回发起端。旧 Daemon 不产出该
+    /// 字段,客户端必须容忍 `null` 并回落到按会话判定。
+    #[serde(default)]
+    pub origin_client: Option<String>,
     pub created_at: u64,
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
@@ -1574,6 +1585,7 @@ mod tests {
         assert!(json.get("error").is_none());
 
         let task = RuntimeTask {
+            origin_client: None,
             id: uuid::Uuid::new_v4(),
             session_id: Some(session.id),
             turn_id: Some(turn.id),
@@ -1862,6 +1874,7 @@ mod tests {
     #[test]
     fn turn_submission_round_trips_typed_attachments_and_rejects_extra_controls() {
         let params = SubmitTurnParams {
+            origin_client: None,
             session_id: uuid::Uuid::new_v4(),
             turn_request_id: uuid::Uuid::new_v4(),
             prompt: "inspect the image".to_owned(),

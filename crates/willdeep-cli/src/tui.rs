@@ -1248,7 +1248,7 @@ async fn event_loop(
                 let tx=runtime_snapshot_tx.clone();
                 let workspace=runtime.runtime_submit.workspace.clone();
                 let session_id=session.id;
-                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace,Some(session_id)).await{let _=tx.send(snapshot);}});
+                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace,Some(session_id),crate::Surface::Tui).await{let _=tx.send(snapshot);}});
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 runtime.notifier.attention_snapshot(&snapshot.attention);
