@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0-4 与并行任务 P1 已落地（0.59.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0-5（内核侧）与并行任务 P1 已落地（0.60.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -77,7 +77,7 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 三档中断策略 | ✅ 0.57.0-rc1，含抢占取消 provider 请求 | `crates/willdeep-core/src/kernel.rs` |
 | 事件持久化与崩溃恢复 | ✅ 0.58.0-rc1 | `crates/willdeep-core/src/kernel_store.rs` |
 | lease / 双消费者语义 | ✅ 0.59.0-rc1，含跨连接单一所有权 | `crates/willdeep-core/src/kernel.rs` |
-| 外部事件入站（Webhook / Relay / 邮件） | ❌ 只有**出站** `willdeep.webhook.v1` 通知 | `crates/willdeep-cli/src/notify.rs` |
+| 本机入站与唤醒额度 | ✅ 0.60.0-rc1（端点待阶段 7）；云端中继不做 | `crates/willdeep-core/src/kernel_ingress.rs` |
 | 定时任务触发 | ❌ 无 | — |
 | 事件中心 UI | ❌ TUI 只有 Inbox，无事件来源/优先级/合并次数/处理结果 | — |
 
@@ -167,7 +167,11 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 
 留给未来的口子：信封本身保留 relay 相关字段的位置，将来若接云端中继不必改 schema 版本，但 rs 侧不实现对应路径。
 
-**验收**：Token 缺失即拒绝入站、同一去重键重投只投递一次、额度耗尽后重试去重、正文信任不随 Token 提升。
+**状态：内核侧已落地（0.60.0-rc1）**，`crates/willdeep-core/src/kernel_ingress.rs` 是额度记账本与入站构造器，`EventKernel::admit_wake` 是那个唯一出口。一条落地时定死的判定：**持 Token 的本机调用方按已认证外部记账，不按本机可信档**——这条路上进来的正文终究是外面给的，给它免限流等于开一条不限速的注入通道。
+
+**未做**：控制面上的入站端点本身与 `kernel.*` 操作一起放在阶段 7；hooks 注入点等阶段 6 接线时一并挂。
+
+**验收**：已达成内核侧——未认证不唤醒、已认证按额度并给出重试时刻、窗口滑过后额度回来、跨消费者共用同一份额度、正文信任不随 Token 提升。
 
 ### 阶段 6 · CLI / TUI 事件中心
 
