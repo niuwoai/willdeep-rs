@@ -387,6 +387,25 @@ pub(crate) async fn execute_noninteractive(
         Err(error) => turn_telemetry.finish(crate::telemetry::global(), Err(error)),
     }
     let mut outcome = run_result?;
+    if outcome.stop_reason == willdeep_core::AgentStopReason::MaxTurns {
+        // 触顶交出的是部分结果，得让人一眼看出它没收敛，而不是当成终稿。
+        // 说明同时写进会话历史：下一轮模型也该知道上一轮是被掐断的。
+        let notice = language
+            .text(
+                "⚠ 轮次上限 {n} 已用尽，任务未收敛。以下是最后一段结果，改动已落盘但可能不完整；继续对话可接着做。",
+                "⚠ The {n}-turn limit was reached before the task converged. Below is the last partial result; edits are on disk but may be incomplete. Continue the conversation to carry on.",
+                "⚠ ターン上限 {n} に達し、タスクは収束していません。以下は最後の部分結果です。変更は保存済みですが不完全な可能性があります。会話を続けて再開できます。",
+            )
+            .replace("{n}", &outcome.turns.to_string());
+        outcome
+            .messages
+            .push(willdeep_core::Message::assistant(&notice, Vec::new()));
+        outcome.final_text = if outcome.final_text.trim().is_empty() {
+            notice
+        } else {
+            format!("{notice}\n\n{}", outcome.final_text)
+        };
+    }
     session.messages = outcome.messages.clone();
     store.save(session)?;
     loop {
@@ -485,7 +504,13 @@ pub(crate) async fn build(
         .map(parse_api)
         .transpose()?;
     let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
-    let max_turns = cli.max_turns.or(loaded.file.agent.max_turns).unwrap_or(24);
+    // 24 轮对「先问一句、再改十个文件、再查一下」这种正常任务已经不够：
+    // 一次触顶就把整轮判失败，写好的东西一句都不给看。
+    const DEFAULT_MAX_TURNS: usize = 64;
+    let max_turns = cli
+        .max_turns
+        .or(loaded.file.agent.max_turns)
+        .unwrap_or(DEFAULT_MAX_TURNS);
     if !(1..=100).contains(&max_turns) {
         bail!("--max-turns must be between 1 and 100");
     }
