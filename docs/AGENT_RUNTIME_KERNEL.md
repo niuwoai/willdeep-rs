@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0 与并行任务 P1 已落地（0.56.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0、阶段 1 与并行任务 P1 已落地（0.57.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -73,8 +73,8 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 后台任务事件 | ⚠️ 有 `broadcast` + `drain_pending`，进程内、无持久化、无优先级、无信任分级 | `crates/willdeep-core/src/background.rs` |
 | turn 边界注入 | ⚠️ `AgentInstructionInbox` 只有一条 lane、只收用户指令、不落盘 | `crates/willdeep-core/src/agent.rs:585` |
 | 注意力聚合 | ⚠️ `RuntimeStatus::priority` 是展示排序，不是调度裁决 | `crates/willdeep-core/src/attention.rs` |
-| 统一事件信封 | ✅ 0.56.0-rc1 契约与类型就位，尚未接线 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
-| 三档中断策略 | ⚠️ 枚举与降级规则已定，调度侧未实现 | 同上 |
+| 统一事件信封 | ✅ 0.56.0-rc1 契约与类型，0.57.0-rc1 接入主循环 | `crates/willdeep-runtime-protocol/src/kernel_event.rs` |
+| 三档中断策略 | ✅ 0.57.0-rc1，含抢占取消 provider 请求 | `crates/willdeep-core/src/kernel.rs` |
 | 事件持久化与崩溃恢复 | ❌ 无 | — |
 | lease / 双消费者语义 | ❌ 无 | — |
 | 外部事件入站（Webhook / Relay / 邮件） | ❌ 只有**出站** `willdeep.webhook.v1` 通知 | `crates/willdeep-cli/src/notify.rs` |
@@ -101,14 +101,22 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 1. **降级在入口做，不在校验做**。`clamp_to_authority()` 把中断策略压到本档上限，`validate()` 才拒绝越权信封。外部来源伪造 `preempt` 是日常流量不是异常，降级后照常投递；做成校验报错会直接丢事件。
 2. **降级只压中断，不压优先级**。伪造 critical 的外部事件仍排在前面，只是不许抢占。两者一起压会让真正紧急的外部通知沉底。
 
-### 阶段 1 · 进程内事件内核
+### 阶段 1 · 进程内事件内核 ✅ 0.57.0-rc1
 
-- 新增 `crates/willdeep-core/src/kernel/`（`event.rs` 信封、`queue.rs` 队列与合并、`dispatch.rs` 调度）；
-- 把 `BackgroundTaskEvent` 与 `AgentInstructionInbox` 收敛为内核的两个生产者，**保留旧路径为兼容层**，并按资源 ID 去重，避免同一结果向模型投递两次（Xedit 踩过这一脚）；
-- 实现三档中断：`enqueue` / `yield_at_boundary` 在 `agent.rs` 的 turn 与工具边界投递；`preempt` 取消当前 provider 请求并保留 transcript；
-- 加权公平顺序（critical / urgent / normal / background），高优先级洪水不得饿死普通事件。
+- `crates/willdeep-core/src/kernel.rs` 是队列与调度：发布时降级、按去重键合并、加权公平取用、lease 往返、双 lane、上限淘汰、正文净化；
+- `agent.rs` 接线：`with_event_kernel` 挂上之后，事件在 turn 顶部作为用户消息进对话，宿主 critical 事件与 provider 请求 select 竞争，抢占发 `AgentEvent::TurnPreempted`；
+- 后台任务的生产者适配器 `background_task_event` 就位。
 
-**验收**：三档调度、优先级防饥饿、去重与 5 秒合并、preempt 后 transcript 完整的单测；空闲会话立即唤醒、忙碌会话边界投递各一条。
+**四条落地时定死的判定**：
+
+1. **边界在 turn 顶部，不在工具与工具之间。** 一次 assistant 的 `tool_calls` 必须紧跟它那批 tool 结果，中间插用户消息会拆散配对。turn 顶部就是「模型或工具步骤已结束」那个边界。
+2. **lease 的分界是「事件有没有进到留得下来的对话」**，不是「请求成不成功」。被抢占取消的那一轮，事件文本已在 transcript 里，算投递完成；请求报错时整轮 messages 一起丢，才放回待投递。
+3. **抢占标志跟着队列走，不靠 `Notify` 的一次性许可。** 许可会在没人等待时到达（请求已发出、select 还没进入等待）而丢掉抢占，也会在事件已被正常投递后残留而取消一个无辜的请求。
+4. **净化只中和看起来像标签的东西。** 正文里的 `</runtime-events>` 会当场关掉边界，而数学与代码里的 `<` 必须原样保留。
+
+**顺序调整（原计划的一半推迟）**：TUI 与非交互 CLI 的后台通知路径**没有**切到内核，仍走原有的 notice 队列。两条路径同时投递会让同一个结果向模型讲两遍，而切换需要事件中心来承接用户侧展示，因此并入阶段 6 一起做。本阶段生产者侧只交付适配器。
+
+**验收**：已达成——三档调度、优先级防饥饿、两种去重、lease 往返与重启回收、双 lane 互不代劳、伪造抢占降级、frame 注入防护、上限淘汰；主循环侧三项接线测试。
 
 ### 阶段 2 · 持久化与恢复
 

@@ -1351,6 +1351,9 @@ impl EventSink for TerminalSink {
                 auto_dispatched
             ),
             AgentEvent::TurnStarted { turn } if turn > 1 => eprintln!("[turn {turn}]"),
+            AgentEvent::TurnPreempted { turn } => {
+                eprintln!("[turn {turn}] preempted by a runtime event")
+            }
             AgentEvent::ToolRequested(call) => eprintln!("[tool] {}", call.name),
             AgentEvent::ToolCompleted {
                 call,
@@ -1472,6 +1475,9 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         }),
         AgentEvent::TurnStarted { turn } => {
             serde_json::json!({"type": "turn_started", "turn": turn})
+        }
+        AgentEvent::TurnPreempted { turn } => {
+            serde_json::json!({"type": "turn_preempted", "turn": turn})
         }
         AgentEvent::AssistantText(text) => {
             serde_json::json!({"type": "assistant_text", "text": text})

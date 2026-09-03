@@ -4,6 +4,7 @@ pub mod background;
 pub mod goal;
 pub mod hooks;
 pub mod judge;
+pub mod kernel;
 /// 实弹靶场：真 Provider、真缺陷、真退出码。仅测试构建，默认 `#[ignore]`。
 #[cfg(test)]
 mod livefire;
@@ -40,6 +41,7 @@ pub use goal::{
     RoundObservation, SoftStopReason,
 };
 pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
+pub use kernel::{DedupPolicy, EventKernel, LeasedEvent, PublishOutcome, host_event};
 pub use mcp::{McpRegistry, McpServerConfig};
 pub use plugin::{
     ApprovalGap, CommandOutcome, DeclarativeDocument, HostError as PluginHostError, PluginHost,

@@ -71,9 +71,23 @@ impl AgentInstructionInbox {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseOutcome {
+    /// 事件已经进到会留下来的对话里。
+    Delivered,
+    /// 这一轮整个作废，事件没被任何人看过。
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
     TurnStarted {
+        turn: usize,
+    },
+    /// 宿主签发的抢占事件取消了这一轮的 provider 请求。转录与工具记录都还在，
+    /// 下一轮从保留的上下文继续——用户看到的应该是「插了一件急事」，不是
+    /// 「刚才那步白做了」。
+    TurnPreempted {
         turn: usize,
     },
     AssistantText(String),
@@ -260,6 +274,8 @@ pub struct Agent {
     goal_continuation: Option<Arc<GoalContinuation>>,
     background_tasks: Option<Arc<BackgroundTaskRegistry>>,
     routing: Option<Arc<RoutingGuard>>,
+    /// 宿主事件内核。不挂等于本改动前的行为：没有边界投递，也没有抢占。
+    kernel: Option<crate::kernel::EventKernel>,
 }
 
 impl Agent {
@@ -277,6 +293,7 @@ impl Agent {
             goal_continuation: None,
             background_tasks: None,
             routing: None,
+            kernel: None,
         }
     }
 
@@ -369,6 +386,16 @@ impl Agent {
 
     pub fn with_instruction_inbox(mut self, inbox: Arc<AgentInstructionInbox>) -> Self {
         self.instruction_inbox = Some(inbox);
+        self
+    }
+
+    /// 挂上宿主事件内核。
+    ///
+    /// 挂上之后，待投递事件会在**模型与工具的步骤边界**进入对话，宿主签发的
+    /// critical 事件还能取消正在进行的 provider 步骤。不挂就完全不影响原有
+    /// 行为——内核是加在主循环旁边的一层，不是替换。
+    pub fn with_event_kernel(mut self, kernel: crate::kernel::EventKernel) -> Self {
+        self.kernel = Some(kernel);
         self
     }
 
@@ -469,12 +496,34 @@ impl Agent {
         let mut tools_since_check = 0_usize;
         for turn in 1..=self.config.max_turns {
             self.append_pending_instructions(&mut messages);
+            // 事件在这里进对话，而不是在工具与工具之间：一次 assistant 的
+            // tool_calls 必须紧跟它那批 tool 结果，中间插一条用户消息会把这个
+            // 配对拆散。turn 顶部就是「当前模型或工具步骤已经结束」那个边界。
+            let leases = self.append_kernel_events(&mut messages);
             self.sink.emit(AgentEvent::TurnStarted { turn }).await;
             let request_messages = self.request_messages(&messages, &mut compressed).await?;
-            let completion = self
-                .provider()?
-                .complete(&request_messages, &definitions)
-                .await?;
+            let completion = match self
+                .complete_or_preempt(&request_messages, &definitions)
+                .await
+            {
+                Ok(Some(completion)) => {
+                    self.settle_leases(&leases, LeaseOutcome::Delivered);
+                    completion
+                }
+                Ok(None) => {
+                    // 被抢占：请求丢掉了，但事件文本已经在 transcript 里，
+                    // 下一轮模型照样看得到，所以算投递成功。放回 pending 只会
+                    // 让同一批事件再讲一遍。
+                    self.settle_leases(&leases, LeaseOutcome::Delivered);
+                    self.sink.emit(AgentEvent::TurnPreempted { turn }).await;
+                    continue;
+                }
+                Err(error) => {
+                    // 这一轮的 messages 会随着错误一起丢掉，事件也就没人看过。
+                    self.settle_leases(&leases, LeaseOutcome::Failed);
+                    return Err(error.into());
+                }
+            };
             if let Some(usage) = completion.usage {
                 input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                 output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
@@ -580,6 +629,67 @@ impl Agent {
             }
         }
         Err(AgentError::MaxTurns(self.config.max_turns))
+    }
+
+    /// 取一批待投递事件，渲染进对话，返回它们的 lease。
+    ///
+    /// 一次最多取这么多条：事件是通知不是正文，一口气灌几十条只会把这一轮的
+    /// 注意力全占掉，剩下的下一轮再来。
+    fn append_kernel_events(&self, messages: &mut Vec<Message>) -> Vec<uuid::Uuid> {
+        const BATCH: usize = 8;
+        let Some(kernel) = &self.kernel else {
+            return Vec::new();
+        };
+        let batch = kernel.take_for_model(BATCH);
+        if batch.is_empty() {
+            return Vec::new();
+        }
+        let events: Vec<_> = batch.iter().map(|leased| leased.event.clone()).collect();
+        let Some(text) = crate::kernel::render_for_model(&events) else {
+            // 渲染不出内容就别占着 lease。
+            let leases: Vec<uuid::Uuid> = batch.iter().map(|leased| leased.lease_id).collect();
+            kernel.release(&leases);
+            return Vec::new();
+        };
+        messages.push(Message::user(text));
+        batch.iter().map(|leased| leased.lease_id).collect()
+    }
+
+    /// 一批 lease 该按投递成功还是投递失败结账。
+    ///
+    /// 分界不是「请求成不成功」而是「事件有没有进到留得下来的 transcript」：
+    /// 被抢占的那一轮请求虽然废了，事件文本却留在对话里，模型下一轮照样看得
+    /// 到；而请求报错时整轮 messages 一起丢，事件就等于没人看过。
+    fn settle_leases(&self, leases: &[uuid::Uuid], outcome: LeaseOutcome) {
+        if leases.is_empty() {
+            return;
+        }
+        let Some(kernel) = &self.kernel else {
+            return;
+        };
+        match outcome {
+            LeaseOutcome::Delivered => kernel.ack(leases),
+            LeaseOutcome::Failed => kernel.release(leases),
+        };
+    }
+
+    /// 发一次 provider 请求，除非中途被宿主签发的抢占事件打断。
+    ///
+    /// 返回 `Ok(None)` 表示被抢占。取消的只有这一次请求：transcript、工具
+    /// 记录和事件队列都原样留着，下一轮从保留的上下文继续。
+    async fn complete_or_preempt(
+        &self,
+        messages: &[Message],
+        definitions: &[crate::types::ToolDefinition],
+    ) -> Result<Option<crate::types::Completion>, ProviderError> {
+        let provider = self.provider()?;
+        let Some(kernel) = self.kernel.clone() else {
+            return provider.complete(messages, definitions).await.map(Some);
+        };
+        tokio::select! {
+            completion = provider.complete(messages, definitions) => completion.map(Some),
+            () = kernel.preempted() => Ok(None),
+        }
     }
 
     fn append_pending_instructions(&self, messages: &mut Vec<Message>) -> bool {
@@ -1174,6 +1284,167 @@ mod tests {
         assert_eq!(outcome.final_text, "revised answer");
         assert_eq!(outcome.turns, 2);
         assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn kernel_event(
+        interrupt: crate::kernel::InterruptPolicy,
+        title: &str,
+    ) -> willdeep_runtime_protocol::KernelEvent {
+        crate::kernel::host_event(
+            uuid::Uuid::nil(),
+            willdeep_runtime_protocol::EventSource::Worker,
+            "worker.completed",
+            willdeep_runtime_protocol::EventPriority::Normal,
+            interrupt,
+            title,
+            None,
+            Some(title.to_owned()),
+            false,
+        )
+    }
+
+    fn kernel_agent(provider: Arc<dyn Provider>, kernel: crate::kernel::EventKernel) -> Agent {
+        Agent::new(
+            provider,
+            registry("kernel"),
+            AgentConfig {
+                max_turns: 4,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_event_kernel(kernel)
+    }
+
+    /// 待投递事件在 turn 边界进入对话，作为用户消息而不是系统提示词。
+    #[tokio::test]
+    async fn kernel_events_reach_the_model_as_user_material() {
+        let kernel = crate::kernel::EventKernel::new();
+        kernel.publish(
+            kernel_event(
+                crate::kernel::InterruptPolicy::YieldAtBoundary,
+                "tests green",
+            ),
+            crate::kernel::DedupPolicy::Once,
+        );
+        let provider = RecordingProvider::new(&["done"]);
+        let agent = kernel_agent(provider.clone(), kernel.clone());
+
+        let outcome = agent.run("carry on").await.expect("run");
+        assert_eq!(outcome.final_text, "done");
+
+        let requests = provider.requests.lock().expect("requests");
+        let delivered = requests[0]
+            .iter()
+            .find(|message| message.content.contains("tests green"))
+            .expect("event text must reach the model");
+        assert_eq!(
+            delivered.role,
+            crate::types::Role::User,
+            "事件是材料不是系统指令"
+        );
+        // 请求成功之后才算处理完。
+        assert!(kernel.take_for_model(4).is_empty());
+        assert_eq!(
+            kernel.snapshot()[0].delivery.state,
+            willdeep_runtime_protocol::DeliveryState::Handled
+        );
+    }
+
+    struct FailingProvider;
+
+    #[async_trait]
+    impl Provider for FailingProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            Err(ProviderError::InvalidResponse(
+                "upstream is down".to_owned(),
+            ))
+        }
+    }
+
+    /// 请求失败时这一轮的 messages 全丢，所以事件必须回到待投递。
+    ///
+    /// 这是 lease 的全部意义：提前 ack 的话，这条事件就在一次谁也没看见的
+    /// 请求里永久消失了。
+    #[tokio::test]
+    async fn a_failed_request_puts_its_events_back() {
+        let kernel = crate::kernel::EventKernel::new();
+        kernel.publish(
+            kernel_event(
+                crate::kernel::InterruptPolicy::YieldAtBoundary,
+                "build broke",
+            ),
+            crate::kernel::DedupPolicy::Once,
+        );
+        let agent = kernel_agent(Arc::new(FailingProvider), kernel.clone());
+        agent.run("carry on").await.expect_err("provider is down");
+
+        assert_eq!(
+            kernel.snapshot()[0].delivery.state,
+            willdeep_runtime_protocol::DeliveryState::Pending
+        );
+        assert_eq!(kernel.take_for_model(4).len(), 1);
+    }
+
+    /// 宿主签发的抢占取消正在进行的请求，但转录留着，下一轮继续。
+    struct SlowThenFastProvider {
+        kernel: crate::kernel::EventKernel,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for SlowThenFastProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                // 请求进行到一半，一条宿主 critical 事件到达。
+                self.kernel.publish(
+                    kernel_event(crate::kernel::InterruptPolicy::Preempt, "context exhausted"),
+                    crate::kernel::DedupPolicy::Once,
+                );
+                // 抢占赢下 select 之前这次请求不该返回。
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                panic!("preemption must cancel this request");
+            }
+            Ok(Completion {
+                content: "picked up after the interrupt".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn host_preemption_cancels_the_request_and_keeps_the_transcript() {
+        let kernel = crate::kernel::EventKernel::new();
+        let provider = Arc::new(SlowThenFastProvider {
+            kernel: kernel.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let agent = kernel_agent(provider.clone(), kernel.clone()).with_event_sink(sink.clone());
+
+        let outcome = agent.run("long job").await.expect("run continues");
+        assert_eq!(outcome.final_text, "picked up after the interrupt");
+        // 第一轮被取消，第二轮才出结果——转录没被回滚，只是那一步作废。
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let events = sink.events.lock().expect("events");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnPreempted { .. })),
+            "抢占要让用户看见，否则界面上就是无故停顿"
+        );
     }
 
     fn goal_agent(provider: Arc<RecordingProvider>, budget: crate::goal::GoalBudget) -> Agent {
