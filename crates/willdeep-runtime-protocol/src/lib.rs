@@ -2,6 +2,21 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod kernel_event;
+pub use kernel_event::{
+    ContentProvenance, DeliveryState, EventAudience, EventAuthority, EventDelivery, EventPriority,
+    EventSource, InterruptPolicy, KERNEL_EVENT_SCHEMA_VERSION, KernelEvent, KernelEventError,
+    PublicKernelEvent,
+};
+
+pub mod model_catalog;
+pub use model_catalog::{
+    CatalogApiDialect, CatalogModel, CatalogModelKind, CatalogProvider, CatalogRouting,
+    CredentialStore, MODEL_CATALOG_SCHEMA_VERSION, ModelCapability, ModelCatalog,
+    ModelCatalogError, ModelMetadataSource, ModelModality, ModelPricing, NetworkScope,
+    RoutingPolicyEntry, RoutingProfileEntry, RoutingWeights,
+};
+
 pub const PROTOCOL_VERSION: &str = "1.0";
 pub const MIN_CLIENT_PROTOCOL_VERSION: &str = "1.0";
 
@@ -221,6 +236,33 @@ pub struct ResolveApprovalParams {
 pub struct AnswerQuestionParams {
     pub id: uuid::Uuid,
     pub answer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KernelListParams {
+    /// 只看这个会话。
+    #[serde(default)]
+    pub session_id: Option<uuid::Uuid>,
+    /// 只看还等着人处理的。
+    #[serde(default)]
+    pub pending_only: bool,
+    #[serde(default = "default_kernel_list_limit")]
+    pub limit: usize,
+}
+
+fn default_kernel_list_limit() -> usize {
+    50
+}
+
+impl Default for KernelListParams {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            pending_only: false,
+            limit: default_kernel_list_limit(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,6 +622,12 @@ pub struct RuntimeTask {
     pub status: TaskStatus,
     pub workspace: Option<String>,
     pub profile: Option<String>,
+    /// 提示词摘要：凭据按命令审批同一套规则打码、空白压平、按字符数截断后的
+    /// 前缀，给列表和 Inbox 详情当任务标识用——只有 UUID 的任务认不出是谁。
+    /// 完整提示词与附件正文仍是私有请求内容，不进公共 DTO；旧 Daemon 不产出
+    /// 该字段，客户端必须容忍 `null` 并退回 UUID 展示。
+    #[serde(default)]
+    pub prompt_excerpt: Option<String>,
     pub created_at: u64,
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
@@ -1122,6 +1170,9 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "question.answer",
     "event.list",
     "event.stream",
+    "kernel.list",
+    "kernel.get",
+    "kernel.ignore",
     "diff.snapshot",
     "diff.content",
     "diff.reviews",
@@ -1266,7 +1317,9 @@ mod tests {
         decode_fixture::<PendingQuestion>(responses, "question");
         decode_fixture::<RuntimeArtifact>(responses, "artifact");
         decode_fixture::<RuntimeEvent>(responses, "event");
-        assert_eq!(responses.len(), 11);
+        // 内核事件的公共投影：正文不在里面，只有打码截断的标题。
+        decode_fixture::<PublicKernelEvent>(responses, "kernel_event");
+        assert_eq!(responses.len(), 12);
 
         let requests = fixture["requests"].as_object().unwrap();
         let spawn: ApiRequest = serde_json::from_value(requests["agent_spawn"].clone()).unwrap();
@@ -1289,6 +1342,9 @@ mod tests {
         let _: AnswerQuestionParams = serde_json::from_value(question.params).unwrap();
         let events: ApiRequest = serde_json::from_value(requests["event_list"].clone()).unwrap();
         let _: EventListParams = serde_json::from_value(events.params).unwrap();
+        let kernel: ApiRequest = serde_json::from_value(requests["kernel_list"].clone()).unwrap();
+        assert_eq!(kernel.operation, "kernel.list");
+        let _: KernelListParams = serde_json::from_value(kernel.params).unwrap();
         let workspace: ApiRequest =
             serde_json::from_value(requests["workspace_register"].clone()).unwrap();
         assert_eq!(workspace.operation, "workspace.register");
@@ -1526,6 +1582,7 @@ mod tests {
             status: TaskStatus::Running,
             workspace: Some("/workspace".to_owned()),
             profile: None,
+            prompt_excerpt: Some("Inspect the repository".to_owned()),
             created_at: 1,
             started_at: Some(2),
             completed_at: None,
@@ -1535,6 +1592,13 @@ mod tests {
         let json = serde_json::to_value(&task).unwrap();
         assert!(json.get("pid").is_none());
         assert!(json.get("error").is_none());
+        // 有意的边界移动（0.55.0-rc1）：Task 公开「摘要」，完整提示词仍私有。
+        // 摘要在 Daemon 侧生成时已打码 + 截断；这里只钉住字段存在与命名。
+        assert_eq!(
+            json.get("prompt_excerpt").and_then(|value| value.as_str()),
+            Some("Inspect the repository")
+        );
+        assert!(json.get("prompt").is_none());
         let mut future_task = json.clone();
         future_task["failure_domain"] = serde_json::json!("future_domain");
         assert_eq!(

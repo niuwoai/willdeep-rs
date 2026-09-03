@@ -43,6 +43,7 @@ mod command_catalog;
 mod daemon_commands;
 mod diff_review_ui;
 mod dispatch;
+mod media_ui;
 mod model_commands;
 mod overlay_dismiss;
 mod rendering;
@@ -59,7 +60,8 @@ use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
-use dispatch::{dispatch_compress, dispatch_notification, dispatch_prompt, dispatch_retitle};
+use dispatch::{dispatch_compress, dispatch_prompt, dispatch_retitle, wake_for_kernel_events};
+use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
@@ -87,6 +89,11 @@ pub enum UiMessage {
     Compressed(Result<Vec<Message>, willdeep_core::AgentError>),
     RuntimeNotice(String),
     ModelsLoaded(std::result::Result<Vec<String>, String>),
+    MediaLoaded {
+        target: String,
+        result: std::result::Result<DynamicImage, String>,
+    },
+    MediaResized(std::result::Result<ratatui_image::thread::ResizeResponse, String>),
     /// 标题摘要跑完了（`Some` 才是有结果）。摘要是一次网络往返，不能在
     /// 事件循环里直接 await——那会让整个界面在轮次收尾时卡住。
     ///
@@ -214,6 +221,8 @@ struct App {
     background_tasks: Vec<BackgroundTaskSnapshot>,
     workspace_attention: Vec<AttentionItem>,
     runtime_attention: Vec<AttentionItem>,
+    /// 事件内核里仍待用户处理的那些，投影到 Inbox。只显示，不决策。
+    kernel_attention: Vec<AttentionItem>,
     runtime_gates: Vec<crate::daemon::RemoteGate>,
     /// Version of the Runtime that actually executes tools, when one is
     /// reachable. `None` means no Runtime (everything runs in-process).
@@ -234,7 +243,6 @@ struct App {
     worktree_review: Option<crate::daemon::WorktreeReview>,
     diff_review: Option<DiffReviewState>,
     runtime_event_cursor: u64,
-    background_notices: VecDeque<String>,
     workspace_status: String,
     progress_log: VecDeque<String>,
     language: Language,
@@ -256,6 +264,7 @@ struct App {
     sidebar_rect: Rect,
     sidebar_wide: bool,
     help_visible: bool,
+    media: MediaState,
     sidebar_hits: Vec<(u16, SidebarHit)>,
     sidebar_manual_scroll: bool,
     attention_selected: usize,
@@ -433,6 +442,7 @@ struct AskDialog {
     sender: oneshot::Sender<Option<String>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     agent: Arc<Agent>,
     mut session: Session,
@@ -440,6 +450,8 @@ pub async fn run(
     home: PathBuf,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
+    kernel: willdeep_core::EventKernel,
+    kernel_store: willdeep_core::kernel_store::KernelStore,
     ui: TuiRuntimeInputs,
 ) -> Result<()> {
     terminal::enable_raw_mode()?;
@@ -457,6 +469,8 @@ pub async fn run(
         notifier: ui.7,
         skills,
         relay_bridge,
+        kernel,
+        kernel_store,
         context_window: ui.2,
         background_tasks: ui.3,
         runtime_submit: ui.4,
@@ -482,6 +496,9 @@ struct TuiRuntime {
     notifier: crate::notify::Notifier,
     skills: Arc<SkillCatalog>,
     relay_bridge: RelayBridge,
+    /// 宿主事件内核。后台结果、入站通知都进这里，由主 Agent 在 turn 边界收走。
+    kernel: willdeep_core::EventKernel,
+    kernel_store: willdeep_core::kernel_store::KernelStore,
     context_window: u64,
     background_tasks: Arc<BackgroundTaskRegistry>,
     runtime_submit: crate::daemon::RuntimeSubmitOptions,
@@ -1037,6 +1054,9 @@ async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    let (media_resize_tx, mut media_resize_rx) =
+        mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
+    app.media = MediaState::detect(media_resize_tx);
     app.goal = session.goal.clone();
     if session.runtime_event_cursor == 0 {
         session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
@@ -1139,9 +1159,10 @@ async fn event_loop(
             }
         }
         // 排队的提示词在这里续上：本轮正常结束、被 Esc 中断、或 Runtime 报失败，
-        // 都会走到这，不必在每个终态各写一遍。后台结果仍然优先。
+        // 都会走到这，不必在每个终态各写一遍。**待投递的运行时事件优先**——
+        // 用户排在后面的那句话，很可能正是基于还没看到的后台结果说的。
         if !app.running
-            && app.background_notices.is_empty()
+            && runtime.kernel.pending_wake_authority(session.id).is_none()
             && let Some(queued) = app.queued_prompts.pop_front()
         {
             app.attachments = queued.attachments;
@@ -1207,6 +1228,11 @@ async fn event_loop(
                 // dead endpoint shows up as a notice instead of silence.
                 if let Some(error)=runtime.notifier.take_error(){app.notice=Some(format!("{}: {error}",language.text("通知 Webhook","Notification webhook","通知 Webhook")));}
                 app.background_tasks=runtime.background_tasks.snapshots();
+                // 事件内核的用户侧投影跟着秒级刷新走：它是观察面，不需要自己
+                // 的通知通道。落盘也在这里收口——状态每变一次就写一次盘，
+                // 打字的时候会卡在磁盘上。
+                app.kernel_attention=runtime.kernel.pending_for_user().iter().map(AttentionItem::from_kernel_event).collect();
+                willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
                 let home=runtime.home.clone();
                 let tx=runtime_snapshot_tx.clone();
                 let workspace=runtime.runtime_submit.workspace.clone();
@@ -1227,6 +1253,15 @@ async fn event_loop(
                 }
             },
             Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
+            Some(request)=media_resize_rx.recv()=>{
+                let tx=runtime.tx.clone();
+                tokio::spawn(async move {
+                    let result=tokio::task::spawn_blocking(move || request.resize_encode().map_err(|error|error.to_string()))
+                        .await
+                        .unwrap_or_else(|error|Err(format!("image resize worker failed: {error}")));
+                    let _=tx.send(UiMessage::MediaResized(result));
+                });
+            },
             event=events.next()=>if let Some(Ok(event))=event { match event {
                 Event::Paste(value)=>{
                     if app.approval.is_some() {
@@ -1254,6 +1289,11 @@ async fn event_loop(
                     if mouse.kind==MouseEventKind::Down(MouseButton::Left)
                         && app.dismiss_overlay_on_outside_click(mouse.column,mouse.row)
                     {
+                        continue;
+                    }
+                    if app.media.is_open() {
+                        let action=app.media.handle_mouse(mouse);
+                        dispatch_media_action(action,&mut app,runtime);
                         continue;
                     }
                     if app.routing_settings.is_some() {
@@ -1368,6 +1408,17 @@ async fn event_loop(
                     if app.question.is_some(){app.handle_question_key(key);continue;}
                     if app.approval.is_some(){
                         app.handle_approval_key(key);
+                        continue;
+                    }
+                    if app.media.is_open(){
+                        let action=app.media.handle_key(key);
+                        dispatch_media_action(action,&mut app,runtime);
+                        continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('l'){
+                        if !app.media.open(&app.transcript){
+                            app.notice=Some(language.text("当前会话里没有链接或图片","No links or images in this Session","現在のセッションにリンクや画像はありません").to_owned());
+                        }
                         continue;
                     }
                     if let Some(detail)=app.attention_detail.clone(){
@@ -1933,6 +1984,7 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::AssistantText(v))=>{app.activity_line=language.text("正在整理思路","Working through it","考えを整理中").to_owned();app.transient_thought=Some(compact_thought(&v));},
                 UiMessage::Agent(AgentEvent::RouteDecided{tier,profile,confidence,auto_dispatched,..})=>app.record_progress(format!("{} {} · {} · {confidence}%{}",language.text("模型路由","Model route","モデルルート"),tier.as_str(),profile.as_deref().unwrap_or("root"),if auto_dispatched{language.text(" · 已自动下发"," · auto-dispatched"," · 自動ディスパッチ済み")}else{""})),
                 UiMessage::Agent(AgentEvent::TurnStarted{turn})=>app.record_progress(format!("{} {turn}",language.text("正在思考 · 准备轮次","Thinking · preparing turn","思考中 · ターンを準備"))),
+                UiMessage::Agent(AgentEvent::TurnPreempted{turn})=>app.record_progress(format!("{} {turn}",language.text("已被运行时事件打断 · 轮次","Preempted by a runtime event · turn","ランタイムイベントで中断 · ターン"))),
                 UiMessage::Agent(AgentEvent::ToolRequested(v))=>{app.transient_thought=None;app.record_progress(format!("{} {}",language.text("正在使用","Using","使用中"),v.name));app.tools.requested(&v.name);},
                 UiMessage::Agent(AgentEvent::ToolCompleted{call,is_error,..})=>{app.record_progress(format!("{} {}",if is_error{language.text("失败","Failed","失敗")}else{language.text("已完成","Finished","完了")},call.name));app.tools.completed(&call.name,is_error);if matches!(call.name.as_str(),"create_file"|"edit_file"|"run_command"|"create_worktree"){app.workspace_status=workspace_status(&session.workspace,language);app.workspace_attention=workspace_attention(&session.workspace);}},
                 UiMessage::Agent(AgentEvent::Usage(v))=>{app.context_tokens=v.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=v;},
@@ -1951,12 +2003,18 @@ async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();if let Some(notice)=app.background_notices.pop_front(){app.append_transcript("System: Background result returned to main harness".to_owned());dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}},
+                UiMessage::Finished(Ok(outcome))=>{app.transient_thought=None;runtime.notifier.task_completed(outcome.final_text.as_str());app.append_transcript(format!("WillDeep: {}",outcome.final_text));session.messages=outcome.messages;store.save(session)?;dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
                 UiMessage::Finished(Err(e))=>{app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages))=>{let changed=session.replace_with_compressed_messages(messages);store.save(session)?;app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e))=>{app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
+                UiMessage::MediaLoaded{target,result}=>app.media.finish_load(target,result),
+                UiMessage::MediaResized(result)=>{
+                    if let Some(error)=app.media.finish_resize(result){
+                        app.notice=Some(format!("{}: {error}",language.text("图片协议已降级","Image protocol downgraded","画像プロトコルをフォールバックしました")));
+                    }
+                },
                 // 摘要失败是静默的：列表里还留着 L1 派生的标题，为一行装饰
                 // 文字往聊天区塞报错不划算。改成功了才说一句。
                 UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
@@ -1968,14 +2026,58 @@ async fn event_loop(
             Ok(event)=background_rx.recv()=>{
                 let _=runtime.background_tasks.drain_pending();
                 app.background_tasks=runtime.background_tasks.snapshots();
-                app.background_notices.push_back(event.notice);
-                app.notice=Some(format!("{} finished · returning result to main harness",event.snapshot.id));
+                // 后台结果交给内核，不再自己排一条通知：两条路同时向模型投递
+                // 会让同一个结果讲两遍。正文由内核按来源净化后在 turn 边界注入。
+                runtime.kernel.publish(
+                    willdeep_core::kernel::background_task_event(session.id,&event.snapshot,event.notice),
+                    willdeep_core::DedupPolicy::Once,
+                );
+                willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
+                app.notice=Some(format!("{} finished · queued as a runtime event",event.snapshot.id));
                 execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
-                if !app.running && let Some(notice)=app.background_notices.pop_front(){dispatch_notification(&mut app,session,store,&agent,&runtime.tx,notice)?;}
+                // 忙的时候什么都不做：内核会在当前轮次的边界把它交出去。
+                if !app.running {wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;}
             },
         }
     }
     Ok(())
+}
+
+fn dispatch_media_action(action: MediaAction, app: &mut App, runtime: &TuiRuntime) {
+    match action {
+        MediaAction::None => {}
+        MediaAction::OpenUrl(target) => match media_ui::open_external_url(&target) {
+            Ok(()) => {
+                app.notice = Some(
+                    app.language
+                        .text(
+                            "已交给系统浏览器打开",
+                            "Opened in the system browser",
+                            "システムブラウザで開きました",
+                        )
+                        .to_owned(),
+                )
+            }
+            Err(error) => {
+                app.notice = Some(format!(
+                    "{}: {error}",
+                    app.language.text(
+                        "打开链接失败",
+                        "Could not open link",
+                        "リンクを開けませんでした"
+                    )
+                ))
+            }
+        },
+        MediaAction::LoadImage(target) => {
+            let workspace = runtime.runtime_submit.workspace.clone();
+            let tx = runtime.tx.clone();
+            tokio::spawn(async move {
+                let result = media_ui::load_image(&target, &workspace).await;
+                let _ = tx.send(UiMessage::MediaLoaded { target, result });
+            });
+        }
+    }
 }
 
 impl App {
@@ -2019,6 +2121,7 @@ impl App {
             background_tasks: Vec::new(),
             workspace_attention: Vec::new(),
             runtime_attention: Vec::new(),
+            kernel_attention: Vec::new(),
             runtime_gates: Vec::new(),
             runtime_version: None,
             runtime_version_warned: false,
@@ -2033,7 +2136,6 @@ impl App {
             worktree_review: None,
             diff_review: None,
             runtime_event_cursor: 0,
-            background_notices: VecDeque::new(),
             workspace_status: String::new(),
             progress_log: VecDeque::new(),
             language,
@@ -2058,6 +2160,7 @@ impl App {
             sidebar_rect: Rect::default(),
             sidebar_wide: false,
             help_visible: false,
+            media: MediaState::default(),
             sidebar_hits: Vec::new(),
             sidebar_manual_scroll: false,
             attention_selected: 0,
@@ -2326,7 +2429,7 @@ impl App {
             );
             return;
         }
-        self.input.insert("/agent spawn scout ");
+        self.input.insert("/agent spawn reader ");
         self.focus = FocusPane::Prompt;
     }
     fn open_task_detail(&mut self, index: usize, registry: &BackgroundTaskRegistry) {
@@ -3078,7 +3181,7 @@ impl App {
             .map(|started| started.elapsed().as_secs_f32())
             .unwrap_or_default();
         self.progress_log
-            .push_back(format!("{elapsed:>5.1}s · {value}"));
+            .push_back(format!("{:>6} · {value}", format_elapsed_span(elapsed, 1)));
         while self.progress_log.len() > 12 {
             self.progress_log.pop_front();
         }
@@ -3751,6 +3854,18 @@ fn progress_spinner(elapsed: Duration) -> &'static str {
     PROGRESS_SPINNER[index]
 }
 
+/// 过了 120 秒还用秒读数（293.2s）就得让人心算，换成分钟保留一位小数；
+/// 过了 120 分钟同理换小时。`seconds_decimals` 沿用各显示点原有的秒精度。
+fn format_elapsed_span(seconds: f32, seconds_decimals: usize) -> String {
+    if seconds > 7200.0 {
+        format!("{:.1}h", seconds / 3600.0)
+    } else if seconds > 120.0 {
+        format!("{:.1}m", seconds / 60.0)
+    } else {
+        format!("{seconds:.seconds_decimals$}s")
+    }
+}
+
 fn format_working_summary(
     language: Language,
     runtime_turn: bool,
@@ -3760,13 +3875,13 @@ fn format_working_summary(
 ) -> String {
     let phase = if idle >= PROGRESS_STALE_AFTER {
         format!(
-            "{} {:.0}s",
+            "{} {}",
             language.text(
                 "暂未收到新事件 · 已等待",
                 "No new event yet · waiting",
                 "新しいイベントなし · 待機"
             ),
-            idle.as_secs_f32()
+            format_elapsed_span(idle.as_secs_f32(), 0)
         )
     } else if idle >= PROGRESS_WAITING_AFTER {
         language
@@ -3794,10 +3909,10 @@ fn format_working_summary(
         activity_line.to_owned()
     };
     format!(
-        "{} {phase} · {} {:.1}s",
+        "{} {phase} · {} {}",
         progress_spinner(elapsed),
         language.text("已运行", "elapsed", "経過"),
-        elapsed.as_secs_f32()
+        format_elapsed_span(elapsed.as_secs_f32(), 1)
     )
 }
 
@@ -3905,10 +4020,10 @@ fn draw(
         {
             let elapsed = started.elapsed();
             title.push_str(&format!(
-                " · {} {} {:.0}s",
+                " · {} {} {}",
                 progress_spinner(elapsed),
                 app.language.text("工作中", "working", "作業中"),
-                elapsed.as_secs_f32()
+                format_elapsed_span(elapsed.as_secs_f32(), 0)
             ));
         }
         let search_query = app
@@ -4136,12 +4251,14 @@ fn draw(
                 .unwrap_or_default();
             let context_tokens = app.context_tokens.max(input_tokens);
             let context_pct = context_tokens.saturating_mul(100) / app.context_window.max(1);
-            let elapsed = app
-                .turn_started
-                .map(|value| value.elapsed())
-                .or(app.last_elapsed)
-                .unwrap_or_default()
-                .as_secs_f32();
+            let elapsed = format_elapsed_span(
+                app.turn_started
+                    .map(|value| value.elapsed())
+                    .or(app.last_elapsed)
+                    .unwrap_or_default()
+                    .as_secs_f32(),
+                1,
+            );
             if app.running {
                 format!(
                     "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache}{queued} · Esc {} · F1",
@@ -4160,7 +4277,7 @@ fn draw(
                 )
             } else {
                 format!(
-                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed:.1}s · {} · Ctrl+S {} · F1",
+                    "{} · {}: {} · {} {context_pct}% · {} ↑{input} ↓{output}{cache} · {elapsed} · {} · Ctrl+S {} · F1",
                     app.language.text("就绪", "Ready", "準備完了"),
                     app.language.text("焦点", "Focus", "フォーカス"),
                     focus_label(app.focus, app.language),
@@ -4457,7 +4574,7 @@ fn draw(
         app.task_detail_rect = Rect::default();
         if let Some(detail) = &app.task_detail {
             let content = format!(
-                "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {:.1}s\n{}: {}\n{}: {}\n\n{}\n{}",
+                "{}: {}\n{}: {:?}\n{}: {:?}\n{}: {}\n{}: {}\n{}: {}\n\n{}\n{}",
                 app.language.text("任务", "Task", "タスク"),
                 detail.snapshot.id,
                 app.language.text("类型", "Kind", "種類"),
@@ -4465,7 +4582,7 @@ fn draw(
                 app.language.text("状态", "Status", "状態"),
                 detail.snapshot.status,
                 app.language.text("耗时", "Elapsed", "経過時間"),
-                detail.snapshot.elapsed_millis as f64 / 1000.0,
+                format_elapsed_span(detail.snapshot.elapsed_millis as f32 / 1000.0, 1),
                 app.language.text("退出码", "Exit code", "終了コード"),
                 detail
                     .snapshot
@@ -4610,6 +4727,7 @@ fn draw(
         }
         render_agent_overlays(f, app);
         render_attention_detail(f, app);
+        render_media_overlay(f, app);
         app.approval_rect = Rect::default();
         app.approval_action_hits.clear();
         if let Some((description, always, _)) = &app.approval {
@@ -5090,6 +5208,9 @@ fn attention_source_label(source: AttentionSource, language: Language) -> &'stat
         AttentionSource::Subagent => language.text("子 Agent", "Subagent", "サブエージェント"),
         AttentionSource::Worktree => language.text("Worktree", "Worktree", "Worktree"),
         AttentionSource::DiffReview => language.text("Diff 审查", "Diff review", "Diff レビュー"),
+        AttentionSource::RuntimeEvent => {
+            language.text("运行时事件", "Runtime event", "ランタイムイベント")
+        }
     }
 }
 
@@ -5117,10 +5238,23 @@ fn help_content(language: Language) -> String {
             "グローバル\n  F1 / 空入力で ?  ヘルプ       Ctrl+C 終了\n  Ctrl+P コマンドパレット        Ctrl+R または /history 履歴セッションを検索して再開\n  Esc 実行中のターンを中断          Ctrl+W 入力/チャット/アクティビティ/状態を切替\n  Ctrl+B または /sidebar で状態欄を表示/非表示（既定は非表示）\n  Ctrl+S テキスト選択モード\n\n入力\n  Enter 送信                     Shift/Alt+Enter または Ctrl+J 改行\n  F2 入力欄を拡大/復元            Ctrl+A/E 行頭/行末\n  / コマンド候補                 $ スキル候補\n  ↑/↓ 選択                       Enter/Tab 挿入、Esc 閉じる\n  Ctrl/Command+Shift+V 画像貼付   Ctrl+D 添付削除\n\nチャットとアクティビティ\n  ドラッグで文字選択              Ctrl/Cmd+C / Y コピー、Q 引用\n  Ctrl+F 検索、Enter/Shift+Enter 前後の一致へ\n  PageUp/PageDown ページ移動      Alt+↑/↓ 1 行スクロール\n  Ctrl+Home/End 先頭/末尾         Ctrl+O ツール詳細\n  アクティビティをクリックして、Enter/Space で開閉\n\n状態サイドバー\n  Tab/Shift+Tab セクション選択    ↑/↓ Inbox 項目選択\n  Enter 詳細、K 停止、R 再実行    M 既読、Space 開閉、Esc 入力へ\n  見出しで開閉、項目で詳細、ホイールでスクロール"
         }
     };
-    content.replace(
-        "Ctrl/Command+Shift+V",
-        "Alt+V / Ctrl+V / Ctrl/Command+Shift+V",
-    )
+    content
+        .replace(
+            "Ctrl/Command+Shift+V",
+            "Alt+V / Ctrl+V / Ctrl/Command+Shift+V",
+        )
+        .replace(
+            "Ctrl+S 文本选择/复制模式",
+            "Ctrl+S 文本选择/复制模式        Ctrl+L 链接与图片面板",
+        )
+        .replace(
+            "Ctrl+S Text selection mode",
+            "Ctrl+S Text selection mode      Ctrl+L Links and images",
+        )
+        .replace(
+            "Ctrl+S テキスト選択モード",
+            "Ctrl+S テキスト選択モード       Ctrl+L リンクと画像",
+        )
 }
 
 pub fn channel() -> (

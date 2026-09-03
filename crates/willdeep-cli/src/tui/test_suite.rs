@@ -236,6 +236,8 @@ mod tests {
             notifier: crate::notify::Notifier::disabled(),
             skills: Arc::new(SkillCatalog::default()),
             relay_bridge: RelayBridge::new(),
+            kernel: willdeep_core::EventKernel::new(),
+            kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
             context_window: 128_000,
             background_tasks: Arc::new(BackgroundTaskRegistry::default()),
             runtime_submit: crate::daemon::RuntimeSubmitOptions {
@@ -1026,6 +1028,7 @@ mod tests {
         assert!(help.contains("M 已读"));
         assert!(help.contains("Ctrl+F"));
         assert!(help.contains("Ctrl+P"));
+        assert!(help.contains("Ctrl+L 链接与图片面板"));
         assert!(help.contains("Alt+V"));
     }
     #[test]
@@ -1483,7 +1486,7 @@ mod tests {
             "说明：\n\n| 层级 | 说明 |\n|---|---|\n| 产品 | 官网、用户体系 |\n| SSO | 1. 登录<br>2. 同步权限 |",
             24,
         );
-        let rendered = lines
+        let rendered_lines = lines
             .iter()
             .map(|line| {
                 line.spans
@@ -1491,8 +1494,13 @@ mod tests {
                     .map(|span| span.content.as_ref())
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        assert!(
+            rendered_lines
+                .iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 24)
+        );
+        let rendered = rendered_lines.join("\n");
 
         assert!(rendered.contains("层级"));
         assert!(rendered.contains("─┼─"));
@@ -1501,6 +1509,33 @@ mod tests {
         assert!(rendered.contains("2. 同步权限"));
         assert!(!rendered.contains("|---|"));
         assert!(!rendered.contains("<br>"));
+    }
+    #[test]
+    fn renders_closed_thin_rules_around_and_between_table_rows() {
+        let lines = render_assistant_markdown("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |", 80);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "WillDeep: ",
+                "┌───┬───┐",
+                "│ A │ B │",
+                "├───┼───┤",
+                "│ 1 │ 2 │",
+                "├───┼───┤",
+                "│ 3 │ 4 │",
+                "└───┴───┘",
+            ]
+        );
     }
     #[test]
     fn recognizes_terminal_line_navigation_control_bytes() {
@@ -2823,6 +2858,7 @@ mod tests {
                 status: willdeep_runtime_protocol::TaskStatus::Failed,
                 workspace: Some("/workspace".to_owned()),
                 profile: None,
+                prompt_excerpt: None,
                 created_at: 1,
                 started_at: Some(1),
                 completed_at: Some(2),
@@ -2964,6 +3000,27 @@ mod tests {
         );
         assert!(silent.contains("暂未收到新事件"));
         assert!(silent.contains("已等待 31s"));
+
+        let long = format_working_summary(
+            Language::ZhCn,
+            true,
+            "Runtime · 正在使用 run_command",
+            Duration::from_secs(293),
+            Duration::from_secs(2),
+        );
+        assert!(long.contains("已运行 4.9m"), "got: {long}");
+    }
+
+    /// 过了 120 秒的读数换分钟、过了 120 分钟换小时，都保留一位小数；
+    /// 120 以内维持各显示点原有的秒精度。
+    #[test]
+    fn elapsed_span_switches_units_past_two_minutes() {
+        assert_eq!(format_elapsed_span(5.0, 1), "5.0s");
+        assert_eq!(format_elapsed_span(31.0, 0), "31s");
+        assert_eq!(format_elapsed_span(120.0, 1), "120.0s");
+        assert_eq!(format_elapsed_span(293.2, 1), "4.9m");
+        assert_eq!(format_elapsed_span(3_600.0, 1), "60.0m");
+        assert_eq!(format_elapsed_span(9_000.0, 0), "2.5h");
     }
 
     #[test]

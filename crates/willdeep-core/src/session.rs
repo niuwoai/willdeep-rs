@@ -125,6 +125,9 @@ pub struct SessionDigest {
     pub has_user_input: bool,
     /// 消息条数。列表视图靠它区分「聊过的」和「点开就没再回来的」。
     pub message_count: usize,
+    /// 第一条用户消息的开头。标题生成没跑成时，列表拿它代替一排
+    /// 一模一样的 `New session`。
+    pub preview: Option<String>,
     /// 会话文件由 Xedit（macOS 桌面版）写出，rs 这边是只读桥接。
     pub bridged: bool,
 }
@@ -367,8 +370,8 @@ struct LocalDigestProbe {
 struct MessageProbe {
     #[serde(default)]
     role: String,
-    #[serde(default, deserialize_with = "non_empty_text")]
-    content: bool,
+    #[serde(default, deserialize_with = "text_preview")]
+    content: Option<String>,
     #[serde(default)]
     attachments: Option<Vec<serde::de::IgnoredAny>>,
 }
@@ -376,7 +379,7 @@ struct MessageProbe {
 impl MessageProbe {
     fn is_user_input(&self) -> bool {
         self.role == "user"
-            && (self.content
+            && (self.content.is_some()
                 || self
                     .attachments
                     .as_ref()
@@ -384,40 +387,66 @@ impl MessageProbe {
     }
 }
 
-/// 把任意 JSON 值折叠成"是否为非空文本"，避免为消息正文分配 String。
-fn non_empty_text<'de, D>(deserializer: D) -> Result<bool, D::Error>
+/// 第一条用户消息的摘要。标题还是占位符时，列表靠它区分会话。
+fn first_user_preview(messages: &[MessageProbe]) -> Option<String> {
+    messages
+        .iter()
+        .filter(|message| message.is_user_input())
+        .find_map(|message| message.content.clone())
+        .filter(|text| !text.is_empty())
+}
+
+/// 摘要里保留的正文长度上限。够列表显示一行，又不至于把上百个会话文件的
+/// 全部正文都读进内存——`digests()` 要扫的可能是几十 MB。
+const PREVIEW_CHARS: usize = 96;
+
+/// 把任意 JSON 值折叠成"正文的前一小段"，非文本内容只记在不在。
+///
+/// 原来这里只折叠成 bool，一个字节不分配。改成留一小段是为了让标题还没生成的
+/// 会话在列表里也能认得出来——满屏 `New session` 等于没有列表。上限卡死在
+/// `PREVIEW_CHARS`，所以增量是每条消息几十字节，不是整篇正文。
+fn text_preview<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     struct TextVisitor;
     impl<'de> serde::de::Visitor<'de> for TextVisitor {
-        type Value = bool;
+        type Value = Option<String>;
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("message content")
         }
-        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<bool, E> {
-            Ok(!value.trim().is_empty())
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            let trimmed = value.trim();
+            Ok((!trimmed.is_empty())
+                .then(|| trimmed.chars().take(PREVIEW_CHARS).collect::<String>()))
         }
-        fn visit_unit<E: serde::de::Error>(self) -> Result<bool, E> {
-            Ok(false)
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
         }
-        fn visit_none<E: serde::de::Error>(self) -> Result<bool, E> {
-            Ok(false)
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
         }
         fn visit_some<D: serde::Deserializer<'de>>(
             self,
             deserializer: D,
-        ) -> Result<bool, D::Error> {
+        ) -> Result<Self::Value, D::Error> {
             deserializer.deserialize_any(self)
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            // 结构化正文（图文混排等）不拆开取文本：这里只需要知道它非空。
             let mut present = false;
             while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
                 present = true;
             }
-            Ok(present)
+            Ok(present.then(String::new))
         }
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
             let mut present = false;
             while map
                 .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
@@ -425,7 +454,7 @@ where
             {
                 present = true;
             }
-            Ok(present)
+            Ok(present.then(String::new))
         }
     }
     deserializer.deserialize_any(TextVisitor)
@@ -442,6 +471,7 @@ fn local_digest(path: &Path, _metadata: &std::fs::Metadata) -> Option<SessionDig
         pinned_at: probe.pinned_at,
         has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
         message_count: probe.messages.len(),
+        preview: first_user_preview(&probe.messages),
         bridged: false,
     })
 }
@@ -486,6 +516,7 @@ fn swift_digest(path: &Path, metadata: &std::fs::Metadata) -> Option<SessionDige
         pinned_at: probe.pinned_at.as_deref().and_then(parse_iso8601),
         has_user_input: probe.messages.iter().any(MessageProbe::is_user_input),
         message_count: probe.messages.len(),
+        preview: first_user_preview(&probe.messages),
         bridged: true,
     })
 }
@@ -720,6 +751,56 @@ mod tests {
         assert!(store.delete(session.id).unwrap());
         assert!(!store.delete(session.id).unwrap());
         assert!(store.load(session.id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn digest_carries_the_first_user_message_for_untitled_sessions() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-session-preview-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "New session");
+        store.save(&mut session).unwrap();
+        let id = session.id;
+        let digest = || {
+            store
+                .digests()
+                .into_iter()
+                .find(|digest| digest.id == id)
+                .expect("digest for the saved session")
+        };
+        // 一条消息都没有时无从预览。
+        assert_eq!(digest().preview, None);
+
+        // 助手消息不算：列表要显示的是「用户说了什么」。
+        session
+            .messages
+            .push(Message::assistant("welcome", Vec::new()));
+        store.save(&mut session).unwrap();
+        assert_eq!(digest().preview, None);
+
+        session
+            .messages
+            .push(Message::user("这个项目是做啥的，分析一下技术架构"));
+        session.messages.push(Message::user("第二条不该被选中"));
+        store.save(&mut session).unwrap();
+        assert_eq!(
+            digest().preview.as_deref(),
+            Some("这个项目是做啥的，分析一下技术架构")
+        );
+
+        // 摘要有硬上限：digests() 要扫的可能是几十 MB，不能把正文整篇读进来。
+        let mut long = Session::new(root.clone(), None, "New session");
+        long.messages.push(Message::user("永".repeat(400)));
+        store.save(&mut long).unwrap();
+        let preview = store
+            .digests()
+            .into_iter()
+            .find(|digest| digest.id == long.id)
+            .and_then(|digest| digest.preview)
+            .expect("preview");
+        assert_eq!(preview.chars().count(), PREVIEW_CHARS);
+
         std::fs::remove_dir_all(root).unwrap();
     }
 

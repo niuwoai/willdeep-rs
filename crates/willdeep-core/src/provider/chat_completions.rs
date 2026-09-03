@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::common::{client, decode_success, endpoint, openai_auth};
+use super::common::{client, endpoint, openai_auth, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
@@ -43,10 +43,12 @@ impl Provider for ChatCompletionsProvider {
             tools: &wire_tools,
             tool_choice: (!tools.is_empty()).then_some("auto"),
             stream: false,
+            reasoning_effort: self.is_auxiliary_or_loopback().then_some("none"),
+            think: self.is_auxiliary_or_loopback().then_some(false),
         };
         let request =
             openai_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
-        let bytes = decode_success(request.send().await?, &self.config).await?;
+        let bytes = send_retrying(request, &self.config).await?;
         let response: ChatResponse = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         let choice = response
@@ -77,6 +79,15 @@ impl Provider for ChatCompletionsProvider {
     }
 }
 
+impl ChatCompletionsProvider {
+    fn is_auxiliary_or_loopback(&self) -> bool {
+        self.config.allow_unauthenticated
+            || reqwest::Url::parse(&self.config.base_url)
+                .ok()
+                .is_some_and(|url| super::is_loopback_base_url(&url))
+    }
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -86,6 +97,10 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Serialize)]

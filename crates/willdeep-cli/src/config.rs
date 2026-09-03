@@ -103,10 +103,23 @@ pub struct ConfigFile {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub agent: AgentSettings,
+    /// Credential-free loopback model used for lightweight auxiliary work.
+    /// Kept separate from Provider profiles so enabling it never changes the
+    /// session's root model or donates a cloud credential to a local server.
+    #[serde(default)]
+    pub local_model: LocalModelSettings,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderProfile>,
     #[serde(default)]
     pub subagents: BTreeMap<String, SubagentProfileSettings>,
+    /// 每个 Worker 档位兑现成哪个模型。与 `[subagents.*]` 是两根轴：那边配
+    /// 「这个职责平时用什么」，这边配「派工时说要贵一档，贵成什么样」。
+    ///
+    /// 段名只认 `standard` / `advanced` / `expert` 三个正名。`deep` 之类的
+    /// 别名在 `worker_tier` 参数上仍然可用，但不能做段名——两个段落映射到同
+    /// 一档时谁赢是说不清楚的。
+    #[serde(default)]
+    pub worker_tiers: BTreeMap<String, WorkerTierSettings>,
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
@@ -127,6 +140,30 @@ pub struct ConfigFile {
     /// 非零退出会真的拦下动作。把审计需求接到 webhook 上会丢事件。
     #[serde(default)]
     pub hooks: Vec<HookSettings>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalModelSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub summary_model: String,
+    pub prefer_for_titles: bool,
+    pub prefer_for_context_summaries: bool,
+    pub prefer_for_worker_routing: bool,
+}
+
+impl Default for LocalModelSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://127.0.0.1:11434/v1".to_owned(),
+            summary_model: "gemma4:e4b-it-qat".to_owned(),
+            prefer_for_titles: true,
+            prefer_for_context_summaries: false,
+            prefer_for_worker_routing: true,
+        }
+    }
 }
 
 /// 一条 hook 的配置。
@@ -272,6 +309,19 @@ pub struct SubagentProfileSettings {
     pub max_attempts: Option<usize>,
 }
 
+/// `[worker_tiers.<档>]`：这一档兑现成哪个模型。
+///
+/// 三个字段都可以只填一部分：只填 `model` 就沿用当前 provider 的端点与凭据
+/// 换个模型；填了 `provider_profile` 则整套端点都换（例如专家档走
+/// Anthropic，其余仍走网关）。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerTierSettings {
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+    pub context_window: Option<u64>,
+}
+
 pub struct LoadedConfig {
     pub file: ConfigFile,
 }
@@ -358,6 +408,16 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         bail!("agent.max_deep_calls_per_harness must be between 0 and 16");
     }
     crate::i18n::Language::parse(file.agent.language.as_deref())?;
+    if file.local_model.enabled {
+        let base_url = reqwest::Url::parse(file.local_model.base_url.trim())
+            .context("local_model.base_url must be a valid URL")?;
+        if !matches!(base_url.scheme(), "http" | "https") || base_url.host_str().is_none() {
+            bail!("local_model.base_url must be an HTTP(S) URL with a host");
+        }
+        if file.local_model.summary_model.trim().is_empty() {
+            bail!("local_model.summary_model must not be empty");
+        }
+    }
     if file.notifications.webhook_enabled.unwrap_or(false) {
         let webhook_url = file
             .notifications
@@ -386,25 +446,38 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     for (name, subagent) in &file.subagents {
         if !matches!(
             name.as_str(),
-            "scout"
+            // 五个公开职责 + 改名前的公开名 + 内部专门工种。旧名保留是为了
+            // 别人已经写好的 config 不因为一次改名就报「unknown subagent」。
+            "generalist"
+                | "reviewer"
+                | "scout"
                 | "reader"
                 | "deep"
+                | "judge"
                 | "editor"
                 | "implementer"
                 | "test_fixer"
                 | "build_fixer"
                 | "log_inspector"
                 | "git_detective"
+                | "tester"
+                | "ops_runner"
         ) {
             bail!("unknown subagent profile: {name}");
         }
         // 4K is below any usable worker budget once the system prompt and
-        // tool schemas are paid for; past 1M nothing real is being described.
-        if subagent
-            .context_window
-            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
-        {
-            bail!("subagents.{name}.context_window must be between 4000 and 1000000");
+        // tool schemas are paid for; past the 1M ceiling nothing real is being
+        // described. The ceiling is 2^20, matching the largest budget the
+        // settings panel offers — a value the panel can pick must be storable.
+        if subagent.context_window.is_some_and(|value| {
+            !(willdeep_core::CONTEXT_WINDOW_MIN..=willdeep_core::CONTEXT_WINDOW_MAX)
+                .contains(&value)
+        }) {
+            bail!(
+                "subagents.{name}.context_window must be between {} and {}",
+                willdeep_core::CONTEXT_WINDOW_MIN,
+                willdeep_core::CONTEXT_WINDOW_MAX
+            );
         }
         if subagent
             .max_attempts
@@ -418,11 +491,14 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         {
             bail!("subagents.{name}.tool_output_limit must be between 1024 and 131072");
         }
+        // 上限取内置里最能跑的那个工种（ops_runner 的 32）。卡在 24 的时候，
+        // 用户连内置默认值都抄不下来——config.example.toml 自己就因此校验
+        // 不过，而那份示例正是让人照抄的。
         if subagent
             .max_turns
-            .is_some_and(|value| !(1..=24).contains(&value))
+            .is_some_and(|value| !(1..=32).contains(&value))
         {
-            bail!("subagents.{name}.max_turns must be between 1 and 24");
+            bail!("subagents.{name}.max_turns must be between 1 and 32");
         }
         if subagent
             .token_budget
@@ -453,6 +529,35 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             && !file.providers.contains_key(provider)
         {
             bail!("subagents.{name}.provider_profile not found: {provider}");
+        }
+    }
+    for (name, tier) in &file.worker_tiers {
+        // 只认正名。`deep`/`basic` 这些别名在 `worker_tier` 参数上还通，但做
+        // 段名就意味着 `[worker_tiers.deep]` 与 `[worker_tiers.expert]` 可以
+        // 同时存在却指向同一档——与其定一条谁赢的规则，不如不许写。
+        if !willdeep_core::WorkerTier::ALL
+            .iter()
+            .any(|value| value.as_str() == name)
+        {
+            bail!("unknown worker tier: {name} (expected standard, advanced or expert)");
+        }
+        if tier.model.as_deref().is_some_and(|value| value.is_empty()) {
+            bail!("worker_tiers.{name}.model cannot be empty");
+        }
+        if tier.context_window.is_some_and(|value| {
+            !(willdeep_core::CONTEXT_WINDOW_MIN..=willdeep_core::CONTEXT_WINDOW_MAX)
+                .contains(&value)
+        }) {
+            bail!(
+                "worker_tiers.{name}.context_window must be between {} and {}",
+                willdeep_core::CONTEXT_WINDOW_MIN,
+                willdeep_core::CONTEXT_WINDOW_MAX
+            );
+        }
+        if let Some(provider) = &tier.provider_profile
+            && !file.providers.contains_key(provider)
+        {
+            bail!("worker_tiers.{name}.provider_profile not found: {provider}");
         }
     }
     for (name, server) in &file.mcp_servers {
@@ -565,6 +670,37 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn local_model_defaults_match_the_desktop_auxiliary_policy() {
+        let parsed: ConfigFile = toml::from_str("version = 1\n").expect("parse minimal config");
+        assert!(!parsed.local_model.enabled);
+        assert_eq!(parsed.local_model.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(parsed.local_model.summary_model, "gemma4:e4b-it-qat");
+        assert!(parsed.local_model.prefer_for_titles);
+        assert!(!parsed.local_model.prefer_for_context_summaries);
+        assert!(parsed.local_model.prefer_for_worker_routing);
+    }
+
+    #[test]
+    fn enabled_local_model_accepts_domain_lan_and_loopback_endpoints_without_a_key() {
+        for base_url in [
+            "https://models.home.example/v1",
+            "http://192.168.50.20:11434/v1",
+            "http://127.0.0.1:11434/v1",
+        ] {
+            let source =
+                format!("version = 1\n[local_model]\nenabled = true\nbase_url = {base_url:?}\n");
+            let parsed: ConfigFile = toml::from_str(&source).expect("parse auxiliary model config");
+            validate(&parsed, Path::new("config.toml")).expect("accept auxiliary endpoint");
+        }
+
+        let parsed: ConfigFile = toml::from_str(
+            "version = 1\n[local_model]\nenabled = true\nbase_url = \"file:///tmp/model\"\n",
+        )
+        .expect("parse invalid auxiliary model config");
+        assert!(validate(&parsed, Path::new("config.toml")).is_err());
+    }
+
+    #[test]
     fn deep_budget_is_bounded_and_can_be_disabled() {
         let disabled: ConfigFile =
             toml::from_str("version = 1\n[agent]\nmax_deep_calls_per_harness = 0\n")
@@ -575,6 +711,56 @@ base_url = "https://example.com/v1"
             toml::from_str("version = 1\n[agent]\nmax_deep_calls_per_harness = 17\n")
                 .expect("parse excessive deep budget");
         assert!(validate(&excessive, Path::new("config.toml")).is_err());
+    }
+
+    #[test]
+    fn worker_tier_sections_take_only_canonical_names_and_real_providers() {
+        let source = r#"
+version = 1
+default_provider = "some-im"
+
+[providers.some-im]
+provider = "some-im"
+api_key_env = "SOMEIM_API_KEY"
+model = "glm-5"
+
+[providers.anthropic]
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "opus-5"
+
+[worker_tiers.advanced]
+model = "deepseek-v4-flash"
+
+[worker_tiers.expert]
+provider_profile = "anthropic"
+model = "opus-5"
+context_window = 400000
+"#;
+        let parsed: ConfigFile = toml::from_str(source).expect("parse worker tiers");
+        validate(&parsed, Path::new("config.toml")).expect("accept worker tiers");
+        assert_eq!(parsed.worker_tiers.len(), 2);
+        assert_eq!(
+            parsed.worker_tiers["expert"].provider_profile.as_deref(),
+            Some("anthropic")
+        );
+
+        // 段名只认正名。`deep` 做参数值仍然可用，做段名则会和 `expert` 撞成
+        // 同一档——与其定一条谁赢的规则，不如直接拒绝。
+        for bad in [
+            "[worker_tiers.deep]\nmodel = \"opus-5\"\n",
+            "[worker_tiers.basic]\nmodel = \"glm-5\"\n",
+            "[worker_tiers.expert]\nmodel = \"\"\n",
+            "[worker_tiers.expert]\ncontext_window = 2000\n",
+            "[worker_tiers.expert]\nprovider_profile = \"nope\"\n",
+        ] {
+            let parsed: ConfigFile =
+                toml::from_str(&format!("version = 1\n{bad}")).expect("parse rejected tier");
+            assert!(
+                validate(&parsed, Path::new("config.toml")).is_err(),
+                "should reject: {bad}"
+            );
+        }
     }
 
     #[test]
@@ -611,6 +797,14 @@ base_url = "https://example.com/v1"
         }
         let deep = parsed.subagents.get("deep").expect("deep profile");
         assert_eq!(deep.model.as_deref(), Some("deepseek-v4-flash"));
+        // 这条测试的名字说的是「stays valid」，那就真的校验一遍——只解析
+        // 不校验的话，示例里写错一个 provider_profile 也照样绿。
+        validate(&parsed, Path::new("config.example.toml")).expect("example config validates");
+        assert_eq!(
+            parsed.worker_tiers["expert"].provider_profile.as_deref(),
+            Some("anthropic"),
+            "示例要示范「专家档单独换端点」这件事"
+        );
     }
 
     #[test]

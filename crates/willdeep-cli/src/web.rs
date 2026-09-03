@@ -43,7 +43,10 @@ pub struct WebConfig {
 struct WebState {
     config_path: PathBuf,
     profile: Option<String>,
-    workspaces: Vec<PathBuf>,
+    /// 浏览器端能看到的工作区白名单。Web 模式没有应用层鉴权，所以这份名单
+    /// 就是边界本身——不在名单里的目录，前端连列都列不出来。回环监听时允许
+    /// 从界面往里加（与模型路由设置同一条既有语义），因此需要可变。
+    workspaces: std::sync::RwLock<Vec<PathBuf>>,
     home: PathBuf,
     language: Language,
     harness_slots: Arc<Semaphore>,
@@ -65,6 +68,10 @@ struct ChatRequest {
 struct SessionSummary {
     id: String,
     title: String,
+    /// 标题还是占位符时，列表拿它来区分会话。标题正常时不下发，
+    /// 免得给前端两个都能显示的字段、让它自己去猜该用哪个。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
     workspace: String,
     updated_at: u64,
     pinned_at: Option<u64>,
@@ -132,6 +139,71 @@ struct WorkspaceSummary {
 #[derive(Deserialize)]
 struct RuntimeActivityQuery {
     workspace: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeEventsQuery {
+    /// 只看这个会话的事件。Web 一次只展示当前会话——跨会话列表在浏览器上没有
+    /// 归属可校验，那正是白名单要挡住的东西。
+    session: uuid::Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IgnoreRuntimeEventBody {
+    session: uuid::Uuid,
+}
+
+/// 浏览器能看到的事件字段。
+///
+/// **正文不在里面**，标题也只是打码截断过的摘要。这是独立于
+/// `PublicKernelEvent` 的第二层白名单：协议那边加字段不会自动流到浏览器。
+#[derive(Serialize)]
+struct WebKernelEvent {
+    id: uuid::Uuid,
+    source: String,
+    kind: String,
+    priority: String,
+    title_excerpt: Option<String>,
+    requires_user_action: bool,
+    merge_count: u32,
+    created_at: String,
+    delivery_state: String,
+}
+
+fn web_kernel_event(event: &willdeep_runtime_protocol::KernelEvent) -> WebKernelEvent {
+    let public = event.to_public(willdeep_core::judge::redact_credentials);
+    WebKernelEvent {
+        id: public.id,
+        source: format!("{:?}", public.source).to_lowercase(),
+        kind: public.kind,
+        priority: format!("{:?}", public.priority).to_lowercase(),
+        title_excerpt: public.title_excerpt,
+        requires_user_action: public.requires_user_action,
+        merge_count: public.merge_count,
+        created_at: public.created_at,
+        delivery_state: format!("{:?}", public.delivery_state).to_lowercase(),
+    }
+}
+
+/// 会话必须属于白名单里的工作区，否则一律拒绝。
+///
+/// 与会话详情同一条门：浏览器端没有应用层鉴权，能看到什么完全由这份白名单
+/// 决定，事件不该是例外。
+async fn authorized_event_session(
+    state: &Arc<WebState>,
+    session_id: uuid::Uuid,
+) -> Result<(), WebError> {
+    let session = SessionStore::new(&state.home)
+        .load(session_id)
+        .map_err(|_| WebError::bad_request("session was not found"))?;
+    if !workspace_allowed(state, &session.workspace).await? {
+        return Err(WebError::bad_request(
+            "session workspace is not in the server allowlist",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -272,7 +344,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     let state = Arc::new(WebState {
         config_path: config.config_path,
         profile: config.profile,
-        workspaces: config.workspaces,
+        workspaces: std::sync::RwLock::new(config.workspaces.clone()),
         home: config.home,
         language: config.language,
         harness_slots: Arc::new(Semaphore::new(2)),
@@ -296,8 +368,13 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/unpin", post(unpin_session))
         .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/turns/{id}/stop", post(stop_turn))
-        .route("/api/workspaces", get(workspaces))
+        .route("/api/workspaces", get(workspaces).post(add_workspace))
         .route("/api/runtime/activity", get(runtime_activity))
+        .route("/api/runtime/events", get(runtime_events))
+        .route(
+            "/api/runtime/events/{id}/ignore",
+            post(ignore_runtime_event),
+        )
         .route(
             "/api/runtime/approvals/{id}/resolve",
             post(resolve_runtime_approval),
@@ -319,15 +396,33 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         )
         .route("/api/composer", get(composer))
         .route("/", get(index))
+        // 单页应用的 catch-all。插件的 /plugin-host/... 比它更具体，
+        // 路由树按具体度匹配，所以不会被这一条吞掉。
         .route("/{*path}", get(asset))
-        .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn(server_version_header))
         .with_state(state.clone());
+    // 插件宿主自带一套路由与状态。发现失败不该让整个 Web 起不来——
+    // 一个装坏的插件包不能变成"聊天也用不了"。
+    let app = match willdeep_core::plugin::PluginHost::discover(&state.home) {
+        Ok(host) => app.merge(crate::plugin_web::router(Arc::new(
+            crate::plugin_web::PluginWebState::new(
+                Arc::new(host),
+                state.config_path.clone(),
+                state.home.clone(),
+            ),
+        ))),
+        Err(error) => {
+            eprintln!("warning: plugin host unavailable: {error}");
+            app
+        }
+    };
+    let app = app
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(server_version_header));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind Web server at {}", config.listen))?;
     println!("WillDeep Web: http://{}", config.listen);
-    for workspace in &state.workspaces {
+    for workspace in &config.workspaces {
         println!("Workspace: {}", workspace.display());
     }
     if !config.listen.ip().is_loopback() {
@@ -437,6 +532,125 @@ async fn workspaces(
         })
         .collect();
     Ok(Json(values))
+}
+
+#[derive(Deserialize)]
+struct AddWorkspaceRequest {
+    path: String,
+}
+
+/// 往浏览器端的工作区白名单里加一个目录。
+///
+/// 只在回环监听时开放，与模型路由设置同一条既有语义：Web 模式没有应用层鉴权，
+/// 能连到端口的人就是「这个用户」。对外暴露的实例上，能加工作区就等于能让
+/// Agent 去读写机器上任意目录——那条边界必须留在启动命令里（`--web-workspace`）。
+async fn add_workspace(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<AddWorkspaceRequest>,
+) -> Result<Json<WorkspaceSummary>, WebError> {
+    if !state.settings_writable {
+        return Err(WebError::bad_request(
+            "adding a workspace from the browser is only available when the Web server \
+             listens on a loopback address; start it with --web-workspace <path> instead",
+        ));
+    }
+    let requested = PathBuf::from(shellexpand_home(request.path.trim()));
+    if requested.as_os_str().is_empty() {
+        return Err(WebError::bad_request("workspace path cannot be empty"));
+    }
+    // 先规范化再注册：符号链接与 `..` 在这里解掉，之后 allowlist 比对的是
+    // 真实路径，不是用户打进来的那串字。
+    let root = requested.canonicalize().map_err(|error| {
+        WebError::bad_request(format!("cannot resolve {}: {error}", requested.display()))
+    })?;
+    if !root.is_dir() {
+        return Err(WebError::bad_request(format!(
+            "{} is not a directory",
+            root.display()
+        )));
+    }
+    let workspace = crate::daemon::ensure_remote_workspace(&state.home, &root)
+        .await
+        .map_err(WebError::from_anyhow)?;
+    {
+        let mut allowed = state
+            .workspaces
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if !allowed.contains(&workspace.root) {
+            allowed.push(workspace.root.clone());
+        }
+    }
+    Ok(Json(WorkspaceSummary {
+        id: workspace.id.to_string(),
+        path: workspace.root.display().to_string(),
+        name: workspace.name,
+        active: workspace.active,
+        access: match workspace.access {
+            crate::daemon::WorkspaceAccess::ReadOnly => "read_only",
+            crate::daemon::WorkspaceAccess::Smart => "smart",
+            crate::daemon::WorkspaceAccess::WorkspaceWrite => "workspace_write",
+        },
+    }))
+}
+
+/// 只展开开头的 `~`。不做通配符与变量展开：这是一个路径，不是一条 shell 命令。
+fn shellexpand_home(value: &str) -> String {
+    let Some(rest) = value.strip_prefix('~') else {
+        return value.to_owned();
+    };
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return value.to_owned();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{rest}", home.to_string_lossy()),
+        None => value.to_owned(),
+    }
+}
+
+/// 当前会话的运行时事件，最新在前。
+///
+/// 读事件日志而不是某个进程的内存：跑 Agent 的可能是 daemon，也可能是别的
+/// 前端，日志是它们之间唯一的共享事实。代价是最多落后一次刷盘。
+async fn runtime_events(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RuntimeEventsQuery>,
+) -> Result<Json<Vec<WebKernelEvent>>, WebError> {
+    authorized_event_session(&state, query.session).await?;
+    let store = willdeep_core::kernel_store::KernelStore::new(&state.home);
+    let mut events = store
+        .load_session(query.session)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::msg(error)))?;
+    events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    events.truncate(50);
+    Ok(Json(events.iter().map(web_kernel_event).collect()))
+}
+
+/// 把一条事件的**用户侧**标记掉。
+///
+/// 它不批准任何操作：审批仍然要在原来的审批卡片上回答。这里只是把「还等着
+/// 人」这个标记摘掉，事件本身留在日志里。
+async fn ignore_runtime_event(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<IgnoreRuntimeEventBody>,
+) -> Result<StatusCode, WebError> {
+    authorized_event_session(&state, body.session).await?;
+    let store = willdeep_core::kernel_store::KernelStore::new(&state.home);
+    let mut events = store
+        .load_session(body.session)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::msg(error)))?;
+    let Some(event) = events.iter_mut().find(|event| event.event_id == id) else {
+        return Err(WebError::not_found(
+            "Runtime event not found in this session",
+        ));
+    };
+    event.delivery.state = willdeep_runtime_protocol::DeliveryState::Ignored;
+    event.requires_user_action = false;
+    store
+        .save_session(body.session, &events)
+        .map_err(|error| WebError::from_anyhow(anyhow::Error::new(error)))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn runtime_activity(
@@ -696,12 +910,13 @@ fn validate_agent_spawn(
     action: WebAgentSpawnAction,
 ) -> Result<(String, String, Option<String>), WebError> {
     let profile = action.profile.trim().to_owned();
+    // 只读的两个公开职责。旧名一并接受：别人保存的流程与脚本不该因为改名断掉。
     if !matches!(
         profile.as_str(),
-        "scout" | "reader" | "log_inspector" | "git_detective"
+        "generalist" | "reviewer" | "reader" | "judge"
     ) {
         return Err(WebError::bad_request(
-            "profile must be one of scout, reader, log_inspector, or git_detective; deep requires a runtime escalation ticket",
+            "external spawn permits the public read-only generalist or reviewer trade; command and writing trades require the parent Agent safety chain",
         ));
     }
     let prompt = action.prompt.trim().to_owned();
@@ -825,9 +1040,16 @@ async fn sessions(
                 .get(&session.id)
                 .copied()
                 .unwrap_or((false, false, None));
+            // 标题生成没跑成的会话在列表里长得一模一样。给它一段首条用户
+            // 消息，比一排 `New session` 强，也比直接把它们藏起来诚实——
+            // 那些会话是有内容的。
+            let preview = willdeep_core::session_title::is_placeholder(&session.title)
+                .then_some(session.preview)
+                .flatten();
             SessionSummary {
                 id: session.id.to_string(),
                 title: session.title,
+                preview,
                 workspace: session.workspace.display().to_string(),
                 updated_at: session.updated_at,
                 pinned_at: session.pinned_at,
@@ -1520,6 +1742,16 @@ async fn send_event_at(
     }
 }
 
+/// 读一份白名单快照。锁被毒化时也要拿到里面的值——把一个中毒的锁变成
+/// 「所有工作区都不可用」，比继续用那份数据更糟。
+fn allowed_workspaces(state: &WebState) -> Vec<PathBuf> {
+    state
+        .workspaces
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
 async fn registered_web_workspaces(
     state: &WebState,
 ) -> Result<Vec<crate::daemon::RuntimeWorkspace>, WebError> {
@@ -1527,7 +1759,7 @@ async fn registered_web_workspaces(
         .await
         .map_err(WebError::from_anyhow)?
         .into_iter()
-        .filter(|workspace| state.workspaces.contains(&workspace.root))
+        .filter(|workspace| allowed_workspaces(state).contains(&workspace.root))
         .collect())
 }
 
@@ -1648,6 +1880,50 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_leading_tilde_is_expanded_in_a_workspace_path() {
+        // SAFETY: 测试单线程运行，这里只为断言 `~` 展开取一个确定的 HOME。
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+        assert_eq!(shellexpand_home("~"), "/home/tester");
+        assert_eq!(shellexpand_home("~/Sites/app"), "/home/tester/Sites/app");
+        // 这是路径不是 shell 命令：`~other`、变量与通配符一律原样留着，
+        // 交给 canonicalize 去失败，而不是在这里猜用户想要什么。
+        assert_eq!(shellexpand_home("~other/app"), "~other/app");
+        assert_eq!(shellexpand_home("$HOME/app"), "$HOME/app");
+        assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
+        assert_eq!(shellexpand_home("relative/path"), "relative/path");
+    }
+
+    /// 浏览器拿到的事件里不能有正文，标题也要打码截断。
+    ///
+    /// 这是第二层白名单：协议那边的 `PublicKernelEvent` 已经不带 body，但 Web
+    /// 仍然自己投影一次，好让协议将来加字段时不会自动流到浏览器。
+    #[test]
+    fn the_browser_projection_carries_no_event_body() {
+        let mut event = willdeep_core::kernel::host_event(
+            uuid::Uuid::nil(),
+            willdeep_runtime_protocol::EventSource::External,
+            "external.notice",
+            willdeep_runtime_protocol::EventPriority::Normal,
+            willdeep_core::kernel::InterruptPolicy::YieldAtBoundary,
+            "deploy failed: sk-abcdefghijklmnop0123",
+            Some("full log tail with secrets".to_owned()),
+            None,
+            true,
+        );
+        event.merge_count = 3;
+        let projected = web_kernel_event(&event);
+        let encoded = serde_json::to_string(&projected).expect("serialize");
+        assert!(!encoded.contains("full log tail"), "正文不进浏览器");
+        // 打码走的是命令审批那一套规则（`redact_credentials`），所以样例得是
+        // 它真的认得的形状：一个够长的 `sk-` 前缀密钥。
+        assert!(!encoded.contains("sk-abcdefghijklmnop0123"), "凭据要打码");
+        assert_eq!(projected.merge_count, 3);
+        assert!(projected.requires_user_action);
+        assert_eq!(projected.source, "external");
+        assert_eq!(projected.delivery_state, "pending");
+    }
 
     fn workspace(path: &str, active: bool) -> crate::daemon::RuntimeWorkspace {
         crate::daemon::RuntimeWorkspace {
@@ -2055,7 +2331,18 @@ mod tests {
         assert_eq!(prompt, "read the architecture docs");
         assert_eq!(label.as_deref(), Some("architecture reader"));
 
-        for profile in ["deep", "editor", "writer", "shell"] {
+        let judge = WebAgentSpawnAction {
+            workspace: "/allowed".to_owned(),
+            session_id,
+            profile: "judge".to_owned(),
+            prompt: "review the evidence".to_owned(),
+            label: None,
+        };
+        assert!(validate_agent_spawn(judge).is_ok());
+
+        // `deep` 不在这里了：它现在是档位别名，档位的准入由 Agent 层的票据
+        // 把关，不归这条工种白名单管。
+        for profile in ["implementer", "editor", "scout", "writer", "shell"] {
             let action = WebAgentSpawnAction {
                 workspace: "/allowed".to_owned(),
                 session_id,

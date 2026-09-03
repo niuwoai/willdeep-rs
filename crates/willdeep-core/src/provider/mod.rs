@@ -3,6 +3,7 @@ mod chat_completions;
 mod common;
 mod responses;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -53,6 +54,10 @@ pub struct ProviderConfig {
     pub workspace_id: String,
     pub request_timeout_secs: u64,
     pub max_output_tokens: u32,
+    /// Explicitly allow an OpenAI-compatible endpoint to run without an API
+    /// key. This is set only for the user-configured auxiliary model; normal
+    /// Provider profiles continue to fail closed when credentials are absent.
+    pub allow_unauthenticated: bool,
 }
 
 impl ProviderConfig {
@@ -73,6 +78,7 @@ impl ProviderConfig {
             workspace_id: Uuid::new_v4().to_string(),
             request_timeout_secs: 600,
             max_output_tokens: 16_384,
+            allow_unauthenticated: false,
         }
     }
 
@@ -84,13 +90,29 @@ impl ProviderConfig {
                 "scheme must be http or https".to_owned(),
             ));
         }
-        if self.api_key.trim().is_empty() {
+        if self.api_key.trim().is_empty()
+            && !(self.kind == ProviderKind::OpenAiCompatible && self.allow_unauthenticated)
+        {
             return Err(ProviderError::MissingApiKey);
         }
         if self.model.trim().is_empty() {
             return Err(ProviderError::MissingModel);
         }
         Ok(())
+    }
+}
+
+/// Detect the conventional same-machine endpoints. Explicit auxiliary
+/// endpoints may also live on another LAN host or domain; callers mark those
+/// with `allow_unauthenticated` instead of pretending every remote Provider
+/// profile is safe without credentials.
+pub fn is_loopback_base_url(url: &Url) -> bool {
+    match url.host_str().map(str::to_ascii_lowercase).as_deref() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
     }
 }
 
@@ -152,7 +174,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, Provide
     } else {
         common::openai_auth(request, config)
     };
-    let bytes = common::decode_success(request.send().await?, config).await?;
+    let bytes = common::send_retrying(request, config).await?;
     parse_model_list(&bytes)
 }
 
@@ -219,6 +241,31 @@ mod tests {
             ProviderKind::infer("https://some.im.example/v1"),
             ProviderKind::OpenAiCompatible
         );
+    }
+
+    #[test]
+    fn credential_free_openai_requires_explicit_auxiliary_opt_in() {
+        let mut auxiliary = ProviderConfig::new(
+            ProviderKind::OpenAiCompatible,
+            ApiDialect::ChatCompletions,
+            "https://models.home.example/v1",
+            "",
+            "gemma4:e4b-it-qat",
+        );
+        auxiliary.allow_unauthenticated = true;
+        assert!(auxiliary.validate().is_ok());
+
+        let ordinary_provider = ProviderConfig::new(
+            ProviderKind::OpenAiCompatible,
+            ApiDialect::ChatCompletions,
+            "https://provider.example/v1",
+            "",
+            "model",
+        );
+        assert!(matches!(
+            ordinary_provider.validate(),
+            Err(ProviderError::MissingApiKey)
+        ));
     }
 
     #[test]

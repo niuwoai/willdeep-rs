@@ -16,9 +16,11 @@ regex = "1.11"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+willdeep-runtime-protocol.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

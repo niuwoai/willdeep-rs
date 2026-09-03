@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::common::{anthropic_auth, anthropic_endpoint, client, decode_success};
+use super::common::{anthropic_auth, anthropic_endpoint, client, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
 
@@ -47,7 +47,7 @@ impl Provider for AnthropicMessagesProvider {
         };
         let request =
             anthropic_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
-        let bytes = decode_success(request.send().await?, &self.config).await?;
+        let bytes = send_retrying(request, &self.config).await?;
         let response: AnthropicResponse = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         let mut text = Vec::new();

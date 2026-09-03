@@ -46,7 +46,7 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 
 ### 派得动 · 小模型先干，主上下文保持干净
 
-定位、阅读、日志、Git 追溯自动派给 `someim-32b-<工种>`，普通编码由 GLM-5 控制；1M 的 `deep` 档**申请制**，必须提交带低档尝试证据的升级票据。九种子 Agent 各自绑定上下文窗口、Token 预算和熔断阈值。
+定位、阅读、日志、Git 追溯仍可自动派给内部 `someim-32b-<工种>`，面向用户则收敛为 Reader、Implementer、Tester、Ops Runner、Judge、Deep 六个工种；1M 的 `deep` 档**申请制**，必须提交带低档尝试证据的升级票据。命令型 Worker 使用静态规则、AI Safety Judge、精确命令人类确认的三级安全链。
 
 这套三档路由是 Runtime 强制策略，不是建议——它是为"模型不出国、机房里只有 S 和 M 两档"那个场景设计的。上下文压缩下沉到网关托管，本地保留两层兜底。
 
@@ -129,7 +129,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **模型** | Chat Completions · Responses · Anthropic Messages · some.im |
 | **工具** | 文件搜索/读写/精确编辑 · Git 状态/Diff/Blame · Shell · 后台 Job · Web 搜索与抓取 |
 | **界面** | Ratatui TUI · React Web · 手机中继 · NDJSON 自动化输出 |
-| **扩展** | `SKILL.md` 技能 · MCP stdio server · 项目上下文文件 |
+| **扩展** | `SKILL.md` 技能 · MCP stdio server · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
 | **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
 | **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 审计与门禁 Hooks |
@@ -164,8 +164,9 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [认证与凭据](docs/AUTHENTICATION.md) — Key 解析链、登录、Token 边界
 - [some.im 集成](docs/SOMEIM_INTEGRATION.md) — 登录、视觉回退、联网搜索
 - [Runtime Daemon 与工作区](docs/RUNTIME_DAEMON.md) — 常驻控制面
-- [子 Agent 与后台任务](docs/SUBAGENTS.md) — 九种工种、模型路由与 Worktree
+- [子 Agent 与后台任务](docs/SUBAGENTS.md) — 六个公开工种、内部兼容路由、命令审核与 Worktree
 - [小上下文 Skill Worker](docs/SKILL_WORKERS.md) — 派工纪律、Verifier 闭环、实弹靶场
+- [插件系统](docs/PLUGINS.md) — 与 macOS 版共享插件包，沙箱边界与审批为何各管各的
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [OS 级写入围栏](docs/SANDBOX.md) — Seatbelt / bubblewrap，预览态
 - [生命周期挂钩](docs/HOOKS.md) — 审计留痕与 CI / 合规门禁

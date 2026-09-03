@@ -53,7 +53,7 @@ willdeep --onboarding
 export WILLDEEP_API_BASE="https://api.niuwoai.com/v1"
 ```
 
-`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认 Root 模型为 `glm-5`。1M 的 `deepseek-v4-flash` 只作为通过升级票据后的 Deep 档使用。
+`--provider some-im` 在未指定 API Base 时默认使用 `https://some.im/v1`，默认 Root 模型为 `glm-5`。`deepseek-v4-flash` 是 Worker 的进阶档；最贵的专家档 `gpt-5.6-sol` 只在通过升级票据后使用。
 
 ## 请求头
 
@@ -113,20 +113,21 @@ vision_model = "qwen3-vl-plus"
 
 ## 子 Agent 的廉价模型
 
-Provider 为 some.im 时，七个托管窄工种自动绑定各自的 `someim-32b-<trade>`，未托管工种回落 `glm-5`；`implementer` 使用 GLM-5，`deep` 推荐显式绑定 `deepseek-v4-flash`。可以在 `[subagents.*]` 中显式覆盖，见 [子 Agent 与后台任务](SUBAGENTS.md)。
+Provider 为 some.im 时，`generalist` 与七个内部窄工种绑定基础档 `someim-32b`，其余工种回落 `glm-5`。模型档位由 `worker_tier` 单独选（基础 `someim-32b` / 进阶 `deepseek-v4-flash` / 专家 `gpt-5.6-sol`），专家档需要升级票据。两根轴各有各的覆盖入口：`[subagents.*]` 改「这个职责平时用什么」，`[worker_tiers.*]` 改「某一档兑现成什么」，见 [子 Agent 与后台任务](SUBAGENTS.md#换掉某一档的模型)。
 
 ## 上下文压缩模型
 
-Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。其它 Provider 未配置时维持旧行为（会话模型 + 行内指令）。
+Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用默认绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。启用 `[local_model] prefer_for_context_summaries = true` 后，本地辅助模型排在这条链之前，失败再回退托管压缩器；其它 Provider 最终回退会话模型。
 
 ## 会话标题模型
 
-**标题不绑网关别名，所有 Provider 一律默认取会话模型。** 这是与判官、压缩器不同的一条，
+**标题不绑网关别名；未启用本地辅助时，所有 Provider 一律默认取会话模型。** 这是与判官、压缩器不同的一条，
 理由有两条：网关侧没有为标题托管的职能模型，而 `/v1/models` 不列虚拟模型链——想确认某个
 `someim-*` 档存不存在只能逐档发最小请求探活，凭猜测钉一个别名等于埋一个"某天静默失效"的默认值；
 `deepseek-v4-flash` 虽然按 flash 档计费，但它在 [模型三档](MODEL_TIERS.md) 里是稀缺的 L 档，
 拿 1M 窗口写一行标题与那份文档的口径直接打架。
 
+启用 `[local_model] prefer_for_titles = true` 后，本地辅助模型排在会话模型之前，失败自动回退。
 代价是可控的：标题请求只在会话**第一轮**发一次，载荷是一问一答各截断到 800 字，
 与对话长度无关。要换便宜档写 `[agent] title_model`；整条关掉写 `[agent] auto_title = false`，
 标题会停在第一条提示词的确定性派生，仍然可读。详见 [会话标题](TUI_GUIDE.md#会话标题怎么来的)。

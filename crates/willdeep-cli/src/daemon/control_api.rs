@@ -1,8 +1,8 @@
 use super::*;
 use willdeep_runtime_protocol::{
     AgentPromptParams, AgentWaitParams, AnswerQuestionParams, ApiRequest, ApiResponse,
-    ApprovalDecision, ErrorCode, EventListParams, IdParams, ResolveApprovalParams,
-    SpawnAgentParams, WorkspaceEnsureParams,
+    ApprovalDecision, ErrorCode, EventListParams, IdParams, KernelListParams,
+    ResolveApprovalParams, SpawnAgentParams, WorkspaceEnsureParams,
 };
 
 const IDEMPOTENCY_CACHE_LIMIT: usize = 1_024;
@@ -391,6 +391,21 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
             ),
             Err(error) => Err(error),
         },
+        "kernel.list" => match params::<KernelListParams>(&request) {
+            Ok(params) => json(kernel_list(state, params)),
+            Err(error) => Err(error),
+        },
+        "kernel.get" => match params::<IdParams>(&request) {
+            Ok(params) => kernel_find(state, params.id)
+                .map(|event| event.to_public(willdeep_core::judge::redact_credentials))
+                .map(json)
+                .unwrap_or_else(|| Err(ApiFailure::not_found("Runtime kernel event not found"))),
+            Err(error) => Err(error),
+        },
+        "kernel.ignore" => match params::<IdParams>(&request) {
+            Ok(params) => kernel_ignore(state, params.id),
+            Err(error) => Err(error),
+        },
         "diff.snapshot" => {
             match params::<willdeep_runtime_protocol::DiffSnapshotParams>(&request) {
                 Ok(params) => diff_review::unified_snapshot(state, params)
@@ -537,6 +552,92 @@ impl UnifiedResponse {
     }
 }
 
+/// 事件内核的三个操作读写事件日志，不碰任何一个进程的内存。
+///
+/// 因此结果最多落后一次刷盘（秒级）。这个取舍是有意的：跑 Agent 的可能是别的
+/// 进程，日志是两者之间唯一的共享事实，而为了几百毫秒的新鲜度去建一条跨进程
+/// 通道，换来的复杂度远大于收益。
+fn kernel_events(state: &ServerState) -> Vec<willdeep_runtime_protocol::KernelEvent> {
+    state
+        .kernel_store
+        .load_all()
+        .sessions
+        .into_iter()
+        .flat_map(|(_, events)| events)
+        .collect()
+}
+
+fn kernel_find(
+    state: &ServerState,
+    id: uuid::Uuid,
+) -> Option<willdeep_runtime_protocol::KernelEvent> {
+    kernel_events(state)
+        .into_iter()
+        .find(|event| event.event_id == id)
+}
+
+fn kernel_list(
+    state: &ServerState,
+    params: KernelListParams,
+) -> Vec<willdeep_runtime_protocol::PublicKernelEvent> {
+    let mut events: Vec<_> = kernel_events(state)
+        .into_iter()
+        .filter(|event| {
+            params
+                .session_id
+                .is_none_or(|wanted| event.session_id == wanted)
+        })
+        .filter(|event| !params.pending_only || kernel_awaits_user(event))
+        .collect();
+    events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    events.truncate(params.limit.clamp(1, 1_000));
+    events
+        .iter()
+        .map(|event| event.to_public(willdeep_core::judge::redact_credentials))
+        .collect()
+}
+
+fn kernel_awaits_user(event: &willdeep_runtime_protocol::KernelEvent) -> bool {
+    event.requires_user_action
+        && !matches!(
+            event.delivery.state,
+            willdeep_runtime_protocol::DeliveryState::Ignored
+                | willdeep_runtime_protocol::DeliveryState::Resolved
+        )
+}
+
+/// 把一条事件的**用户侧**标记掉。
+///
+/// 它不是审批：审批仍然要在它被提出的地方回答。这里只是把「还等着人」这个
+/// 标记摘掉，事件本身留在日志里。
+fn kernel_ignore(state: &ServerState, id: uuid::Uuid) -> ApiResult {
+    let Some(session) = state
+        .kernel_store
+        .load_all()
+        .sessions
+        .into_iter()
+        .find(|(_, events)| events.iter().any(|event| event.event_id == id))
+        .map(|(session, _)| session)
+    else {
+        return Err(ApiFailure::not_found("Runtime kernel event not found"));
+    };
+    let mut events = state
+        .kernel_store
+        .load_session(session)
+        .map_err(ApiFailure::internal)?;
+    let Some(event) = events.iter_mut().find(|event| event.event_id == id) else {
+        return Err(ApiFailure::not_found("Runtime kernel event not found"));
+    };
+    event.delivery.state = willdeep_runtime_protocol::DeliveryState::Ignored;
+    event.requires_user_action = false;
+    let projected = event.to_public(willdeep_core::judge::redact_credentials);
+    state
+        .kernel_store
+        .save_session(session, &events)
+        .map_err(ApiFailure::internal)?;
+    json(projected)
+}
+
 const MUTATING_OPERATIONS: &[&str] = &[
     "agent.prompt",
     "agent.spawn",
@@ -562,6 +663,7 @@ const MUTATING_OPERATIONS: &[&str] = &[
     "diff.revert",
     "worktree.merge",
     "worktree.quarantine",
+    "kernel.ignore",
 ];
 
 fn is_mutating_operation(operation: &str) -> bool {
@@ -869,6 +971,7 @@ fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
         },
         workspace: Some(task.workspace.to_string_lossy().into_owned()),
         profile: task.profile,
+        prompt_excerpt: task.prompt_excerpt,
         created_at: task.created_at,
         started_at: task.started_at,
         completed_at: task.completed_at,
@@ -1424,15 +1527,15 @@ fn agent_spawn(state: &ServerState, request: &ApiRequest) -> ApiResult {
 }
 
 fn validate_external_spawn_profile(profile: Option<&str>) -> Result<String, ApiFailure> {
-    let profile = profile.unwrap_or("scout").trim().to_ascii_lowercase();
+    let profile = profile.unwrap_or("reader").trim().to_ascii_lowercase();
     if matches!(
         profile.as_str(),
-        "scout" | "reader" | "log_inspector" | "git_detective"
+        "reader" | "judge" | "scout" | "log_inspector" | "git_detective"
     ) {
         Ok(profile)
     } else {
         Err(ApiFailure::invalid(
-            "external agent.spawn only permits worker-tier read-only scout, reader, log_inspector, or git_detective profiles; deep requires a parent-issued escalation ticket",
+            "external agent.spawn permits public read-only reader or judge trades; legacy read-only profile IDs remain accepted only for saved-flow compatibility",
         ))
     }
 }
@@ -1806,7 +1909,7 @@ mod tests {
         );
         assert_eq!(
             validate_external_spawn_profile(None).ok().as_deref(),
-            Some("scout")
+            Some("reader")
         );
         assert_eq!(
             validate_external_spawn_profile(Some(" SCOUT "))

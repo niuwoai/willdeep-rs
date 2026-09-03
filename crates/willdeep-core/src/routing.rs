@@ -6,9 +6,30 @@
 //! plus an explicit escalation ticket.
 
 use std::collections::BTreeSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::provider::Provider;
+use crate::types::Message;
+
+const KEYWORD_TRUST_THRESHOLD: u8 = 86;
+const CLASSIFIED_PREFIX_CHARS: usize = 600;
+const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(8);
+const ROUTABLE_PROFILES: &[(&str, &str)] = &[
+    ("scout", "定位符号、文件、调用点；只读的代码检索"),
+    ("reader", "阅读并转述已知文件或文档的内容；只读"),
+    (
+        "log_inspector",
+        "解释报错、堆栈、构建或测试的失败输出；只读，不改代码",
+    ),
+    ("git_detective", "追溯改动历史、定位引入问题的提交；只读"),
+    ("editor", "改动明确点名的单个文件"),
+    ("test_fixer", "修复失败的测试"),
+    ("build_fixer", "修复编译、链接、依赖导致的构建失败"),
+    ("implementer", "跨多个文件的常规实现与修改"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutingTier {
@@ -87,6 +108,7 @@ struct RoutingState {
 pub struct RoutingGuard {
     policy: RoutingPolicy,
     state: Mutex<RoutingState>,
+    classifiers: Vec<Arc<dyn Provider>>,
 }
 
 impl RoutingGuard {
@@ -94,11 +116,48 @@ impl RoutingGuard {
         Self {
             policy,
             state: Mutex::new(RoutingState::default()),
+            classifiers: Vec::new(),
         }
     }
 
-    pub fn route(&self, prompt: &str) -> RouteDecision {
-        classify(prompt, self.policy.auto_dispatch_read_only)
+    /// Add model candidates in preference order. The local auxiliary model
+    /// goes first and the session provider follows as a fallback. Calls are
+    /// made only for the two low-confidence keyword fallback branches.
+    pub fn with_classifiers(mut self, classifiers: Vec<Arc<dyn Provider>>) -> Self {
+        self.classifiers = classifiers;
+        self
+    }
+
+    pub async fn route(&self, prompt: &str) -> RouteDecision {
+        let keyword = classify(prompt, self.policy.auto_dispatch_read_only);
+        if keyword.confidence >= KEYWORD_TRUST_THRESHOLD || self.classifiers.is_empty() {
+            return keyword;
+        }
+
+        let messages = classifier_messages(prompt);
+        for classifier in &self.classifiers {
+            let completion =
+                match tokio::time::timeout(CLASSIFIER_TIMEOUT, classifier.complete(&messages, &[]))
+                    .await
+                {
+                    Ok(Ok(completion)) => completion,
+                    Ok(Err(_)) | Err(_) => continue,
+                };
+            let Some(verdict) = parse_model_verdict(&completion.content) else {
+                continue;
+            };
+            let Some(profile) = verdict.profile.as_deref().and_then(known_profile) else {
+                return keyword;
+            };
+            return RouteDecision {
+                profile: Some(profile),
+                reason: "local routing model selected the worker profile",
+                // The model may refine only the trade. Tier, confidence and
+                // auto-dispatch authority remain owned by the keyword path.
+                ..keyword
+            };
+        }
+        keyword
     }
 
     pub fn record_tool_success(&self, name: &str) {
@@ -167,6 +226,80 @@ impl RoutingGuard {
         state.deep_calls = state.deep_calls.saturating_add(1);
         Ok(())
     }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ModelVerdict {
+    #[serde(rename = "worker")]
+    profile: Option<String>,
+    confidence: u8,
+}
+
+fn classifier_messages(prompt: &str) -> [Message; 2] {
+    let menu = ROUTABLE_PROFILES
+        .iter()
+        .map(|(id, purpose)| format!("- {id}: {purpose}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let request = prompt
+        .chars()
+        .take(CLASSIFIED_PREFIX_CHARS)
+        .collect::<String>();
+    [
+        Message::system(format!(
+            "你是任务派发分类器。根据用户请求，从候选 worker 中选出最合适的一个。\n\
+候选：\n{menu}\n\
+- none: 以上都不合适，或请求过于宽泛无法归类\n\n\
+判断依据是请求要做的事，不是它提到的词。只输出 JSON，不要解释。\n\
+格式：{{\"worker\":\"候选ID或none\",\"confidence\":0到100的整数}}"
+        )),
+        Message::user(format!("请求：{request}")),
+    ]
+}
+
+fn parse_model_verdict(raw: &str) -> Option<ModelVerdict> {
+    let body = strip_json_fence(raw.trim())?;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let worker = value.get("worker")?.as_str()?;
+    let confidence = value
+        .get("confidence")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_f64().map(|number| number as u64))
+        })
+        .unwrap_or(0)
+        .min(100) as u8;
+    if worker == "none" {
+        return Some(ModelVerdict {
+            profile: None,
+            confidence,
+        });
+    }
+    let profile = known_profile(worker)?;
+    Some(ModelVerdict {
+        profile: Some(profile.to_owned()),
+        confidence,
+    })
+}
+
+fn known_profile(value: &str) -> Option<&'static str> {
+    ROUTABLE_PROFILES
+        .iter()
+        .map(|(id, _)| *id)
+        .find(|candidate| *candidate == value)
+}
+
+fn strip_json_fence(raw: &str) -> Option<&str> {
+    if raw.is_empty() {
+        return None;
+    }
+    if !raw.starts_with("```") {
+        return Some(raw);
+    }
+    let first_newline = raw.find('\n')?;
+    let body = raw[first_newline + 1..].trim();
+    Some(body.strip_suffix("```").unwrap_or(body).trim())
 }
 
 fn classify(prompt: &str, auto_dispatch_read_only: bool) -> RouteDecision {
@@ -371,6 +504,34 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
+    use crate::provider::ProviderError;
+    use crate::types::{Completion, ToolDefinition};
+
+    struct ClassifierProvider {
+        reply: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for ClassifierProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion {
+                content: self.reply.to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+            })
+        }
+    }
 
     #[test]
     fn read_only_location_is_auto_dispatched_but_find_and_fix_is_not() {
@@ -419,5 +580,37 @@ mod tests {
         guard.record_profile_attempt("reader");
         assert!(guard.authorize_deep(Some(&ticket)).is_ok());
         assert!(guard.authorize_deep(Some(&ticket)).is_err());
+    }
+
+    #[test]
+    fn model_verdict_parser_accepts_fences_and_rejects_unknown_profiles() {
+        let verdict =
+            parse_model_verdict("```json\n{\"worker\":\"build_fixer\",\"confidence\":91}\n```")
+                .expect("parse fenced verdict");
+        assert_eq!(verdict.profile.as_deref(), Some("build_fixer"));
+        assert_eq!(verdict.confidence, 91);
+        assert!(parse_model_verdict("{\"worker\":\"database_admin\",\"confidence\":99}").is_none());
+        assert!(parse_model_verdict("").is_none());
+    }
+
+    #[tokio::test]
+    async fn classifier_only_refines_low_confidence_and_keeps_safety_flags() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(ClassifierProvider {
+            reply: "{\"worker\":\"editor\",\"confidence\":94}",
+            calls: calls.clone(),
+        });
+        let guard = RoutingGuard::new(RoutingPolicy::default()).with_classifiers(vec![provider]);
+
+        let trusted = guard.route("定位用户权限在哪个文件").await;
+        assert_eq!(trusted.profile, Some("scout"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let refined = guard.route("修改这个需求，你看着办").await;
+        assert_eq!(refined.profile, Some("editor"));
+        assert!(!refined.auto_dispatch_read_only);
+        assert_eq!(refined.tier, RoutingTier::Standard);
+        assert_eq!(refined.confidence, 78);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -20,6 +20,9 @@ Coding conventions:
 - Never log, echo, persist, or expose secrets, tokens, credentials, personal data, or .env contents.
 - Preserve unrelated user changes.
 
+Version control:
+- End every git commit message you write with a blank line followed by the trailer `Co-Authored-By: WillDeep <noreply@willdeep.com>`, so `git log` says which agent produced the commit.
+
 Stable tool contract:
 - Inspect before guessing with search_files, grep_files, read_file, list_directory, and git_status.
 - Create new files with create_file. Edit existing files with exact-match edit_file; old_string must be copied exactly and normally be unique.
@@ -31,11 +34,12 @@ Stable tool contract:
 
 Delegation contract:
 - Treat deployable 32K/48K/64K/256K models as the default execution substrate, not merely a cost optimization. Keep data and work on the configured private provider whenever the task fits; use the parent/deep model only when the material or reasoning genuinely cannot be bounded.
-- Delegate self-contained work with spawn_agent and pick the narrowest profile that fits: scout to locate, reader to summarize, log_inspector to explain a failure log, git_detective to find the commit behind a regression, editor for one file, implementer for a bounded multi-file feature or refactor, test_fixer for failing tests, build_fixer for compile and lint errors. Deep is scarce: use it only for indivisible repository-wide work, after lower tiers were attempted, and include an escalation ticket with runtime-checkable evidence.
+- Delegate self-contained work with spawn_agent and pick the narrowest public trade that fits: reader for research and inspection, implementer for bounded coding, tester for tests and review, ops_runner for operational commands, judge for independent correctness or safety review. Deep is scarce: use it only for indivisible repository-wide work, after lower tiers were attempted, and include an escalation ticket with runtime-checkable evidence. Legacy specialist IDs remain internal routing details, not public choices.
 - Prefer delegation whenever you can state the goal, a write set of at most 16 files, and relevant facts. Do not keep ordinary multi-file coding in the parent merely because it is more substantial than a trivial fix.
 - A skill listed as tier=worker belongs in a worker, not in your window: spawn_agent with task.skill set to the skill name and the runtime inlines its body for the worker. Oversized inputs can ride task.digest_oversized instead of being dropped.
 - Compile the task packet yourself. A worker sees none of this conversation, so pass task.goal, task.read_files for context it may inspect, task.write_files for the exact files it may change, task.known_facts for the failing assertion and anything you already established, and task.constraints for what it must not touch. Facts you withhold are facts it has to rediscover with your tokens.
-- Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run. test_fixer and build_fixer require one.
+- Give a verifier whenever done is decidable by a command: task.verifier.command is run by the runtime after every attempt, and its exit code — never the worker's own claim — ends the run.
+- A command-capable worker first uses deterministic safety rules. Only ambiguous, non-destructive and non-credential-sensitive commands reach the AI safety judge. If the judge denies or is unavailable, the worker reports the exact command; only then may you respawn profile=ops_runner with the identical target_command so the parent can request one-time human approval.
 - A writing worker's files are exactly task.write_files (or target_file for editor), resolved as one set under the active workspace policy. task.read_files adds context without adding write authority. Legacy task.relevant_files remains a combined set only for backwards compatibility."#;
 
 pub fn build_system_prompt(workspace: &Path) -> String {
@@ -122,6 +126,17 @@ mod tests {
         }
     }
 
+    /// The trailer is the only thing that makes a WillDeep commit tell you so
+    /// afterwards. It is one line inside a long prompt, which is exactly the
+    /// kind of line a later prompt edit drops without anyone noticing.
+    #[test]
+    fn the_stable_prompt_carries_the_commit_trailer() {
+        assert!(
+            STABLE_CONTRACT.contains("Co-Authored-By: WillDeep <noreply@willdeep.com>"),
+            "missing the commit co-author trailer"
+        );
+    }
+
     /// Workers only get used if the contract says when to reach for them, and
     /// they only succeed if the parent compiles a real packet. Both halves
     /// live in the cached prefix, so both are worth pinning.
@@ -129,10 +144,12 @@ mod tests {
     fn the_stable_prompt_teaches_delegation_and_packet_compilation() {
         for fragment in [
             "spawn_agent",
-            "test_fixer",
-            "build_fixer",
-            "log_inspector",
-            "git_detective",
+            "reader",
+            "implementer",
+            "tester",
+            "ops_runner",
+            "judge",
+            "target_command",
             "task.read_files",
             "task.write_files",
             "task.relevant_files",

@@ -41,6 +41,7 @@ pub(super) async fn submit_turn(
         .map(|value| value.message)
         .collect();
     let prompt = app.enrich_prompt(&prompt, &runtime.skills);
+    persist_missing_core_session(session, store)?;
     let event_head = crate::daemon::runtime_event_head(&runtime.home)
         .await
         .unwrap_or(app.runtime_event_cursor);
@@ -74,6 +75,26 @@ pub(super) async fn submit_turn(
             .to_owned(),
     );
     Ok(())
+}
+
+/// Runtime 的 `session.create { id: Some(..) }` 是领养，不是凭空创建：对应 Core
+/// Session 必须先存在。空白 TUI 会话为了不污染历史列表而有意不在启动时落盘，所以
+/// 第一次真正提交恰好是补写它的最晚安全时机。
+///
+/// 已存在的会话只做可读性校验，绝不把 TUI 手里的旧副本写回去；否则另一个 Runtime
+/// 客户端刚落下的消息可能被覆盖。Xedit 桥接会话也会由 `load` 找到，不会生成本地影子。
+fn persist_missing_core_session(session: &mut Session, store: &SessionStore) -> Result<()> {
+    match store.load(session.id) {
+        Ok(_) => Ok(()),
+        Err(willdeep_core::session::SessionError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            store
+                .save(session)
+                .context("persist Core Session before Runtime adoption")
+        }
+        Err(error) => Err(error).context("validate Core Session before Runtime adoption"),
+    }
 }
 
 pub(super) fn apply_runtime_events(
@@ -495,5 +516,52 @@ pub(super) fn open_remote_gate(
             });
             visible
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temporary_store(label: &str) -> (PathBuf, SessionStore) {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        (root, store)
+    }
+
+    #[test]
+    fn first_runtime_submission_persists_the_core_session_before_adoption() {
+        let (root, store) = temporary_store("tui-first-runtime-adoption");
+        let mut session = Session::new(root.clone(), None, "");
+        assert!(store.load(session.id).is_err());
+
+        persist_missing_core_session(&mut session, &store).unwrap();
+
+        let persisted = store.load(session.id).unwrap();
+        assert_eq!(persisted.id, session.id);
+        assert!(persisted.messages.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adoption_prerequisite_never_overwrites_existing_core_history() {
+        let (root, store) = temporary_store("tui-adoption-preserves-history");
+        let mut visible = Session::new(root.clone(), None, "stale TUI copy");
+        let mut persisted = visible.clone();
+        persisted
+            .messages
+            .push(Message::assistant("new Runtime answer", Vec::new()));
+        store.save(&mut persisted).unwrap();
+
+        persist_missing_core_session(&mut visible, &store).unwrap();
+
+        let restored = store.load(visible.id).unwrap();
+        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(restored.messages[0].content, "new Runtime answer");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

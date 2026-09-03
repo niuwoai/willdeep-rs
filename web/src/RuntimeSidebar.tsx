@@ -4,7 +4,8 @@ import type { Messages } from "./i18n";
 import { RuntimeDetailPanel, type RuntimeDetailTarget } from "./RuntimeDetailPanel";
 import { agentDuration, isSidebarAgent } from "./runtimeAgents";
 
-export type AgentSpawnProfile = "scout" | "reader" | "log_inspector" | "git_detective";
+/// 只读的两个公开职责。写入与命令类必须走父 Agent 的安全链。
+export type AgentSpawnProfile = "generalist" | "reviewer";
 
 export type RuntimeTool = {
   id: string;
@@ -63,6 +64,19 @@ export type RuntimeGate =
   | { kind: "approval"; id: string; task_id: string; description: string; always_allow_available: boolean }
   | { kind: "question"; id: string; task_id: string; question: string; options: string[]; multi_select: boolean };
 
+/// 一条运行时事件。正文不在这里：服务端只给打码截断过的标题摘要。
+export type RuntimeEvent = {
+  id: string;
+  source: string;
+  kind: string;
+  priority: string;
+  title_excerpt: string | null;
+  requires_user_action: boolean;
+  merge_count: number;
+  created_at: string;
+  delivery_state: string;
+};
+
 export type RuntimeActivity = {
   tools: RuntimeTool[];
   artifacts: RuntimeArtifact[];
@@ -74,6 +88,8 @@ export type RuntimeActivity = {
 
 type Props = {
   activity: RuntimeActivity;
+  events: RuntimeEvent[];
+  onIgnoreEvent: (id: string) => Promise<void>;
   messages: Messages;
   onResolveApproval: (id: string, decision: "allow_once" | "deny" | "always_allow") => Promise<void>;
   onAnswerQuestion: (id: string, answer: string | null) => Promise<void>;
@@ -106,13 +122,15 @@ function failureDomain(domain: string | null, t: Messages) {
   return t.unknownValue;
 }
 
-export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAnswerQuestion, onAgentAction, canSpawnAgent, onSpawnAgent }: Props) {
+export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, onResolveApproval, onAnswerQuestion, onAgentAction, canSpawnAgent, onSpawnAgent }: Props) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [multiAnswers, setMultiAnswers] = useState<Record<string, string[]>>({});
   const [controlBusy, setControlBusy] = useState(false);
-  const [spawnProfile, setSpawnProfile] = useState<AgentSpawnProfile>("scout");
+  const [spawnProfile, setSpawnProfile] = useState<AgentSpawnProfile>("generalist");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [detail, setDetail] = useState<RuntimeDetailTarget | null>(null);
+  // 只列还等着人的那些。已经由 Agent 读过但不需要人处理的事件不该占用户的注意力。
+  const pendingEvents = events.filter((event) => event.requires_user_action && event.delivery_state !== "ignored" && event.delivery_state !== "resolved");
   const [expanded, setExpanded] = useState(false);
   const runningTools = activity.tools.filter((tool) => tool.status === "running").length;
   const sidebarAgents = activity.agents.filter(isSidebarAgent);
@@ -143,15 +161,26 @@ export function RuntimeSidebar({ activity, messages: t, onResolveApproval, onAns
       <Text fontSize="sm">{t.agents}: {sidebarAgents.length}{hiddenAgents > 0 ? ` (+${hiddenAgents} ${t.finishedHidden})` : ""}</Text>
       <Text fontSize="sm">{t.tasks}: {activity.tasks.length}</Text>
       <Text fontSize="sm">{t.needsAttention}: {activity.attention_count}</Text>
+      <Text fontSize="sm">{t.runtimeEvents}: {pendingEvents.length}</Text>
     </Flex>
+    {pendingEvents.length > 0 && <VStack align="stretch" gap="2" mt="3">
+      <Text fontSize="xs" color="#8290a3">{t.runtimeEventsPending}</Text>
+      {pendingEvents.slice(0, 5).map((event) => <Box key={event.id} p="2" borderRadius="sm" bg="#171d24">
+        <Flex justify="space-between" gap="2" align="center">
+          <Text fontSize="2xs" color="#8290a3">{event.source} · {event.priority}{event.merge_count > 1 ? ` ×${event.merge_count}` : ""}</Text>
+          {/* 忽略只结算「还等着人」这一侧，不批准任何操作：审批仍在它自己的卡片上回答。 */}
+          <Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onIgnoreEvent(event.id))}>{t.ignoreEvent}</Button>
+        </Flex>
+        <Text fontSize="xs" lineClamp="2">{event.title_excerpt ?? event.kind}</Text>
+        <Text fontSize="2xs" color="#718096">{event.delivery_state === "handled" ? t.eventSeenByAgent : t.eventNotDelivered}</Text>
+      </Box>)}
+    </VStack>}
     <Box mt="3" p="2" borderRadius="sm" bg="#171d24">
       <Text fontSize="xs" color="#8290a3" mb="1">{t.newReadOnlyAgent}</Text>
       <NativeSelect.Root mb="1">
         <NativeSelect.Field aria-label={t.agentProfile} value={spawnProfile} onChange={(event) => setSpawnProfile(event.target.value as AgentSpawnProfile)} fontSize="xs" h="8">
-          <option value="scout">{t.agentProfileScout}</option>
-          <option value="reader">{t.agentProfileReader}</option>
-          <option value="log_inspector">{t.agentProfileLogInspector}</option>
-          <option value="git_detective">{t.agentProfileGitDetective}</option>
+          <option value="generalist">{t.agentProfileGeneralist}</option>
+          <option value="reviewer">{t.agentProfileReviewer}</option>
         </NativeSelect.Field>
         <NativeSelect.Indicator />
       </NativeSelect.Root>

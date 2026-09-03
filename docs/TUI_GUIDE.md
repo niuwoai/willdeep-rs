@@ -120,7 +120,8 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 1. **提交那一刻**：从第一条用户消息确定性派生，不花模型调用、不会失败。
    命中凭据特征（`sk-`、`password`、长随机串等）时整条放弃、退回占位标题——
    半截密钥仍然是密钥，而标题会进列表、通知载荷和导出文件。
-2. **第一轮回复落地后**：用 `[agent] title_model`（默认会话模型）跑一次单发请求，
+2. **第一轮回复落地后**：若启用 `[local_model]` 且 `prefer_for_titles = true`，先用本地辅助模型；
+   否则或本地失败后，用 `[agent] title_model`（默认会话模型）跑一次单发请求，
    把这轮问答压成一行短句，然后**锁定**。请求只带一问一答各 800 字，成本与对话长度无关。
 
 三条不变量：
@@ -145,13 +146,17 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 输入 `/routing` 打开持久化模型与路由面板。它与 `/model` 的边界不同：`/model`
 只切换当前 Session，`/routing` 修改 `config.toml` 中后续 Harness/子 Agent 的默认策略。
 
+面板分三段：Root、五个**职责**、三个**模型档位**。职责选做什么，档位选用多贵的
+模型——两根轴各自配置，见 [子 Agent 与后台任务](SUBAGENTS.md#换掉某一档的模型)。
+专家档那行标着「需票据」：绑到多贵的模型，都还有升级票据那道闸门兜着。
+
 | 按键 | 行为 |
 |---|---|
-| `↑` / `↓` | 选择 Root 或子 Agent 工种 |
-| `←` / `→` / `Tab` | 切换 Provider；Worker 的空 Provider 表示继承 Root |
+| `↑` / `↓` | 在 Root、职责、档位三段之间选择 |
+| `←` / `→` / `Tab` | 切换 Provider；空 Provider 表示继承 Root |
 | `Enter` | 编辑选中行的模型 ID |
-| `Space` | 清除 Worker 的 Provider/模型覆盖，恢复 some.im 推荐托管映射或继承 Root |
-| `[` / `]` | 切换 32K、48K、64K、128K、256K、1M 上下文档位 |
+| `Space` | 清除该行的 Provider/模型覆盖，恢复推荐默认或继承 Root |
+| `[` / `]` | 切换 32K、48K、64K、128K、256K、1M 上下文档位（档位行改的是这一档的预算） |
 | `R` / `A` | 开关小模型路由 / 高置信度只读自动派工 |
 | `+` / `-` | 调整每个 Harness 的 Deep 调用预算 |
 | `Ctrl+S` / `Cmd+S` | 原子保存；配置已被手工修改时拒绝覆盖并要求重载 |
@@ -274,7 +279,7 @@ tmux set -g mouse on
 | `/session` | 管理、搜索、切换、Fork 或导出会话；`/session retitle` 让标题模型重算一次标题 |
 | `/history [关键词]` | 打开历史会话面板：最近 20 条，选中进入继续。等价于 `Ctrl+R` 和 `/session search` |
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
-| `/agent` | 查看或控制子 Agent，如 `/agent spawn scout\|reader\|log_inspector\|git_detective <task>`；Deep 必须由父 Agent 提交升级票据 |
+| `/agent` | 查看或控制子 Agent，如 `/agent spawn reader\|judge <task>`；命令/写入工种与 Deep 必须由父 Agent走安全链 |
 | `/diff` | 打开 Diff Review Center |
 | `/skills` | 查看当前目录发现的技能 |
 | `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |

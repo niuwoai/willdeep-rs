@@ -1,7 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
-> 勘察日期：2026-08-21（同日完成建议路径三步 + 运行时层阶段一并回写）|
-> rs：0.39.0-rc3 | Xedit：1.284.0-rc1。
+> 初次勘察：2026-08-21；最近同步复核：2026-08-31（Worker 三档）。|
+> rs：0.52.0-rc2 | Xedit：1.312.0-rc2。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -19,7 +19,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 
 | 项 | willdeep-rs | Xedit |
 |---|---|---|
-| 版本 | 0.39.0-rc3 | 1.284.0-rc1 |
+| 版本 | 0.52.0-rc2 | 1.312.0-rc2 |
 | 规模 | ~60K 行 Rust / 4 crate | ~252K 行 Swift（主应用 481 文件） |
 | 工具数 | 21+2 | 164（`Xedit/AgentToolRegistry.swift`） |
 | 系统提示词 | `STABLE_CONTRACT` ~4.5KB | 稳定前缀 ~30KB（v29，`AgentContextBuilder.swift`） |
@@ -34,20 +34,36 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | `config.toml` `[agent]` 路由三键 | CLI 拥有，App 只读 | 0.37.0-rc1 引入 | `Xedit/AgentSharedRuntimeConfig.swift`（只读理由在头注释） |
 | `~/.willdeep/skills/` + `tier:` frontmatter | 双向 | `crates/willdeep-core/src/skills.rs:7` | `Xedit/AgentSkillDirectory.swift:121`（注释逐字同源） |
 | webhook `willdeep.webhook.v1` | Xedit 定义、rs 遵从 | `notify.rs:8-14`（"wire format is not ours to invent"），状态词表对齐 Swift enum raw value，回归测试锁定 | `AgentAttentionSettings.swift:472-511` |
-| 工种→模型映射（`someim-32b-<trade>`） | 双端镜像 | `subagent.rs:1618`（注释点名镜像对象）+ 单测 | `AgentSubagentJobPrompts.hostedModel(for:)` |
-| Task Packet 字段 | 近乎字段级同构 | `subagent.rs:143-178` | `AgentSubagentTaskPacket.swift:19-66` |
+| **Worker 三档**（基础/进阶/专家）与默认模型 | 双端镜像，同一张表 | `worker_tier.rs`（`default_hosted_model` + 契约测试） | `AgentWorkerTierModels.defaultBinding`（Xedit 1.312.0-rc1） |
+| **五个公开职责**（调查/实现/验证/审查/运维） | 同名同义 | `PUBLIC_SUBAGENT_IDS` + `public_profile_id` 别名表 | `AgentWorkerRole` |
+| 工种→模型映射（`someim-32b-<trade>`） | **已退役**（0.50.0-rc1 / 1.311.0-rc2）：七个别名在请求边界归一到 `someim-32b`，职责提示词由客户端持有 | `worker_tier.rs` 的 `normalize_hosted_model` + `hosted_worker_model` | `AgentSubagentModelCompatibility` |
+| Task Packet 字段 | 近乎字段级同构 | `subagent/types.rs:139-174` | `AgentSubagentTaskPacket.swift:19-66` |
 | 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件。0.43.0-rc1 起桥接会话进入 rs 历史面板并标 `[Xedit]` | `session.rs` 的 `swift_digest` / `swift_session`；`session_store.rs` 的 `extend_with_unmanaged` | Xedit 不读 `~/.willdeep/sessions` |
 | 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
+| 本地辅助模型 | 语义对齐、配置存储暂不共享：复用单模型，本地优先后远端回退，低置信度才做模型路由 | `config.rs` `[local_model]`、`harness.rs`、`routing.rs` | `AgentLocalModelSupport.swift`、`AppStateAgentWorkerRouting.swift` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
+| **插件包** `~/.willdeep/plugins/<id>/<version>/` | **双向共享包内容，状态各存各的**（0.50.0-rc1 起） | `crates/willdeep-core/src/plugin/`、`plugin_web.rs`、`plugin_bridge.js`；见 [PLUGINS.md](PLUGINS.md) | `AgentPluginRegistry.swift` 等 11 个文件；`docs/WILLDEEP_PLUGIN_SYSTEM_DESIGN.md` |
+| 插件清单 schema | 同一份契约，两端各自实现校验 | `plugin/manifest.rs`（含菜单位置白名单往返测试） | `docs/plugin-schema/willdeep-plugin.schema.json` |
+| 插件页面桥 `window.willdeep.*` | 逐方法对齐，传输层各异 | `plugin_bridge.js`（postMessage） | `AgentPluginPageHost.swift`（WKWebView messageHandlers） |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
+| `model-catalog.v1.json` 模型目录 | **canonical 契约已定，代码未接入** | `docs/SHARED_MODEL_CATALOG.md` + JSON Schema/示例 | 计划由 `AgentProviderLibrary` / some.im public model catalog 迁移；真实凭据只存 `credential_ref` |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |
+| 子 Worker 命令智能审核 | 双端同语义 | `reviewed_subagent_shell` + `target_command` 精确授权 | `CommandReviewer` + 父级 `ops_runner(target_command)` 人审兜底 |
 | 判官模型 `someim-security-guard` | 同名 | `harness.rs:26` | `AgentModels.swift` |
 | `mobile-gateway.v1` | 协议版本共用，room/token 独立 | `mobile.rs`、`AUTHENTICATION.md:133` | `MobileGatewayCoordinator.swift` |
 | CLI 命名权 | `willdeep` 归 rs | — | `CommandLineToolInstaller.swift`（App 装成 `willdeep-app`） |
 
+插件那一行是目前**用户感知最强**的一条共享面：同一个插件包在两个宿主里都能跑，
+包不用改一行。刻意不共享的是启用状态与权限审批——两个宿主的沙箱边界不是一回事
+（rs 是 opaque-origin iframe + CSP，Xedit 是非持久化 WKWebView + 自定义协议），
+跨宿主复用审批等于替另一侧替用户点了头。这与 `always-allow.json` 上得到的教训同源：
+共享货币必须是**内容**，不是**判断**。
+
 **明确尚未共用**（见 Xedit `docs/SMALL_MODEL_FIRST_RUNTIME_PLAN.md` §6）：
 `[subagents.<trade>]`（Xedit 存 UserDefaults）、`[providers.*]`（Xedit 走
-Provider 库 + Keychain，不读明文 TOML）。
+Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定义在
+[`SHARED_MODEL_CATALOG.md`](SHARED_MODEL_CATALOG.md)：先共享非敏感 Provider/模型目录，
+再用 `credential_ref` 接系统凭据后端，绝不把 Key 搬进共享 JSON。
 
 ## 契约层对齐
 
@@ -55,6 +71,11 @@ Provider 库 + Keychain，不读明文 TOML）。
   要写明理由，而不是让它自然漂移"。
 - canonical 文档跨仓分工：`MODEL_TIERS.md` 在 rs；`GOAL_TEAMS_ROLES_DESIGN.md`
   与 `LONG_HORIZON_AUTONOMY.md` 在 Xedit，rs 侧为引用与落地映射。
+- **内核事件信封 `agent-kernel-event.v1`：canonical 在 rs**（2026-09-03 定，
+  Xedit 为 mirror）。内核语义本身由 Xedit 1.315.0-rc15 首发实现，但字段契约
+  文本归 rs，移植计划见 [AGENT_RUNTIME_KERNEL.md](AGENT_RUNTIME_KERNEL.md)。
+  分工边界：外部事件的**云端中继归 Xedit 加 Go relay**，rs 只做本机入站
+  （daemon 端点、hooks、本机定时任务），因此 `collab-relay.v2` 不是双端共享面。
 - 指标与纪律双向回流：Xedit 的 Citation Audit、实弹靶场自 rs 回流；rs 的
   安全分类器、审批语义自 Xedit 移植。
 
@@ -93,6 +114,17 @@ Provider 库 + Keychain，不读明文 TOML）。
 Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工具后端，
 与本 Runtime 控制面无关（Xedit `docs/GOAL_TEAMS_ROLES_DESIGN.md:35`）。
 
+**契约演进备忘（rs 0.55.0-rc1）**：`RuntimeTask` 新增可选字段 `prompt_excerpt`
+（打码 + 120 字符截断的提示词摘要，任务标识用），`public-api-v1.json` fixture
+已带上。字段可空，Swift 解码器未同步也不会断（未知键忽略、Optional 缺省
+nil）；Xedit 下次同步 fixture 时在 `WillDeepRuntimeProtocol.swift` 补上即可。
+
+**契约演进备忘（rs 0.62.0-rc1）**：新增 `kernel.list` / `kernel.get` /
+`kernel.ignore` 三个操作与 `PublicKernelEvent` 投影，`public-api-v1.json`
+fixture 已带上。**事件正文不进公共 DTO**，只有打码截断的标题摘要。Swift 侧
+未同步不会断（新操作不调用即可），但要注意命名：Xedit 那边的内核事件与
+rs 控制面既有的 `event.*` 是两个方向，接的时候别把它们混成一个流。
+
 ## 网关实况（2026-08-21 逐档实弹探活）
 
 `/v1/models` **不列出虚拟模型链**（连在用的 `someim-security-guard`、
@@ -101,7 +133,7 @@ Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工
 
 | 档 | 状态 | 实测上游 |
 |---|---|---|
-| `someim-32b` + 七个工种档（scout / reader / editor / test-fixer / build-fixer / log-inspector / git-detective） | ✅ 在线 | 多为 glm-5，`editor` 已落 poolside/laguna-xs-2.1 |
+| `someim-32b` + 七个工种档（scout / reader / editor / test-fixer / build-fixer / log-inspector / git-detective） | ✅ 在线，但**两端已停止使用工种档**（0.50.0-rc1 / 1.311.0-rc2）：职责提示词改由客户端持有，七个别名在请求边界归一到 `someim-32b` | 多为 glm-5，`editor` 已落 poolside/laguna-xs-2.1 |
 | `someim-32b-compressor` | ✅ 在线 | inclusionai/ling-3.0-flash |
 | `someim-security-guard`、`someim-judge`（主循环档） | ✅ 在线 | stealth/ox-alpha |
 | `someim-32b-security-guard` / `-judge` / `-reviewer` / `-ops-runner` | ❌ `model_not_configured` | 未建 |
@@ -133,7 +165,8 @@ Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工
    （托管职能提示词、4KB 技能索引、MCP 按需）流向 Xedit，而非反向。
 
 **有意分歧（不处理，已有书面理由）**：冲突文件集 Xedit 排队 / rs 拒绝；
-`terminal_operator` rs 明确不做；Provider 凭据存储结构性差异；
+Swift 的 `terminal_operator` 驾驶 App 侧栏终端，Rust 以公开 `ops_runner` 承接同类
+命令审核语义但不模拟 GUI 终端；Provider 凭据存储结构性差异；
 `auto_dispatch_read_only` Xedit 仅解析不生效（先对名字后对行为）。
 
 ## 战略判断

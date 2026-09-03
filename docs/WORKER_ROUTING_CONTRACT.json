@@ -1,0 +1,88 @@
+{
+  "schema": "willdeep.worker-routing.v1",
+  "canonical_source": "Xedit/docs/WORKER_ROUTING_CONTRACT.json",
+  "mirrors": [
+    "willdeep-rs/docs/WORKER_ROUTING_CONTRACT.json"
+  ],
+  "summary": "关键词路由与模型路由的双端共享契约。Xedit(Swift) 与 willdeep-rs(Rust) 各自实现同一套派发判决，本文件是唯一事实来源；两侧各有一个守卫测试对着它断言，任何一边改了代码没改契约（或反过来）都会红。",
+
+  "keyword_trust_threshold": 86,
+  "keyword_trust_threshold_rationale": "关键词路由命中标记的分支一律 86 分及以上；兜底只有两档——implementer(78) 与「什么都不匹配」(70)。阈值卡在这条缝上，命中即零延迟采信，只有兜底才升级给模型。改这个数之前先确认关键词分档没变。",
+
+  "classifier_timeout_seconds": 8,
+  "classified_prefix_chars": 600,
+  "confidence_min": 0,
+  "confidence_max": 100,
+  "none_choice": "none",
+
+  "verdict_format_line": "格式：{\"worker\":\"候选ID或none\",\"confidence\":0到100的整数}",
+  "verdict_format_rationale": "提示词必须显式给出键名。实测本地 gemma4 在措辞不含「worker」时会改吐 {\"category\":...} 或 {\"task\":...}，解析器认不出就永远静默回落关键词，功能等于没上线。",
+
+  "routable_profiles": [
+    { "id": "scout", "purpose": "定位符号、文件、调用点；只读的代码检索" },
+    { "id": "reader", "purpose": "阅读并转述已知文件或文档的内容；只读" },
+    { "id": "log_inspector", "purpose": "解释报错、堆栈、构建或测试的失败输出；只读，不改代码" },
+    { "id": "git_detective", "purpose": "追溯改动历史、定位引入问题的提交；只读" },
+    { "id": "tester", "purpose": "运行测试或检查门禁并汇报结果；不修改源码" },
+    { "id": "reviewer", "purpose": "审查一段改动或代码质量；只读" },
+    { "id": "editor", "purpose": "改动明确点名的单个文件" },
+    { "id": "test_fixer", "purpose": "修复失败的测试" },
+    { "id": "build_fixer", "purpose": "修复编译、链接、依赖导致的构建失败" },
+    { "id": "implementer", "purpose": "跨多个文件的常规实现与修改" }
+  ],
+
+  "excluded_profiles": [
+    {
+      "id": "ops_runner",
+      "reason": "职责是部署、发布、重启线上服务。它的关键词分支是 94 分，本来就永远轮不到模型。放进菜单等于开一条「请求含糊 → 小模型猜 → 生产运维」的路径，特权目的地只能由明确的关键词证据抵达。"
+    },
+    {
+      "id": "terminal_operator",
+      "reason": "操作用户可见的终端会话，同为 94 分特权目的地，同上。"
+    },
+    {
+      "id": "judge",
+      "reason": "升级裁决目标，由别的机制选中，不是新请求的落点。"
+    },
+    {
+      "id": "security_guard",
+      "reason": "升级目标，同上。"
+    },
+    {
+      "id": "small_implementer",
+      "reason": "模型分层变体，由 tier 机制决定，不由请求分类决定。"
+    },
+    {
+      "id": "small_reviewer",
+      "reason": "模型分层变体，同上。"
+    },
+    {
+      "id": "deep",
+      "reason": "深度档需要运行时证据加显式升级票据，不能由分类器直接选中。"
+    }
+  ],
+
+  "model_may_override": [
+    "profile_id"
+  ],
+  "model_must_not_override": [
+    "tier",
+    "confidence",
+    "auto_dispatch_eligible",
+    "requires_delegated_execution",
+    "preflight_profile_id"
+  ],
+  "override_rationale": "模型只换 trade。安全相关的标志位仍归关键词路由：否则一个会改文件的请求可能因为小模型「有把握」就变成可自动派发。",
+
+  "fallback_chain": [
+    "本地辅助模型（启用且勾选「Worker 派发判断先用本地」时）",
+    "会话默认模型",
+    "纯关键词判决（前两者都不可用，或返回不可用答案时）"
+  ],
+  "unusable_reply_cases": [
+    "超时（classifier_timeout_seconds）",
+    "空 content（本地 Gemma 4 查不到答案时返回 eval_count=1 的空串）",
+    "JSON 不合法或被截断",
+    "worker 不在 routable_profiles 也不是 none_choice"
+  ]
+}

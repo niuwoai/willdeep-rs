@@ -67,6 +67,47 @@ pub(super) fn dispatch_compress(
     }));
 }
 
+/// 队列里有待投递事件时，开一轮把它们交给模型。
+///
+/// **额度在这里花，不在别处。** 所有会启动一轮的路径都经过这个函数，漏掉任何
+/// 一条限流就形同虚设。而且只在真的要开轮次时才问内核——`admit_wake` 一旦
+/// 放行就已经记了这一笔，问了不用等于白扣一次。
+///
+/// 事件正文不进这个提示词：真正的内容由内核在 turn 顶部注入，那条路上有净化
+/// 和来源标注。
+pub(super) fn wake_for_kernel_events(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    agent: &Arc<Agent>,
+    runtime: &super::TuiRuntime,
+) -> Result<()> {
+    if app.running {
+        return Ok(());
+    }
+    let Some(authority) = runtime.kernel.pending_wake_authority(session.id) else {
+        return Ok(());
+    };
+    if !runtime
+        .kernel
+        .admit_wake(session.id, authority)
+        .is_allowed()
+    {
+        // 排队等着就是了：额度用完不是丢事件的理由，下一次用户发言或下一轮
+        // 结束时它照样会被投递。
+        return Ok(());
+    }
+    app.append_transcript("System: runtime events queued for the main agent".to_owned());
+    dispatch_notification(
+        app,
+        session,
+        store,
+        agent,
+        &runtime.tx,
+        crate::harness::KERNEL_WAKE_PROMPT.to_owned(),
+    )
+}
+
 pub(super) fn dispatch_notification(
     app: &mut App,
     session: &mut Session,

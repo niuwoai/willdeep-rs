@@ -10,16 +10,14 @@ use crate::config::{ConfigFile, LoadedConfig};
 
 pub const STALE_CONFIG_MESSAGE: &str = "model routing settings are stale; reload before saving";
 
+/// 与 `willdeep_core::PUBLIC_SUBAGENT_IDS` 同一份名单：五个职责，模型档位
+/// 是另一根轴（见 `willdeep_core::WorkerTier`）。
 const PROFILE_IDS: &[&str] = &[
-    "scout",
-    "reader",
-    "editor",
+    "generalist",
     "implementer",
-    "test_fixer",
-    "build_fixer",
-    "log_inspector",
-    "git_detective",
-    "deep",
+    "tester",
+    "reviewer",
+    "ops_runner",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,6 +31,26 @@ pub struct ModelRoutingSettings {
     pub max_deep_calls_per_harness: usize,
     pub providers: Vec<ModelProviderOption>,
     pub profiles: Vec<ProfileRoutingSettings>,
+    /// 三个模型档位。与 `profiles` 是两根正交的轴：那边是「这个职责平时用
+    /// 什么」，这边是「派工时说要贵一档，贵成什么样」。
+    pub tiers: Vec<TierRoutingSettings>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TierRoutingSettings {
+    pub id: String,
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+    pub context_window: u64,
+    /// 没有任何显式配置——此时用的是网关默认表或父模型回落。
+    pub automatic: bool,
+    pub effective_provider: String,
+    pub effective_model: String,
+    /// 这一档在 some.im 网关上的默认模型，留空即采用它。
+    pub recommended_model: Option<String>,
+    /// 这一档是否需要升级票据。UI 要说清楚：把专家档绑到多贵的模型，都还有
+    /// 这道闸门兜着。
+    pub requires_admission: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +82,20 @@ pub struct ModelRoutingUpdate {
     pub auto_dispatch_read_only: bool,
     pub max_deep_calls_per_harness: usize,
     pub profiles: Vec<ProfileRoutingUpdate>,
+    /// 缺省表示「这次不动档位」，与提交一个空列表是两回事——老客户端不带这个
+    /// 字段，不该因为升级了服务端就把用户的档位配置清空。
+    #[serde(default)]
+    pub tiers: Option<Vec<TierRoutingUpdate>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TierRoutingUpdate {
+    pub id: String,
+    pub provider_profile: Option<String>,
+    pub model: Option<String>,
+    /// `None` 表示这一档不写 `context_window`，沿用档位自己的预算。
+    pub context_window: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -94,6 +126,19 @@ impl ModelRoutingSettings {
                     context_window: profile.context_window,
                 })
                 .collect(),
+            tiers: Some(
+                self.tiers
+                    .iter()
+                    .map(|tier| TierRoutingUpdate {
+                        id: tier.id.clone(),
+                        provider_profile: tier.provider_profile.clone(),
+                        model: tier.model.clone(),
+                        // automatic 的档不写回 context_window：写了就等于把
+                        // 当前默认值钉死，以后改了档位预算这里也跟不上。
+                        context_window: (!tier.automatic).then_some(tier.context_window),
+                    })
+                    .collect(),
+            ),
         }
     }
 }
@@ -156,7 +201,10 @@ pub fn save(
         Some(update.max_deep_calls_per_harness.to_string()),
     );
     for profile in &update.profiles {
-        let section = format!("subagents.{}", profile.id);
+        let section = format!(
+            "subagents.{}",
+            configured_section_id(&current.file, &profile.id)
+        );
         patched = patch_key(
             &patched,
             Some(&section),
@@ -174,6 +222,29 @@ pub fn save(
             Some(&section),
             "context_window",
             Some(profile.context_window.to_string()),
+        );
+    }
+    // 缺省表示「这次不动档位」。老客户端不带 tiers 字段，升级服务端不该把
+    // 用户的档位配置清空。
+    for tier in update.tiers.iter().flatten() {
+        let section = format!("worker_tiers.{}", tier.id);
+        patched = patch_key(
+            &patched,
+            Some(&section),
+            "provider_profile",
+            tier.provider_profile.as_deref().map(toml_string),
+        );
+        patched = patch_key(
+            &patched,
+            Some(&section),
+            "model",
+            tier.model.as_deref().map(str::trim).map(toml_string),
+        );
+        patched = patch_key(
+            &patched,
+            Some(&section),
+            "context_window",
+            tier.context_window.map(|value| value.to_string()),
         );
     }
 
@@ -219,6 +290,10 @@ fn from_config(
         .iter()
         .map(|id| profile_settings(file, id, &default_provider, &root_model))
         .collect::<Result<Vec<_>>>()?;
+    let tiers = willdeep_core::WorkerTier::ALL
+        .iter()
+        .map(|tier| tier_settings(file, *tier, &default_provider, &root_model))
+        .collect::<Result<Vec<_>>>()?;
     let active_provider_override = active_profile
         .filter(|profile| *profile != default_provider)
         .map(str::to_owned);
@@ -232,7 +307,86 @@ fn from_config(
         max_deep_calls_per_harness: file.agent.max_deep_calls_per_harness.unwrap_or(1),
         providers,
         profiles,
+        tiers,
     })
+}
+
+/// 一个档位在界面上显示成什么。
+///
+/// 这里的「有效值」必须和 `harness::resolve_tier_bindings` 的解析阶梯说同一件
+/// 事，否则设置面板会显示一个运行时并不会用的模型——0.51 那个「表只在文档里」
+/// 的毛病，换个地方重演一遍。
+fn tier_settings(
+    file: &ConfigFile,
+    tier: willdeep_core::WorkerTier,
+    root_provider: &str,
+    root_model: &str,
+) -> Result<TierRoutingSettings> {
+    let configured = file.worker_tiers.get(tier.as_str());
+    let provider_profile = configured.and_then(|settings| settings.provider_profile.clone());
+    let model = configured.and_then(|settings| settings.model.clone());
+    let effective_provider = provider_profile
+        .clone()
+        .unwrap_or_else(|| root_provider.to_owned());
+    let provider = file
+        .providers
+        .get(&effective_provider)
+        .with_context(|| format!("provider profile not found in config: {effective_provider}"))?;
+    let is_some_im = provider.provider.as_deref() == Some("some-im");
+    let automatic = configured.is_none_or(|settings| {
+        settings.provider_profile.is_none()
+            && settings.model.is_none()
+            && settings.context_window.is_none()
+    });
+    // 基础档在网关上就是工种自己的模型，没有独立的「档位默认」可推荐。
+    let recommended_model = (is_some_im && tier != willdeep_core::WorkerTier::Standard)
+        .then(|| tier.default_hosted_model().to_owned());
+    let effective_model = model
+        .clone()
+        .or_else(|| recommended_model.clone())
+        .unwrap_or_else(|| {
+            // 落到这里就是「没配、网关也没这一档的表」：专家档回落父模型，其余
+            // 保持工种自己的绑定，与 harness 同一条阶梯。
+            provider
+                .model
+                .clone()
+                .unwrap_or_else(|| root_model.to_owned())
+        });
+    Ok(TierRoutingSettings {
+        id: tier.as_str().to_owned(),
+        automatic,
+        provider_profile,
+        model,
+        context_window: configured
+            .and_then(|settings| settings.context_window)
+            .unwrap_or_else(|| tier.context_budget()),
+        effective_provider,
+        effective_model,
+        recommended_model,
+        requires_admission: tier.requires_admission(),
+    })
+}
+
+/// 这个工种改名前叫什么。已经写在别人 config 里的段落不该因为一次改名就失效。
+fn legacy_section_ids(id: &str) -> &'static [&'static str] {
+    match id {
+        "generalist" => &["reader", "deep"],
+        "reviewer" => &["judge"],
+        _ => &[],
+    }
+}
+
+/// 定位一个工种在 config 里实际使用的段落名：新名优先，其次是改名前的名字。
+/// 保存时也用它，免得写出一个新段落、把用户原来那段晾在旁边失效。
+fn configured_section_id(file: &ConfigFile, id: &str) -> String {
+    if file.subagents.contains_key(id) {
+        return id.to_owned();
+    }
+    legacy_section_ids(id)
+        .iter()
+        .find(|legacy| file.subagents.contains_key(**legacy))
+        .map(|legacy| (*legacy).to_owned())
+        .unwrap_or_else(|| id.to_owned())
 }
 
 fn profile_settings(
@@ -241,7 +395,11 @@ fn profile_settings(
     root_provider: &str,
     root_model: &str,
 ) -> Result<ProfileRoutingSettings> {
-    let configured = file.subagents.get(id);
+    let configured = file.subagents.get(id).or_else(|| {
+        legacy_section_ids(id)
+            .iter()
+            .find_map(|legacy| file.subagents.get(*legacy))
+    });
     let provider_profile = configured.and_then(|settings| settings.provider_profile.clone());
     let model = configured.and_then(|settings| settings.model.clone());
     let effective_provider = provider_profile
@@ -259,7 +417,7 @@ fn profile_settings(
     let provider_model = provider.model.as_deref().unwrap_or(root_model);
     let effective_model = model.clone().unwrap_or_else(|| {
         recommended_model.clone().unwrap_or_else(|| {
-            if is_some_im && id != "deep" {
+            if is_some_im {
                 "glm-5".to_owned()
             } else {
                 provider_model.to_owned()
@@ -310,6 +468,37 @@ fn validate_update(file: &ConfigFile, update: &ModelRoutingUpdate) -> Result<()>
             );
         }
     }
+    let mut seen_tiers = HashSet::new();
+    for tier in update.tiers.iter().flatten() {
+        // 与 `config::validate` 同一条规矩：段名只认三个正名，`deep` 之类的
+        // 别名做段名会和 `expert` 撞成同一档。
+        if willdeep_core::WorkerTier::parse(&tier.id)
+            .is_none_or(|parsed| parsed.as_str() != tier.id)
+            || !seen_tiers.insert(tier.id.as_str())
+        {
+            bail!("unknown or duplicate worker tier: {}", tier.id);
+        }
+        if let Some(provider) = tier.provider_profile.as_deref()
+            && (!safe_bare_key(provider) || !file.providers.contains_key(provider))
+        {
+            bail!(
+                "unknown or unsupported provider profile for tier {}",
+                tier.id
+            );
+        }
+        if let Some(model) = tier.model.as_deref() {
+            validate_model(&tier.id, model)?;
+        }
+        if tier
+            .context_window
+            .is_some_and(|value| !(4_000..=1_000_000).contains(&value))
+        {
+            bail!(
+                "context_window for tier {} must be between 4000 and 1000000",
+                tier.id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -328,13 +517,18 @@ fn safe_bare_key(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
+/// 工种的默认上下文预算。
+///
+/// 这些是**职责**各自需要多少材料，与 [`willdeep_core::WorkerTier`] 的档位预算
+/// 是两回事：档位说的是「这一档最多给多少」，这里说的是「这个职责默认要多少」，
+/// 显式配置覆盖两者。
 fn default_context_window(id: &str) -> u64 {
     match id {
-        "scout" | "log_inspector" | "git_detective" => 32_768,
-        "reader" | "editor" | "build_fixer" => 49_152,
-        "test_fixer" => 65_536,
+        // 调查要跨文件跟线索，材料量本来就比有界工种大。
+        "generalist" => willdeep_core::WorkerTier::Standard.context_budget(),
         "implementer" => 262_144,
-        "deep" => 1_000_000,
+        "tester" => 65_536,
+        "reviewer" | "ops_runner" => 49_152,
         _ => 32_768,
     }
 }
@@ -383,7 +577,17 @@ fn patch_key(contents: &str, section: Option<&str>, key: &str, value: Option<Str
                 lines.remove(index);
             }
         }
-        (None, Some(value)) => lines.insert(end, format!("{key} = {value}")),
+        (None, Some(value)) => {
+            // `end` 是下一个段头的位置，它前面通常有一行空行分隔两段。直接插在
+            // `end` 会把新键写到那行空行**之后**，于是它紧贴着下一个段头，
+            // 段间的空行被吃掉。TOML 照样解析得了，但这是一份人要手改的文件，
+            // 不该被工具越改越难读。
+            let mut at = end;
+            while at > start && lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            lines.insert(at, format!("{key} = {value}"));
+        }
         (None, None) => return contents.to_owned(),
     }
     let mut result = lines.join("\n");
@@ -503,9 +707,9 @@ api_key_env = "SOMEIM_API_KEY"
 provider = "openai-compatible"
 model = "local-coder"
 
-[subagents.scout]
+[subagents.reader]
 # preserve worker comments
-context_window = 32768
+context_window = 49152
 
 [notifications]
 future_desktop_field = "preserved"
@@ -518,13 +722,13 @@ future_desktop_field = "preserved"
         let mut value = sample();
         value = patch_key(
             &value,
-            Some("subagents.scout"),
+            Some("subagents.reader"),
             "model",
-            Some(toml_string("custom-scout")),
+            Some(toml_string("custom-reader")),
         );
         value = patch_key(
             &value,
-            Some("subagents.scout"),
+            Some("subagents.reader"),
             "provider_profile",
             Some(toml_string("local")),
         );
@@ -538,8 +742,14 @@ future_desktop_field = "preserved"
         assert!(value.contains("small_model_routing = false # keep nearby comments"));
         assert!(value.contains("# preserve worker comments"));
         assert!(value.contains("future_desktop_field = \"preserved\""));
-        assert!(value.contains("model = \"custom-scout\""));
+        assert!(value.contains("model = \"custom-reader\""));
         assert!(value.contains("provider_profile = \"local\""));
+        // 新键要落在段落最后一行有效内容之后，而不是段间空行之后——否则它会
+        // 紧贴下一个段头，把两段之间的空行吃掉。
+        assert!(
+            value.contains("provider_profile = \"local\"\n\n[notifications]"),
+            "新键不应吃掉段间空行:\n{value}"
+        );
         toml::from_str::<ConfigFile>(&value).expect("patched config");
     }
 
@@ -551,34 +761,119 @@ future_desktop_field = "preserved"
         let path = root.join("config.toml");
         std::fs::write(&path, sample()).expect("sample config");
         let settings = load(&path, None).expect("load settings");
-        assert_eq!(settings.profiles[0].effective_model, "someim-32b-scout");
+        // 七个旧工种别名已收敛到基础档：职责提示词随请求走，网关不再
+        // 按工种各铺一条链。
+        assert_eq!(settings.profiles[0].effective_model, "someim-32b");
         let mut update = settings.to_update();
         update.default_provider = "local".to_owned();
         update.root_model = "local-coder-v2".to_owned();
         update.max_deep_calls_per_harness = 0;
-        let scout = update
+        // 样例 config 里写的是改名前的 `[subagents.reader]`。它必须继续被读到，
+        // 保存也必须落回同一个段落——否则一次改名就让别人的配置变成死字，
+        // 界面上还多出一个空的新段落。
+        let generalist = update
             .profiles
             .iter_mut()
-            .find(|profile| profile.id == "scout")
-            .expect("scout update");
-        scout.provider_profile = Some("some-im".to_owned());
-        scout.model = Some("custom-scout".to_owned());
+            .find(|profile| profile.id == "generalist")
+            .expect("generalist update");
+        generalist.provider_profile = Some("some-im".to_owned());
+        generalist.model = Some("custom-reader".to_owned());
         let saved = save(&path, None, &update).expect("save settings");
         assert_eq!(saved.default_provider, "local");
         assert_eq!(saved.root_model, "local-coder-v2");
         assert_eq!(saved.max_deep_calls_per_harness, 0);
-        let scout = saved
+        let generalist = saved
             .profiles
             .iter()
-            .find(|profile| profile.id == "scout")
-            .expect("saved scout");
-        assert_eq!(scout.model.as_deref(), Some("custom-scout"));
+            .find(|profile| profile.id == "generalist")
+            .expect("saved generalist");
+        assert_eq!(generalist.model.as_deref(), Some("custom-reader"));
+        let written = std::fs::read_to_string(&path).expect("saved config");
+        assert!(written.contains("# preserve worker comments"));
         assert!(
-            std::fs::read_to_string(&path)
-                .expect("saved config")
-                .contains("# preserve worker comments")
+            written.contains("[subagents.reader]") && !written.contains("[subagents.generalist]"),
+            "the existing section must be updated in place, not duplicated under the new name"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tier_rows_round_trip_into_the_shared_worker_tiers_section() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-tier-routing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let path = root.join("config.toml");
+        std::fs::write(&path, sample()).expect("sample config");
+
+        let settings = load(&path, None).expect("load settings");
+        assert_eq!(settings.tiers.len(), 3);
+        // 什么都没配时显示的必须是运行时真会用的那个模型，不是一张只写在
+        // 文档里的表——这正是 0.51 踩过的坑。
+        assert!(settings.tiers.iter().all(|tier| tier.automatic));
+        assert_eq!(settings.tiers[1].effective_model, "deepseek-v4-flash");
+        assert_eq!(settings.tiers[2].effective_model, "gpt-5.6-sol");
+        assert!(settings.tiers[2].requires_admission);
+
+        let mut update = settings.to_update();
+        let tiers = update.tiers.as_mut().expect("tiers");
+        let expert = tiers
+            .iter_mut()
+            .find(|tier| tier.id == "expert")
+            .expect("expert");
+        expert.provider_profile = Some("local".to_owned());
+        expert.model = Some("local-opus".to_owned());
+        expert.context_window = Some(400_000);
+        let saved = save(&path, None, &update).expect("save settings");
+
+        let expert = saved
+            .tiers
+            .iter()
+            .find(|tier| tier.id == "expert")
+            .expect("expert");
+        assert!(!expert.automatic);
+        assert_eq!(expert.effective_provider, "local");
+        assert_eq!(expert.effective_model, "local-opus");
+        assert_eq!(expert.context_window, 400_000);
+        // 没动过的档不该被写出一个空段落。
+        let written = std::fs::read_to_string(&path).expect("written config");
+        assert!(written.contains("[worker_tiers.expert]"));
+        assert!(!written.contains("[worker_tiers.standard]"));
+        assert!(written.contains("# keep this comment"));
+        assert!(written.contains("# preserve worker comments"));
+        crate::config::validate(
+            &toml::from_str::<ConfigFile>(&written).expect("parse written config"),
+            &path,
+        )
+        .expect("written config stays valid");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn a_tier_alias_is_refused_as_a_section_name() {
+        let file: ConfigFile = toml::from_str(&sample()).expect("sample config");
+        let mut update = load_update_fixture(&file);
+        update.tiers = Some(vec![TierRoutingUpdate {
+            // `deep` 做参数值还通，做段名会和 `expert` 撞成同一档。
+            id: "deep".to_owned(),
+            provider_profile: None,
+            model: Some("opus-5".to_owned()),
+            context_window: None,
+        }]);
+        assert!(validate_update(&file, &update).is_err());
+    }
+
+    fn load_update_fixture(file: &ConfigFile) -> ModelRoutingUpdate {
+        let _ = file;
+        ModelRoutingUpdate {
+            revision: "r1".to_owned(),
+            default_provider: "some-im".to_owned(),
+            root_model: "glm-5".to_owned(),
+            small_model_routing: true,
+            auto_dispatch_read_only: true,
+            max_deep_calls_per_harness: 1,
+            profiles: Vec::new(),
+            tiers: None,
+        }
     }
 
     #[test]

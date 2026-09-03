@@ -25,9 +25,12 @@
 | [some.im 集成](SOMEIM_INTEGRATION.md) | 登录、自动识别、请求头、视觉回退、web_search |
 | [Runtime Daemon 与工作区](RUNTIME_DAEMON.md) | 常驻控制面、工作区策略、Session/Turn、事件流、Diff |
 | [子 Agent 与后台任务](SUBAGENTS.md) | 八种 Profile、模型绑定、Worktree 审查与合并 |
+| [Agent Runtime Kernel（任务书）](AGENT_RUNTIME_KERNEL.md) | 统一事件信封、三档中断、lease 与外部事件的移植计划 |
 | [小上下文 Skill Worker](SKILL_WORKERS.md) | 工种分档、Task Packet、Verifier 闭环、文件集锁 |
+| [双端共享模型目录](SHARED_MODEL_CATALOG.md) | Xedit / rs 共用 Provider、模型事实、候选池与凭据引用契约 |
 | [审批与自动化](APPROVALS.md) | 三档审批模式、Always Allow 边界、CI 用法、`ask_user` |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |
+| [插件系统](PLUGINS.md) | 与 macOS 版共享插件包、三种页面运行时、页面桥与沙箱边界 |
 | [手机中继](MOBILE.md) | `/mobile` 二维码配对与凭据安全 |
 
 ## 排查

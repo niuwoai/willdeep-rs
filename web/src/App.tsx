@@ -1,12 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Portal, Text, Textarea, VStack } from "@chakra-ui/react";
-import { detectLanguage, languageLabels, languages, messages, type Language } from "./i18n";
-import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity } from "./RuntimeSidebar";
+import { detectLanguage, messages, type Language } from "./i18n";
+import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
 import { Markdown } from "./Markdown";
-import { ModelRoutingSettings } from "./ModelRoutingSettings";
+import { SidebarSettings } from "./SidebarSettings";
+import { PluginCenter } from "./PluginCenter";
+import { PluginPage } from "./PluginPage";
+import { PluginRail, type RailSelection } from "./PluginRail";
+import { PluginSidebar } from "./PluginSidebar";
+import { fetchPlugins, orderedDestinations, type PluginFailureView, type PluginView } from "./plugins";
+import { PluginCommandPalette, PluginMenuPopup } from "./PluginMenus";
+import { menuEntries, useChatSelection, usePluginCommandRunner, type MenuEntry } from "./pluginMenuModel";
+import { SfIcon } from "./sfSymbols";
 
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
-type Session = { id: string; title: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
+type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
 type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
@@ -41,6 +49,20 @@ async function mutate(url: string, init: RequestInit) {
 }
 
 function nextId(prefix: string) { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+
+// 一级入口写进 URL hash，刷新和分享链接都能回到同一个目的地。
+function railFromHash(): RailSelection {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (hash === "plugins") return { kind: "center" };
+  const plugin = hash.startsWith("plugin/") ? hash.slice("plugin/".length) : "";
+  return plugin ? { kind: "plugin", qualifiedId: decodeURIComponent(plugin) } : { kind: "conversation" };
+}
+
+function hashForRail(selection: RailSelection): string {
+  if (selection.kind === "center") return "#plugins";
+  if (selection.kind === "plugin") return `#plugin/${encodeURIComponent(selection.qualifiedId)}`;
+  return "";
+}
 
 function clipboardImageFile(clipboard: DataTransfer): File | null {
   const file = Array.from(clipboard.files).find((candidate) => candidate.type.startsWith("image/"));
@@ -112,6 +134,10 @@ export function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage); const t = messages[language];
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
+  const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
+  // 轮询闭包里读得到当前会话，而不必把 sessionId 放进依赖数组重开定时器。
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const [sessionSearch, setSessionSearch] = useState("");
   const [skillSearch, setSkillSearch] = useState("");
   const [version, setVersion] = useState("");
@@ -129,6 +155,94 @@ export function App() {
   const pendingStopRef = useRef(false);
   const loadSessionRef = useRef<(id: string, activeTurnId?: string | null) => Promise<void>>(async () => undefined);
   const chatViewportRef = useRef<HTMLDivElement | null>(null); const followBottomRef = useRef(true);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [newWorkspacePath, setNewWorkspacePath] = useState("");
+  const [workspaceError, setWorkspaceError] = useState("");
+  const [plugins, setPlugins] = useState<PluginView[]>([]);
+  const [pluginFailures, setPluginFailures] = useState<PluginFailureView[]>([]);
+  const [rail, setRail] = useState<RailSelection>(railFromHash);
+  const [pluginSelectedItem, setPluginSelectedItem] = useState<string | null>(null);
+  const [pluginReloadToken, setPluginReloadToken] = useState(0);
+
+  const refreshPlugins = useCallback(() => {
+    fetchPlugins(language)
+      .then((value) => { setPlugins(value.plugins); setPluginFailures(value.failures); })
+      // 插件宿主没起来不该让聊天界面报错——那是两件独立的事。
+      .catch(() => { setPlugins([]); setPluginFailures([]); });
+  }, [language]);
+  useEffect(() => { refreshPlugins(); }, [refreshPlugins, pluginReloadToken]);
+
+  const pluginEntries = useMemo(() => orderedDestinations(plugins), [plugins]);
+  const activePlugin = useMemo(
+    () => (rail.kind === "plugin" ? pluginEntries.find((entry) => entry.destination.qualified_id === rail.qualifiedId) : undefined),
+    [rail, pluginEntries]
+  );
+  // 选中的插件被停用或卸载时回到对话，而不是停在一个已经不存在的目的地上。
+  // 插件清单还没加载完时先别动——否则从一个 #plugin/... 链接进来会被立刻踢走。
+  useEffect(() => {
+    if (rail.kind === "plugin" && plugins.length > 0 && !activePlugin) setRail({ kind: "conversation" });
+  }, [rail, activePlugin, plugins.length]);
+
+  useEffect(() => {
+    const target = hashForRail(rail);
+    if (window.location.hash !== target) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${target}`);
+    }
+  }, [rail]);
+  useEffect(() => {
+    const onHashChange = () => setRail(railFromHash());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const navigateToDestination = useCallback((qualifiedId: string) => {
+    setPluginSelectedItem(null);
+    setRail({ kind: "plugin", qualifiedId });
+  }, []);
+
+  // 插件的五个菜单贡献点。目的地是主入口，这些是顺手入口——收藏夹与待办
+  // 真正的用法是「聊天里选中一句就记下」，而不是先切目的地再手打一遍。
+  const [showPalette, setShowPalette] = useState(false);
+  const [popup, setPopup] = useState<{ entries: MenuEntry[]; x: number; y: number; args: Record<string, string> } | null>(null);
+  const [pluginMenuError, setPluginMenuError] = useState("");
+  const runPluginCommand = usePluginCommandRunner(navigateToDestination);
+  const paletteEntries = useMemo(() => menuEntries(plugins, "commandPalette"), [plugins]);
+  const chatSelectionEntries = useMemo(() => menuEntries(plugins, "chat.selection"), [plugins]);
+  const sessionContextEntries = useMemo(() => menuEntries(plugins, "session.context"), [plugins]);
+  const composerEntries = useMemo(() => menuEntries(plugins, "composer.more"), [plugins]);
+  const [chatSelection, setChatSelection] = useChatSelection(chatViewportRef, chatSelectionEntries.length > 0);
+
+  const runMenuEntry = useCallback(async (entry: MenuEntry, args: Record<string, string> = {}) => {
+    setPopup(null);
+    setShowPalette(false);
+    setChatSelection(null);
+    setPluginMenuError("");
+    try {
+      await runPluginCommand(entry, args);
+      // 命令可能改了插件自己的数据，让当前目的地的侧栏与页面重取一次。
+      setPluginReloadToken((current) => current + 1);
+    } catch (reason) {
+      setPluginMenuError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [runPluginCommand, setChatSelection]);
+
+  useEffect(() => {
+    if (!paletteEntries.length) return;
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setShowPalette((current) => !current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paletteEntries.length]);
+
+  const pluginOverlays = <>
+    {showPalette && <PluginCommandPalette entries={paletteEntries} messages={t} onRun={(entry) => void runMenuEntry(entry)} onClose={() => setShowPalette(false)} />}
+    {popup && <PluginMenuPopup entries={popup.entries} x={popup.x} y={popup.y} onRun={(entry) => void runMenuEntry(entry, popup.args)} onClose={() => setPopup(null)} />}
+    {pluginMenuError && <Text className="plugin-error" position="fixed" bottom="3" right="3" zIndex="50" borderRadius="8px" onClick={() => setPluginMenuError("")}>{t.pluginCommandFailed}: {pluginMenuError}</Text>}
+  </>;
 
   useEffect(() => { document.title = t.documentTitle; document.documentElement.lang = language; localStorage.setItem("willdeep.language", language); }, [language, t.documentTitle]);
   useEffect(() => { json<Health>("/health").then((value) => setVersion(value.version)).catch(() => setVersion("")); }, []);
@@ -156,8 +270,13 @@ export function App() {
     const refresh = () => {
       if (inFlight) return Promise.resolve();
       inFlight = true;
-      return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions")])
-        .then(([runtime, currentSessions]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); } })
+      // 事件按会话取，且只在选中会话时取：浏览器端没有应用层鉴权，跨会话
+      // 列表没有归属可校验。
+      const eventsRequest = sessionIdRef.current
+        ? json<RuntimeEvent[]>(`/api/runtime/events?session=${encodeURIComponent(sessionIdRef.current)}`).catch(() => [] as RuntimeEvent[])
+        : Promise.resolve([] as RuntimeEvent[]);
+      return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions"), eventsRequest])
+        .then(([runtime, currentSessions, events]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); setRuntimeEvents(events); } })
         .catch(() => undefined)
         .finally(() => { inFlight = false; });
     };
@@ -358,6 +477,16 @@ export function App() {
     setSessions(await json<Session[]>("/api/sessions"));
   }
 
+  async function ignoreRuntimeEvent(id: string) {
+    if (!sessionId) return;
+    await fetch(`/api/runtime/events/${encodeURIComponent(id)}/ignore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session: sessionId }),
+    });
+    setRuntimeEvents((current) => current.filter((event) => event.id !== id));
+  }
+
   async function refreshRuntimeActivity() {
     if (!workspace) return;
     setRuntimeActivity(await json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`));
@@ -406,12 +535,42 @@ export function App() {
 
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
 
+  // 加进来的工作区只影响这个浏览器视图能看到什么，不改 Runtime 的全局默认。
+  // 非回环监听时后端会拒绝并说明理由——那条边界留在启动命令里。
+  async function addWorkspace() {
+    const path = newWorkspacePath.trim();
+    if (!path) return;
+    setWorkspaceError("");
+    try {
+      const added = await json<Workspace>("/api/workspaces", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const values = await json<Workspace[]>("/api/workspaces");
+      setWorkspaces(values);
+      setWorkspace(added.path);
+      setNewWorkspacePath("");
+      setAddingWorkspace(false);
+    } catch (reason) {
+      setWorkspaceError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
   function sessionRow(item: Session) {
     const selected = sessionId === item.id;
-    return <Flex key={item.id} className={`session-row${selected ? " selected" : ""}`} opacity={item.archived ? 0.68 : 1}>
+    return <Flex key={item.id} className={`session-row${selected ? " selected" : ""}`} opacity={item.archived ? 0.68 : 1}
+      onContextMenu={(event) => {
+        // 没有插件贡献这个位置时不劫持右键——浏览器自带的菜单仍然该能用。
+        if (!sessionContextEntries.length) return;
+        event.preventDefault();
+        setPopup({ entries: sessionContextEntries, x: event.clientX, y: event.clientY, args: { session: item.id } });
+      }}>
       <button type="button" className="session-title" disabled={busy} onClick={() => void loadSession(item.id, item.active_turn_id)}>
         {item.pinned_at != null && <span className="session-pin" title={t.pinned} aria-label={t.pinned}>📌</span>}
-        {item.title}
+        {/* 标题没生成时后端会带回首条用户消息。显示它而不是一排
+            一模一样的 New session——那些会话是有内容的。 */}
+        {item.preview ? <span className="session-untitled">{item.preview}</span> : item.title}
       </button>
       <Flex className="session-actions">
         <button type="button" title={t.renameSession} aria-label={t.renameSession} disabled={busy || item.active} onClick={() => void renameSession(item)}>✎</button>
@@ -531,27 +690,78 @@ export function App() {
     } finally { if (abortRef.current === controller) abortRef.current = null; if (activeRunRef.current === runId) activeRunRef.current = null; activeTurnRef.current = null; activeSessionRef.current = null; setActiveRuntimeSessionId(""); pendingStopRef.current = false; setBusy(false); setActivity(""); }
   }
 
+  // 一级入口栏之后，右侧要么是对话（原有侧栏 + 聊天），要么是一个插件目的地
+  // （它的配套侧栏 + 页面），要么是插件中心。入口、侧栏与中央页永远来自
+  // 同一个 descriptor，不会出现入口属于 A、侧栏属于 B 的半切换状态。
+  const railNav = <PluginRail entries={pluginEntries} selection={rail} messages={t} onSelect={(next) => { setPluginSelectedItem(null); setRail(next); }} />;
+
+  if (rail.kind === "center") {
+    return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
+      {railNav}
+      <PluginCenter plugins={plugins} failures={pluginFailures} messages={t} onChanged={() => setPluginReloadToken((current) => current + 1)} />
+      {pluginOverlays}
+    </Flex>;
+  }
+
+  if (rail.kind === "plugin" && activePlugin) {
+    const { plugin, destination } = activePlugin;
+    return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
+      {railNav}
+      {destination.sidebar?.mode === "declarative" && <PluginSidebar plugin={plugin} destination={destination} locale={language} messages={t} reloadToken={pluginReloadToken} onNavigate={navigateToDestination} onSelectItem={setPluginSelectedItem} selectedItemId={pluginSelectedItem} onRowContextMenu={(event, componentId, commands) => {
+        const entries = menuEntries(plugins, "plugin.sidebar.row.context").filter((entry) => entry.pluginId === plugin.id && (!commands.length || commands.includes(entry.commandId)));
+        if (!entries.length) return;
+        event.preventDefault();
+        setPopup({ entries, x: event.clientX, y: event.clientY, args: { item: componentId } });
+      }} />}
+      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} />
+      {pluginOverlays}
+    </Flex>;
+  }
+
   return <Flex minH="100vh" bg="#080d12" color="#e7edf4">
-    <Box as="aside" w={{ base: "0", md: "282px" }} display={{ base: "none", md: "flex" }} flexDir="column" borderRight="1px solid" borderColor="#202a35" p="5" bg="#0b1118" overflowY="auto">
-      <Box flex="1">
-      <Heading size="lg">{t.appName}</Heading><Text color="#718096" mb="8">{t.webHarness}</Text>
-      <Text fontSize="xs" color="#8290a3" mb="2">{t.language}</Text><NativeSelect.Root mb="5"><NativeSelect.Field aria-label={t.language} value={language} onChange={(event) => setLanguage(event.target.value as Language)} bg="#101820" borderColor="#2b3948">{languages.map((code) => <option key={code} value={code}>{languageLabels[code]}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <ModelRoutingSettings messages={t} />
-      <Text fontSize="xs" color="#8290a3" mb="2">{t.workspace}</Text><NativeSelect.Root><NativeSelect.Field aria-label={t.workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.readOnly : item.access === "smart" ? t.smartApproval : t.workspaceWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
-      <RuntimeSidebar activity={runtimeActivity} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
-      <Flex mt="8" mb="3" justify="space-between"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" disabled={busy} onClick={() => { localStorage.removeItem(`${lastSessionPrefix}${workspace}`); setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
-      <Input size="sm" mb="2" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568" />
-      <Box className="session-list">
-        <VStack align="stretch" gap="1">{liveSessions.map(sessionRow)}{!liveSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
-        {archivedSessions.length > 0 && <Box mt="2">
-          <button type="button" className="archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((current) => !current)}>
-            <span className={`archived-caret${showArchived ? " open" : ""}`}>▸</span>{t.archived} ({archivedSessions.length})
-          </button>
-          {showArchived && <VStack align="stretch" gap="1" mt="1">{archivedSessions.map(sessionRow)}</VStack>}
-        </Box>}
-      </Box>
-      {selectedSession && <Flex mt="2" gap="1" wrap="wrap"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
-      </Box>
+    {railNav}
+    {/* 侧栏本身不滚动：只有会话列表滚。这样列表能吃掉全部剩余高度，
+        而不是被上面几块设置挤到下半屏。 */}
+    <Box as="aside" w={{ base: "0", md: "282px" }} display={{ base: "none", md: "flex" }} flexDir="column" borderRight="1px solid" borderColor="#202a35" p="5" bg="#0b1118" overflow="hidden">
+      <Flex justify="space-between" align="flex-start" mb="5">
+        <Box minW="0">
+          <Heading size="md" lineHeight="1.2">{t.appName}</Heading>
+          <Text color="#718096" fontSize="xs">{t.webHarness}</Text>
+        </Box>
+        <SidebarSettings messages={t} language={language} onLanguageChange={setLanguage} />
+      </Flex>
+      {/* 工作区收成一行：选择器占满，加号贴右。标签文字省掉——下拉里
+          显示的就是工作区名和访问模式，再顶一行「工作区」是废话。 */}
+      <Flex gap="1" align="center">
+        <NativeSelect.Root size="sm" flex="1" minW="0"><NativeSelect.Field aria-label={t.workspace} title={workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="#101820" borderColor="#2b3948" color="#d8e2ec">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.accessReadOnly : item.access === "smart" ? t.accessSmart : t.accessWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
+        <button type="button" className={`workspace-add${addingWorkspace ? " active" : ""}`} title={addingWorkspace ? t.cancel : t.addWorkspace} aria-label={addingWorkspace ? t.cancel : t.addWorkspace} aria-expanded={addingWorkspace} onClick={() => { setAddingWorkspace((current) => !current); setWorkspaceError(""); }}>
+          <SfIcon name={addingWorkspace ? "sf:x.mark" : "sf:plus.circle"} size={15} />
+        </button>
+      </Flex>
+      {addingWorkspace && <Box mt="2">
+        <Input size="sm" autoFocus value={newWorkspacePath} placeholder={t.addWorkspacePlaceholder} aria-label={t.addWorkspace} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568"
+          onChange={(event) => setNewWorkspacePath(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") void addWorkspace(); if (event.key === "Escape") { setAddingWorkspace(false); setWorkspaceError(""); } }} />
+        <Text fontSize="2xs" color="#6d7c90" mt="1">{t.addWorkspaceHint}</Text>
+        {workspaceError && <Text fontSize="xs" color="#ff9d9d" mt="1">{workspaceError}</Text>}
+      </Box>}
+      <RuntimeSidebar activity={runtimeActivity} events={runtimeEvents} onIgnoreEvent={ignoreRuntimeEvent} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
+      {/* 会话区吃掉剩余高度。minH=0 是必须的：没有它，flex 子项的最小高度是
+          内容高度，列表撑破容器而不是内部滚动。 */}
+      <Flex direction="column" flex="1" minH="0" mt="5">
+        <Flex mb="2" justify="space-between" align="baseline"><Text fontSize="xs" color="#8290a3">{t.session}</Text><Button size="xs" variant="ghost" color="#9dabbd" _hover={{ bg: "#16212c", color: "#f2f6fa" }} disabled={busy} onClick={() => { localStorage.removeItem(`${lastSessionPrefix}${workspace}`); setSessionId(""); setChat([]); }}>{t.newSession}</Button></Flex>
+        <Input size="sm" mb="2" flex="0 0 auto" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder={t.searchSessions} aria-label={t.searchSessions} color="#d8e2ec" _placeholder={{ color: "#667587" }} bg="#0f1720" borderColor="#465568" />
+        <Box className="session-list" flex="1" minH="0">
+          <VStack align="stretch" gap="1">{liveSessions.map(sessionRow)}{!liveSessions.length && <Text color="#77879a" fontSize="sm">{t.noSessions}</Text>}</VStack>
+          {archivedSessions.length > 0 && <Box mt="2">
+            <button type="button" className="archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((current) => !current)}>
+              <span className={`archived-caret${showArchived ? " open" : ""}`}>▸</span>{t.archived} ({archivedSessions.length})
+            </button>
+            {showArchived && <VStack align="stretch" gap="1" mt="1">{archivedSessions.map(sessionRow)}</VStack>}
+          </Box>}
+        </Box>
+        {selectedSession && <Flex mt="2" gap="1" wrap="wrap" flex="0 0 auto"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
+      </Flex>
       <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="#202a35" color="#627184" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
       {/* closeOnInteractOutside 必须显式写：zag 对 role="alertdialog" 默认关掉外部点击，
           于是这个框只认 Esc，点旁边的输入框什么也不发生。删除仍要点「删除」才发生，
@@ -580,15 +790,41 @@ export function App() {
         <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id} className="run-card">{message.steps?.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="#ff8f8f" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
+      {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
+          `source` 固定 "chat.selection"，与 macOS 宿主传的两个参数一致。 */}
+      {chatSelection && chatSelectionEntries.length > 0 && (
+        <PluginMenuPopup
+          entries={chatSelectionEntries}
+          x={chatSelection.x}
+          y={chatSelection.y}
+          onRun={(entry) => void runMenuEntry(entry, { text: chatSelection.text, source: "chat.selection" })}
+          onClose={() => setChatSelection(null)}
+        />
+      )}
       <Box className="composer-shell">
         {busy && <Flex className="thinking-strip"><Box className="thinking-pulse" /><Text title={activity}>{activity || t.thinking}</Text></Flex>}
         {commandMatches.length > 0 && <Box className="suggestions"><Text className="suggestion-title">{t.commands}</Text>{commandMatches.map((command) => <button key={command} type="button" onMouseDown={(event) => { event.preventDefault(); setPrompt(command); }}>{command}</button>)}</Box>}
         {skillQuery !== undefined && <Box className="suggestions"><Text className="suggestion-title">{t.skills}</Text><Input className="skill-search" size="sm" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t.searchSkills} aria-label={t.searchSkills} />{skillMatches.length ? skillMatches.map((skill) => <button key={skill.identifier} type="button" onMouseDown={(event) => { event.preventDefault(); setSkillSearch(""); setPrompt((current) => current.replace(/\$[\w-]*$/, `$${skill.identifier} `)); }}><strong>${skill.identifier}</strong><small>{skill.name} · {skill.description}</small></button>) : <Text className="suggestion-empty">{t.noSkills}</Text>}</Box>}
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
         <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
+        {composerEntries.length > 0 && (
+          <button
+            type="button"
+            className="composer-more"
+            title={t.pluginComposerMore}
+            aria-label={t.pluginComposerMore}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setPopup({ entries: composerEntries, x: rect.left, y: rect.top - 8, args: {} });
+            }}
+          >
+            <SfIcon name="sf:plus.circle" size={16} />
+          </button>
+        )}
         <Text className="send-hint">{t.sendHint}</Text>
         <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && ((!prompt.trim() && !attachments.length) || selectedSession?.archived)}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
       </Box>
     </Container>
+    {pluginOverlays}
   </Flex>;
 }

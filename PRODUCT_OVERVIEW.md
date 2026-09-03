@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-25 | 当前版本：v0.44.0-rc1
+> 最后更新：2026-08-31 | 当前版本：v0.52.0-rc2
 
 ## 项目简介
 
@@ -11,20 +11,23 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 与 macOS WillDeep 共用 `~/.willdeep/config.toml` 的 `[notifications]` Schema：保留桌面通知声音设置，校验本地或远程 HTTP(S) Webhook 地址，并在「任务完成」「需要人处理」两类时机实际投递 Webhook；投递为旁路，失败不影响 agent；Webhook 地址按普通个人偏好落盘，不使用 Keychain；
 - Chat Completions、Responses、Anthropic Messages 三协议；
 - some.im 与 BYOK Provider；
+- 共享 `model-catalog.v1` 协议描述 Provider、模型事实、成本与路由候选池，并以 `credential_ref` 将非敏感目录和真实凭据分离；当前已提供严格 Rust 解析/校验与跨客户端接入设计，尚未替换既有 Provider 路由和凭据来源；
 - 文件搜索、读取、创建和精确编辑；
 - Web Fetch 对每次跳转重做公网目标校验，同域自动跟随、跨域重新审批，并以环路、次数、超时和流式 3 MiB 硬限制约束响应；
 - Git 状态、Diff、受限提交历史与逐行归因，以及 Shell 命令；
 - 多轮 Tool Call Harness；
 - 工作区路径边界和写操作审批；
+- 命令型子 Worker 使用“确定性静态分类 → 任务上下文 AI Safety Judge → 父 Agent 精确命令人类授权”三级链路；危险形状、凭据内容与敏感路径不进入 AI，Judge 拒绝或不可用时绝不自动执行，`target_command` 的一次性授权也不能被参数拼接或命令替换扩权；
 - 人类输出与 NDJSON 自动化输出；
 - `willdeep run` 默认通过持久 Runtime 执行，支持 Prompt/stdin、文本与图片附件、Session 续接、断开后继续、text/JSON/NDJSON、静默模式和稳定退出码；`--local` 保留显式进程内兼容入口；
 - Bash、Zsh、Fish、PowerShell 补全和 roff man page 从同一 Clap 命令树生成；
 - 顶层 `willdeep session list/get/turns/stop` 查询持久会话并精确停止其 active Turn；
 - `willdeep doctor [--json] [--bundle PATH]` 在不联系 Provider 的前提下生成本地就绪诊断或私有脱敏 ZIP；
 - TOML 多 Provider Profile 与安全凭据引用；
-- TUI `/routing` 与 Web“模型与路由”设置共用同一套持久化配置：可调整 Root、九个子 Agent 工种、上下文窗口、自动派工与 Deep 预算；保存带版本冲突检测并原子更新 `config.toml`，可一键恢复 some.im 推荐 Worker 映射；
+- 可选自建辅助模型复用单一 OpenAI-compatible 端点完成会话标题、上下文压缩和低置信度 Worker 路由；支持域名、局域网 IP 与回环地址显式免 Key，各职能独立开关，失败自动回退远端候选，模型路由不得改变关键词规则决定的层级与安全闸门；
+- TUI `/routing` 与 Web“模型与路由”设置共用同一套持久化配置：可调整 Root、`reader` / `implementer` / `tester` / `ops_runner` / `judge` / `deep` 六个公开工种、上下文窗口、自动派工与 Deep 预算；旧专门工种仍保留为内部路由兼容 ID；保存带版本冲突检测并原子更新 `config.toml`，可一键恢复 some.im 推荐 Worker 映射；
 - TUI 支持 `/model <模型名>` 直接切换当前 Session 模型；裸 `/model` 从 Provider `/v1/models` 获取模型，提供模糊筛选、键盘翻页、鼠标滚动和点击选择，并同步 Runtime 与进程内 Agent；
-- TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；Core Runtime 统一识别 `<goal>` 信封，Web、TUI 与 Headless 共用同一续推判定；
+- TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；`willdeep -r` / `willdeep --resume` 可直接加载最近更新的持久会话，同时保留显式 UUID 与 `latest` 参数；Core Runtime 统一识别 `<goal>` 信封，Web、TUI 与 Headless 共用同一续推判定；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
 - 后台 Shell 由同版本内部 Supervisor 通过匿名帧管道接收命令并监视父 Harness 存活；命令不进入进程参数或 Runtime 资源索引，Unix 在取消、超时或父端断开时终止独立进程组；
@@ -44,19 +47,20 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 临时单行思考摘要，以及聊天标题、活动区和底部状态栏一致的动态运行指示、当前阶段、累计耗时、无新事件等待提示与 Runtime 重连恢复；Web 提供单行工作状态、逐轮工具轨迹与停止生成；
 - Web 聊天消息、工具轨迹和思考状态使用紧凑垂直节奏；Composer 聚焦只显示单一外框，内部 Textarea 不重复绘制 focus-visible 轮廓；
 - Rust CLI 构建显式跟踪 `web/dist`，前端产物变化会触发二进制重新嵌入，Debug 与 Release 不会静默沿用旧 Web UI；
-- Web/TUI 独立聊天历史滚动；TUI 支持常用 Markdown、HTML `<br>` 终端换行和按中文显示宽度对齐、窄屏单元格换行的 GFM 表格；
+- Web/TUI 独立聊天历史滚动；TUI 支持常用 Markdown、HTML `<br>` 终端换行，以及按中文显示宽度对齐、窄屏单元格换行并带完整闭合细边框的 GFM 表格；
+- TUI 将 Markdown 图片渲染为媒体卡片，并以 `Ctrl+L` 汇总当前会话的 Markdown 链接、裸 HTTP(S) URL 与图片；链接通过无 Shell 的系统浏览器调用打开，图片按显式操作安全加载，在 Kitty、iTerm2、Sixel 原生预览与 Unicode 半块字符之间自动降级；
 - Rust Runtime Client 为全部公开 Runtime 操作提供类型化方法；Runtime 状态、Workspace、Session、Agent、Turn、Task、Approval、Question、Tool、Artifact、Event、Diff 与 Worktree 控制复用同一协议 DTO，并通过本地 Socket 往返测试约束操作名、Token、幂等 Request ID 与响应解码；
 - 统一 `agent.spawn` API 与 Rust Client 可在活跃 Session 中创建稳定 ID 的后台只读子 Agent，并通过 `agent.wait` 观察完成；父级、Task 和 Workspace 均由服务端推导，外部调用不能选择写目标；
 - Web Runtime 侧栏按当前 Workspace 展示 Agent、后台 Task、待审批/回答、关注项、Tool 与 Artifact 摘要；进行中与最近五分钟完成的 Task 可查看状态、Profile、耗时、退出码、失败域和归属时间线，Workspace、Prompt、命令、参数、输出、报告、路径、模型、配置、PID 和内部错误不会下发；
 - Web Runtime 侧栏可解决三类审批、回答单选/多选/自定义问题，并停止、重试、指定模型重试或补充后台 Agent；写操作重新验证 Workspace 和目标归属，请求体拒绝客户端夹带额外作用域；
-- Web Runtime 侧栏可在活动父会话中创建 Scout、Reader、Log Inspector、Git Detective 四种 Worker 档只读子 Agent；Deep 必须由父 Agent 走升级票据；父级、Task、Workspace 和 Child ID 均由 Runtime 推导，聊天 SSE 输出不会锁死审批、回答和 Agent 控件；
+- Web Runtime 侧栏可在活动父会话中创建公开 `reader`、`judge` 两种无 Shell、无写入子 Agent；需要命令、写入或 Deep 升级的工种必须由父 Agent 走安全审核、写集审批或升级票据；父级、Task、Workspace 和 Child ID 均由 Runtime 推导，聊天 SSE 输出不会锁死审批、回答和 Agent 控件；
 - Web Runtime 摘要默认收起但持续刷新，历史会话默认可见并使用明确的暗色对比度；空白会话不进入历史列表，技能候选提供独立搜索框，侧栏 Footer 展示服务端当前版本；
 - Web Agent 与待处理 Task 详情按公开 `agent_id` / `task_id` 展示最近工具时间线、状态、耗时和 Diff Artifact；仅使用已脱敏 Runtime DTO，不下发 Prompt、工具载荷、报告、路径或内部错误；
 - Rust Runtime Client 覆盖 Diff 快照、内容、审查、验证、归因、Commit Preview 和安全撤销，TUI Diff Center 直接复用；
 - Worktree Review、Merge、Audit、Quarantine 已进入统一 API 和 Rust Client，精确 Review/Snapshot ID 与确认字段继续约束写操作；
 - 公共 API 兼容夹具覆盖 Runtime 的 11 类稳定对象，供 Swift、Android 和第三方客户端做跨语言解码回归；
 - TUI 状态行常驻 `Ctrl+S 选择` 入口；聊天区也可直接拖动进入内建选区，以 `Ctrl/Cmd+C` 或 `Y` 复制、`Q` 引用，并以 `Esc` 返回普通交互；
-- TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建 Scout、Reader、Log Inspector、Git Detective 四种 Worker 档只读子 Agent；
+- TUI 可从 Runtime Agent 状态分组或 `/agent spawn` 显式创建公开 `reader`、`judge` 两种无 Shell、无写入子 Agent；历史专门工种仍可正常展示和继续已有流程；
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
@@ -154,7 +158,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 上下文用量、Token（K/M 两位小数）、缓存命中率、耗时、自动摘要压缩及宽屏后台状态侧栏。
 - `/compress` 手动压缩当前会话上下文并立即保存；
 - 后台 Shell Job 与完成/失败后自动唤醒主 Harness 的结果回流；
-- `spawn_agent` 前台/后台子 Agent，内置 scout、reader、log_inspector、git_detective、deep、editor、implementer、test_fixer、build_fixer 九个工种；Runtime 将高置信度只读请求自动派给 someim-32b 托管工种，Root 默认使用 GLM-5，Deep 必须通过升级票据和每 Harness 调用预算；
+- `spawn_agent` 前台/后台子 Agent，公开 Reader、Implementer、Tester、Ops Runner、Judge、Deep 六个工种；旧专门 ID 继续承载自动路由、托管链与历史兼容。Runtime 将高置信度只读请求自动派给 someim-32b 托管工种，Root 默认使用 GLM-5，Deep 必须通过升级票据和每 Harness 调用预算；
 - Task Packet 结构化派工（目标 / 已知事实 / 约束 / `read_files` 上下文 / `write_files` 精确权限 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
 - 写入型工种的文件集写通道：最多声明 16 个现有或待创建文件，`smart/workspace-write` 继承主 Agent 工作区写权限，`strict` 一次审批整个集合，越界拒绝并给出扩权路径，运行中文件集互斥；
 - 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；

@@ -12,19 +12,25 @@
 2. **平均上下文要小**。max 64K 不等于 avg 64K；给小模型配一个 128K 的窗口，它照样会用 25 次 grep 把窗口烧穿。真正省钱的是**平均**上下文。
 3. **相关文件由主 Agent 内联，Worker 不自己找**。Worker 每一轮搜索都在烧窗口；Task Packet 直接带文件内容，Worker 起手就是热的。
 
-## 工种清单
+## 公开工种清单
 
 | 工种 | 职能 | 工具 | 窗口 | Payload 上限 | 写通道 | Verifier |
 |---|---|---|---:|---:|---|---|
-| `scout` | 定位文件、符号、调用点 | search / grep / list / read | 32K | 4 KB | 无 | — |
 | `reader` | 阅读并总结长文件 | read / list / search | 48K | 5 KB | 无 | — |
-| `log_inspector` | 解释失败日志、归类错误 | read | 32K | 4 KB | 无 | — |
-| `git_detective` | 回归定位、commit 考古 | git log / diff / blame / status / read / **run_command（限只读 git）** | 32K | 4 KB | 无 | — |
-| `editor` | 修改一个明确文件 | read / edit | 48K | 5 KB | 单文件锁 | 可选 |
-| `implementer` | 有界多文件功能、重构、新文件 | search / grep / list / read / create / edit / run_command（可选 verifier） | 256K | 16 KB | **文件集锁** | 可选 |
-| `test_fixer` | 把失败测试修到绿 | read / edit / run_command（限 verifier） | 64K | 6 KB | **文件集锁** | 必需 |
-| `build_fixer` | 修编译 / 类型 / lint 错误 | read / edit / run_command（限 verifier） | 48K | 5 KB | **文件集锁** | 必需 |
-| `deep` | 开放式跨文件调查 | search / grep / read / list / git status | **继承会话窗口** | 默认 | 无 | — |
+| `implementer` | 有界多文件功能、重构、新文件 | search / grep / list / read / create / edit / reviewed shell | 256K | 16 KB | **文件集锁** | 可选 |
+| `tester` | 测试与行为审核 | search / grep / read / git / reviewed shell | 64K | 6 KB | 无 | 可选 |
+| `ops_runner` | 有界运维与命令执行 | read / git status / reviewed shell | 48K | 5 KB | 无 | 可选 |
+| `judge` | 独立正确性/安全审核 | search / grep / read / git diff，无 Shell | 48K | 5 KB | 无 | — |
+| `deep` | 开放式跨文件调查 | search / grep / read / list / git status / reviewed shell | **继承会话窗口** | 默认 | 无 | — |
+
+`scout`、`editor`、`test_fixer`、`build_fixer`、`log_inspector`、`git_detective`
+等旧专门工种继续存在，并按旧 ID 参与自动路由、some.im 托管链、已保存工作流和
+历史展示；只是它们不再挤在公开选择器里。公开展示归并关系由代码中的
+`public_profile_id` 固定，运行时解析仍优先使用精确旧 ID。
+
+Reviewed shell 的边界是“静态安全 → AI 判官 → 精确命令人类确认”，不是把 Shell
+权限整包交给 Worker。危险形状、凭据和敏感路径不进入 AI；AI 拒绝/不可用时返回
+原命令，父 Agent 只能用 `ops_runner + target_command` 对同一字符串申请一次性授权。
 
 `deep` 是**刻意的例外**：它跑父模型，因为它的活本来就装不进小窗口。跨模块重构、架构设计、语义模糊的任务继续走 `deep` 或主 Agent，不要硬拆。
 
@@ -59,8 +65,8 @@ Provider 是 some.im 时，七个工种各自跑网关托管的虚拟模型 `som
   "prompt": "修到绿，别动公开接口",
   "task": {
     "goal": "修复 subagent::tests::verifier_loop 失败",
-    "read_files": ["crates/willdeep-core/src/subagent.rs", "crates/willdeep-core/src/agent.rs"],
-    "write_files": ["crates/willdeep-core/src/subagent.rs"],
+    "read_files": ["crates/willdeep-core/src/subagent/runner.rs", "crates/willdeep-core/src/agent.rs"],
+    "write_files": ["crates/willdeep-core/src/subagent/runner.rs"],
     "known_facts": ["失败始于 f936618", "断言是 attempts=3 实得 1"],
     "constraints": ["不改 SubagentProfile 的公开字段"],
     "verifier": { "command": "cargo test -p willdeep-core subagent", "expected_exit_code": 0 },
@@ -187,7 +193,7 @@ timeout_seconds = 900
 worktree = "dedicated"      # 写入型工种默认专属 Worktree
 ```
 
-工种名必须是上表之一，写错会在启动时报错而不是静默忽略。
+配置可使用六个公开 ID 或仍受支持的内部兼容 ID；未知名字会在启动时报错而不是静默忽略。
 
 ## 与 macOS 版 Xedit 的对照（2026-08-16 盘点）
 
@@ -200,13 +206,13 @@ worktree = "dedicated"      # 写入型工种默认专属 Worktree
 | 服务端职能段 / 客户端边界段分工 | ✅ | ✅ | **已对齐** |
 | Task Packet / Verifier 闭环 / 文件集锁 | ✅ | ✅ | 已对齐 |
 | `X-Playground-Session-ID` | ✅ | ✅ | **已对齐** |
-| `git_detective` 带只读 shell | ✅ `run_command` | ✅ 只读 git 形状门禁 | **已对齐** |
+| 命令型 Worker 的智能审核 | ✅ 静态规则 + AI + 父级精确人审 | ✅ 同语义 | **已对齐** |
 | 确定性派工触发（测试/构建失败） | ✅ | ✅ | 已对齐 |
 | 冲突文件集 | 排队 | 拒绝并点名 | 有意分歧（见上文） |
 | 只读工种引用抽查 | ✅ 1.264.0-rc1 回流 | ✅ 本版新增 | **已对齐**（Xedit 侧第四个指标 Citation Accuracy） |
 | 实弹靶场 | ✅ 1.264.0-rc1 回流（5 样本） | ✅ 12 样本 | **已对齐**（样本各按语言，判定纪律逐字一致） |
-| `security_guard` / `judge` 工种 | ✅ 有工种，但 1.282.0-rc8 起不再声称托管 | ❌ 无 | **已对齐**：网关侧这两个 Worker 虚拟模型 2026-08-21 复测仍返回 `model_not_configured`，Xedit 已把它们移出 `hostedTradeIDs`，职能段改由客户端自带。两端托管名单同为七项。rs 的判官走既有 `someim-security-guard`（主循环档，在线，与 Worker 档同名但不同信任边界），不受影响 |
-| `reviewer` / `ops_runner` / `terminal_operator` | ✅ | ❌ 无 | 缺口：前两个可移植（虚拟模型同样未配置），`terminal_operator` 驾驶的是 App 侧栏终端，CLI 无对应物，**不打算做** |
+| 五个公开职责 | ✅ 调查 generalist / 实现 implementer / 验证 tester / 审查 reviewer / 运维 ops_runner | ✅ 同名单（`AgentWorkerRole`）；旧 ID 内部兼容 | **已对齐**（0.50.0-rc1 ↔ 1.312.0-rc1） |
+| Worker 三档（基础/进阶/专家） | ✅ `WorkerTier`，与职责正交；专家档沿用 Deep 的票据与预算 | ✅ `AgentWorkerTier`，档位在设置里配 | **已对齐**；准入控制是 rs 独有 |
 | Workflow 步骤绑工种 | ✅ 派工率第一刀 | ❌ 无 workflow 引擎 | 结构性差异，rs 侧对应抓手是 Goal Teams |
 | 沙箱档（seatbelt / 凭证档） | ✅ | ❌ 无 seatbelt | 平台差异 |
 

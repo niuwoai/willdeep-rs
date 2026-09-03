@@ -17,7 +17,9 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `api` | 用 JSON 请求信封调用一个稳定 Runtime 操作 |
 | `attach` | 附着到持久 Runtime 事件流 |
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
+| `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `integrations` | 查看和管理可选外部集成 |
+| `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
 | `doctor` | 不联系 Provider 的本地就绪诊断 |
 | `completions` | 生成 Shell 补全脚本 |
 | `man` | 输出 roff man page |
@@ -65,15 +67,26 @@ willdeep --profile some-im --workspace .
 | `--web-workspace <PATH>` | Web 模式额外允许的工作区，可重复 |
 | `--onboarding` | 重新运行交互式首次设置 |
 | `--json` | 在 stdout 输出 NDJSON 事件 |
-| `-r`, `--resume <ID\|latest>` | 恢复已保存的会话 |
+| `-r`, `--resume [ID\|latest]` | 恢复已保存的会话；省略值时直接加载最近更新的会话 |
 
 短选项一览：`-c` 配置、`-p` Profile、`-m` 模型、`-w` 工作区、`-r` 恢复会话。前四个是全局选项，子命令前后都能写。
+
+### TUI 链接与图片
+
+助手回复里的 Markdown 图片会显示为 `▧` 卡片。按 `Ctrl+L` 打开当前会话的链接与图片面板，使用 `↑/↓` 或滚轮选择：
+
+- 链接按 `Enter` 或点击后交给系统默认浏览器，调用不经过 Shell；
+- 图片按 `Enter` 或点击后才会加载，不会在消息出现时自动向远端发请求；
+- 预览优先使用终端探测到的 Kitty、iTerm2 或 Sixel，失败或不支持时自动使用 Unicode 半块字符；预览内按 `U` 可主动切换字符模式，按 `O` 打开远程原图；
+- 远程图片只允许公网 HTTP(S)，并有重定向、超时、下载大小、像素尺寸和解码内存限制；本地路径必须留在当前工作区。
 
 ## 会话与项目
 
 ```bash
 willdeep --list-sessions
-willdeep -r latest "继续检查刚才的问题"          # -r 即 --resume
+willdeep -r                                      # 直接进入最近一次会话
+willdeep --resume                                # 与 willdeep -r 等价
+willdeep -r latest "继续检查刚才的问题"          # 也可显式写 latest
 willdeep --resume 550e8400-e29b-41d4-a716-446655440000 "继续"
 ```
 
@@ -194,6 +207,39 @@ willdeep doctor --bundle ./willdeep-diagnostic.zip
 ```
 
 `--bundle` 导出不含日志和本地路径的私有脱敏 ZIP，便于提交问题报告。详见 [故障排查](TROUBLESHOOTING.md)。
+
+## `willdeep event` — 运行时事件
+
+```bash
+willdeep event list [--session <UUID>] [--pending] [--json] [--limit 30]
+willdeep event show <事件 ID>
+willdeep event ignore <事件 ID>
+```
+
+后台任务、Worker 结果与本机入站通知统一进入事件内核，由主 Agent 在轮次边界收走。这条命令读的是事件日志（`~/.willdeep/agent-events/`），因此在 Agent 没跑的时候也能查。
+
+列表里的投递状态有两段，中间用 `/` 分开：前一段是**模型侧**（`queued` / `sending` / `seen`），后一段 `you` 表示**这条还等着人**。两者互不代劳，模型读过一封外部通知不等于替你回了。
+
+`ignore` 只结算你这一侧，事件本身留着：忽略是「我看过了」，不是「这件事没发生过」。**它不批准任何操作**——审批仍然要在它被提出的地方回答，终端、文件、浏览器与 MCP 各自的授权路径不受影响。
+
+## `willdeep plugin`
+
+```bash
+willdeep plugin list [--json]
+willdeep plugin info <id>
+willdeep plugin install <目录> [--enable]
+willdeep plugin import [目录] [--enable]     # 批量导入 macOS 版自带的第一方插件
+willdeep plugin approve <id>                 # 打印权限、来源、digest 与要起的进程，再记录审批
+willdeep plugin enable <id>
+willdeep plugin disable <id>
+willdeep plugin remove <id> --yes
+```
+
+安装器**不执行**包里的任何东西：没有 postinstall、没有 npm/yarn install、没有构建步骤。
+同一个版本内容不同时拒绝覆盖——覆盖会让一份已批准的 digest 在用户不知情时被换掉。
+
+批准与启用分两步：批准是对**内容**的判断，启用是对**此刻要不要跑**的判断。
+包与 macOS 版共享 `~/.willdeep/plugins/`，审批与启用状态各存各的，理由见[插件系统](PLUGINS.md)。
 
 ## `willdeep integrations`
 

@@ -32,6 +32,16 @@ use crate::config::NotificationSettings;
 /// Matches `URLSessionConfiguration.timeoutIntervalForRequest` on the app side
 /// so a slow endpoint behaves the same whichever client is talking to it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Ceiling on how long we wait for the TCP connection itself.
+///
+/// Must stay below `FLUSH_TIMEOUT`, otherwise an endpoint that accepts nothing
+/// and answers nothing — a black-holed address, a host that dropped off the
+/// network — burns the whole flush window without ever recording an error.
+/// `REQUEST_TIMEOUT` alone cannot cover this: it is the ceiling for a request
+/// that is already in flight, and a connect that never completes never gets
+/// there. The failure it guards against is silent, which is why the delivery
+/// error only shows up on some networks.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ceiling on how long `flush` will hold a process open waiting for deliveries
 /// it already started. Shorter than `REQUEST_TIMEOUT`: a courtesy ping must
 /// never become the reason `willdeep run` feels slow to exit.
@@ -193,13 +203,14 @@ impl Notifier {
         else {
             return Self::disabled();
         };
-        // Mirrors the app's User-Agent shape. The detector resolves any agent
-        // string containing "willdeep" to this vendor, so keeping the prefix
-        // is what makes a CLI event self-identifying at header level.
-        let user_agent = format!("some.im/WillDeep-{APP_VERSION} ({EXECUTOR})");
+        // One client name across every outgoing request. Vendor detection does
+        // not rest on this string: the app's detector reads the headers first,
+        // and `X-Agent-Source` / `X-Agent-Executor` below still carry the
+        // lowercase `willdeep` the classifier matches on.
         let Ok(client) = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(user_agent)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .user_agent(willdeep_core::CLIENT_USER_AGENT)
             .build()
         else {
             return Self::disabled();
@@ -460,6 +471,7 @@ fn source_label(source: AttentionSource) -> &'static str {
         AttentionSource::Subagent => "subagent",
         AttentionSource::Worktree => "worktree",
         AttentionSource::DiffReview => "diff_review",
+        AttentionSource::RuntimeEvent => "runtime_event",
     }
 }
 
@@ -824,8 +836,7 @@ mod tests {
         assert_eq!(headers["x-agent-event"], "attention_required");
         assert_eq!(headers["x-app-version"], APP_VERSION);
         assert_eq!(headers["content-type"], "application/json");
-        let user_agent = headers["user-agent"].to_str().expect("user agent");
-        assert!(user_agent.contains("WillDeep-"), "got {user_agent}");
+        assert_eq!(headers["user-agent"], willdeep_core::CLIENT_USER_AGENT);
 
         assert_eq!(body["schema_version"], "willdeep.webhook.v1");
         assert_eq!(body["event"], "attention_required");
@@ -841,18 +852,28 @@ mod tests {
     #[tokio::test]
     async fn failed_delivery_surfaces_an_error_without_breaking_the_caller() {
         let mut settings = enabled_settings();
-        // Reserved TEST-NET-1 address: routable nowhere, so this always fails.
-        settings.webhook_url = Some("http://192.0.2.1:9/willdeep".to_owned());
+        // A closed port on loopback: the kernel refuses immediately, so the
+        // failure path is exercised without a packet leaving the machine and
+        // without depending on how this network treats unroutable addresses.
+        // The old address here was TEST-NET-1, which is unroutable by
+        // definition but not uniformly *fast* to fail: where the first hop
+        // black-holes it instead of answering, the connect hangs until a
+        // timeout the assertion window was shorter than, and this test failed
+        // for reasons that had nothing to do with the notifier.
+        settings.webhook_url = Some("http://127.0.0.1:1/willdeep".to_owned());
         let notifier = Notifier::new(&settings);
         notifier.task_completed("Turn finished");
 
+        // Poll past the connect ceiling, so a slow refusal is still caught.
+        let deadline = CONNECT_TIMEOUT + Duration::from_secs(2);
+        let started = std::time::Instant::now();
         let mut error = None;
-        for _ in 0..60 {
+        while started.elapsed() < deadline {
             if let Some(found) = notifier.take_error() {
                 error = Some(found);
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
             error.is_some_and(|value| value.contains("webhook delivery failed")),
