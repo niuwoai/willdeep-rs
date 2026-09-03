@@ -46,6 +46,7 @@ pub(crate) async fn execute_headless_turn(
         request.session_id,
         request.prompt,
         request.attachments,
+        crate::Surface::Cli,
     )
     .await?;
     let mut task_id = None;

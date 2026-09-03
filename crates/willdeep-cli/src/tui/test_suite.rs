@@ -3019,6 +3019,7 @@ mod tests {
     fn failed_task_details_name_the_command_and_the_reason() {
         let diagnostics = willdeep_runtime_protocol::RuntimeTaskDiagnostics {
             task: willdeep_runtime_protocol::RuntimeTask {
+                origin_client: None,
                 id: uuid::Uuid::new_v4(),
                 session_id: None,
                 turn_id: None,
@@ -3056,6 +3057,7 @@ mod tests {
         // 没有失败痕迹时不挂一个空标题。
         let clean = willdeep_runtime_protocol::RuntimeTaskDiagnostics {
             task: willdeep_runtime_protocol::RuntimeTask {
+                origin_client: None,
                 exit_code: None,
                 failure_domain: None,
                 ..diagnostics.task.clone()
