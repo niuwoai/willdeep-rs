@@ -301,7 +301,7 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             }
         }
         Some("usage") => {
-            app.latest_usage = Usage {
+            let usage = Usage {
                 input_tokens: value.get("input_tokens").and_then(|value| value.as_u64()),
                 output_tokens: value.get("output_tokens").and_then(|value| value.as_u64()),
                 total_tokens: value.get("total_tokens").and_then(|value| value.as_u64()),
@@ -309,6 +309,9 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                     .get("cache_read_tokens")
                     .and_then(|value| value.as_u64()),
             };
+            // 本轮账目要累计，状态栏要最后一次，两者不能互相顶替。
+            app.record_turn_usage(&usage);
+            app.latest_usage = usage;
             app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
         }
         Some("subagent_started") => {
@@ -379,6 +382,8 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         Some("completed") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
                 app.append_transcript(format!("WillDeep: {text}"));
+                // Runtime 轮次没有 `AgentOutcome`，账目走本轮累计。
+                app.append_turn_stats(None);
                 app.finish_turn();
                 return Some(Message::assistant(text, Vec::new()));
             }
