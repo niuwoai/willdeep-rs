@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Portal, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, messages, type Language } from "./i18n";
-import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity } from "./RuntimeSidebar";
+import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
 import { Markdown } from "./Markdown";
 import { SidebarSettings } from "./SidebarSettings";
 import { PluginCenter } from "./PluginCenter";
@@ -134,6 +134,10 @@ export function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage); const t = messages[language];
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
+  const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
+  // 轮询闭包里读得到当前会话，而不必把 sessionId 放进依赖数组重开定时器。
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const [sessionSearch, setSessionSearch] = useState("");
   const [skillSearch, setSkillSearch] = useState("");
   const [version, setVersion] = useState("");
@@ -266,8 +270,13 @@ export function App() {
     const refresh = () => {
       if (inFlight) return Promise.resolve();
       inFlight = true;
-      return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions")])
-        .then(([runtime, currentSessions]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); } })
+      // 事件按会话取，且只在选中会话时取：浏览器端没有应用层鉴权，跨会话
+      // 列表没有归属可校验。
+      const eventsRequest = sessionIdRef.current
+        ? json<RuntimeEvent[]>(`/api/runtime/events?session=${encodeURIComponent(sessionIdRef.current)}`).catch(() => [] as RuntimeEvent[])
+        : Promise.resolve([] as RuntimeEvent[]);
+      return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions"), eventsRequest])
+        .then(([runtime, currentSessions, events]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); setRuntimeEvents(events); } })
         .catch(() => undefined)
         .finally(() => { inFlight = false; });
     };
@@ -466,6 +475,16 @@ export function App() {
 
   async function refreshSessions() {
     setSessions(await json<Session[]>("/api/sessions"));
+  }
+
+  async function ignoreRuntimeEvent(id: string) {
+    if (!sessionId) return;
+    await fetch(`/api/runtime/events/${encodeURIComponent(id)}/ignore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session: sessionId }),
+    });
+    setRuntimeEvents((current) => current.filter((event) => event.id !== id));
   }
 
   async function refreshRuntimeActivity() {
@@ -726,7 +745,7 @@ export function App() {
         <Text fontSize="2xs" color="#6d7c90" mt="1">{t.addWorkspaceHint}</Text>
         {workspaceError && <Text fontSize="xs" color="#ff9d9d" mt="1">{workspaceError}</Text>}
       </Box>}
-      <RuntimeSidebar activity={runtimeActivity} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
+      <RuntimeSidebar activity={runtimeActivity} events={runtimeEvents} onIgnoreEvent={ignoreRuntimeEvent} messages={t} onResolveApproval={resolveRuntimeApproval} onAnswerQuestion={answerRuntimeQuestion} onAgentAction={runAgentAction} canSpawnAgent={Boolean(sessionId) && (selectedSession?.active === true || activeRuntimeSessionId === sessionId)} onSpawnAgent={spawnRuntimeAgent} />
       {/* 会话区吃掉剩余高度。minH=0 是必须的：没有它，flex 子项的最小高度是
           内容高度，列表撑破容器而不是内部滚动。 */}
       <Flex direction="column" flex="1" minH="0" mt="5">
