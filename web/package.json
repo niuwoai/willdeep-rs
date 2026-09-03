@@ -1,7 +1,7 @@
 {
   "name": "willdeep-web",
   "private": true,
-  "version": "0.66.0-rc1",
+  "version": "0.67.0-rc1",
   "type": "module",
   "scripts": {
     "dev": "vite",

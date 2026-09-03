@@ -1466,6 +1466,72 @@ fn failure_excerpt(value: &str) -> String {
     format!("{head}\n…[{dropped} chars omitted]…\n{tail}")
 }
 
+/// 一句话说清这一步在干什么，供远端界面显示在工具名旁边。
+///
+/// **它不是参数，是摘要。** 完整参数属于私有请求内容（`arguments` 那个字段名
+/// 会被公共事件流剥掉，本机排查走 `task.diagnostics`）；这里给的是够回答「执行
+/// 了什么」的最小信息，且三道处理都不可省：
+///
+/// - 命令只取前三个词。整条命令行常带路径，而「路径不下发浏览器」是既有承诺；
+/// - 看起来像路径的词换成 `…`，包括 `/abs`、`~/x` 与 `--flag=/abs` 这种；
+/// - 按命令审批同一套规则打码，再按**字符**截断——用户完全可能把 token 粘进
+///   命令行。
+///
+/// 认不出的工具返回 `None`：宁可不显示，也不要把一段不知道含什么的参数漏出去。
+fn tool_detail(name: &str, arguments: &str) -> Option<String> {
+    const MAX_DETAIL_CHARS: usize = 60;
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let detail = match name {
+        "run_command" => {
+            let command = parsed.get("command")?.as_str()?;
+            command
+                .split_whitespace()
+                .take(3)
+                .map(elide_path_like)
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        "spawn_agent" => {
+            let profile = parsed
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .unwrap_or("generalist");
+            match parsed.get("label").and_then(|value| value.as_str()) {
+                Some(label) if !label.trim().is_empty() => {
+                    format!("{profile} · {}", label.trim())
+                }
+                _ => profile.to_owned(),
+            }
+        }
+        _ => return None,
+    };
+    let redacted = willdeep_core::judge::redact_credentials(&detail);
+    if redacted.trim().is_empty() {
+        return None;
+    }
+    let mut chars = redacted.chars();
+    let excerpt: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    })
+}
+
+/// 看起来像路径的词换成省略号。
+///
+/// 判定放宽到 `--flag=/abs` 这种形式：把路径藏在等号后面是最常见的漏法。
+fn elide_path_like(token: &str) -> String {
+    let candidate = token.split_once('=').map_or(token, |(_, value)| value);
+    if candidate.starts_with('/') || candidate.starts_with('~') || candidate.starts_with("./") {
+        return match token.split_once('=') {
+            Some((flag, _)) => format!("{flag}=…"),
+            None => "…".to_owned(),
+        };
+    }
+    token.to_owned()
+}
+
 pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
     match event {
         AgentEvent::RouteDecided {
@@ -1491,11 +1557,19 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         AgentEvent::AssistantText(text) => {
             serde_json::json!({"type": "assistant_text", "text": text})
         }
-        AgentEvent::ToolRequested(call) => serde_json::json!({
-            "type": "tool_requested",
-            "id": call.id,
-            "name": call.name
-        }),
+        AgentEvent::ToolRequested(call) => {
+            let mut value = serde_json::json!({
+                "type": "tool_requested",
+                "id": call.id,
+                "name": call.name
+            });
+            if let Some(detail) = tool_detail(&call.name, &call.arguments)
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("detail".to_owned(), serde_json::Value::String(detail));
+            }
+            value
+        }
         // 成功的工具只报名字。失败的额外带上参数和输出尾巴——「哪条命令、为什么挂」
         // 全在这两个字段里，没有它们，事后排查只剩一个 task_id。这两个字段名正是
         // `public_event` 会从公共事件流里剥掉的那两个，所以远端客户端看不到；
@@ -1511,6 +1585,11 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
                 "name": call.name,
                 "is_error": is_error
             });
+            if let Some(detail) = tool_detail(&call.name, &call.arguments)
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("detail".to_owned(), serde_json::Value::String(detail));
+            }
             if is_error && let Some(object) = value.as_object_mut() {
                 object.insert(
                     "arguments".to_owned(),
@@ -2081,6 +2160,54 @@ mod tests {
             resolve_dialect(ApiArg::Responses, ProviderKind::SomeIm),
             ApiDialect::Responses
         );
+    }
+
+    /// 动作摘要够回答「执行了什么」，又不把路径和凭据带出去。
+    #[test]
+    fn tool_detail_answers_what_ran_without_leaking_paths_or_secrets() {
+        let detail = tool_detail(
+            "run_command",
+            r#"{"command":"cargo test --manifest-path /Users/rocky/secret/Cargo.toml"}"#,
+        )
+        .expect("run_command detail");
+        // 只取前三个词,路径根本没机会进来。
+        assert_eq!(detail, "cargo test --manifest-path");
+        assert!(
+            !detail.contains("/Users/rocky"),
+            "路径不下发浏览器: {detail}"
+        );
+
+        // 路径出现在前三个词里时才需要那道省略。
+        let flagged = tool_detail(
+            "run_command",
+            r#"{"command":"cargo --manifest-path=/Users/rocky/Cargo.toml test"}"#,
+        )
+        .expect("detail");
+        assert_eq!(flagged, "cargo --manifest-path=… test");
+
+        // 裸路径参数同样要藏起来。
+        let bare =
+            tool_detail("run_command", r#"{"command":"ls /Users/rocky/private"}"#).expect("detail");
+        assert!(!bare.contains("/Users"), "{bare}");
+
+        // 凭据按命令审批同一套规则打码。
+        let secret = tool_detail(
+            "run_command",
+            r#"{"command":"deploy sk-abcdefghijklmnop0123"}"#,
+        )
+        .expect("detail");
+        assert!(!secret.contains("sk-abcdefghijklmnop0123"), "{secret}");
+
+        // Worker 报职责与标签，这两样本来就是给人看的。
+        let worker = tool_detail(
+            "spawn_agent",
+            r#"{"profile":"tester","label":"run the suite","prompt":"..."}"#,
+        )
+        .expect("spawn detail");
+        assert_eq!(worker, "tester · run the suite");
+
+        // 认不出的工具宁可不显示，也不要漏一段不知道含什么的参数。
+        assert_eq!(tool_detail("edit_file", r#"{"path":"/etc/hosts"}"#), None);
     }
 
     #[test]
