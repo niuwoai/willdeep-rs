@@ -18,6 +18,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `attach` | 附着到持久 Runtime 事件流 |
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
 | `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
+| `job` | 查看脱离父进程的后台作业：跑完没有、退出码、输出 |
 | `integrations` | 查看和管理可选外部集成 |
 | `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
 | `doctor` | 不联系 Provider 的本地就绪诊断 |
@@ -207,6 +208,18 @@ willdeep doctor --bundle ./willdeep-diagnostic.zip
 ```
 
 `--bundle` 导出不含日志和本地路径的私有脱敏 ZIP，便于提交问题报告。详见 [故障排查](TROUBLESHOOTING.md)。
+
+## `willdeep job` — 脱离父进程的后台作业
+
+```bash
+willdeep job list [--json]
+willdeep job show <作业 ID> [--tail-bytes 16384]
+willdeep job forget <作业 ID>
+```
+
+显式 `run_in_background` 的命令跑在这里:进程自成进程组、输出与退出码落盘,Runtime 升级或重启都不影响,回来取结果就行。状态词分三种:`running` 是还在跑,`done` / `failed(N)` 是有退出码,`unknown` 是进程没了却没留下退出码——被 `kill -9`、断电,或者 PID 被复用。**`unknown` 不等于失败**:失败是有退出码的。
+
+`forget` 只删已经有结论的记录。还在跑的不给删:删了那个进程就没人认领了,连它的输出都找不回来。
 
 ## `willdeep event` — 运行时事件
 

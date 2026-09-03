@@ -21,6 +21,7 @@ mod event_cmd;
 mod harness;
 mod i18n;
 mod integrations;
+mod job_cmd;
 mod mobile;
 mod model_routing;
 mod notify;
@@ -213,6 +214,11 @@ enum CliCommand {
     Integrations {
         #[command(subcommand)]
         action: integrations::IntegrationAction,
+    },
+    /// Inspect detached background jobs that outlive the Runtime.
+    Job {
+        #[command(subcommand)]
+        action: job_cmd::JobAction,
     },
     /// Inspect the runtime event kernel: what arrived, what still needs you.
     Event {
@@ -468,6 +474,7 @@ async fn run() -> Result<()> {
             CliCommand::Attach { after } => daemon::attach(after).await,
             CliCommand::Detach => daemon::detach().await,
             CliCommand::Integrations { action } => integrations::handle(action).await,
+            CliCommand::Job { action } => job_cmd::run(action, &willdeep_home()?),
             CliCommand::Event { action } => event_cmd::run(action, &willdeep_home()?),
             CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
             CliCommand::Doctor { json, bundle } => {
