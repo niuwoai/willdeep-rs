@@ -22,6 +22,18 @@ use crate::subagent_worktree::{
 };
 use crate::tools::ToolError;
 
+/// 一个会话同时能挂几个后台 Worker。
+///
+/// 3 → 5 与 macOS 版 1.315.0-rc13 对齐：真实的一批活常常是四五件互不依赖的
+/// 小事（读三个模块、跑一次测试、查一段历史），卡在 3 会逼主 Agent 把本可以
+/// 一起发的任务拆成两轮串着等。
+///
+/// **这个数不管文件冲突。** 两个 Worker 同时写一个文件由
+/// [`super::runner`] 的逐路径认领挡下（比 macOS 版「带写集合就锁前台」更细：
+/// 写不同文件的两个 Worker 在这里可以并行）。把并发上限调小去防写冲突是把
+/// 两件事搞混了，反过来也一样。
+pub const MAX_BACKGROUND_SUBAGENTS: usize = 5;
+
 use super::runner::{SubagentRun, run_subagent};
 use super::text::bounded_report;
 use super::types::{
@@ -50,6 +62,11 @@ pub struct SubagentCatalog {
     /// decide. A subagent has no approval UI, so an undecidable command with
     /// no judge is refused rather than silently run.
     safety_judge: Option<Arc<dyn SafetyJudge>>,
+    mcp: Option<Arc<crate::mcp::McpRegistry>>,
+    /// 父会话的 always-allow 存储。Worker 与父会话共享**已经明确批准过的精确
+    /// 动作**，仅此而已：没批准过的照旧被拒，Worker 把精确动作写进报告，由父
+    /// 会话去请人批。
+    always_allow_store: Option<PathBuf>,
     /// Skill library used to resolve `task.skill` at dispatch time.
     skills: Option<Arc<crate::skills::SkillCatalog>>,
     /// 每一档兑现成哪个 provider。准入在上一层（[`crate::WorkerTier::requires_admission`]），
@@ -99,8 +116,31 @@ impl SubagentCatalog {
             claimed_files: Arc::new(Mutex::new(BTreeSet::new())),
             safety_judge: None,
             skills: None,
+            mcp: None,
+            always_allow_store: None,
             tier_bindings: BTreeMap::new(),
         }
+    }
+
+    /// 把已连接的 MCP 服务交给兜底工种。
+    ///
+    /// 只有 `generalist` 会拿到 MCP 工具：窄工种的价值在于范围窄，给它们开一
+    /// 条通往任意外部服务的门等于把这个价值抵消掉。**动态网关不等于免审批**
+    /// ——`call_mcp_tool` 的外部副作用仍走各自的审批路径。
+    pub fn with_mcp(mut self, mcp: Arc<crate::mcp::McpRegistry>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    /// 让 Worker 共享父会话已批准的精确动作。
+    ///
+    /// 共享的**是精确项，不是命令族**：父会话批过 `cargo test` 才等于 Worker
+    /// 也能跑 `cargo test`，不等于它能跑任意 `cargo`。没有这条，一个后台
+    /// Worker 会在人已经批准过的同一条命令上再次卡住，而它自己没有审批 UI，
+    /// 只能失败回来。
+    pub fn with_always_allow_store(mut self, path: impl Into<PathBuf>) -> Self {
+        self.always_allow_store = Some(path.into());
+        self
     }
 
     /// Attach the skill library so a task packet can name a skill and have
@@ -361,7 +401,8 @@ impl SubagentCatalog {
                 profile.id, failure_count
             )));
         }
-        if profile.write_scope.writes() && approved_targets.as_ref().is_none_or(BTreeSet::is_empty)
+        if profile.write_scope.requires_declared_targets()
+            && approved_targets.as_ref().is_none_or(BTreeSet::is_empty)
         {
             return Err(AgentError::Subagent(format!(
                 "profile {} may write, so it requires an approved file set: pass target_file, or task.write_files for a file-set profile",
@@ -407,10 +448,10 @@ impl SubagentCatalog {
                         && task.status == BackgroundTaskStatus::Running
                 })
                 .count();
-            if running >= 3 {
-                return Err(AgentError::Subagent(
-                    "at most 3 background subagents may run concurrently".to_owned(),
-                ));
+            if running >= MAX_BACKGROUND_SUBAGENTS {
+                return Err(AgentError::Subagent(format!(
+                    "at most {MAX_BACKGROUND_SUBAGENTS} background subagents may run concurrently"
+                )));
             }
         }
         let prepared = self.prepare_workspace(agent_id, profile.worktree).await?;
@@ -427,6 +468,11 @@ impl SubagentCatalog {
             skills: self.skills.clone(),
             safety_judge: self.safety_judge.clone(),
             approved_command,
+            // 只给兜底工种。窄工种声明里也没有那两个工具名，双重保险。
+            mcp: (profile.id == "generalist")
+                .then(|| self.mcp.clone())
+                .flatten(),
+            always_allow_store: self.always_allow_store.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -749,6 +795,27 @@ mod tests {
     };
     use crate::subagent::types::TaskPacket;
     use crate::types::{Completion, Message, ToolDefinition};
+
+    /// 后台并发上限与 macOS 版同一个数，且写冲突不归它管。
+    ///
+    /// 钉这条是因为两边各存一份字面量：一边改了另一边没改，同一个人在两个
+    /// 客户端里能同时挂的 Worker 数就不一样，而这个数直接决定他能不能一次派
+    /// 出一批活。
+    #[test]
+    fn the_background_ceiling_matches_the_desktop_and_does_not_guard_writes() {
+        assert_eq!(MAX_BACKGROUND_SUBAGENTS, 5);
+        // 文件冲突由逐路径认领挡下，与这个上限无关——同样的话写在常量注释里，
+        // 这里钉的是「两者确实是分开的两条路径」。
+        let claimed = Arc::new(Mutex::new(BTreeSet::new()));
+        let files: BTreeSet<PathBuf> = [PathBuf::from("src/lib.rs")].into_iter().collect();
+        let first = super::super::runner::acquire_file_claim_for_test(&claimed, &files)
+            .expect("first claim");
+        assert!(first.is_some());
+        assert!(
+            super::super::runner::acquire_file_claim_for_test(&claimed, &files).is_err(),
+            "同一个文件的第二个认领必须被拒，哪怕并发数还没到上限"
+        );
+    }
 
     #[test]
     fn approval_denial_marks_background_subagent_blocked() {

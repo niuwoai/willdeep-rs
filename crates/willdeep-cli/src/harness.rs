@@ -648,7 +648,7 @@ pub(crate) async fn build(
             record_approval_trace(&approval_log, &trace);
         })
         .with_skills(skills.clone())
-        .with_mcp(mcp)
+        .with_mcp(mcp.clone())
         .with_background_tasks(background_tasks.clone())
         .with_verification_reporter(move |verification| {
             let home = verification_home.clone();
@@ -772,6 +772,11 @@ pub(crate) async fn build(
         // Task packets may name a skill; the runtime inlines its body so the
         // worker never spends turns fetching its own instructions.
         .with_skills(skills.clone())
+        // 兜底工种能查已连接的 MCP 服务。窄工种拿不到：它们的价值就是范围窄。
+        .with_mcp(mcp)
+        // Worker 与父会话共享已批准的精确动作。没有这条，后台 Worker 会在人
+        // 刚刚批过的同一条命令上再卡一次，而它自己没有审批 UI。
+        .with_always_allow_store(home.join("always-allow.json"))
         .with_event_sink(sink.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in

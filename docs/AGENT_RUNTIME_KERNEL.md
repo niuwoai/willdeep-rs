@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0-7 与并行任务 P1 已落地（0.62.0-rc1），并行任务 P2-P5 待做。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：全部阶段（0-7）与并行任务（P1-P5）已落地，最新 0.63.0-rc1。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -208,10 +208,12 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 | 任务 | 内容 | 参照 |
 | --- | --- | --- |
 | ~~P1 上下文预算档位对齐~~ ✅ 0.56.0-rc1 | 见下方更正 | Xedit 1.315.0-rc8 |
-| P2 档位语义对齐 | 进阶档明确为「1M 上下文」而非只放宽预算；专家档为「更聪明」。注意 0.52.0-rc1 的教训：只有测试引用的常量表等于文档不是代码，改完 grep 非 `cfg(test)` 调用点 | [worker-tier 记忆] |
-| P3 `generalist` 工具面 | 补 MCP 动态网关三件套、受限终端四工具、可选精确写文件范围；含糊请求兜底到 `generalist` 而非返回空 profile | Xedit 1.315.0-rc11 / rc12 |
-| P4 后台 Worker 并发 5 | 上限 3 → 5；带精确写文件集合的 Worker 仍前台锁定，不用扩容换文件冲突 | Xedit 1.315.0-rc13 |
-| P5 后台 Worker 继承父上下文 | 可见终端、精确批准命令、附加工作区、验证命令、复核回调；回调按 runtime ID 弱引用重解析，不强持已结束会话 | Xedit 1.317.0-rc2 |
+| ~~P2 档位语义对齐~~ ✅ 0.63.0-rc1 | 三档换的是不同的东西写进了 `SUBAGENTS.md`：基础档是主力且可私有化、进阶档换上下文、专家档换智力。`default_hosted_model` 早在 0.52.0-rc1 就接了线（`harness.rs` 的 `resolve_tier_bindings`），本次复核确认它不是「只有测试引用的表」 | [worker-tier 记忆] |
+| ~~P3 `generalist` 工具面~~ ✅ 0.63.0-rc1 | 新增 `SubagentWriteScope::OptionalFileSet`（带写集合才有写工具）+ MCP 动态网关。**受限终端四工具与 Chrome 工具面不做**：rs 没有终端标签与浏览器自动化，那两样在这边没有对应物 | Xedit 1.315.0-rc11 / rc12 |
+| ~~P4 后台 Worker 并发 5~~ ✅ 0.63.0-rc1 | `MAX_BACKGROUND_SUBAGENTS = 5`。与 macOS 版的差别写在常量注释里：rs 用逐路径认领挡写冲突，比「带写集合就锁前台」更细 | Xedit 1.315.0-rc13 |
+| ~~P5 后台 Worker 继承父上下文~~ ✅ 0.63.0-rc1 | Worker 与父会话共享 always-allow 的**精确动作**；验证命令与附加工作区本来就随 Task Packet 传。可见终端与浏览器复核回调不做，同 P3 的理由 | Xedit 1.317.0-rc2 |
+
+**含糊请求兜底的那一半没做**：`routing.rs` 的 70 分分支仍返回 `profile: None`。在 Xedit 那里 `None` 意味着「打回父 Agent，什么也没派出去」，而在 rs 它意味着「主 Agent 自己干」——主 Agent 本来就是全能的，把每个含糊请求都改成派子 Agent 是行为语义的改动，需要单独论证，不适合塞在这一批里。
 
 **P1 的更正（本文初版写错了，留档）**：初版说 rs「只有 128K / 256K 两档，要扩到四档」。那是照着 `TIER_WINDOW_STANDARD` / `TIER_WINDOW_EXTENDED` 两个常量下的判断，而**可选档位根本不在那里**——TUI 面板自带一份 `CONTEXT_WINDOWS` 字面量，本来就有六档。真正的问题不是数量而是口径：
 
