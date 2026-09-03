@@ -94,6 +94,10 @@ struct StoredRuntimeTurn {
     attachments: Vec<willdeep_core::MessageAttachment>,
     #[serde(default)]
     replay_existing_user_message: bool,
+    /// 谁提交的这一轮。排队的轮次可能等上很久才被认领，发起端要一路跟到
+    /// 任务上，否则认领那一刻就丢了。旧记录读回来是 `None`。
+    #[serde(default)]
+    origin_client: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +106,9 @@ pub(crate) struct CreateRuntimeTurn {
     pub prompt: String,
     #[serde(default)]
     pub attachments: Vec<willdeep_core::MessageAttachment>,
+    /// 谁提交的这一轮，见 `RuntimeTask::origin_client`。
+    #[serde(default)]
+    pub origin_client: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -881,6 +888,7 @@ impl RuntimeSessionStore {
                 prompt: request.prompt,
                 attachments: request.attachments,
                 replay_existing_user_message: false,
+                origin_client: request.origin_client,
             },
         );
         persist_turns(&self.turns_path, &turns)?;
@@ -1010,6 +1018,7 @@ impl RuntimeSessionStore {
                 config: session.config.clone(),
                 session_id: Some(session.id),
                 turn_id: Some(turn.metadata.id),
+                origin_client: turn.origin_client.clone(),
                 replay_existing_user_message: turn.replay_existing_user_message,
             },
         };
@@ -1860,6 +1869,7 @@ pub(super) async fn submit_turn_cli(
                     turn_request_id,
                     prompt,
                     attachments: Vec::new(),
+                    origin_client: Some(crate::client_identity(crate::Surface::Cli).to_owned()),
                 },
                 turn_request_id,
             )
@@ -2184,6 +2194,7 @@ mod tests {
             .enqueue_turn(
                 automatic.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "  Analyze   the session migration architecture  ".to_owned(),
                     attachments: Vec::new(),
@@ -2205,6 +2216,7 @@ mod tests {
             .enqueue_turn(
                 renamed.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "must not replace the title".to_owned(),
                     attachments: Vec::new(),
@@ -2218,6 +2230,7 @@ mod tests {
             .enqueue_turn(
                 sensitive.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "debug password = NeverCopyThisValue123".to_owned(),
                     attachments: Vec::new(),
@@ -2232,6 +2245,7 @@ mod tests {
             .enqueue_turn(
                 attachment.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: String::new(),
                     attachments: vec![willdeep_core::MessageAttachment::Text {
@@ -2465,6 +2479,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "private queued prompt".to_owned(),
                     attachments: Vec::new(),
@@ -2489,6 +2504,7 @@ mod tests {
                 .enqueue_turn(
                     session.id,
                     CreateRuntimeTurn {
+                        origin_client: None,
                         request_id: uuid::Uuid::new_v4(),
                         prompt: "blocked while archived".to_owned(),
                         attachments: Vec::new(),
@@ -2670,6 +2686,7 @@ mod tests {
                 .enqueue_turn(
                     session.id,
                     CreateRuntimeTurn {
+                        origin_client: None,
                         request_id: uuid::Uuid::new_v4(),
                         prompt: prompt.to_owned(),
                         attachments: Vec::new(),
@@ -2791,6 +2808,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "continue with the restored settings".to_owned(),
                     attachments: Vec::new(),
@@ -2838,6 +2856,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: prompt.to_owned(),
                     attachments: Vec::new(),
@@ -2904,6 +2923,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "do not discard partial history".to_owned(),
                     attachments: Vec::new(),
@@ -2965,6 +2985,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "a tool may already have changed the workspace".to_owned(),
                     attachments: Vec::new(),
@@ -3024,6 +3045,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: first_request,
                     prompt: "first".to_owned(),
                     attachments: Vec::new(),
@@ -3035,6 +3057,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: first_request,
                     prompt: "must not replace first".to_owned(),
                     attachments: Vec::new(),
@@ -3047,6 +3070,7 @@ mod tests {
             .enqueue_turn(
                 session.id,
                 CreateRuntimeTurn {
+                    origin_client: None,
                     request_id: uuid::Uuid::new_v4(),
                     prompt: "second".to_owned(),
                     attachments: Vec::new(),
@@ -3114,6 +3138,7 @@ mod tests {
             request_id: uuid::Uuid::new_v4(),
             prompt: prompt.to_owned(),
             attachments: Vec::new(),
+            origin_client: None,
         };
         let (first, _) = store.enqueue_turn(session.id, enqueue("first")).unwrap();
         let (second, _) = store.enqueue_turn(session.id, enqueue("second")).unwrap();

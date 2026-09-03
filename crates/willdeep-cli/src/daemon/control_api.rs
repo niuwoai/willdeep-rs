@@ -972,6 +972,7 @@ fn public_task(task: RuntimeTask) -> willdeep_runtime_protocol::RuntimeTask {
         workspace: Some(task.workspace.to_string_lossy().into_owned()),
         profile: task.profile,
         prompt_excerpt: task.prompt_excerpt,
+        origin_client: task.origin_client,
         created_at: task.created_at,
         started_at: task.started_at,
         completed_at: task.completed_at,
@@ -1307,6 +1308,7 @@ async fn turn_submit(state: &ServerState, request: &ApiRequest) -> ApiResult {
                 request_id: params.turn_request_id,
                 prompt: params.prompt,
                 attachments,
+                origin_client: params.origin_client,
             },
         )
         .map_err(|error| ApiFailure::invalid(format!("cannot submit Turn: {error}")))?;
@@ -1955,6 +1957,7 @@ mod tests {
     #[test]
     fn turn_submission_limits_are_enforced_at_the_runtime_boundary() {
         let mut params = willdeep_runtime_protocol::SubmitTurnParams {
+            origin_client: None,
             session_id: uuid::Uuid::new_v4(),
             turn_request_id: uuid::Uuid::new_v4(),
             prompt: "hello".to_owned(),

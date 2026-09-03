@@ -658,9 +658,10 @@ async fn runtime_activity(
     Query(query): Query<RuntimeActivityQuery>,
 ) -> Result<Json<RuntimeActivitySummary>, WebError> {
     let workspace = select_workspace(&state, Some(&query.workspace)).await?;
-    let snapshot = crate::daemon::runtime_snapshot(&state.home, &workspace.root, None)
-        .await
-        .map_err(WebError::from_anyhow)?;
+    let snapshot =
+        crate::daemon::runtime_snapshot(&state.home, &workspace.root, None, crate::Surface::Web)
+            .await
+            .map_err(WebError::from_anyhow)?;
     Ok(Json(RuntimeActivitySummary {
         tools: snapshot.tools,
         artifacts: snapshot.artifacts,
@@ -946,7 +947,7 @@ async fn authorized_runtime_snapshot(
     workspace: &str,
 ) -> Result<crate::daemon::RuntimeSnapshot, WebError> {
     let workspace = select_workspace(state, Some(workspace)).await?;
-    crate::daemon::runtime_snapshot(&state.home, &workspace.root, None)
+    crate::daemon::runtime_snapshot(&state.home, &workspace.root, None, crate::Surface::Web)
         .await
         .map_err(WebError::from_anyhow)
 }
@@ -1479,6 +1480,7 @@ async fn run_runtime_turn_inner(
         remote_session.id,
         input.prompt.trim().to_owned(),
         input.attachments,
+        crate::Surface::Web,
     )
     .await
     .map_err(WebError::from_anyhow)?;

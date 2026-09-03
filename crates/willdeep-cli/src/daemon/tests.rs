@@ -62,6 +62,7 @@ fn legacy_state_without_local_transport_remains_readable() {
 #[test]
 fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
     let task = |completed_at| willdeep_runtime_protocol::RuntimeTask {
+        origin_client: None,
         id: uuid::Uuid::new_v4(),
         session_id: None,
         turn_id: None,
@@ -771,6 +772,7 @@ fn task_store_marks_active_tasks_interrupted_after_restart() {
     let path = root.join("tasks.json");
     let id = uuid::Uuid::new_v4();
     let task = RuntimeTask {
+        origin_client: None,
         id,
         session_id: None,
         turn_id: None,
@@ -830,6 +832,7 @@ fn task_recovery_survives_dangling_session_reference() {
     let path = root.join("tasks.json");
     let id = uuid::Uuid::new_v4();
     let task = RuntimeTask {
+        origin_client: None,
         id,
         session_id: Some(uuid::Uuid::new_v4()),
         turn_id: None,
@@ -885,6 +888,7 @@ fn task_recovery_interrupts_waiting_task_and_cancels_its_interaction() {
         &HashMap::from([(
             task_id,
             RuntimeTask {
+                origin_client: None,
                 id: task_id,
                 session_id: None,
                 turn_id: None,
@@ -984,6 +988,7 @@ fn task_recovery_preserves_the_session_root_agent_id() {
     let turn_id = uuid::Uuid::new_v4();
     let path = root.join("tasks.json");
     let task = RuntimeTask {
+        origin_client: None,
         id: task_id,
         session_id: Some(session.id),
         turn_id: Some(turn_id),
@@ -1118,6 +1123,7 @@ async fn concurrent_task_updates_persist_a_complete_snapshot() {
             let id = uuid::Uuid::new_v4();
             manager
                 .insert_and_persist(RuntimeTask {
+                    origin_client: None,
                     id,
                     session_id: None,
                     turn_id: None,
@@ -1169,6 +1175,7 @@ async fn drain_wait_ignores_stale_cancellation_for_terminal_task() {
     let task_id = uuid::Uuid::new_v4();
     manager
         .insert_and_persist(RuntimeTask {
+            origin_client: None,
             id: task_id,
             session_id: None,
             turn_id: None,
@@ -1233,6 +1240,7 @@ async fn drain_does_not_wait_on_tasks_that_are_waiting_on_a_human() {
         waiting_ids.push(task_id);
         manager
             .insert_and_persist(RuntimeTask {
+                origin_client: None,
                 id: task_id,
                 session_id: None,
                 turn_id: None,
@@ -1286,6 +1294,7 @@ async fn drain_still_waits_for_work_that_finishes_on_its_own() {
     .unwrap();
     manager
         .insert_and_persist(RuntimeTask {
+            origin_client: None,
             id: uuid::Uuid::new_v4(),
             session_id: None,
             turn_id: None,
@@ -1387,6 +1396,7 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     let task_id = uuid::Uuid::new_v4();
     manager
         .insert_and_persist(RuntimeTask {
+            origin_client: None,
             id: task_id,
             session_id: None,
             turn_id: None,

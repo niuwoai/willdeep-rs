@@ -1466,6 +1466,44 @@ fn failure_excerpt(value: &str) -> String {
     format!("{head}\n…[{dropped} chars omitted]…\n{tail}")
 }
 
+/// 提交轮次的那一端。审批与提问要弹回它，而不是弹给所有打开着同一个会话的端。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Tui,
+    Web,
+    Cli,
+}
+
+impl Surface {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Web => "web",
+            Self::Cli => "cli",
+        }
+    }
+}
+
+/// 这一端的客户端标识。
+///
+/// **按界面分,不是按进程分。** TUI 里用 `/webapp` 起的 Web 与 TUI 本身跑在同
+/// 一个进程里,如果共用一个 ID,浏览器里发起的审批照样会弹到终端——那正是这个
+/// 字段要解决的问题。
+///
+/// 每次启动重新生成,不落盘:进程没了,它发起的那些问题本来也没人回答得了,
+/// 这时按会话回落比认一个死掉的 ID 更有用。
+pub(crate) fn client_identity(surface: Surface) -> &'static str {
+    static TUI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static WEB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static CLI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let cell = match surface {
+        Surface::Tui => &TUI,
+        Surface::Web => &WEB,
+        Surface::Cli => &CLI,
+    };
+    cell.get_or_init(|| format!("{}:{}", surface.prefix(), uuid::Uuid::new_v4()))
+}
+
 /// 一句话说清这一步在干什么，供远端界面显示在工具名旁边。
 ///
 /// **它不是参数，是摘要。** 完整参数属于私有请求内容（`arguments` 那个字段名

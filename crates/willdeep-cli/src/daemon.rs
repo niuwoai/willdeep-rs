@@ -590,6 +590,10 @@ pub(crate) struct RuntimeTask {
     /// 打码 + 截断后的提示词前缀，进公共 DTO 当任务标识；见 `task_prompt_excerpt`。
     #[serde(default)]
     prompt_excerpt: Option<String>,
+    /// 提交这一轮的客户端。审批要弹回发起端，而不是弹给所有打开着同一个会话
+    /// 的端；旧记录没有这个字段，读回来是 `None`，按会话判定。
+    #[serde(default)]
+    pub(crate) origin_client: Option<String>,
     pid: Option<u32>,
     created_at: u64,
     started_at: Option<u64>,
@@ -640,6 +644,9 @@ pub(crate) struct SubmitTask {
     pub(crate) session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub(crate) turn_id: Option<uuid::Uuid>,
+    /// 谁提交的这一轮，见 `RuntimeTask::origin_client`。
+    #[serde(default)]
+    pub(crate) origin_client: Option<String>,
     #[serde(skip)]
     pub(crate) replay_existing_user_message: bool,
 }
@@ -1102,6 +1109,7 @@ pub(crate) async fn submit_runtime_prompt(
                     config: options.config.clone(),
                     session_id: None,
                     turn_id: None,
+                    origin_client: Some(crate::client_identity(crate::Surface::Cli).to_owned()),
                     replay_existing_user_message: false,
                 },
             )
@@ -2931,6 +2939,7 @@ impl TaskManager {
             workspace: request.workspace.clone(),
             profile: request.profile.clone(),
             model: request.model.clone(),
+            origin_client: request.origin_client.clone(),
             prompt_excerpt: task_prompt_excerpt(&request.prompt),
             pid: None,
             created_at: now(),

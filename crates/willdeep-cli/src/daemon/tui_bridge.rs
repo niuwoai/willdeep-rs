@@ -314,6 +314,7 @@ pub(crate) async fn submit_runtime_turn(
     session_id: uuid::Uuid,
     prompt: String,
     attachments: Vec<willdeep_core::MessageAttachment>,
+    surface: crate::Surface,
 ) -> Result<RemoteRuntimeTurn> {
     if prompt.trim().is_empty() && attachments.is_empty() {
         bail!("Runtime Turn prompt and attachments must not both be empty");
@@ -330,6 +331,7 @@ pub(crate) async fn submit_runtime_turn(
         turn_request_id: request_id,
         prompt,
         attachments: public_attachments,
+        origin_client: Some(crate::client_identity(surface).to_owned()),
     };
     let turn = api_data(client.submit_turn(&params, request_id).await?)?;
     Ok(RemoteRuntimeTurn { id: turn.id })
@@ -599,7 +601,10 @@ pub(crate) async fn runtime_snapshot(
     home: &Path,
     workspace: &Path,
     session: Option<uuid::Uuid>,
+    surface: crate::Surface,
 ) -> Result<RuntimeSnapshot> {
+    // 这一端的身份。审批弹回发起端靠它比对。
+    let viewer_client = Some(crate::client_identity(surface));
     let paths = DaemonPaths::new(home);
     let (state, runtime_version) = match load_state(&paths.state) {
         Ok(state) => match probe(&state).await {
@@ -671,7 +676,7 @@ pub(crate) async fn runtime_snapshot(
                 .and_then(|path| path.canonicalize().ok())
                 .is_some_and(|path| path == workspace)
         })
-        .map(|task| (task.id, task.session_id))
+        .map(|task| (task.id, (task.session_id, task.origin_client.clone())))
         .collect::<std::collections::HashMap<_, _>>();
     let remote_tasks = tasks
         .iter()
@@ -729,7 +734,9 @@ pub(crate) async fn runtime_snapshot(
     // 审批和提问会弹成独占对话框，还能被就地解掉——归属别的会话的，绝不能在这里
     // 弹出来：那等于替一条你没看见上下文的命令签字。没有会话归属的任务（例如
     // headless 提交的）仍然全弹，否则没有任何客户端能解开它，任务就吊死了。
-    let owned = |task_id: &uuid::Uuid| gate_belongs_here(session, visible_tasks.get(task_id));
+    let owned = |task_id: &uuid::Uuid| {
+        gate_belongs_here(session, viewer_client, visible_tasks.get(task_id))
+    };
     let mut gates = Vec::new();
     for approval in approvals
         .into_iter()
@@ -948,15 +955,34 @@ fn parse_public_session_status(value: &str) -> Result<willdeep_runtime_protocol:
 ///
 /// `viewer` 是调用方打开的会话，`owner` 是该 gate 所属任务的归属会话
 /// （`None` 表示任务不在本工作区，外层 `get` 就没命中）。
-fn gate_belongs_here(viewer: Option<uuid::Uuid>, owner: Option<&Option<uuid::Uuid>>) -> bool {
-    match owner {
+/// 这个 gate 该不该在当前这一端弹出来。
+///
+/// **发起端优先，会话是回落。** 同一个会话可能同时开在终端和浏览器里；按会话
+/// 判定的话两边都会弹，谁先答谁算数，另一边只看到问题凭空消失。所以只要任务
+/// 记下了发起端，就只弹回那一端。
+///
+/// 旧 Daemon 不产出发起端（字段读回来是 `None`），那时回落到会话判定——那正是
+/// 这个字段出现之前唯一存在的口径，不能因为升级了客户端就让老任务没人管。
+fn gate_belongs_here(
+    viewer: Option<uuid::Uuid>,
+    viewer_client: Option<&str>,
+    owner: Option<&(Option<uuid::Uuid>, Option<String>)>,
+) -> bool {
+    let Some((owner_session, origin_client)) = owner else {
         // 任务不在本工作区：本来就看不见。
-        None => false,
+        return false;
+    };
+    if let Some(origin) = origin_client.as_deref() {
+        // 认得出发起端的任务只回发起端。看不出自己是谁的观察者（工作区级
+        // 视图）也不该抢答：它连「这是不是我发起的」都回答不了。
+        return viewer_client == Some(origin);
+    }
+    match owner_session {
         // 工作区级视图（Web）：维持旧口径，工作区里的都归它管。
-        Some(_) if viewer.is_none() => true,
+        _ if viewer.is_none() => true,
         // 没有会话归属的任务（headless 提交的）：谁都能解，否则没人解得开。
-        Some(None) => true,
-        Some(owner) => *owner == viewer,
+        None => true,
+        Some(owner_session) => Some(*owner_session) == viewer,
     }
 }
 
@@ -1112,23 +1138,56 @@ mod tests {
         let mine = uuid::Uuid::new_v4();
         let theirs = uuid::Uuid::new_v4();
 
-        assert!(gate_belongs_here(Some(mine), Some(&Some(mine))));
+        let legacy = |session: Option<uuid::Uuid>| (session, None);
+
+        assert!(gate_belongs_here(
+            Some(mine),
+            None,
+            Some(&legacy(Some(mine)))
+        ));
         assert!(
-            !gate_belongs_here(Some(mine), Some(&Some(theirs))),
+            !gate_belongs_here(Some(mine), None, Some(&legacy(Some(theirs)))),
             "另一个会话的审批不能在这里弹"
         );
         // headless 提交的任务没有会话归属：不放行就没有任何客户端解得开它。
-        assert!(gate_belongs_here(Some(mine), Some(&None)));
+        assert!(gate_belongs_here(Some(mine), None, Some(&legacy(None))));
         // 工作区级视图（Web）维持旧口径。
-        assert!(gate_belongs_here(None, Some(&Some(theirs))));
+        assert!(gate_belongs_here(None, None, Some(&legacy(Some(theirs)))));
         // 不在本工作区的任务，连看都看不到。
-        assert!(!gate_belongs_here(Some(mine), None));
+        assert!(!gate_belongs_here(Some(mine), None, None));
     }
 
-    fn attention_task(
-        prompt_excerpt: Option<&str>,
-    ) -> willdeep_runtime_protocol::RuntimeTask {
+    /// 记了发起端的任务只弹回发起端，哪怕两端开着同一个会话。
+    ///
+    /// 这是浏览器里发起、审批却弹到终端那个毛病的回归：TUI 里用 `/webapp` 起的
+    /// Web 与 TUI 同进程，所以身份必须按界面分而不是按进程分。
+    #[test]
+    fn a_gate_goes_back_to_the_surface_that_raised_it() {
+        let shared_session = uuid::Uuid::new_v4();
+        let web = (Some(shared_session), Some("web:1".to_owned()));
+
+        assert!(
+            gate_belongs_here(Some(shared_session), Some("web:1"), Some(&web)),
+            "发起端要收到自己的审批"
+        );
+        assert!(
+            !gate_belongs_here(Some(shared_session), Some("tui:1"), Some(&web)),
+            "同一个会话开在终端里，也不该替浏览器签字"
+        );
+        // 工作区级视图同样不能抢答：它连「这是不是我发起的」都回答不了。
+        assert!(!gate_belongs_here(None, None, Some(&web)));
+        // 旧 Daemon 不产出发起端时回落到会话判定，老任务不至于没人管。
+        let legacy_task = (Some(shared_session), None);
+        assert!(gate_belongs_here(
+            Some(shared_session),
+            Some("tui:1"),
+            Some(&legacy_task)
+        ));
+    }
+
+    fn attention_task(prompt_excerpt: Option<&str>) -> willdeep_runtime_protocol::RuntimeTask {
         willdeep_runtime_protocol::RuntimeTask {
+            origin_client: None,
             id: uuid::Uuid::nil(),
             session_id: None,
             turn_id: None,
@@ -1156,9 +1215,13 @@ mod tests {
             current_turn: 15,
             current_tool: Some("run_command".to_owned()),
         };
-        let item = runtime_task_attention(attention_task(Some("发布 Xedit 新版本")), Some(&activity));
+        let item =
+            runtime_task_attention(attention_task(Some("发布 Xedit 新版本")), Some(&activity));
         assert_eq!(item.title, "发布 Xedit 新版本");
-        assert!(item.detail.contains(&format!("Task: {}", uuid::Uuid::nil())));
+        assert!(
+            item.detail
+                .contains(&format!("Task: {}", uuid::Uuid::nil()))
+        );
         assert!(item.detail.contains("Turn: 15"));
         assert!(item.detail.contains("Current tool: run_command"));
         assert!(
@@ -1167,7 +1230,10 @@ mod tests {
         );
 
         let fallback = runtime_task_attention(attention_task(None), None);
-        assert_eq!(fallback.title, format!("Runtime task {}", uuid::Uuid::nil()));
+        assert_eq!(
+            fallback.title,
+            format!("Runtime task {}", uuid::Uuid::nil())
+        );
         assert!(
             !fallback.detail.contains("Task: "),
             "标题已是 UUID 时正文不再重复"
