@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-08-31 | 当前版本：v0.52.0-rc2
+> 最后更新：2026-09-03 | 当前版本：v0.70.0-rc2
 
 ## 项目简介
 
@@ -30,6 +30,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；`willdeep -r` / `willdeep --resume` 可直接加载最近更新的持久会话，同时保留显式 UUID 与 `latest` 参数；Core Runtime 统一识别 `<goal>` 信封，Web、TUI 与 Headless 共用同一续推判定；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
+- Runtime Daemon 收到关停信号后为控制连接保留 5 秒收尾窗口，超时会强制关闭并释放活租约；过期租约删除失败会返回带路径的明确错误；
 - 后台 Shell 由同版本内部 Supervisor 通过匿名帧管道接收命令并监视父 Harness 存活；命令不进入进程参数或 Runtime 资源索引，Unix 在取消、超时或父端断开时终止独立进程组；
 - Daemon 重启将运行中的 Child Agent、Tool 与后台 Shell 明确收敛为 Interrupted，未应用 Agent 命令收敛为 Rejected，未真正启动的外部 Spawn Child 收敛为 Failed；后台 Shell 以 `background_shell:<job_id>` 精确绑定 Session、Turn、Task 与 Root Agent，恢复事件仅写一次且只含稳定归属 ID，专属 Worktree 原地保留供后续 Diff/合并/隔离；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
