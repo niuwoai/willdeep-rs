@@ -12,6 +12,91 @@ fn unix_now() -> u64 {
 mod command_tests {
     use super::*;
 
+    fn outcome(first_response_millis: Option<u64>) -> willdeep_core::AgentOutcome {
+        willdeep_core::AgentOutcome {
+            final_text: "done".to_owned(),
+            turns: 3,
+            messages: Vec::new(),
+            stop_reason: willdeep_core::AgentStopReason::Finished,
+            input_tokens: 12_345,
+            output_tokens: 678,
+            first_response_millis,
+        }
+    }
+
+    /// 本轮账目跟在回答后面，浅色前缀，四个数都在。
+    #[test]
+    fn a_finished_turn_appends_its_own_bill() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(false, "thinking".to_owned());
+        app.append_turn_stats(Some(&outcome(Some(1_500))));
+
+        let line = app.transcript.last().expect("stats line");
+        assert!(line.starts_with("· "), "浅色前缀决定它不跟正文抢注意力");
+        assert!(line.contains("first reply"));
+        assert!(line.contains("total"));
+        // 输入含系统提示词与整段历史，所以它本来就该比用户那句话大得多。
+        assert!(line.contains("in 12.35K"));
+        assert!(line.contains("out 678"));
+        assert!(line.contains("turns 3"));
+    }
+
+    /// 拿不到首答耗时就不印那一段，而不是印一个 0。
+    #[test]
+    fn a_missing_first_reply_is_left_out_rather_than_faked() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(false, "thinking".to_owned());
+        app.append_turn_stats(Some(&outcome(None)));
+
+        let line = app.transcript.last().expect("stats line");
+        assert!(!line.contains("first reply"));
+        assert!(line.contains("total"));
+    }
+
+    /// Runtime 轮次没有 AgentOutcome，账目走本轮累计的用量。
+    ///
+    /// 这条路径此前完全没有账目：daemon 模式下的回答后面什么也不显示。
+    #[test]
+    fn a_runtime_turn_bills_from_its_accumulated_usage() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(true, "working".to_owned());
+        app.record_turn_usage(&willdeep_core::types::Usage {
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            total_tokens: Some(1_200),
+            cache_read_tokens: None,
+        });
+        // 第二次请求：账目累加，而不是被最后一次覆盖。
+        app.record_turn_usage(&willdeep_core::types::Usage {
+            input_tokens: Some(1_500),
+            output_tokens: Some(300),
+            total_tokens: Some(1_800),
+            cache_read_tokens: None,
+        });
+        app.append_turn_stats(None);
+
+        let line = app.transcript.last().expect("stats line");
+        assert!(line.contains("in 2.50K"), "两次请求的输入要加起来: {line}");
+        assert!(line.contains("out 500"));
+        assert!(line.contains("first reply"), "第一次用量到达的时刻就是首答");
+        assert!(
+            !line.contains("turns"),
+            "Runtime 路径数不出轮次，就别硬报一个"
+        );
+    }
+
+    /// 一个数都没有的轮次不占一行。
+    #[test]
+    fn an_empty_turn_prints_no_bill() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let mut empty = outcome(None);
+        empty.input_tokens = 0;
+        empty.output_tokens = 0;
+        empty.turns = 1;
+        app.append_turn_stats(Some(&empty));
+        assert!(app.transcript.is_empty());
+    }
+
     #[test]
     fn goal_command_enriches_future_prompts() {
         let mut app = App::new(Vec::new(), Language::En);
@@ -1962,7 +2047,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(app.transcript, vec!["WillDeep: 真实的 AI 回复"]);
+        // 回答之后跟一行本轮账目。这一轮没有用量事件，所以只报耗时——不印一个
+        // 像「真的用了 0 个 token」的 0。
+        assert_eq!(app.transcript.len(), 2, "{:?}", app.transcript);
+        assert_eq!(app.transcript[0], "WillDeep: 真实的 AI 回复");
+        assert!(app.transcript[1].starts_with("· total "));
+        assert!(!app.transcript[1].contains("in 0"));
         assert!(
             !app.running,
             "the completed Runtime output must end the busy state"
