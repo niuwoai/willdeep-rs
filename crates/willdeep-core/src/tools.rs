@@ -183,6 +183,9 @@ pub struct ToolRegistry {
     mcp: Arc<McpRegistry>,
     web: Option<WebToolConfig>,
     background: Arc<BackgroundTaskRegistry>,
+    /// 脱离父进程的后台作业。挂上它之后，显式 `run_in_background` 的命令不再
+    /// 随 Harness 一起死：升级、重启、退出都不影响，回来按记录取结果。
+    detached_jobs: Option<Arc<crate::detached_job::DetachedJobStore>>,
     allowed_tools: Option<HashSet<String>>,
     /// Every path a subagent is allowed to write. `None` means the registry
     /// is not write-scoped at all (the main agent); a set means writes are
@@ -247,6 +250,7 @@ impl ToolRegistry {
             background: Arc::new(BackgroundTaskRegistry::default()),
             allowed_tools: None,
             write_targets: None,
+            detached_jobs: None,
             read_only_git_shell: false,
             command_allowlist: None,
             reviewed_subagent_shell: false,
@@ -342,6 +346,12 @@ impl ToolRegistry {
         self.skills = skills;
         self
     }
+    /// 让显式后台命令脱离父进程，结果落盘。
+    pub fn with_detached_jobs(mut self, store: Arc<crate::detached_job::DetachedJobStore>) -> Self {
+        self.detached_jobs = Some(store);
+        self
+    }
+
     pub fn with_mcp(mut self, mcp: Arc<McpRegistry>) -> Self {
         self.mcp = mcp;
         self
@@ -1431,6 +1441,17 @@ impl ToolRegistry {
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
             .clamp(1, MAX_COMMAND_TIMEOUT_SECS);
         if args.run_in_background.unwrap_or(false) {
+            // 脱离模式：进程自成进程组，输出与退出码落盘。父进程升级或退出
+            // 都不影响它，回来只取结果，不重跑。
+            if let Some(jobs) = self.detached_jobs.clone() {
+                let job = jobs
+                    .spawn(&args.command, &description, &self.workspace)
+                    .map_err(ToolError::Io)?;
+                return Ok(format!(
+                    "Background job started: {} (pid {}). It survives a Runtime restart; read it with get_job_output.",
+                    job.id, job.pid
+                ));
+            }
             let command = args.command;
             let workspace = self.workspace.clone();
             let verification_reporter = self.verification_reporter.clone();
@@ -1919,11 +1940,34 @@ impl ToolRegistry {
     }
 
     fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
-        self.background
+        if let Some(output) = self
+            .background
             .output(&args.job_id, args.tail_lines.unwrap_or(200).clamp(1, 2_000))
-            .ok_or_else(|| {
-                ToolError::Network(format!("background task not found: {}", args.job_id))
-            })
+        {
+            return Ok(output);
+        }
+        // 进程内那份找不到就问落盘的那份：脱离作业活得比 Harness 久，重启之后
+        // 它只存在于磁盘上。
+        if let Some(jobs) = &self.detached_jobs
+            && let Some(job) = jobs.get(&args.job_id)
+        {
+            let report = jobs.report(&job);
+            let status = match report.state {
+                crate::detached_job::JobState::Running => format!("running (pid {})", job.pid),
+                crate::detached_job::JobState::Finished { exit_code } => {
+                    format!("finished with exit code {exit_code}")
+                }
+                // 「不知道」和「失败」不是一回事：失败有退出码。
+                crate::detached_job::JobState::Vanished => {
+                    "process is gone and left no exit code".to_owned()
+                }
+            };
+            return Ok(format!("{}: {status}\n{}", job.id, report.output));
+        }
+        Err(ToolError::Network(format!(
+            "background task not found: {}",
+            args.job_id
+        )))
     }
 
     async fn kill_job(&self, args: JobIDArgs) -> Result<String, ToolError> {

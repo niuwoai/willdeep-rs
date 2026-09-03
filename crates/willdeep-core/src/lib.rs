@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod attention;
 pub mod background;
+pub mod detached_job;
 pub mod goal;
 pub mod hooks;
 pub mod judge;
@@ -38,6 +39,7 @@ pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,
     BackgroundTaskStatus,
 };
+pub use detached_job::{DetachedJob, DetachedJobStore, JobReport, JobState};
 pub use goal::{
     ContinuationDecision, ContinuationRung, GOAL_COMPLETE_MARKER, GoalBudget, GoalContinuation,
     RoundObservation, SoftStopReason,
