@@ -4,6 +4,7 @@ import { detectLanguage, messages, type Language, type Messages } from "./i18n";
 import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
 import { Markdown } from "./Markdown";
 import { SidebarSettings } from "./SidebarSettings";
+import { QuickSettings } from "./QuickSettings";
 import { PluginCenter } from "./PluginCenter";
 import { PluginPage } from "./PluginPage";
 import { PluginRail, type RailSelection } from "./PluginRail";
@@ -16,7 +17,7 @@ import { SfIcon } from "./sfSymbols";
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
 type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
-type RunStep = { id: string; label: string; status: "active" | "done" | "failed" };
+type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed" };
 type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
 type ComposerSkill = { identifier: string; name: string; description: string };
@@ -29,6 +30,9 @@ type RuntimeStreamEvent = {
   turn_id?: string;
   text?: string;
   label?: string;
+  /// 这一步具体在干什么：命令的前几个词，或 Worker 的职责与标签。服务端已经
+  /// 收敛并打码过，前端只负责淡色显示。
+  detail?: string;
   id?: string;
   name?: string;
   is_error?: boolean;
@@ -141,7 +145,7 @@ function RunCard({ steps, messages: t }: { steps: RunStep[]; messages: Messages 
   const visible = steps.slice(hidden);
   return <Box className="run-card">
     {hidden > 0 && <Text className="run-collapsed">{t.earlierSteps.replace("{count}", String(hidden))}</Text>}
-    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text></Flex>)}
+    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text>{step.detail && <Text className="run-step-detail" title={step.detail}>{step.detail}</Text>}</Flex>)}
   </Box>;
 }
 
@@ -370,14 +374,14 @@ export function App() {
     else if (event.type === "tool_requested") {
       setActivity(event.label || t.toolRunning);
       const stepId = event.id || `tool-${event.cursor ?? nextId("tool")}`;
-      updateRun(runId, (steps) => steps.some((step) => step.id === stepId) ? steps : [...steps, { id: stepId, label: event.label || t.toolRunning, status: "active" }]);
+      updateRun(runId, (steps) => steps.some((step) => step.id === stepId) ? steps : [...steps, { id: stepId, label: event.label || t.toolRunning, detail: event.detail, status: "active" }]);
     }
     else if (event.type === "tool_completed") {
       setActivity(event.label || (event.is_error ? t.toolFailed : t.toolDone));
       const stepId = event.id || `tool-${event.cursor ?? nextId("tool")}`;
       updateRun(runId, (steps) => steps.some((step) => step.id === stepId)
-        ? steps.map((step) => step.id === stepId ? { ...step, label: event.label || step.label, status: event.is_error ? "failed" : "done" } : step)
-        : [...steps, { id: stepId, label: event.label || (event.is_error ? t.toolFailed : t.toolDone), status: event.is_error ? "failed" : "done" }]);
+        ? steps.map((step) => step.id === stepId ? { ...step, label: event.label || step.label, detail: event.detail ?? step.detail, status: event.is_error ? "failed" : "done" } : step)
+        : [...steps, { id: stepId, label: event.label || (event.is_error ? t.toolFailed : t.toolDone), detail: event.detail, status: event.is_error ? "failed" : "done" }]);
     }
     else setActivity(event.label || event.type);
     return { terminal: false as const };
@@ -805,6 +809,7 @@ export function App() {
         <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <RunCard key={message.id} steps={message.steps ?? []} messages={t} /> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="#ff8f8f" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
+      <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} />
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
           `source` 固定 "chat.selection"，与 macOS 宿主传的两个参数一致。 */}
       {chatSelection && chatSelectionEntries.length > 0 && (
