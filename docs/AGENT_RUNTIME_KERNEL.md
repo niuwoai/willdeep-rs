@@ -1,6 +1,6 @@
 # Agent Runtime Kernel（willdeep-rs 移植任务书）
 
-> 状态：阶段 0-6 与并行任务 P1 已落地（0.61.0-rc1），其余待开工。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
+> 状态：阶段 0-7 与并行任务 P1 已落地（0.62.0-rc1），并行任务 P2-P5 待做。创建于 2026-09-03，对标 Xedit 1.315.0-rc15 → 1.317.0-rc5 的 Runtime Kernel 分支。
 > 上游事实来源：`Xedit/docs/AGENT_RUNTIME_KERNEL.md`（内核语义）、`Xedit/CHANGELOG.md` 1.315.0-rc10 ~ 1.317.0-rc2（逐条实现记录）。
 > 相关：[SUBAGENTS.md](SUBAGENTS.md)、[SKILL_WORKERS.md](SKILL_WORKERS.md)、[MODEL_TIERS.md](MODEL_TIERS.md)、[RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)、[XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
 
@@ -190,13 +190,18 @@ Xedit 在 2026-09-01 到 09-03 之间把「长生命周期 Agent 的宿主职责
 
 **未做**：`AttentionSource::RuntimeEvent` 的 TUI 渲染沿用现有 Inbox 行，没有单独的事件中心面板；相对时间与「处理人」两列留到有真实使用反馈之后再决定要不要加。
 
-### 阶段 7 · 控制面与互操作
+### 阶段 7 · 控制面与互操作 ✅ 0.62.0-rc1
 
 - `kernel.list` / `kernel.get` / `kernel.ignore` 加入 [RUNTIME_CONTROL_API.md](RUNTIME_CONTROL_API.md)，并进 `public-api-v1.json` fixture；
 - 脱敏口径按 §7 现有规则：正文默认不进公共 DTO，最多给一个与 `prompt_excerpt` 同规则的打码摘要；
 - 更新 `docs/XEDIT_INTEROP_STATUS.md`，标注两端 schema 版本与兼容窗口。
 
-**验收**：fixture 契约测试通过、Swift 解码器对新字段容忍缺失。
+**落地时定死的两条**：
+
+1. **正文不进公共 DTO。** 只给打码截断的标题摘要，字段白名单，往信封上加字段不会自动顺流到浏览器。
+2. **读日志不读内存。** 跑 Agent 的可能是别的进程，日志是唯一共享事实；代价是最多落后一次刷盘，这条写进了 API 文档。
+
+**验收**：已达成——fixture 契约测试通过、公共投影不带正文且标题打码截断、`kernel.ignore` 计入变更类操作。
 
 ### 并行任务（不依赖内核，可先做）
 

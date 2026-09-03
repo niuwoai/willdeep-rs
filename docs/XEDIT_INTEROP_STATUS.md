@@ -119,6 +119,12 @@ Xedit 连自己 daemon 走的仍是 Go `willdeep-agent` 的 `/v1/fs/*` 远端工
 已带上。字段可空，Swift 解码器未同步也不会断（未知键忽略、Optional 缺省
 nil）；Xedit 下次同步 fixture 时在 `WillDeepRuntimeProtocol.swift` 补上即可。
 
+**契约演进备忘（rs 0.62.0-rc1）**：新增 `kernel.list` / `kernel.get` /
+`kernel.ignore` 三个操作与 `PublicKernelEvent` 投影，`public-api-v1.json`
+fixture 已带上。**事件正文不进公共 DTO**，只有打码截断的标题摘要。Swift 侧
+未同步不会断（新操作不调用即可），但要注意命名：Xedit 那边的内核事件与
+rs 控制面既有的 `event.*` 是两个方向，接的时候别把它们混成一个流。
+
 ## 网关实况（2026-08-21 逐档实弹探活）
 
 `/v1/models` **不列出虚拟模型链**（连在用的 `someim-security-guard`、

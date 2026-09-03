@@ -50,6 +50,7 @@ X-WillDeep-Request-Id: <optional UUID>
 9. `question`
 10. `artifact`
 11. `event`
+12. `kernel`（事件内核里的入向信号，与 `event` 方向相反：`event` 是 Runtime 向外报告发生了什么，`kernel` 是外界向主 Agent 投递的通知）
 
 对象 ID 必须稳定且不可由客户端伪造父子关系。Session、Root Agent、Turn、Execution Task 与 Child Agent 的身份语义继续遵循 [`RUNTIME_SESSION_PROTOCOL.md`](RUNTIME_SESSION_PROTOCOL.md)。
 
@@ -79,6 +80,9 @@ agent.retry
 approval.resolve
 event.list
 event.stream
+kernel.list
+kernel.get
+kernel.ignore
 turn.submit
 turn.list
 turn.stop
@@ -118,6 +122,10 @@ diff.revert
 内嵌 Web 的同源适配端点为 `POST /api/runtime/agents/spawn`。浏览器请求额外携带当前选择的 `workspace`，服务端先以启动白名单与 Runtime 注册表交叉验证 Workspace，再确认 `session_id` 属于该 Workspace 且存在活动 Turn；随后只把经过边界校验的 `session_id`、`prompt`、只读 `profile` 和可选 `label` 转交统一 `agent.spawn`。该适配层不接受 Parent ID、Task ID、Child ID、路径、工具权限或写 Profile，成功返回 HTTP `202` 与公开 Agent 摘要。
 
 操作名一旦发布不得在同一协议主版本中改变语义。新增操作向后兼容；删除或改变字段含义需要提升协议主版本。
+
+`kernel.*` 读写事件内核的日志（`~/.willdeep/agent-events/`），**不碰任何一个进程的内存**：跑 Agent 的可能是别的进程，日志是两者之间唯一的共享事实，代价是结果最多落后一次刷盘（秒级）。`kernel.ignore` 只把「还等着人」这个标记摘掉，事件留在日志里，**它不批准任何操作**——审批仍然要在它被提出的地方回答。
+
+`kernel.list` / `kernel.get` 返回 `PublicKernelEvent`：**事件正文不在里面**。body 可能是外部消息、工具输出或 Worker 报告全文，与 Prompt 同级私有；公共 DTO 只带一个按命令审批同规则打码、截断到 120 字符的标题摘要，够回答「这是哪一条」，不够替代读原文。字段是白名单，新增字段不会自动顺流到浏览器。
 
 `runtime.status` 返回类型化健康状态、版本、PID、运行时间和事件头；安全升级排空期间状态为 `draining`。`workspace.remove` 与 `session.delete` 返回 `{ id, status }` 结构化结果，其中状态分别为 `removed` 与 `deleted`，客户端无需解析任意 JSON 文本。
 

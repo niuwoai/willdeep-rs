@@ -223,6 +223,74 @@ impl ContentProvenance {
     }
 }
 
+/// 控制面公开的事件投影。
+///
+/// **正文不在里面。** 事件 body 可能是外部消息、工具输出或 Worker 报告全文，
+/// 与 Prompt 同级私有；公共 DTO 只带一个打码截断过的标题摘要，够回答「这是
+/// 哪一条」，不够替代读原文。字段是白名单，新增字段不会自动顺流到浏览器。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicKernelEvent {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub source: EventSource,
+    pub kind: String,
+    pub priority: EventPriority,
+    pub interrupt: InterruptPolicy,
+    pub authority: EventAuthority,
+    pub content_provenance: ContentProvenance,
+    /// 打码 + 截断的标题。
+    pub title_excerpt: Option<String>,
+    pub requires_user_action: bool,
+    pub merge_count: u32,
+    pub created_at: String,
+    pub delivery_state: DeliveryState,
+}
+
+/// 标题进公共 DTO 前截断到这么多**字符**。按字符切，不按字节，免得在多字节
+/// 中间砍一刀。
+pub const PUBLIC_TITLE_EXCERPT_MAX_CHARS: usize = 120;
+
+impl KernelEvent {
+    /// 投影成公共 DTO。
+    ///
+    /// `redact` 由调用方提供——凭据打码规则住在 core 那边，而协议 crate 不该
+    /// 为了一个函数反向依赖它。传进来的必须是与命令审批同一套规则，否则同一
+    /// 个 token 在两个地方一个被打码一个没有。
+    pub fn to_public(&self, redact: impl Fn(&str) -> String) -> PublicKernelEvent {
+        let redacted = redact(&self.title);
+        let title_excerpt = if redacted.is_empty() {
+            None
+        } else {
+            let mut chars = redacted.chars();
+            let excerpt: String = chars
+                .by_ref()
+                .take(PUBLIC_TITLE_EXCERPT_MAX_CHARS)
+                .collect();
+            Some(if chars.next().is_some() {
+                format!("{excerpt}…")
+            } else {
+                excerpt
+            })
+        };
+        PublicKernelEvent {
+            id: self.event_id,
+            session_id: self.session_id,
+            source: self.source,
+            kind: self.kind.clone(),
+            priority: self.priority,
+            interrupt: self.interrupt,
+            authority: self.authority,
+            content_provenance: self.content_provenance,
+            title_excerpt,
+            requires_user_action: self.requires_user_action,
+            merge_count: self.merge_count,
+            created_at: self.created_at.clone(),
+            delivery_state: self.delivery.state,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelEventError(String);
 
@@ -578,6 +646,27 @@ mod tests {
         // 宿主自己的事件不占外部额度，否则内部信号会被外部流量挤掉。
         assert!(!EventAuthority::Host.counts_against_wake_budget());
         assert!(!EventAuthority::TrustedLocal.counts_against_wake_budget());
+    }
+
+    /// 公共投影不带正文，标题打码且截断。
+    #[test]
+    fn the_public_projection_leaves_the_body_behind() {
+        let events: Vec<serde_json::Value> = serde_json::from_slice(EXAMPLE).unwrap();
+        let mut event =
+            KernelEvent::from_json(&serde_json::to_vec(&events[0]).unwrap()).expect("valid");
+        event.title = format!("token sk-live-123 {}", "长".repeat(200));
+        event.body = Some("secret log tail".to_owned());
+
+        // 调用方传的打码器：这里模拟凭据规则命中。
+        let public = event.to_public(|text| text.replace("sk-live-123", "[redacted]"));
+        let encoded = serde_json::to_string(&public).unwrap();
+        assert!(!encoded.contains("secret log tail"), "正文不进公共 DTO");
+        assert!(!encoded.contains("sk-live-123"), "凭据必须打码");
+        let excerpt = public.title_excerpt.expect("excerpt");
+        assert!(excerpt.chars().count() <= PUBLIC_TITLE_EXCERPT_MAX_CHARS + 1);
+        assert!(excerpt.ends_with('…'), "截断要看得出来还有下文");
+        assert_eq!(public.id, event.event_id);
+        assert_eq!(public.delivery_state, event.delivery.state);
     }
 
     #[test]

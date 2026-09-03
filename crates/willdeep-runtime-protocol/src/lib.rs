@@ -6,6 +6,7 @@ pub mod kernel_event;
 pub use kernel_event::{
     ContentProvenance, DeliveryState, EventAudience, EventAuthority, EventDelivery, EventPriority,
     EventSource, InterruptPolicy, KERNEL_EVENT_SCHEMA_VERSION, KernelEvent, KernelEventError,
+    PublicKernelEvent,
 };
 
 pub mod model_catalog;
@@ -235,6 +236,33 @@ pub struct ResolveApprovalParams {
 pub struct AnswerQuestionParams {
     pub id: uuid::Uuid,
     pub answer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KernelListParams {
+    /// 只看这个会话。
+    #[serde(default)]
+    pub session_id: Option<uuid::Uuid>,
+    /// 只看还等着人处理的。
+    #[serde(default)]
+    pub pending_only: bool,
+    #[serde(default = "default_kernel_list_limit")]
+    pub limit: usize,
+}
+
+fn default_kernel_list_limit() -> usize {
+    50
+}
+
+impl Default for KernelListParams {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            pending_only: false,
+            limit: default_kernel_list_limit(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1142,6 +1170,9 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "question.answer",
     "event.list",
     "event.stream",
+    "kernel.list",
+    "kernel.get",
+    "kernel.ignore",
     "diff.snapshot",
     "diff.content",
     "diff.reviews",
@@ -1286,7 +1317,9 @@ mod tests {
         decode_fixture::<PendingQuestion>(responses, "question");
         decode_fixture::<RuntimeArtifact>(responses, "artifact");
         decode_fixture::<RuntimeEvent>(responses, "event");
-        assert_eq!(responses.len(), 11);
+        // 内核事件的公共投影：正文不在里面，只有打码截断的标题。
+        decode_fixture::<PublicKernelEvent>(responses, "kernel_event");
+        assert_eq!(responses.len(), 12);
 
         let requests = fixture["requests"].as_object().unwrap();
         let spawn: ApiRequest = serde_json::from_value(requests["agent_spawn"].clone()).unwrap();
@@ -1309,6 +1342,9 @@ mod tests {
         let _: AnswerQuestionParams = serde_json::from_value(question.params).unwrap();
         let events: ApiRequest = serde_json::from_value(requests["event_list"].clone()).unwrap();
         let _: EventListParams = serde_json::from_value(events.params).unwrap();
+        let kernel: ApiRequest = serde_json::from_value(requests["kernel_list"].clone()).unwrap();
+        assert_eq!(kernel.operation, "kernel.list");
+        let _: KernelListParams = serde_json::from_value(kernel.params).unwrap();
         let workspace: ApiRequest =
             serde_json::from_value(requests["workspace_register"].clone()).unwrap();
         assert_eq!(workspace.operation, "workspace.register");
