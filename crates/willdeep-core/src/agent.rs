@@ -12,7 +12,7 @@ use crate::provider::{Provider, ProviderError};
 use crate::routing::{RoutingGuard, RoutingTier};
 use crate::subagent::{SpawnAgentArgs, SubagentCatalog};
 use crate::tools::{ToolError, ToolRegistry};
-use crate::types::{Message, ToolCall, Usage};
+use crate::types::{Message, ToolCall, Usage, sanitize_tool_history};
 
 /// 在途自动压缩的触发水位：请求估算达到窗口的这个百分比即开始摘要旧历史。
 const AUTO_COMPRESSION_TRIGGER_PERCENT: u64 = 75;
@@ -465,6 +465,10 @@ impl Agent {
         mut messages: Vec<Message>,
         mut user_message: Message,
     ) -> Result<AgentOutcome, AgentError> {
+        // Persisted history can come from older desktop bridges that retained
+        // `role=tool` while losing the protocol IDs. Never let one malformed
+        // historical item make every future turn fail at the Provider boundary.
+        sanitize_tool_history(&mut messages);
         if let Some((provider, label)) = &self.image_fallback {
             let image_count = user_message
                 .attachments
@@ -1840,6 +1844,52 @@ mod tests {
                 .iter()
                 .any(|message| message.content.contains("qwen3-vl-plus"))
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_orphan_tool_results_are_removed_before_provider_replay() {
+        let provider = RecordingProvider::new(&["recovered"]);
+        let agent = Agent::new(
+            provider.clone(),
+            registry("orphan-tool-history"),
+            AgentConfig {
+                max_turns: 1,
+                system_prompt: "system".to_owned(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        );
+        let history = vec![
+            Message::user("old request"),
+            Message::assistant("", Vec::new()),
+            Message {
+                role: crate::types::Role::Tool,
+                content: "legacy output".to_owned(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                attachments: Vec::new(),
+            },
+            Message::assistant("old answer", Vec::new()),
+        ];
+
+        let outcome = agent
+            .run_with_history(history, "continue")
+            .await
+            .expect("malformed persisted history should recover");
+
+        let requests = provider.requests.lock().expect("requests");
+        assert!(
+            requests[0]
+                .iter()
+                .all(|message| message.role != crate::types::Role::Tool)
+        );
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .all(|message| message.role != crate::types::Role::Tool)
+        );
+        assert_eq!(outcome.final_text, "recovered");
     }
 
     #[tokio::test]

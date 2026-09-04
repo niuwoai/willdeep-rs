@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.71.0-rc2] - 2026-09-04
+
+### Fixed
+- **macOS 桌面会话里的工具历史可在 Rust TUI 中继续。** Swift 会话使用 `toolCalls[].externalID/toolName/argumentsJSON` 与 `toolCallID`，旧桥接器却只复制 `role/content`，把 assistant 的调用声明和 tool 的关联 ID 全部丢掉；下一轮仍发出 `role=tool`，some.im 因缺少 `tool_call_id` 返回 HTTP 400，之后每次续聊都会确定性重现。现在桥接时完整转换这组 camelCase 字段，保留合法工具往返。
+- **已落盘的坏会话自动恢复。** Provider 请求前统一清理无法配对的孤立 tool 结果与未完成调用；一次成功续聊后，清理后的历史随正常会话结果重新保存，不要求用户删除整个会话。只移除协议上无法重放的残缺记录，完整调用与结果保持不变。
+
+### Tests
+- 新增 Swift 工具调用往返、孤立工具结果清理、既有坏历史进入 Agent 后可正常请求 Provider 三组回归测试。
+- Bugfix 版本从 **0.71.0-rc1** 提升为 **0.71.0-rc2**。
+
 ## [0.71.0-rc1] - 2026-09-04
 
 ### Added
