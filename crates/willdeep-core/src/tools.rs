@@ -35,6 +35,8 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_SUPERVISOR_REQUEST_BYTES: usize = 256 * 1024;
 const BACKGROUND_SUPERVISOR_ENV: &str = "WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR";
 const MAX_WEB_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+const MAX_WEB_REQUEST_BYTES: usize = 1024 * 1024;
+const DEFAULT_WEB_POST_CONTENT_TYPE: &str = "application/json";
 const MAX_VERIFICATION_SUMMARY_BYTES: usize = 8 * 1024;
 /// Ceiling on how many files one writing subagent may claim. Sixteen files
 /// cover a bounded feature slice while keeping the write set reviewable; a
@@ -720,8 +722,8 @@ impl ToolRegistry {
             ),
             definition(
                 "web_fetch",
-                "Fetch readable text from a public HTTP(S) URL. Safe same-host redirects are followed automatically; cross-host redirects require approval. Private, loopback and link-local targets are refused.",
-                json!({"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer","minimum":1,"maximum":100000}},"required":["url"],"additionalProperties":false}),
+                "Fetch a public HTTP(S) URL and return readable text. GET is the default; POST sends `body` and always requires approval, which the user may remember for every POST to the same registrable domain. Same-host GET redirects are followed automatically, POST redirects are never followed. Private, loopback and link-local targets are refused.",
+                json!({"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string","enum":["GET","POST"],"description":"Defaults to GET."},"body":{"type":"string","description":"Request body; POST only."},"content_type":{"type":"string","description":"Content-Type of the POST body. Defaults to application/json."},"max_chars":{"type":"integer","minimum":1,"maximum":100000}},"required":["url"],"additionalProperties":false}),
             ),
             definition(
                 "run_command",
@@ -1312,7 +1314,7 @@ impl ToolRegistry {
         if query.is_empty() {
             return Err(ToolError::Network("search query is empty".to_owned()));
         }
-        self.require_approval(&format!("search the public web for: {query}"), false)
+        self.require_network_read_approval(&format!("search the public web for: {query}"))
             .await?;
         let mut endpoint = reqwest::Url::parse(&config.some_im_base_url)
             .map_err(|error| ToolError::Network(format!("invalid some.im API base: {error}")))?;
@@ -1344,61 +1346,54 @@ impl ToolRegistry {
     }
 
     async fn web_fetch(&self, args: WebFetchArgs) -> Result<String, ToolError> {
-        let mut url = reqwest::Url::parse(args.url.trim())
+        let method = parse_web_method(args.method.as_deref())?;
+        let url = reqwest::Url::parse(args.url.trim())
             .map_err(|error| ToolError::Network(format!("invalid URL: {error}")))?;
         validate_public_url(&url).await?;
-        self.require_approval(&format!("fetch public URL: {url}"), false)
-            .await?;
-        let client = web_client()?;
-        let mut redirects = 0;
-        let mut visited = HashSet::new();
-        let response = loop {
-            if !visited.insert(redirect_key(&url)) {
-                return Err(ToolError::Network("redirect loop detected".to_owned()));
+        let response = match method {
+            WebMethod::Get => {
+                if args.body.is_some() {
+                    return Err(ToolError::Network(
+                        "a request body requires method \"POST\"".to_owned(),
+                    ));
+                }
+                self.require_network_read_approval(&format!("fetch public URL: {url}"))
+                    .await?;
+                self.web_get(url).await?
             }
-            let response = client
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(|error| ToolError::Network(error.to_string()))?;
-            if !response.status().is_redirection() {
-                break response;
+            WebMethod::Post => {
+                let body = args.body.unwrap_or_default();
+                if body.len() > MAX_WEB_REQUEST_BYTES {
+                    return Err(ToolError::Network(format!(
+                        "request body exceeds the {} KiB limit",
+                        MAX_WEB_REQUEST_BYTES / 1024
+                    )));
+                }
+                let content_type = args
+                    .content_type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(DEFAULT_WEB_POST_CONTENT_TYPE)
+                    .to_owned();
+                self.require_web_post_approval(&url, body.len(), &content_type)
+                    .await?;
+                self.web_post(url, body, &content_type).await?
             }
-            if redirects >= MAX_WEB_REDIRECTS {
-                return Err(ToolError::Network(format!(
-                    "redirect limit exceeded ({MAX_WEB_REDIRECTS})"
-                )));
-            }
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| {
-                    ToolError::Network("redirect response has no valid Location header".to_owned())
-                })?;
-            let next = url
-                .join(location)
-                .map_err(|error| ToolError::Network(format!("invalid redirect target: {error}")))?;
-            validate_public_url(&next).await?;
-            if url.scheme() == "https" && next.scheme() == "http" {
-                return Err(ToolError::Network(
-                    "HTTPS to HTTP redirect downgrade is refused".to_owned(),
-                ));
-            }
-            if !same_hostname(&url, &next) {
-                self.require_approval(
-                    &format!("redirect web_fetch from {url} to different host: {next}"),
-                    false,
-                )
-                .await?;
-            }
-            url = next;
-            redirects += 1;
         };
         if !response.status().is_success() {
+            let status = response.status();
+            if method == WebMethod::Post {
+                // POST 的失败正文往往就是服务端给的错误说明，吞掉它等于让模型
+                // 对着一个裸状态码猜。
+                let body = read_web_response(response).await.unwrap_or_default();
+                return Err(ToolError::Network(format!(
+                    "web server returned HTTP {status}: {}",
+                    truncate_line(&String::from_utf8_lossy(&body), 500)
+                )));
+            }
             return Err(ToolError::Network(format!(
-                "web server returned HTTP {}",
-                response.status()
+                "web server returned HTTP {status}"
             )));
         }
         if response
@@ -1426,6 +1421,86 @@ impl ToolRegistry {
             .unwrap_or(DEFAULT_WEB_MAX_CHARS)
             .clamp(1, MAX_WEB_MAX_CHARS);
         Ok(truncate_chars(&text, limit))
+    }
+
+    async fn web_get(&self, mut url: reqwest::Url) -> Result<reqwest::Response, ToolError> {
+        let client = web_client()?;
+        let mut redirects = 0;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(redirect_key(&url)) {
+                return Err(ToolError::Network("redirect loop detected".to_owned()));
+            }
+            let response = client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|error| ToolError::Network(error.to_string()))?;
+            if !response.status().is_redirection() {
+                return Ok(response);
+            }
+            if redirects >= MAX_WEB_REDIRECTS {
+                return Err(ToolError::Network(format!(
+                    "redirect limit exceeded ({MAX_WEB_REDIRECTS})"
+                )));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ToolError::Network("redirect response has no valid Location header".to_owned())
+                })?;
+            let next = url
+                .join(location)
+                .map_err(|error| ToolError::Network(format!("invalid redirect target: {error}")))?;
+            validate_public_url(&next).await?;
+            if url.scheme() == "https" && next.scheme() == "http" {
+                return Err(ToolError::Network(
+                    "HTTPS to HTTP redirect downgrade is refused".to_owned(),
+                ));
+            }
+            if !same_hostname(&url, &next) {
+                self.require_network_read_approval(&format!(
+                    "redirect web_fetch from {url} to different host: {next}"
+                ))
+                .await?;
+            }
+            url = next;
+            redirects += 1;
+        }
+    }
+
+    /// POST 不跟随重定向。用户批准的是「向这个地址写」，而重定向后的目标是
+    /// 另一个端点、可能还是另一个域名，跟着跳就等于拿旧批准去写新地方。把状
+    /// 态码和 Location 原样交回去，让模型拿新地址重新申请一次。
+    async fn web_post(
+        &self,
+        url: reqwest::Url,
+        body: String,
+        content_type: &str,
+    ) -> Result<reqwest::Response, ToolError> {
+        let content_type = reqwest::header::HeaderValue::from_str(content_type)
+            .map_err(|error| ToolError::Network(format!("invalid content type: {error}")))?;
+        let response = web_client()?
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("(no Location header)");
+            return Err(ToolError::Network(format!(
+                "POST redirects are not followed (HTTP {} to {location}); re-issue the request against the final URL",
+                response.status()
+            )));
+        }
+        Ok(response)
     }
 
     async fn run_command(&self, args: CommandArgs) -> Result<String, ToolError> {
@@ -1808,6 +1883,40 @@ impl ToolRegistry {
             source,
             detail,
         });
+    }
+
+    /// POST 是对外写操作，所有审批模式都要过一遍，`read-only` 策略直接拒。
+    ///
+    /// 「始终允许」按注册域名收敛，而不是像 shell 命令那样逐字记：POST 的 URL
+    /// 常带一次性 id、body 每次都不同，逐字规则下一次就对不上，等于没有。规则
+    /// 里只有域名，body 中的密钥不会被写进 always-allow.json。
+    async fn require_web_post_approval(
+        &self,
+        url: &reqwest::Url,
+        body_bytes: usize,
+        content_type: &str,
+    ) -> Result<(), ToolError> {
+        if self.approval_mode == ApprovalMode::ReadOnly {
+            return Err(ToolError::ReadOnlyPolicy(format!("POST to {url}")));
+        }
+        let domain = registrable_domain(url);
+        let description = format!(
+            "POST to {url}\nbody: {body_bytes} B ({content_type})\nAlways allow scope: every POST to {domain}"
+        );
+        self.require_rememberable_approval(
+            &description,
+            format!("{WEB_POST_SIGNATURE_PREFIX}{domain}"),
+        )
+        .await
+    }
+
+    /// 只读的公网抓取（web_fetch / web_search）不改动本地状态，SSRF 目标已被
+    /// `validate_public_url` 拦下，所以只有 Strict 模式才逐次询问。
+    async fn require_network_read_approval(&self, description: &str) -> Result<(), ToolError> {
+        if self.approval_mode != ApprovalMode::Strict {
+            return Ok(());
+        }
+        self.require_approval(description, false).await
     }
 
     async fn require_approval(
@@ -2386,6 +2495,7 @@ fn truncate_line(line: &str, max_chars: usize) -> String {
 }
 
 const COMMAND_SIGNATURE_PREFIX: &str = "command-exact:";
+const WEB_POST_SIGNATURE_PREFIX: &str = "web-post:";
 
 fn command_signature(command: &str) -> Option<String> {
     if command
@@ -2581,6 +2691,38 @@ fn web_client() -> Result<reqwest::Client, ToolError> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| ToolError::Network(error.to_string()))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebMethod {
+    Get,
+    Post,
+}
+
+fn parse_web_method(raw: Option<&str>) -> Result<WebMethod, ToolError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(WebMethod::Get),
+        Some(value) if value.eq_ignore_ascii_case("get") => Ok(WebMethod::Get),
+        Some(value) if value.eq_ignore_ascii_case("post") => Ok(WebMethod::Post),
+        Some(value) => Err(ToolError::Network(format!(
+            "unsupported HTTP method: {value}; web_fetch supports GET and POST"
+        ))),
+    }
+}
+
+/// 「主域名」按公共后缀表取：`api.example.com` 和 `upload.example.com` 归到同
+/// 一条 `example.com` 规则，而 `example.co.uk` 整体就是一个注册域名。机械地取
+/// 后两段会把它截成 `co.uk`，那条规则等于放行整个英国二级域。IP 直连没有域名
+/// 可归并，按字面量各自成规则。
+fn registrable_domain(url: &reqwest::Url) -> String {
+    let Some(host) = url.host_str() else {
+        return url.as_str().to_ascii_lowercase();
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<IpAddr>().is_ok() {
+        return host.to_ascii_lowercase();
+    }
+    psl::domain_str(host).unwrap_or(host).to_ascii_lowercase()
 }
 
 fn same_hostname(left: &reqwest::Url, right: &reqwest::Url) -> bool {
@@ -3028,6 +3170,9 @@ struct WebSearchArgs {
 #[derive(Deserialize)]
 struct WebFetchArgs {
     url: String,
+    method: Option<String>,
+    body: Option<String>,
+    content_type: Option<String>,
     max_chars: Option<usize>,
 }
 
@@ -3376,6 +3521,113 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
                 .approve_subagent_write_set(&["file.txt".to_owned()])
                 .await,
             Err(ToolError::ReadOnlyPolicy(_))
+        ));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn always_allow_scope_for_a_post_is_the_registrable_domain() {
+        let domain = |raw: &str| registrable_domain(&reqwest::Url::parse(raw).expect("url"));
+        assert_eq!(domain("https://api.example.com/hooks/1"), "example.com");
+        assert_eq!(domain("https://upload.EXAMPLE.com/x"), "example.com");
+        // 后两段截法会把这个截成 co.uk，一条规则放行整个英国二级域。
+        assert_eq!(domain("https://example.co.uk/x"), "example.co.uk");
+        assert_eq!(domain("https://api.example.co.uk/x"), "example.co.uk");
+        assert_eq!(domain("https://203.0.113.7:8443/x"), "203.0.113.7");
+        assert_eq!(domain("https://[2001:db8::1]/x"), "2001:db8::1");
+    }
+
+    #[tokio::test]
+    async fn a_remembered_post_rule_covers_every_subdomain_of_one_registrable_domain() {
+        let root = workspace("web-post-approval");
+        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
+        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+            .expect("registry")
+            .with_approver(approver.clone());
+        let post = |raw: &str| reqwest::Url::parse(raw).expect("url");
+        registry
+            .require_web_post_approval(
+                &post("https://api.example.com/hooks/1"),
+                12,
+                "application/json",
+            )
+            .await
+            .expect("first POST is approved and remembered");
+        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
+        // 同一注册域名下换了子域和路径，规则仍然命中，不再打断用户。
+        registry
+            .require_web_post_approval(
+                &post("https://upload.example.com/files"),
+                9_000,
+                "text/plain",
+            )
+            .await
+            .expect("same registrable domain reuses the stored rule");
+        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
+        // 换个域名就得重新问一次。
+        registry
+            .require_web_post_approval(
+                &post("https://api.other.com/hooks/1"),
+                12,
+                "application/json",
+            )
+            .await
+            .expect("a different domain is approved on its own");
+        assert_eq!(approver.0.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn read_only_mode_refuses_a_post_before_any_approval() {
+        let root = workspace("web-post-read-only");
+        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
+        let registry = ToolRegistry::new(&root, ApprovalMode::ReadOnly)
+            .expect("registry")
+            .with_approver(approver.clone());
+        let result = registry
+            .require_web_post_approval(
+                &reqwest::Url::parse("https://api.example.com/hooks/1").expect("url"),
+                12,
+                "application/json",
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::ReadOnlyPolicy(_))));
+        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn web_fetch_methods_are_limited_to_get_and_post() {
+        assert!(matches!(parse_web_method(None), Ok(WebMethod::Get)));
+        assert!(matches!(parse_web_method(Some(" ")), Ok(WebMethod::Get)));
+        assert!(matches!(
+            parse_web_method(Some("post")),
+            Ok(WebMethod::Post)
+        ));
+        assert!(parse_web_method(Some("PUT")).is_err());
+    }
+
+    #[tokio::test]
+    async fn public_web_reads_skip_approval_outside_strict_mode() {
+        let root = workspace("web-read-approval");
+        // 默认 approver 是 DenyApprover：只要还问，就会拿到 Err。
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Smart,
+            ApprovalMode::WorkspaceAccess,
+        ] {
+            let registry = ToolRegistry::new(&root, mode).expect("registry");
+            registry
+                .require_network_read_approval("fetch public URL: https://example.com/")
+                .await
+                .expect("public web read should not need an approval");
+        }
+        let strict = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
+        assert!(matches!(
+            strict
+                .require_network_read_approval("fetch public URL: https://example.com/")
+                .await,
+            Err(ToolError::ApprovalDenied(_))
         ));
         std::fs::remove_dir_all(root).expect("cleanup");
     }

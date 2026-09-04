@@ -90,7 +90,8 @@ Allow once? [y/N]
 持久放行的粒度被刻意收窄：
 
 - Shell 只记住**规范化后的完整命令**，不是命令前缀，也不是可执行文件名；
-- MCP 只记住精确的 `server/tool` 组合。
+- MCP 只记住精确的 `server/tool` 组合；
+- `web_fetch` 的 POST 记住**注册域名**，不是完整 URL——URL 带一次性 id、body 每次都不同，逐字规则下一次就对不上，等于没有；作为交换，规则一次覆盖该域名下的全部 POST。
 
 以下情况一律不提供持久放行：
 
@@ -117,12 +118,20 @@ Coding Agent 的默认语义是 `workspace-write`：Workspace 内 `create_file` 
 
 ## 网络工具
 
-`web_search` 和 `web_fetch` 在**所有**审批模式下都需要确认。
+`web_search` 和 `web_fetch` 的 GET 只在 `strict` 模式下逐次确认。`read-only`、`smart`、`workspace-write` 三种模式把它们当作只读操作放行：抓一个公网页面不改动本地任何状态，私网目标在审批之前就已经被公网校验拒绝。
+
+`web_fetch` 带 `method: "POST"` 时是对外写操作，规矩完全不同：
+
+- 所有审批模式下都逐次确认，`read-only` 策略在审批之前直接拒绝；
+- 审批卡多出「始终允许」一项，记下的规则是**注册域名**级的 `web-post:<域名>`：批准 `api.example.com` 之后，`upload.example.com` 也不再问，换成 `other.com` 则重新问。域名按公共后缀表切分，`example.co.uk` 整体算一个注册域名，不会被截成 `co.uk`；IP 直连按字面量单独成规则；
+- 规则里只有域名，URL 上的一次性 id 和 body 里的内容都不会写进 `always-allow.json`；
+- 请求体上限 1 MiB，默认 `Content-Type: application/json`，可用 `content_type` 覆盖；
+- POST **不跟随任何重定向**：用户批准的是当前这个地址，跳转后的端点得重新申请。
 
 `web_fetch` 的额外硬约束：
 
 - 拒绝私网、回环和链路本地地址；
-- 同 hostname 重定向自动跟随，跨 hostname 重定向重新审批；
+- GET 的同 hostname 重定向自动跟随，跨 hostname 重定向在 `strict` 模式下重新审批，POST 一律不跟随；
 - HTTPS 降级到 HTTP 一律拒绝；
 - 每次跳转重做公网目标校验；
 - 以环路、次数、超时和流式 3 MiB 硬限制约束响应。
