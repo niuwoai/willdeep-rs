@@ -147,7 +147,7 @@ fn chat_content(message: &Message) -> serde_json::Value {
     let mut parts = vec![serde_json::json!({"type":"text","text":message.content})];
     for attachment in &message.attachments {
         match attachment {
-            MessageAttachment::Text { name, content } => parts.push(serde_json::json!({"type":"text","text":format!("[Pasted text: {name}]\n{content}")})),
+            MessageAttachment::Text { name, content } => parts.push(serde_json::json!({"type":"text","text":super::common::pasted_text_block(name, content)})),
             MessageAttachment::Image { media_type, data, .. } => parts.push(serde_json::json!({"type":"image_url","image_url":{"url":format!("data:{media_type};base64,{data}")}})),
         }
     }
@@ -269,6 +269,25 @@ mod attachment_tests {
         let value = chat_content(&message);
         assert_eq!(value[1]["type"], "image_url");
         assert_eq!(value[1]["image_url"]["url"], "data:image/png;base64,YWJj");
+    }
+
+    /// 粘贴文本必须连正文一起到达，并且说清楚它不是工作区里的文件。
+    #[test]
+    fn text_attachment_carries_its_content_and_denies_being_a_file() {
+        let message = Message::user_with_attachments(
+            "see below",
+            vec![MessageAttachment::Text {
+                name: "paste-1.txt".into(),
+                content: "the code word is ZEBRA".into(),
+            }],
+        );
+        let value = chat_content(&message);
+        assert_eq!(value[0]["text"], "see below");
+        let text = value[1]["text"].as_str().unwrap();
+        assert!(text.contains("paste-1.txt"));
+        assert!(text.contains("the code word is ZEBRA"));
+        assert!(text.contains("not a file in the workspace"));
+        assert!(text.ends_with("[End of pasted text \"paste-1.txt\"]"));
     }
 }
 

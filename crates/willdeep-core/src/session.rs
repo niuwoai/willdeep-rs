@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::session_title::{self, TitleSource};
-use crate::types::Message;
-use crate::types::Role;
+use crate::types::{Message, Role, ToolCall, sanitize_tool_history};
 
 pub const SESSION_VERSION: u32 = 1;
 
@@ -562,7 +561,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
                 .and_then(|value| value.as_str())
         })
         .unwrap_or(".");
-    let messages = value
+    let mut messages = value
         .get("messages")
         .and_then(|value| value.as_array())
         .into_iter()
@@ -575,6 +574,14 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
                 "tool" => Role::Tool,
                 _ => return None,
             };
+            let tool_call_id = (role == Role::Tool)
+                .then(|| swift_string(message, "toolCallID"))
+                .flatten();
+            let tool_calls = if role == Role::Assistant {
+                swift_tool_calls(message)
+            } else {
+                Vec::new()
+            };
             Some(Message {
                 role,
                 content: message
@@ -582,12 +589,13 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_owned(),
-                tool_call_id: None,
-                tool_calls: Vec::new(),
+                tool_call_id,
+                tool_calls,
                 attachments: Vec::new(),
             })
         })
         .collect();
+    sanitize_tool_history(&mut messages);
     let updated = std::fs::metadata(path)?
         .modified()
         .ok()
@@ -623,6 +631,31 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         compression_checkpoint: None,
         swift_source: Some(path.to_path_buf()),
     })
+}
+
+fn swift_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn swift_tool_calls(message: &serde_json::Value) -> Vec<ToolCall> {
+    message
+        .get("toolCalls")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            Some(ToolCall {
+                id: swift_string(call, "externalID")?,
+                name: swift_string(call, "toolName")?,
+                arguments: swift_string(call, "argumentsJSON").unwrap_or_else(|| "{}".to_owned()),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -988,6 +1021,82 @@ mod tests {
         assert_eq!(session.title, "排查 CPU 负载");
         assert_eq!(session.title_source, TitleSource::Legacy);
         assert_eq!(session.swift_source.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridged_sessions_preserve_complete_tool_round_trips() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-tools-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = Uuid::new_v4();
+        let path = root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "title": "检查提交",
+                "workspaceRootPath": "/Users/tester/Sites/project",
+                "messages": [
+                    {"role": "user", "content": "查看提交"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "toolCalls": [{
+                            "externalID": "swift-call-1",
+                            "toolName": "run_command",
+                            "argumentsJSON": "{\"command\":\"git log -3\"}"
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "three commits",
+                        "toolCallID": "swift-call-1"
+                    },
+                    {"role": "assistant", "content": "完成"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let session = swift_session(&path).expect("Swift session with tool history");
+
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert_eq!(session.messages[1].tool_calls[0].id, "swift-call-1");
+        assert_eq!(session.messages[1].tool_calls[0].name, "run_command");
+        assert_eq!(
+            session.messages[2].tool_call_id.as_deref(),
+            Some("swift-call-1")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridged_sessions_drop_orphan_tool_results() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-orphan-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = Uuid::new_v4();
+        let path = root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "tool", "content": "legacy output"},
+                    {"role": "assistant", "content": "done"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let session = swift_session(&path).expect("Swift session with legacy orphan");
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, Role::User);
+        assert_eq!(session.messages[1].role, Role::Assistant);
         std::fs::remove_dir_all(root).unwrap();
     }
 

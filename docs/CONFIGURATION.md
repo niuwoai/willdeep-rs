@@ -24,7 +24,7 @@ version = 1
 default_provider = "some-im"
 
 [agent]
-max_turns = 24
+max_turns = 64
 approval = "smart"
 language = "zh-CN"      # zh-CN | en | ja
 small_model_routing = true

@@ -12,6 +12,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 globset = "0.4"
 ignore = "0.4"
+psl.workspace = true
 regex = "1.11"
 reqwest.workspace = true
 serde.workspace = true

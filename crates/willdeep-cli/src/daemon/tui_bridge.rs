@@ -42,6 +42,12 @@ pub(crate) struct RuntimeSnapshot {
     /// is only a front end: a long-lived daemon can be several releases
     /// behind this binary, and every policy change lives in the daemon.
     pub runtime_version: Option<String>,
+    /// 探测 Runtime 时它的事件流头部序号；Runtime 不可达时为 `None`。
+    ///
+    /// 快照是每秒另起一个任务去拉的，和事件流各走各的通道，谁先到没有保证。
+    /// 客户端拿它跟自己的事件游标比：序号落后于游标的快照拍摄于已经消费掉的
+    /// 事件之前，它说的「任务还在跑」不能当真。
+    pub event_sequence: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -606,9 +612,9 @@ pub(crate) async fn runtime_snapshot(
     // 这一端的身份。审批弹回发起端靠它比对。
     let viewer_client = Some(crate::client_identity(surface));
     let paths = DaemonPaths::new(home);
-    let (state, runtime_version) = match load_state(&paths.state) {
+    let (state, runtime_version, event_sequence) = match load_state(&paths.state) {
         Ok(state) => match probe(&state).await {
-            Ok(health) => (state, Some(health.version)),
+            Ok(health) => (state, Some(health.version), Some(health.event_sequence)),
             Err(_) => {
                 return Ok(RuntimeSnapshot {
                     attention: Vec::new(),
@@ -618,6 +624,7 @@ pub(crate) async fn runtime_snapshot(
                     tools: Vec::new(),
                     artifacts: Vec::new(),
                     runtime_version: None,
+                    event_sequence: None,
                 });
             }
         },
@@ -630,6 +637,7 @@ pub(crate) async fn runtime_snapshot(
                 tools: Vec::new(),
                 artifacts: Vec::new(),
                 runtime_version: None,
+                event_sequence: None,
             });
         }
     };
@@ -783,6 +791,7 @@ pub(crate) async fn runtime_snapshot(
         tools,
         artifacts,
         runtime_version,
+        event_sequence,
     })
 }
 

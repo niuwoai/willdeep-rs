@@ -2,7 +2,7 @@ version = 1
 default_provider = "some-im"
 
 [agent]
-max_turns = 24
+max_turns = 64
 approval = "smart"
 language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--language
 # smart / workspace-write 模式下的两级审批：本地静态规则先判，判不了的交给 AI 判官。

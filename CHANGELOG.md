@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.71.0-rc2] - 2026-09-04
+
+### Fixed
+- **macOS 桌面会话里的工具历史可在 Rust TUI 中继续。** Swift 会话使用 `toolCalls[].externalID/toolName/argumentsJSON` 与 `toolCallID`，旧桥接器却只复制 `role/content`，把 assistant 的调用声明和 tool 的关联 ID 全部丢掉；下一轮仍发出 `role=tool`，some.im 因缺少 `tool_call_id` 返回 HTTP 400，之后每次续聊都会确定性重现。现在桥接时完整转换这组 camelCase 字段，保留合法工具往返。
+- **已落盘的坏会话自动恢复。** Provider 请求前统一清理无法配对的孤立 tool 结果与未完成调用；一次成功续聊后，清理后的历史随正常会话结果重新保存，不要求用户删除整个会话。只移除协议上无法重放的残缺记录，完整调用与结果保持不变。
+
+### Tests
+- 新增 Swift 工具调用往返、孤立工具结果清理、既有坏历史进入 Agent 后可正常请求 Provider 三组回归测试。
+- Bugfix 版本从 **0.71.0-rc1** 提升为 **0.71.0-rc2**。
+
+## [0.71.0-rc1] - 2026-09-04
+
+### Added
+- **`web_fetch` 支持 POST。** 新增 `method`（`GET` / `POST`，默认 GET）、`body` 和 `content_type`（默认 `application/json`）三个参数，请求体上限 1 MiB。此前 Agent 想调一个 HTTP 接口只能绕道 `run_command` 里的 curl，等于用 shell 审批去挡一次网络写入。
+- **POST 审批可按注册域名记住。** 审批卡多出「始终允许」一项，规则形如 `web-post:example.com`：批准 `api.example.com` 之后，`upload.example.com` 的 POST 也不再问，换成别的域名重新问。域名按公共后缀表切分，`example.co.uk` 整体算一个注册域名，不会被机械地截成 `co.uk` 而放行整个英国二级域；IP 直连按字面量单独成规则。逐字记完整 URL 在这里没有意义——URL 常带一次性 id、body 每次都不同，规则下一次就对不上。规则里只有域名，body 中的密钥不会被写进 `always-allow.json`。
+- 新增依赖 `psl 2.1`（公共后缀表编译进二进制，运行时不联网取表）。
+
+### Changed
+- POST 在**所有**审批模式下都逐次确认，`read-only` 策略在进入审批之前直接拒绝——它是对外写操作，跟 GET 不是一回事。
+- POST **不跟随任何重定向**：用户批准的是当前这个地址，跳转后的端点可能换了域名，跟着跳等于拿旧批准写新地方。现在把状态码和 `Location` 如实交回模型，让它拿新地址重新申请。
+- POST 失败时把响应正文截断 500 字符一并返回：服务端的错误说明正是模型需要的东西，只给一个裸状态码等于让它猜。GET 的失败信息不变。
+
+### Tests
+- 新增：注册域名切分（子域归并、`example.co.uk` 不被截、IPv4 / IPv6 字面量）、同注册域名下第二次 POST 命中已记规则不再询问、换域名重新询问、`read-only` 模式在审批之前拒绝、`method` 只接受 GET 与 POST。
+- 版本从 **0.70.0-rc6** 提升为 **0.71.0-rc1**（新增功能，rc 重置）。
+
+## [0.70.0-rc6] - 2026-09-04
+
+### Changed
+- **抓公网网页不再逐次弹审批。** `web_fetch` 和 `web_search` 此前在所有审批模式下都要用户按 Y，读一份在线文档得连按好几次，价值等于零：抓页面不写本地任何东西，私网、回环、链路本地目标在审批之前就已被 `validate_public_url` 拒掉，HTTPS 降级也一律拒绝。现在只有 `strict` 模式逐次确认，`read-only` / `smart` / `workspace-write` 按只读操作直接放行。
+- 跨 hostname 重定向的二次审批同样只保留在 `strict` 模式；每一跳仍然重做公网目标校验，环路、跳数、超时和 3 MiB 上限不变。
+
+### Tests
+- 新增：`read-only` / `smart` / `workspace-write` 三种模式下公网只读审批直接通过，`strict` 模式仍然走审批并被默认拒绝器拒绝。
+- 版本从 **0.70.0-rc5** 提升为 **0.70.0-rc6**。
+
+## [0.70.0-rc5] - 2026-09-04
+
+### Changed
+- **主 Agent 默认轮次上限从 24 提到 64。** 一次「先问一句、再改十个文件、再查一下」的正常任务就能把 24 轮用光，而触顶是整轮判失败，写好的东西一句都不给看。`--max-turns` 与 `[agent].max_turns` 仍可覆盖，合法范围不变（1–100）。`config.example.toml` 与 `docs/CONFIGURATION.md` 的示例同步改为 64。
+- 子 Agent 各 profile 的上限不动：它们按职责各有预算，不该跟着主 Agent 一起放宽。
+- **触顶不再把整轮判失败，改为交出部分结果。** 此前主循环用尽轮次直接返回 `AgentError::MaxTurns`，Runtime 标成 `turn.failed`，模型改好的十个文件、写到一半的结论一句都不给看，用户只看到一行「reached the maximum of N turns」。现在 Agent 返回 `AgentStopReason::MaxTurns`，`final_text` 取最后一段可见的助手文字；Harness 在前面加一句「⚠ 轮次上限 N 已用尽，任务未收敛…改动已落盘但可能不完整；继续对话可接着做」，同时把这句写进会话历史，下一轮模型也知道上一轮是被掐断的。子 Agent 触顶时给父 Agent 的结果尾部追加「partial, may be incomplete」说明，免得半成品被当成验证过的答案。
+
+### Notes
+- 已有配置文件里若写死了 `max_turns = 24`，会覆盖新默认值，需要手动改。
+- `AgentError::MaxTurns` 保留给退出码与遥测映射，主循环不再产生它。
+
+### Tests
+- 新增：轮次用尽时返回 `MaxTurns` 停机原因、`final_text` 取最后一段助手文字、工具调用历史完整保留。
+- 版本从 **0.70.0-rc4** 提升为 **0.70.0-rc5**。
+
+## [0.70.0-rc4] - 2026-09-04
+
+### Fixed
+- **粘贴文本不再被模型当成工作区里的文件。** 现场：用户贴了一段文本，模型回「paste-1.txt 的内容我看不到」，接着 `search_files`、`ls tmp` 满工作区找这个文件，24 轮耗尽后整轮判失败。实测网关（api.niuwoai.com / deepseek-v4-flash）对多段 content 是完整送达的，正文一直都在模型眼前——坏在包装只有一行 `[Pasted text: paste-1.txt]`，`.txt` 后缀让模型认定这是个文件路径。现在三种协议实现（chat completions、responses、anthropic）共用 `pasted_text_block`：明说「这是用户贴进聊天的文本，不是工作区文件，别去找，全文如下」，并用结束标记圈住正文。
+- **附件条目露出正文首行。** 此前只显示「Pasted text · 3 lines · 146 B」，贴错了东西发送前看不出来；现在追加「首行预览」，最多 36 个字符，超出加省略号。
+- **聊天区拖选松手不再自动复制到剪贴板。** 这正是上面那次事故的起点：先复制好网址，回到聊天区拖了一下看，剪贴板就被上一条回复顶掉，贴进去的自然不是网址。现在松手只选中，状态行提示选中字数，`Ctrl+C` / `y` 才复制，`q` 引用，`Esc` 取消。文档同步更新。
+
+### Notes
+- 排查中确认 `web_search` 工具对 `api.niuwoai.com` 返回 404（该网关没有 `/api/v1/customer/web-search`），对 `some.im` 返回 503「web search provider not configured」。这是网关侧未配置，不在本仓修。
+
+### Tests
+- 新增：chat completions 的文本附件携带正文并声明「不是文件」；附件摘要预览首个非空行、截断与空内容。
+- Bugfix 版本从 **0.70.0-rc3** 提升为 **0.70.0-rc4**。
+
+## [0.70.0-rc3] - 2026-09-03
+
+### Fixed
+- **TUI 不再被一份迟到的 Runtime 快照卡在「工作中」。** 现场：一轮已经正常结束、界面打印了耗时汇总，紧接着活动面板却变成「已重新连接 Runtime · 正在恢复进度」，然后二十多分钟毫无动静；之后输入的每一句都只回显一行 `You:`，Runtime 那边却根本没收到——会话是 `Idle`，事件流停在上一轮的 `turn.completed`。
+
+  根因是两条通道之间的竞态。快照每秒 `spawn` 一个任务去拉，事件流由另一个 follower 独立推送，谁先到没有保证。一份在任务还是 `Running` 时拍下的快照，在 `turn.completed` 把界面复位之后才送到，`observe_runtime_tasks` 见到「有活动任务、界面没在跑」就无条件开了一个轮次；而那轮的完成事件早被消费、游标已经过去，再没有人来结束它。`observe_runtime_tasks` 只会把 `running` 置真、从不置假，排队的提示词又要等 `running` 落下才发，于是整条队列跟着死等。
+
+  三处修正：
+  - `RuntimeSnapshot` 带上探测 Runtime 时的事件序号（`probe` 本就返回 `event_sequence`，此前被丢弃）。序号落后于本地事件游标的快照拍摄于已消费事件之前，不再凭它开启轮次；Runtime 不可达的快照序号为空，同样不算数。
+  - 对称补一条自愈：界面显示 Runtime 轮次在跑，而连续 3 份新鲜快照都没有本会话的活动任务，就向 Runtime 求证在途轮次——判据与 Esc 完全相同——Runtime 说没有才复位，并在对话里写一行说明，排队的提示词随即续上。留 3 秒余量是因为刚提交的轮次排队时任务是 `Queued`、快照会滤掉它。Runtime 说有、或者问不到，都按兵不动。
+  - 快照拉取加在途标记：上一份没回来就跳过本次 tick，不再让几份快照并行在途互相抢先。
+
+### Tests
+- 新增两项：序号落后的快照与不可达快照都不开启幻影轮次；连续新鲜空快照攒够次数才标记求证、见到任务或旧快照即归零、本地轮次不受影响。原有的重连恢复测试改为显式传入序号。
+- Bugfix 版本从 **0.70.0-rc2** 提升为 **0.70.0-rc3**。
+
 ## [0.70.0-rc2] - 2026-09-03
 
 ### Fixed

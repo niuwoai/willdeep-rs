@@ -193,10 +193,14 @@ pub struct DraftAttachment {
 impl DraftAttachment {
     pub fn summary(&self) -> String {
         match &self.message {
+            // 带一截正文预览：剪贴板里装的到底是不是想贴的东西，发送前就该看得出来。
+            // 出过一回事——拖选聊天区自动复制顶掉了刚复制的网址，条目只写
+            // 「3 lines · 146 B」，谁也看不出贴进去的是上一条回复。
             MessageAttachment::Text { content, .. } => format!(
-                "Pasted text · {} lines · {}",
+                "Pasted text · {} lines · {} · 「{}」",
                 content.lines().count().max(1),
-                human_bytes(content.len())
+                human_bytes(content.len()),
+                text_preview(content)
             ),
             MessageAttachment::Image {
                 name,
@@ -211,6 +215,21 @@ impl DraftAttachment {
         }
     }
 }
+/// 正文里第一行有字的内容，截到 [`PREVIEW_CHARS`] 个字符；截断了就加省略号。
+const PREVIEW_CHARS: usize = 36;
+fn text_preview(content: &str) -> String {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut preview = line.chars().take(PREVIEW_CHARS).collect::<String>();
+    if line.chars().count() > PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
 fn human_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / 1_048_576.0)
@@ -224,6 +243,25 @@ fn human_bytes(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 附件条目要露出正文首行：贴错了东西发送前就能看见。
+    #[test]
+    fn pasted_text_summary_previews_the_first_non_empty_line() {
+        let attachment = DraftAttachment {
+            message: MessageAttachment::Text {
+                name: "paste-1.txt".to_owned(),
+                content: "\nscripts/tsing_hub_probe.rb 是现成脚手架，可以加一组 effort 探针在 beta 环境跑。\n\n· 首答 9.11s".to_owned(),
+            },
+        };
+        let summary = attachment.summary();
+        assert!(summary.starts_with("Pasted text · 4 lines · "), "{summary}");
+        assert!(summary.ends_with("「scripts/tsing_hub_probe.rb 是现成脚手架，可以…」"), "{summary}");
+
+        let short = text_preview("  https://hub-beta.example.com/v1  ");
+        assert_eq!(short, "https://hub-beta.example.com/v1");
+        assert_eq!(text_preview("\n\n"), "");
+    }
+
     #[test]
     fn edits_multiline_text_and_moves_cursor() {
         let mut e = PromptEditor::default();

@@ -23,6 +23,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use regex::RegexBuilder;
 use tokio::sync::{mpsc, oneshot};
+
+/// 连续多少份新鲜快照里都没有本会话的活动任务，才去向 Runtime 求证「工作中」是否残留。
+/// 快照一秒一份，刚提交的轮次在队列里排队时任务是 `Queued`、快照会滤掉它，
+/// 所以要留几秒余量，别把一条真在排队的轮次当成残留复位掉。
+const STALE_RUNTIME_TURN_SNAPSHOTS: u8 = 3;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use willdeep_core::types::Usage;
 use willdeep_core::{
@@ -222,6 +227,10 @@ struct App {
     turn_started: Option<Instant>,
     last_progress_at: Option<Instant>,
     runtime_turn: bool,
+    /// 界面显示 Runtime 轮次在跑、而新鲜快照里却找不到本会话活动任务的连续次数。
+    /// 攒够 [`STALE_RUNTIME_TURN_SNAPSHOTS`] 次就去问 Runtime 一句「还有在途轮次吗」，
+    /// 没有就把残留的「工作中」复位——否则排队的提示词会跟着一起死等。
+    stale_runtime_turn_snapshots: u8,
     last_elapsed: Option<Duration>,
     context_window: u64,
     context_tokens: u64,
@@ -1099,6 +1108,7 @@ async fn event_loop(
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
     let (runtime_snapshot_tx, mut runtime_snapshot_rx) =
         mpsc::unbounded_channel::<crate::daemon::RuntimeSnapshot>();
+    let snapshot_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (runtime_event_tx, mut runtime_event_rx) =
         mpsc::unbounded_channel::<Vec<crate::daemon::RemoteRuntimeEvent>>();
     let mut _runtime_event_follower = crate::daemon::start_runtime_event_follower(
@@ -1251,15 +1261,26 @@ async fn event_loop(
                 app.kernel_attention=runtime.kernel.pending_for_user().iter().map(AttentionItem::from_kernel_event).collect();
                 publish_finished_jobs(runtime,session.id);
                 willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
-                let home=runtime.home.clone();
-                let tx=runtime_snapshot_tx.clone();
-                let workspace=runtime.runtime_submit.workspace.clone();
-                let session_id=session.id;
-                tokio::spawn(async move {if let Ok(snapshot)=crate::daemon::runtime_snapshot(&home,&workspace,Some(session_id),crate::Surface::Tui).await{let _=tx.send(snapshot);}});
+                // 上一份快照还没回来就不再叠加一份：几份并行在途的快照回来的
+                // 顺序没有保证，越多越容易把一份旧的排到新的后面。
+                if !snapshot_in_flight.swap(true,std::sync::atomic::Ordering::AcqRel) {
+                    let home=runtime.home.clone();
+                    let tx=runtime_snapshot_tx.clone();
+                    let workspace=runtime.runtime_submit.workspace.clone();
+                    let session_id=session.id;
+                    let in_flight=snapshot_in_flight.clone();
+                    tokio::spawn(async move {
+                        let result=crate::daemon::runtime_snapshot(&home,&workspace,Some(session_id),crate::Surface::Tui).await;
+                        in_flight.store(false,std::sync::atomic::Ordering::Release);
+                        if let Ok(snapshot)=result{let _=tx.send(snapshot);}
+                    });
+                }
             },
             Some(snapshot)=runtime_snapshot_rx.recv()=>{
                 runtime.notifier.attention_snapshot(&snapshot.attention);
-                app.observe_runtime_tasks(&snapshot.tasks,session.id);
+                if app.observe_runtime_tasks(&snapshot.tasks,session.id,snapshot.event_sequence) {
+                    runtime_ui::reconcile_stale_runtime_turn(&mut app,session,runtime).await;
+                }
                 app.runtime_attention=snapshot.attention;
                 app.runtime_gates=snapshot.gates;
                 app.runtime_agents=snapshot.agents;
@@ -2136,6 +2157,7 @@ impl App {
             turn_started: None,
             last_progress_at: None,
             runtime_turn: false,
+            stale_runtime_turn_snapshots: 0,
             last_elapsed: None,
             context_window: 128_000,
             context_tokens: 0,
@@ -3019,6 +3041,7 @@ impl App {
         self.running = false;
         self.last_progress_at = None;
         self.runtime_turn = false;
+        self.stale_runtime_turn_snapshots = 0;
         // 轮次结束，句柄就作废了；留着会让下一次 Esc 对着一个已完成的 Task 空掐。
         self.local_turn = None;
         self.transient_thought = None;
@@ -3029,6 +3052,7 @@ impl App {
         let now = Instant::now();
         self.running = true;
         self.runtime_turn = runtime_turn;
+        self.stale_runtime_turn_snapshots = 0;
         self.turn_started = Some(now);
         self.last_progress_at = Some(now);
         self.last_elapsed = None;
@@ -3057,11 +3081,23 @@ impl App {
         );
     }
 
+    /// 用一份 Runtime 快照校准「工作中」状态。返回 `true` 表示界面上的 Runtime
+    /// 轮次很可能是残留的，调用方应当去问 Runtime 确认并复位。
+    ///
+    /// 快照和事件流各走各的通道，谁先到没有保证。一份在任务还在跑时拍下的快照，
+    /// 完全可能在 `turn.completed` 已经把界面复位之后才送到；此前这里见到「有活动
+    /// 任务、界面没在跑」就无条件开一个轮次，而那轮的完成事件早被消费掉，再也
+    /// 没有人来结束它——排队的提示词也就跟着永远发不出去。所以：
+    ///
+    /// - `snapshot_sequence` 落后于本地事件游标的快照，不能凭它开启轮次。
+    /// - 新鲜快照连续几次都没有本会话的活动任务，而界面还在跑 Runtime 轮次，
+    ///   就该怀疑是残留状态。真正在跑的轮次，快照里一定看得见它的任务。
     fn observe_runtime_tasks(
         &mut self,
         tasks: &[crate::daemon::tui_bridge::RemoteTask],
         session_id: uuid::Uuid,
-    ) {
+        snapshot_sequence: Option<u64>,
+    ) -> bool {
         let has_active_task = tasks.iter().any(|task| {
             task.session_id == Some(session_id)
                 && matches!(
@@ -3073,9 +3109,20 @@ impl App {
                         | willdeep_runtime_protocol::TaskStatus::WaitingAnswer
                 )
         });
-        if has_active_task && !self.running {
-            self.ensure_runtime_turn();
+        // Runtime 不可达时序号为 None：那份快照什么都不能证明。
+        let fresh = snapshot_sequence.is_some_and(|sequence| sequence >= self.runtime_event_cursor);
+        if has_active_task {
+            self.stale_runtime_turn_snapshots = 0;
+            if !self.running && fresh {
+                self.ensure_runtime_turn();
+            }
+            return false;
         }
+        if !(self.running && self.runtime_turn && fresh) {
+            return false;
+        }
+        self.stale_runtime_turn_snapshots = self.stale_runtime_turn_snapshots.saturating_add(1);
+        self.stale_runtime_turn_snapshots >= STALE_RUNTIME_TURN_SNAPSHOTS
     }
     /// The Runtime's version when it differs from this binary's. The TUI is
     /// only a front end — a daemon started days ago keeps executing tools
@@ -3522,7 +3569,18 @@ impl App {
                 {
                     selection.head = point;
                 }
-                self.copy_chat_selection();
+                // 松手不再自动写剪贴板。拖一下看看就把刚复制好的网址顶掉，
+                // 之后贴进去的是上一条回复，谁也想不到——复制要人明确按键。
+                let chars = self.selected_chat_text().chars().count();
+                self.notice = Some(
+                    self.language
+                        .text(
+                            "已选中 {n} 字 · Ctrl+C 或 y 复制 · q 引用 · Esc 取消",
+                            "{n} chars selected · Ctrl+C or y copies · q quotes · Esc cancels",
+                            "{n} 文字を選択 · Ctrl+C か y でコピー · q で引用 · Esc で解除",
+                        )
+                        .replace("{n}", &chars.to_string()),
+                );
                 true
             }
             MouseEventKind::ScrollUp if self.selection_mode => {

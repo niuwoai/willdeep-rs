@@ -107,7 +107,7 @@ vision_model = "qwen3-vl-plus"
 
 搜索请求不携带 `x-willdeep-session-id` / `x-willdeep-workspace-id`（那两个头只在 Provider 层添加）。
 
-`web_search` 在**所有审批模式**下都需要逐次确认，且不提供 Always Allow。
+`web_search` 只在 `strict` 模式下逐次确认，且不提供 Always Allow。
 
 `web_fetch` 是独立实现，不走 some.im，也不使用 API Key。其安全约束见 [审批与自动化](APPROVALS.md)。
 
