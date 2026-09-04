@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,6 +102,60 @@ impl ToolCall {
     }
 }
 
+/// Remove incomplete tool round trips before replaying persisted history.
+///
+/// Older desktop-session imports kept `role=tool` but discarded the matching
+/// camelCase tool metadata. OpenAI-compatible providers reject that history
+/// before model execution because a tool message without `tool_call_id` is not
+/// a valid protocol item. Complete pairs are preserved; orphan results and
+/// calls without a persisted result are omitted from the replay.
+pub fn sanitize_tool_history(messages: &mut Vec<Message>) {
+    let mut pending = HashSet::new();
+    let mut matched = HashSet::new();
+    let mut valid_tool_messages = HashSet::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        match message.role {
+            Role::Assistant => {
+                for call in &message.tool_calls {
+                    if !call.id.trim().is_empty() && !call.name.trim().is_empty() {
+                        pending.insert(call.id.clone());
+                    }
+                }
+            }
+            Role::Tool => {
+                let Some(call_id) = message
+                    .tool_call_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                if pending.remove(call_id) {
+                    matched.insert(call_id.to_owned());
+                    valid_tool_messages.insert(index);
+                }
+            }
+            Role::System | Role::User => {}
+        }
+    }
+
+    let mut index = 0_usize;
+    messages.retain_mut(|message| {
+        let keep = match message.role {
+            Role::Assistant => {
+                message.tool_calls.retain(|call| matched.contains(&call.id));
+                true
+            }
+            Role::Tool => valid_tool_messages.contains(&index),
+            Role::System | Role::User => true,
+        };
+        index += 1;
+        keep
+    });
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -124,4 +180,44 @@ pub struct Usage {
     /// 「确实一条没命中」——两者不是一回事，界面只在知道时展示命中率。
     #[serde(default)]
     pub cache_read_tokens: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_incomplete_tool_history_without_touching_complete_pairs() {
+        let complete = ToolCall {
+            id: "call-complete".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: "{}".to_owned(),
+        };
+        let incomplete = ToolCall {
+            id: "call-incomplete".to_owned(),
+            name: "run_command".to_owned(),
+            arguments: "{}".to_owned(),
+        };
+        let mut messages = vec![
+            Message::user("inspect"),
+            Message::assistant("", vec![complete.clone(), incomplete]),
+            Message::tool(&complete, "contents"),
+            Message {
+                role: Role::Tool,
+                content: "legacy orphan".to_owned(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                attachments: Vec::new(),
+            },
+            Message::assistant("done", Vec::new()),
+        ];
+
+        sanitize_tool_history(&mut messages);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].tool_calls.len(), 1);
+        assert_eq!(messages[1].tool_calls[0].id, complete.id);
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-complete"));
+        assert_eq!(messages[3].content, "done");
+    }
 }
