@@ -97,7 +97,7 @@ Provider Profile 可声明 `context_window`。在途自动压缩按四道水位�
 
 用户执行 `/compress` 时则显式生成摘要、保留最近六条消息并原子保存精简后的会话。TUI 展示最近一次 Provider Usage、缓存命中率、耗时和压缩阶段，不把运行状态伪装成模型私有推理文本。
 
-`web_search` 调用同一 some.im Origin 的 `/api/v1/customer/web-search`。`web_fetch` 只接受 HTTP(S) 公网目标，在请求前及每次重定向时解析 DNS，并拒绝私网、回环、链路本地和文档保留地址。客户端自行处理最多 8 次跳转：同 hostname 自动跟随，跨 hostname 重新审批，HTTPS→HTTP 降级拒绝；最终响应限制为 3 MiB 和最多 100,000 字符。两项网络工具的初始访问在所有审批模式下都逐次审批。
+`web_search` 调用同一 some.im Origin 的 `/api/v1/customer/web-search`。`web_fetch` 只接受 HTTP(S) 公网目标，在请求前及每次重定向时解析 DNS，并拒绝私网、回环、链路本地和文档保留地址。GET 自行处理最多 8 次跳转：同 hostname 自动跟随，跨 hostname 在 `strict` 模式下重新审批，HTTPS→HTTP 降级拒绝；最终响应限制为 3 MiB 和最多 100,000 字符。POST 由 `method` 与 `body` 参数触发，请求体上限 1 MiB，一律不跟随重定向，在所有审批模式下逐次审批，且可按注册域名记成 Always Allow 规则。两项网络工具的 GET 与搜索只在 `strict` 模式下逐次审批。
 
 ### Mobile Relay
 

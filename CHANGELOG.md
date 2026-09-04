@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.71.0-rc1] - 2026-09-04
+
+### Added
+- **`web_fetch` 支持 POST。** 新增 `method`（`GET` / `POST`，默认 GET）、`body` 和 `content_type`（默认 `application/json`）三个参数，请求体上限 1 MiB。此前 Agent 想调一个 HTTP 接口只能绕道 `run_command` 里的 curl，等于用 shell 审批去挡一次网络写入。
+- **POST 审批可按注册域名记住。** 审批卡多出「始终允许」一项，规则形如 `web-post:example.com`：批准 `api.example.com` 之后，`upload.example.com` 的 POST 也不再问，换成别的域名重新问。域名按公共后缀表切分，`example.co.uk` 整体算一个注册域名，不会被机械地截成 `co.uk` 而放行整个英国二级域；IP 直连按字面量单独成规则。逐字记完整 URL 在这里没有意义——URL 常带一次性 id、body 每次都不同，规则下一次就对不上。规则里只有域名，body 中的密钥不会被写进 `always-allow.json`。
+- 新增依赖 `psl 2.1`（公共后缀表编译进二进制，运行时不联网取表）。
+
+### Changed
+- POST 在**所有**审批模式下都逐次确认，`read-only` 策略在进入审批之前直接拒绝——它是对外写操作，跟 GET 不是一回事。
+- POST **不跟随任何重定向**：用户批准的是当前这个地址，跳转后的端点可能换了域名，跟着跳等于拿旧批准写新地方。现在把状态码和 `Location` 如实交回模型，让它拿新地址重新申请。
+- POST 失败时把响应正文截断 500 字符一并返回：服务端的错误说明正是模型需要的东西，只给一个裸状态码等于让它猜。GET 的失败信息不变。
+
+### Tests
+- 新增：注册域名切分（子域归并、`example.co.uk` 不被截、IPv4 / IPv6 字面量）、同注册域名下第二次 POST 命中已记规则不再询问、换域名重新询问、`read-only` 模式在审批之前拒绝、`method` 只接受 GET 与 POST。
+- 版本从 **0.70.0-rc6** 提升为 **0.71.0-rc1**（新增功能，rc 重置）。
+
+## [0.70.0-rc6] - 2026-09-04
+
+### Changed
+- **抓公网网页不再逐次弹审批。** `web_fetch` 和 `web_search` 此前在所有审批模式下都要用户按 Y，读一份在线文档得连按好几次，价值等于零：抓页面不写本地任何东西，私网、回环、链路本地目标在审批之前就已被 `validate_public_url` 拒掉，HTTPS 降级也一律拒绝。现在只有 `strict` 模式逐次确认，`read-only` / `smart` / `workspace-write` 按只读操作直接放行。
+- 跨 hostname 重定向的二次审批同样只保留在 `strict` 模式；每一跳仍然重做公网目标校验，环路、跳数、超时和 3 MiB 上限不变。
+
+### Tests
+- 新增：`read-only` / `smart` / `workspace-write` 三种模式下公网只读审批直接通过，`strict` 模式仍然走审批并被默认拒绝器拒绝。
+- 版本从 **0.70.0-rc5** 提升为 **0.70.0-rc6**。
+
 ## [0.70.0-rc5] - 2026-09-04
 
 ### Changed
