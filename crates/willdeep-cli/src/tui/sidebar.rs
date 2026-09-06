@@ -456,7 +456,15 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         lines.push(Line::styled(
                             format!(
                                 "{prefix} {short} · {profile}{mode} · {}",
-                                runtime_status_label(agent.status, app.language)
+                                if agent.retry_wait.is_some() {
+                                    app.language.text(
+                                        "等待重试",
+                                        "Waiting to retry",
+                                        "再試行を待機中",
+                                    )
+                                } else {
+                                    runtime_status_label(agent.status, app.language)
+                                }
                             ),
                             agent_style,
                         ));

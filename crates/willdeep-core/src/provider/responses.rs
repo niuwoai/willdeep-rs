@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{client, endpoint, openai_auth, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
+mod streaming;
 
 pub struct ResponsesProvider {
     config: ProviderConfig,
@@ -24,6 +25,15 @@ impl ResponsesProvider {
 
 #[async_trait]
 impl Provider for ResponsesProvider {
+    async fn complete_with_events(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        events: &dyn super::ProviderEventSink,
+    ) -> Result<Completion, ProviderError> {
+        streaming::complete(self, messages, tools, events).await
+    }
+
     fn with_model(&self, model: &str) -> Result<std::sync::Arc<dyn Provider>, ProviderError> {
         let mut config = self.config.clone();
         config.model = model.to_owned();
@@ -48,54 +58,7 @@ impl Provider for ResponsesProvider {
         let request =
             openai_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
         let bytes = send_retrying(request, &self.config).await?;
-        let response: ResponsesResponse = serde_json::from_slice(&bytes)
-            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-
-        let mut text = Vec::new();
-        let mut tool_calls = Vec::new();
-        for item in response.output {
-            match item.kind.as_str() {
-                "message" => {
-                    for content in item.content {
-                        if matches!(content.kind.as_str(), "output_text" | "text")
-                            && let Some(value) = content.text
-                        {
-                            text.push(value);
-                        }
-                    }
-                }
-                "function_call" => {
-                    tool_calls.push(ToolCall {
-                        id: item
-                            .call_id
-                            .or(item.id)
-                            .unwrap_or_else(|| "call_unknown".to_owned()),
-                        name: item.name.unwrap_or_default(),
-                        arguments: item.arguments.unwrap_or_else(|| "{}".to_owned()),
-                    });
-                }
-                _ => {}
-            }
-        }
-        if text.is_empty() && tool_calls.is_empty() {
-            return Err(ProviderError::EmptyResponse);
-        }
-        Ok(Completion {
-            content: text.join(""),
-            tool_calls,
-            finish_reason: response.status,
-            usage: response.usage.map(|usage| Usage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: match (usage.input_tokens, usage.output_tokens) {
-                    (Some(input), Some(output)) => Some(input + output),
-                    _ => None,
-                },
-                cache_read_tokens: usage
-                    .input_tokens_details
-                    .and_then(|details| details.cached_tokens),
-            }),
-        })
+        decode_completion(&bytes)
     }
 }
 
@@ -284,6 +247,57 @@ struct ResponseUsage {
 #[derive(Deserialize)]
 struct ResponseInputTokensDetails {
     cached_tokens: Option<u64>,
+}
+
+fn decode_completion(bytes: &[u8]) -> Result<Completion, ProviderError> {
+    let response: ResponsesResponse = serde_json::from_slice(bytes)
+        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+
+    let mut text = Vec::new();
+    let mut tool_calls = Vec::new();
+    for item in response.output {
+        match item.kind.as_str() {
+            "message" => {
+                for content in item.content {
+                    if matches!(content.kind.as_str(), "output_text" | "text")
+                        && let Some(value) = content.text
+                    {
+                        text.push(value);
+                    }
+                }
+            }
+            "function_call" => {
+                tool_calls.push(ToolCall {
+                    id: item
+                        .call_id
+                        .or(item.id)
+                        .unwrap_or_else(|| "call_unknown".to_owned()),
+                    name: item.name.unwrap_or_default(),
+                    arguments: item.arguments.unwrap_or_else(|| "{}".to_owned()),
+                });
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(ProviderError::EmptyResponse);
+    }
+    Ok(Completion {
+        content: text.join(""),
+        tool_calls,
+        finish_reason: response.status,
+        usage: response.usage.map(|usage| Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: match (usage.input_tokens, usage.output_tokens) {
+                (Some(input), Some(output)) => Some(input + output),
+                _ => None,
+            },
+            cache_read_tokens: usage
+                .input_tokens_details
+                .and_then(|details| details.cached_tokens),
+        }),
+    })
 }
 
 #[cfg(test)]

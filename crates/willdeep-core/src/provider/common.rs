@@ -1,9 +1,35 @@
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
+use std::time::{Duration, SystemTime};
 
 use super::{ProviderConfig, ProviderError, ProviderKind};
 use crate::{CLIENT_NAME, CLIENT_USER_AGENT};
 
 const ERROR_BODY_LIMIT: usize = 8 * 1024;
+const SUCCESS_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Some compatible servers ignore stream=true and return a JSON completion.
+/// Decode the existing response without issuing a second generation request.
+pub async fn emit_buffered_completion(
+    completion: crate::types::Completion,
+    events: &dyn super::ProviderEventSink,
+    deadline: tokio::time::Instant,
+) -> Result<crate::types::Completion, ProviderError> {
+    tokio::time::timeout_at(deadline, async {
+        if !completion.content.is_empty() {
+            events
+                .emit(super::ProviderEvent::TextDelta(completion.content.clone()))
+                .await;
+        }
+        if let Some(usage) = &completion.usage {
+            events
+                .emit(super::ProviderEvent::Usage(usage.clone()))
+                .await;
+        }
+    })
+    .await
+    .map_err(|_| ProviderError::DeadlineExceeded)?;
+    Ok(completion)
+}
 
 /// 一次 Provider 请求最多发几遍（含第一遍）。
 const MAX_ATTEMPTS: u32 = 3;
@@ -101,33 +127,88 @@ fn apply_some_im_headers(request: RequestBuilder, config: &ProviderConfig) -> Re
 /// 收场，而链路本身几秒后就恢复了——握手掉一次，整轮对话连同上下文一起丢掉，
 /// 重来的成本远高于等那 250 毫秒。
 ///
-/// 只重发本来就该重发的：连接建立失败、读写超时、以及 5xx。4xx 一律直接抛——
-/// 密钥错了、模型名写错了、请求体不合法，重发多少遍都是同一个答案。429 也不在
-/// 重发之列：限流要照 `Retry-After` 的节奏来，用这里这套几百毫秒的退避去顶，
-/// 只会把限流顶得更死。
+/// 429 和 5xx 遵守 Retry-After；无有效头时使用退避。其他 4xx 不重试。
+/// 所有尝试及等待共享一个请求期限，等待被取消后不会再发送请求。
 pub async fn send_retrying(
     request: RequestBuilder,
     config: &ProviderConfig,
 ) -> Result<Vec<u8>, ProviderError> {
+    let deadline = request_deadline(config)?;
+    let response =
+        send_open_retrying(request, config, &super::NoopProviderEvents, deadline).await?;
+    tokio::time::timeout_at(deadline, decode_success(response, config))
+        .await
+        .map_err(|_| ProviderError::DeadlineExceeded)?
+}
+
+pub fn request_deadline(config: &ProviderConfig) -> Result<tokio::time::Instant, ProviderError> {
+    tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(config.request_timeout_secs))
+        .ok_or(ProviderError::DeadlineExceeded)
+}
+
+/// Retry only before a successful response is delivered. Body/stream failures
+/// are not replayed: the provider may already have generated billable content.
+pub async fn send_open_retrying(
+    request: RequestBuilder,
+    config: &ProviderConfig,
+    events: &dyn super::ProviderEventSink,
+    deadline: tokio::time::Instant,
+) -> Result<reqwest::Response, ProviderError> {
     for attempt in 1..MAX_ATTEMPTS {
         // 拿不到副本说明 body 不可重放（流式请求），那就没有重发一说，
         // 直接跳出去把原件发掉。
         let Some(candidate) = request.try_clone() else {
             break;
         };
-        match send_once(candidate, config).await {
+        match tokio::time::timeout_at(deadline, send_once(candidate, config))
+            .await
+            .map_err(|_| ProviderError::DeadlineExceeded)?
+        {
             Ok(bytes) => return Ok(bytes),
             Err(error) if is_retryable(&error) => {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    RETRY_BASE_DELAY_MS << (attempt - 1),
-                ))
-                .await;
+                let delay = retry_delay(&error, attempt);
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if delay >= remaining {
+                    return Err(ProviderError::RetryDeferred {
+                        retry_after_secs: delay.as_secs(),
+                        source: Box::new(error),
+                    });
+                }
+                tokio::time::timeout_at(deadline, async {
+                    events
+                        .emit(super::ProviderEvent::RetryWait { attempt, delay })
+                        .await;
+                    tokio::time::sleep(delay).await;
+                    events
+                        .emit(super::ProviderEvent::RetryStarted { attempt })
+                        .await;
+                })
+                .await
+                .map_err(|_| ProviderError::DeadlineExceeded)?;
             }
             Err(error) => return Err(error),
         }
     }
     // 最后一遍：用掉原始 request，错误照原样往上抛，不再包一层重试的说辞。
-    send_once(request, config).await
+    tokio::time::timeout_at(deadline, send_once(request, config))
+        .await
+        .map_err(|_| ProviderError::DeadlineExceeded)?
+}
+
+fn retry_delay(error: &ProviderError, attempt: u32) -> Duration {
+    let fallback = Duration::from_millis(RETRY_BASE_DELAY_MS << (attempt - 1));
+    match error {
+        ProviderError::Http {
+            retry_after: Some(delay),
+            ..
+        } => *delay,
+        ProviderError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            ..
+        } => fallback.max(Duration::from_secs(1)),
+        _ => fallback,
+    }
 }
 
 /// 发一遍并读出 body。连接层的失败在这里就被收进 [`ProviderError::Request`]，
@@ -136,8 +217,17 @@ pub async fn send_retrying(
 async fn send_once(
     request: RequestBuilder,
     config: &ProviderConfig,
-) -> Result<Vec<u8>, ProviderError> {
-    decode_success(request.send().await?, config).await
+) -> Result<reqwest::Response, ProviderError> {
+    let response = request.send().await?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    match decode_success(response, config).await {
+        Err(error) => Err(error),
+        Ok(_) => Err(ProviderError::InvalidResponse(
+            "unexpected HTTP status transition".to_owned(),
+        )),
+    }
 }
 
 fn is_retryable(error: &ProviderError) -> bool {
@@ -152,24 +242,60 @@ fn is_retryable(error: &ProviderError) -> bool {
         ProviderError::Request(error) => {
             error.is_connect() || error.is_timeout() || error.is_request()
         }
-        ProviderError::Http { status, .. } => status.is_server_error(),
+        ProviderError::Http { status, .. } => {
+            status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
+        }
         _ => false,
     }
 }
 
 pub async fn decode_success(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     config: &ProviderConfig,
 ) -> Result<Vec<u8>, ProviderError> {
     let status = response.status();
-    let bytes = response.bytes().await?.to_vec();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, SystemTime::now()));
+    let limit = if status.is_success() {
+        SUCCESS_BODY_LIMIT
+    } else {
+        ERROR_BODY_LIMIT
+    };
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = limit.saturating_add(1).saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() > limit {
+            if status.is_success() {
+                return Err(ProviderError::InvalidResponse(
+                    "provider response exceeds the bounded body limit".to_owned(),
+                ));
+            }
+            break;
+        }
+    }
     if status.is_success() {
         return Ok(bytes);
     }
     Err(ProviderError::Http {
         status,
         body: safe_error_body(status, &bytes, Some(config.api_key.trim())),
+        retry_after,
     })
+}
+
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        // A syntactically valid but enormous delay must not become a fast retry.
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .map(|time| time.duration_since(now).unwrap_or_default())
 }
 
 fn safe_error_body(status: StatusCode, bytes: &[u8], api_key: Option<&str>) -> String {
@@ -206,6 +332,13 @@ mod tests {
     async fn scripted_server(
         script: Vec<Option<u16>>,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        scripted_server_with_retry_after(script, None).await
+    }
+
+    async fn scripted_server_with_retry_after(
+        script: Vec<Option<u16>>,
+        retry_after: Option<&'static str>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -228,8 +361,11 @@ mod tests {
                     status => {
                         let status = status.unwrap_or(200);
                         let body = if status == 200 { "{\"data\":[]}" } else { "{}" };
+                        let header = retry_after
+                            .map(|value| format!("retry-after: {value}\r\n"))
+                            .unwrap_or_default();
                         let response = format!(
-                            "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 {status} X\r\n{header}content-length: {}\r\nconnection: close\r\n\r\n{body}",
                             body.len()
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
@@ -249,6 +385,143 @@ mod tests {
             "test-key",
             "test-model",
         )
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_dates_and_overflow_without_early_retry() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after(&httpdate::fmt_http_date(now + Duration::from_secs(30)), now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(30)), now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after("999999999999999999999999", now),
+            Some(Duration::from_secs(u64::MAX))
+        );
+        assert_eq!(parse_retry_after("-1", now), None);
+        assert_eq!(parse_retry_after("invalid", now), None);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_waits_for_retry_after_before_sending_again() {
+        #[derive(Default)]
+        struct Events(std::sync::Mutex<Vec<super::super::ProviderEvent>>);
+        #[async_trait::async_trait]
+        impl super::super::ProviderEventSink for Events {
+            async fn emit(&self, event: super::super::ProviderEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let (url, hits, server) =
+            scripted_server_with_retry_after(vec![Some(429)], Some("1")).await;
+        let config = probe_config(&url);
+        let started = std::time::Instant::now();
+        let events = Events::default();
+        send_open_retrying(
+            client(&config).unwrap().get(&url),
+            &config,
+            &events,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let recorded = events.0.lock().unwrap();
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                super::super::ProviderEvent::RetryWait { attempt: 1, .. },
+                super::super::ProviderEvent::RetryStarted { attempt: 1 }
+            ]
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn excessive_retry_after_returns_without_sending_early() {
+        let (url, hits, server) =
+            scripted_server_with_retry_after(vec![Some(503)], Some("120")).await;
+        let mut config = probe_config(&url);
+        config.request_timeout_secs = 1;
+        let error = send_retrying(client(&config).unwrap().get(&url), &config)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::RetryDeferred {
+                retry_after_secs: 120,
+                ..
+            }
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_retry_wait_never_sends_another_request() {
+        let (url, hits, server) =
+            scripted_server_with_retry_after(vec![Some(429)], Some("1")).await;
+        let task = tokio::spawn(async move {
+            let config = probe_config(&url);
+            send_retrying(client(&config).unwrap().get(&url), &config).await
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while hits.load(Ordering::SeqCst) == 0 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn error_body_is_bounded_before_the_server_finishes_sending() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 1000000000\r\n\r\n")
+                .await
+                .unwrap();
+            stream
+                .write_all(&vec![b'x'; ERROR_BODY_LIMIT + 1])
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let config = probe_config(&url);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_retrying(client(&config).unwrap().get(&url), &config),
+        )
+        .await;
+        server.abort();
+        let error = result
+            .expect("must not wait for the remaining gigabyte")
+            .unwrap_err();
+        let ProviderError::Http { body, .. } = error else {
+            panic!("unexpected error: {error}")
+        };
+        assert!(body.ends_with("[truncated]"));
+        assert!(body.len() < ERROR_BODY_LIMIT + 32);
     }
 
     /// 掉一次握手不该让整轮对话陪葬——这正是 0.54.0-rc2 之前那次

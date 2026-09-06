@@ -34,6 +34,9 @@ jobs:
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
+      - name: Hand-maintained file size boundary
+        if: runner.os == 'Linux'
+        run: ruby scripts/check_source_size.rb
       - name: Test
         run: cargo test --workspace
       - name: Clippy

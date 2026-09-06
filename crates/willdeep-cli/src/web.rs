@@ -281,6 +281,7 @@ struct WebRuntimeAgent {
     status: &'static str,
     current_turn: u64,
     current_tool: Option<String>,
+    retry_wait: Option<willdeep_runtime_protocol::AgentRetryWait>,
     total_tokens: Option<u64>,
     elapsed_seconds: u64,
     finished_seconds_ago: Option<u64>,
@@ -716,6 +717,7 @@ fn web_runtime_agent(agent: crate::daemon::tui_bridge::RemoteAgent) -> WebRuntim
         status: runtime_status_name(agent.status),
         current_turn: agent.current_turn,
         current_tool: agent.current_tool,
+        retry_wait: agent.retry_wait.clone(),
         total_tokens: agent.total_tokens,
         elapsed_seconds,
         finished_seconds_ago,
@@ -763,6 +765,7 @@ fn task_status_name(status: willdeep_runtime_protocol::TaskStatus) -> &'static s
         willdeep_runtime_protocol::TaskStatus::Failed => "failed",
         willdeep_runtime_protocol::TaskStatus::Cancelled => "cancelled",
         willdeep_runtime_protocol::TaskStatus::Interrupted => "interrupted",
+        willdeep_runtime_protocol::TaskStatus::Partial => "partial",
     }
 }
 
@@ -786,6 +789,7 @@ fn runtime_status_name(status: willdeep_core::RuntimeStatus) -> &'static str {
         willdeep_core::RuntimeStatus::WaitingAnswer => "waiting_answer",
         willdeep_core::RuntimeStatus::Failed => "failed",
         willdeep_core::RuntimeStatus::Done => "done",
+        willdeep_core::RuntimeStatus::Partial => "partial",
         willdeep_core::RuntimeStatus::Cancelled => "cancelled",
         willdeep_core::RuntimeStatus::Unknown => "unknown",
     }
@@ -1351,8 +1355,9 @@ async fn resume_session_stream(
             )
             .await;
             let event = match turn.status {
-                willdeep_runtime_protocol::TurnStatus::Completed => serde_json::json!({
-                    "type":"completed",
+                willdeep_runtime_protocol::TurnStatus::Completed
+                | willdeep_runtime_protocol::TurnStatus::Partial => serde_json::json!({
+                    "type":if turn.status == willdeep_runtime_protocol::TurnStatus::Partial { "partial" } else { "completed" },
                     "text":final_text,
                     "session_id":id,
                     "turn_id":turn.id,
@@ -1551,7 +1556,10 @@ async fn relay_runtime_turn(
                 && event_uuid(&event.message, "task_id") == task_id
                 && let Some(value) = runtime_output_payload(&event.message)
             {
-                if value.get("type").and_then(|value| value.as_str()) == Some("completed") {
+                if matches!(
+                    value.get("type").and_then(|value| value.as_str()),
+                    Some("completed" | "partial")
+                ) {
                     final_text = value
                         .get("text")
                         .and_then(|value| value.as_str())
@@ -1562,17 +1570,21 @@ async fn relay_runtime_turn(
             }
             if matches!(
                 event.kind.as_str(),
-                "turn.completed" | "turn.cancelled" | "turn.interrupted" | "turn.failed"
+                "turn.completed"
+                    | "turn.partial"
+                    | "turn.cancelled"
+                    | "turn.interrupted"
+                    | "turn.failed"
             ) && event_uuid(&event.message, "turn_id") == Some(turn_id)
             {
-                if event.kind == "turn.completed" {
+                if matches!(event.kind.as_str(), "turn.completed" | "turn.partial") {
                     let text = final_text
                         .or_else(|| latest_assistant_text(&state.home, session_id))
                         .unwrap_or_default();
                     send_event_at(
                         tx,
                         serde_json::json!({
-                            "type":"completed",
+                            "type":if event.kind == "turn.partial" { "partial" } else { "completed" },
                             "text":text,
                             "session_id":session_id,
                             "turn_id":turn_id,
@@ -1665,6 +1677,40 @@ fn validate_attachments(attachments: &[MessageAttachment]) -> Result<(), WebErro
 
 fn client_event(value: serde_json::Value, language: Language) -> Option<serde_json::Value> {
     let kind = value.get("type")?.as_str()?;
+    if matches!(kind, "provider_retry_started" | "subagent_retry_started") {
+        return Some(
+            serde_json::json!({"type":kind,"label":language.text("正在重试", "Retrying", "再試行中")}),
+        );
+    }
+    if kind == "assistant_text_delta" {
+        return Some(serde_json::json!({"type":kind,"text":value.get("text")?.as_str()?}));
+    }
+    if kind == "subagent_retry_wait" {
+        let id = value.get("id")?.as_str()?.parse::<uuid::Uuid>().ok()?;
+        let attempt = value.get("attempt")?.as_u64()?;
+        let delay = value.get("delay_ms")?.as_u64()?;
+        return Some(serde_json::json!({
+            "type":kind, "id":id, "attempt":attempt, "delay_ms":delay,
+            "label":format!("{} {} · {} {attempt} · {}s",
+                language.text("子 Agent", "Subagent", "サブエージェント"),
+                &id.to_string()[..8],
+                language.text("等待重试", "Waiting to retry", "再試行を待機中"),
+                delay.div_ceil(1000)),
+        }));
+    }
+    if kind == "provider_retry_wait" {
+        let delay = value
+            .get("delay_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default();
+        return Some(serde_json::json!({
+            "type":kind,
+            "label":format!("{} · {}s", language.text("等待重试", "Waiting to retry", "再試行を待機中"), delay.div_ceil(1000)),
+        }));
+    }
+    if kind == "usage_snapshot" {
+        return None;
+    }
     let label = match kind {
         "turn_started" => format!(
             "{} {}",
@@ -1970,8 +2016,45 @@ mod tests {
     // 「空会话不进 Web 历史」「只有附件也算用户输入」这两条语义，
     // 现在由 willdeep_core::session 的 digest 测试覆盖。
     #[test]
+    fn streaming_client_events_preserve_text_and_localize_retry_wait() {
+        let event = client_event(serde_json::json!({"type":"assistant_text_delta", "text":"正在生成正文", "internal":"hidden"}), Language::ZhCn).unwrap();
+        assert_eq!(event["text"], "正在生成正文");
+        assert!(event.get("internal").is_none());
+        let event = client_event(
+            serde_json::json!({"type":"provider_retry_wait", "delay_ms":1500}),
+            Language::En,
+        )
+        .unwrap();
+        assert_eq!(event["label"], "Waiting to retry · 2s");
+        assert!(client_event(serde_json::json!({"type":"usage_snapshot"}), Language::En).is_none());
+    }
+
+    #[test]
     fn embedded_frontend_exists() {
         assert!(WebAssets::get("index.html").is_some());
+    }
+    #[test]
+    fn child_retry_event_preserves_identity_and_redacts_private_fields() {
+        let id = uuid::Uuid::new_v4();
+        let mut event = crate::agent_event_json(willdeep_core::AgentEvent::SubagentRetryWait {
+            id,
+            attempt: 2,
+            delay: std::time::Duration::from_millis(1500),
+        });
+        event["private"] = serde_json::json!("hidden");
+        let public = client_event(event, Language::En).unwrap();
+        assert_eq!(public["type"], "subagent_retry_wait");
+        assert_eq!(public["id"], id.to_string());
+        assert_eq!(public["attempt"], 2);
+        assert_eq!(public["delay_ms"], 1500);
+        assert_eq!(
+            public["label"],
+            format!(
+                "Subagent {} · Waiting to retry 2 · 2s",
+                &id.to_string()[..8]
+            )
+        );
+        assert!(public.get("private").is_none());
     }
     #[test]
     fn tool_events_are_redacted_for_sse() {
@@ -2032,6 +2115,7 @@ mod tests {
             status: runtime_status_name(willdeep_core::RuntimeStatus::Working),
             current_turn: 2,
             current_tool: Some("read_file".to_owned()),
+            retry_wait: None,
             total_tokens: Some(100),
             elapsed_seconds: 12,
             finished_seconds_ago: None,
@@ -2060,6 +2144,7 @@ mod tests {
                 status: willdeep_core::RuntimeStatus::Done,
                 current_turn: 0,
                 current_tool: None,
+                retry_wait: None,
                 total_tokens: None,
                 max_turns: None,
                 token_budget: None,

@@ -377,15 +377,21 @@ export function App() {
     const currentSessionId = event.session_id || activeSessionRef.current;
     const currentTurnId = event.turn_id || activeTurnRef.current;
     if (currentSessionId && currentTurnId) saveRuntimeCursor(currentSessionId, currentTurnId, event.cursor);
-    if (event.type === "completed") {
+    if (event.type === "completed" || event.type === "partial") {
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "" } : message));
       setActiveRuntimeSessionId("");
       activeSessionRef.current = null;
       activeTurnRef.current = null;
       return { terminal: true as const, text: event.text || t.emptyReply };
     }
     if (event.type === "error") return { terminal: true as const, error: event.message || t.requestFailed };
-    if (event.type === "thought") setActivity(event.text || t.thinking);
+    if (event.type === "assistant_text_delta") {
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: message.content + (event.text || "") } : message));
+    }
+    else if (["provider_retry_wait", "subagent_retry_wait", "provider_retry_started", "subagent_retry_started"].includes(event.type)) setActivity(event.label || t.thinking);
+    else if (event.type === "thought") setActivity(event.text || t.thinking);
     else if (event.type === "turn_started") {
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "" } : message));
       setActivity(event.label || t.thinking);
       const stepId = event.id || `turn-${event.cursor ?? nextId("turn")}`;
       updateRun(runId, (steps) => {
@@ -838,10 +844,9 @@ export function App() {
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="var(--text-dim)">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <RunCard key={message.id} steps={message.steps ?? []} messages={t} /> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.content && <Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="var(--danger-text)" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
-      <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} theme={theme} onThemeChange={setTheme} />
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
           `source` 固定 "chat.selection"，与 macOS 宿主传的两个参数一致。 */}
       {chatSelection && chatSelectionEntries.length > 0 && (
@@ -876,6 +881,7 @@ export function App() {
         <Text className="send-hint">{t.sendHint}</Text>
         <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && ((!prompt.trim() && !attachments.length) || selectedSession?.archived)}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
       </Box>
+      <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} theme={theme} onThemeChange={setTheme} />
     </Container>
     {pluginOverlays}
   </Flex>;

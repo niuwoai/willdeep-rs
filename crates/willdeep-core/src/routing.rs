@@ -88,7 +88,7 @@ impl Default for RoutingPolicy {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EscalationTicket {
     pub reason: String,

@@ -320,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn child_retry_wait_survives_event_log_reopen_and_public_projection() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-child-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("events.ndjson");
+        let id = uuid::Uuid::new_v4();
+        let payload = crate::agent_event_json(willdeep_core::AgentEvent::SubagentRetryWait {
+            id,
+            attempt: 2,
+            delay: Duration::from_millis(1500),
+        });
+        let log = EventLog::open(path.clone()).unwrap();
+        log.append(
+            "task.output",
+            format!("task_id={} {payload}", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+        drop(log);
+        let reopened = EventLog::open(path).unwrap();
+        let events = reopened.read_after(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let public = public_event(events[0].clone());
+        let (_, body) = public.message.split_once(' ').unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            payload
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn readers_wait_until_an_event_line_is_complete() {
         let root =
             std::env::temp_dir().join(format!("willdeep-event-race-{}", uuid::Uuid::new_v4()));

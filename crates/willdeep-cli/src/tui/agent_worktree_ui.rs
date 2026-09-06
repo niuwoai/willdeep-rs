@@ -78,6 +78,7 @@ fn render_agent_actions(
             willdeep_core::RuntimeStatus::Blocked
                 | willdeep_core::RuntimeStatus::Failed
                 | willdeep_core::RuntimeStatus::Done
+                | willdeep_core::RuntimeStatus::Partial
                 | willdeep_core::RuntimeStatus::Cancelled
         )
     {
@@ -189,6 +190,15 @@ pub(super) fn agent_detail_content(
         app.language.text("分支", "Branch", "ブランチ"),
         agent.worktree_branch.as_deref().unwrap_or("—")
     )];
+    if let Some(wait) = &agent.retry_wait {
+        lines.push(format!(
+            "{} · {} · {}s",
+            app.language
+                .text("等待重试", "Waiting to retry", "再試行を待機中"),
+            wait.attempt,
+            wait.delay_ms.div_ceil(1000)
+        ));
+    }
     let tools = app
         .runtime_tools
         .iter()

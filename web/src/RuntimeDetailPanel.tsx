@@ -21,6 +21,7 @@ function statusLabel(status: string, t: Messages) {
   if (status === "completed" || status === "done") return t.toolDone;
   if (status === "failed") return t.toolFailed;
   if (status === "interrupted") return t.interrupted;
+  if (status === "partial") return t.partial;
   if (status === "cancelled") return t.cancelled;
   if (status === "blocked") return t.blocked;
   if (status === "idle") return t.idle;

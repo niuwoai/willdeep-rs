@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::provider::Provider;
 use crate::routing::EscalationTicket;
@@ -66,13 +66,35 @@ impl SubagentShell {
 /// model"); those are now separate axes — the responsibility is `generalist`,
 /// the model is [`crate::WorkerTier::Expert`]. A trade list that doubles as a
 /// price list makes every new responsibility cost a new model binding.
-pub const PUBLIC_SUBAGENT_IDS: [&str; 5] = [
-    "generalist",
-    "implementer",
-    "tester",
-    "reviewer",
-    "ops_runner",
+pub const PUBLIC_SUBAGENT_TRADES: [(&str, &str); 5] = [
+    (
+        "generalist",
+        "investigation across files and repository state",
+    ),
+    ("implementer", "bounded coding"),
+    ("tester", "tests and verification"),
+    ("reviewer", "independent correctness and safety review"),
+    ("ops_runner", "bounded command execution"),
 ];
+
+pub const PUBLIC_SUBAGENT_IDS: [&str; 5] = [
+    PUBLIC_SUBAGENT_TRADES[0].0,
+    PUBLIC_SUBAGENT_TRADES[1].0,
+    PUBLIC_SUBAGENT_TRADES[2].0,
+    PUBLIC_SUBAGENT_TRADES[3].0,
+    PUBLIC_SUBAGENT_TRADES[4].0,
+];
+
+pub fn public_trade_contract() -> String {
+    let roles = PUBLIC_SUBAGENT_TRADES
+        .iter()
+        .map(|(id, purpose)| format!("{id} ({purpose})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Public worker responsibilities: {roles}. Model tier is separate: standard, advanced, expert. Use the exact responsibility IDs from this catalog; legacy aliases are not public choices."
+    )
+}
 
 pub fn public_profile_id(id: &str) -> Option<&'static str> {
     match id.trim().to_ascii_lowercase().as_str() {
@@ -158,7 +180,7 @@ pub struct SubagentProfile {
 
 /// The structured half of a dispatch: what the parent already knows, so the
 /// worker does not spend its window rediscovering it.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TaskPacket {
     pub goal: String,
     /// Skill whose body the runtime inlines into the worker's first message.
@@ -221,7 +243,7 @@ impl TaskPacket {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskVerifier {
     pub command: String,
     #[serde(default)]
@@ -234,7 +256,7 @@ impl TaskVerifier {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct SpawnAgentArgs {
     pub prompt: String,
     pub label: Option<String>,

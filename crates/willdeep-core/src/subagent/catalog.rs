@@ -67,6 +67,8 @@ pub struct SubagentCatalog {
     /// 动作**，仅此而已：没批准过的照旧被拒，Worker 把精确动作写进报告，由父
     /// 会话去请人批。
     always_allow_store: Option<PathBuf>,
+    state_home: Option<PathBuf>,
+    parent_session: Option<uuid::Uuid>,
     /// Skill library used to resolve `task.skill` at dispatch time.
     skills: Option<Arc<crate::skills::SkillCatalog>>,
     /// 每一档兑现成哪个 provider。准入在上一层（[`crate::WorkerTier::requires_admission`]），
@@ -75,6 +77,7 @@ pub struct SubagentCatalog {
     /// 没配的档不换模型，只放宽预算——票据白拿不到东西，好过静默降级到一个
     /// 谁也没指定的模型。
     tier_bindings: BTreeMap<crate::WorkerTier, TierBinding>,
+    sandbox: crate::sandbox::SandboxSpec,
 }
 
 /// 一个档位兑现出来的模型。
@@ -118,8 +121,17 @@ impl SubagentCatalog {
             skills: None,
             mcp: None,
             always_allow_store: None,
+            state_home: None,
+            parent_session: None,
             tier_bindings: BTreeMap::new(),
+            sandbox: crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::Off, []),
         }
+    }
+
+    /// Workers and unattended verifiers inherit the parent's OS boundary.
+    pub fn with_sandbox(mut self, sandbox: crate::sandbox::SandboxSpec) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// 把已连接的 MCP 服务交给兜底工种。
@@ -138,6 +150,16 @@ impl SubagentCatalog {
     /// 也能跑 `cargo test`，不等于它能跑任意 `cargo`。没有这条，一个后台
     /// Worker 会在人已经批准过的同一条命令上再次卡住，而它自己没有审批 UI，
     /// 只能失败回来。
+    pub fn with_state_home(mut self, path: impl Into<PathBuf>) -> Self {
+        self.state_home = Some(path.into());
+        self
+    }
+
+    pub fn with_parent_session(mut self, id: uuid::Uuid) -> Self {
+        self.parent_session = Some(id);
+        self
+    }
+
     pub fn with_always_allow_store(mut self, path: impl Into<PathBuf>) -> Self {
         self.always_allow_store = Some(path.into());
         self
@@ -190,7 +212,153 @@ impl SubagentCatalog {
             .join(" ")
     }
 
-    pub fn retry_background_agent(
+    pub async fn retry_background_agent(
+        &self,
+        agent_id: uuid::Uuid,
+        model: Option<&str>,
+    ) -> Result<Option<String>, AgentError> {
+        if let Some(id) = self.retry_in_memory(agent_id, model)? {
+            return Ok(Some(id));
+        }
+        if self
+            .background
+            .snapshots()
+            .iter()
+            .any(|task| task.agent_id == Some(agent_id))
+        {
+            return Ok(None);
+        }
+        let Some(home) = &self.state_home else {
+            return Ok(None);
+        };
+        let Some(record) = super::dispatch_store::load(home, agent_id)? else {
+            return Ok(None);
+        };
+        if record.parent_session != self.parent_session
+            || record.args.run_in_background != Some(true)
+        {
+            return Err(AgentError::Subagent(
+                "worker dispatch does not belong to this parent background session".into(),
+            ));
+        }
+        if record
+            .args
+            .profile
+            .as_deref()
+            .is_none_or(|id| !self.profiles.contains_key(id))
+        {
+            return Err(AgentError::Subagent(
+                "original worker profile is no longer configured".into(),
+            ));
+        }
+        super::dispatch_store::validate_workspace(&record.prepared, &self.workspace).await?;
+        let selected_model = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or(record.model);
+        if let Some(model) = selected_model {
+            self.model_overrides
+                .lock()
+                .expect("subagent model overrides")
+                .insert(agent_id, model);
+        }
+        let result = self
+            .run_with_id(
+                agent_id,
+                record.args,
+                record.approved_targets,
+                record.approved_command,
+                Some(record.prepared),
+            )
+            .await;
+        if let Err(error) = result {
+            self.model_overrides
+                .lock()
+                .expect("subagent model overrides")
+                .remove(&agent_id);
+            return Err(error);
+        }
+        Ok(self
+            .background
+            .snapshots()
+            .into_iter()
+            .find(|task| task.agent_id == Some(agent_id))
+            .map(|task| task.id))
+    }
+
+    pub(crate) fn list_agent_recoveries(
+        &self,
+        after: Option<uuid::Uuid>,
+    ) -> Result<String, AgentError> {
+        let home = self
+            .state_home
+            .as_deref()
+            .ok_or_else(|| AgentError::Checkpoint("worker state home is unavailable".into()))?;
+        let parent = self.parent_session.ok_or_else(|| {
+            AgentError::Checkpoint("parent session identity is unavailable".into())
+        })?;
+        Ok(super::dispatch_store::list_foreground(home, parent, after)?.to_string())
+    }
+
+    pub(crate) async fn resume_foreground_agent(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<String, AgentError> {
+        let home = self
+            .state_home
+            .as_deref()
+            .ok_or_else(|| AgentError::Checkpoint("worker state home is unavailable".into()))?;
+        let record = super::dispatch_store::load(home, id)?
+            .ok_or_else(|| AgentError::Checkpoint("worker dispatch was not found".into()))?;
+        if record.parent_session != self.parent_session
+            || self.parent_session.is_none()
+            || record.args.run_in_background == Some(true)
+        {
+            return Err(AgentError::Subagent(
+                "dispatch is not a foreground child of this parent session".into(),
+            ));
+        }
+        if let Some(report) = super::dispatch_store::load_report(home, id)? {
+            self.sink
+                .emit(AgentEvent::SubagentCompleted {
+                    id,
+                    status: SubagentLifecycleStatus::Completed,
+                    report: Some(bounded_report(report.clone())),
+                })
+                .await;
+            return Ok(format!(
+                "[Recovered completed child report; tools and verifier were not rerun.]\n{report}"
+            ));
+        }
+        if record
+            .args
+            .profile
+            .as_deref()
+            .is_none_or(|profile| !self.profiles.contains_key(profile))
+        {
+            return Err(AgentError::Subagent(
+                "original worker profile is no longer configured".into(),
+            ));
+        }
+        super::dispatch_store::validate_workspace(&record.prepared, &self.workspace).await?;
+        if let Some(model) = record.model {
+            self.model_overrides
+                .lock()
+                .expect("subagent model overrides")
+                .insert(id, model);
+        }
+        self.run_with_id(
+            id,
+            record.args,
+            record.approved_targets,
+            record.approved_command,
+            Some(record.prepared),
+        )
+        .await
+    }
+
+    fn retry_in_memory(
         &self,
         agent_id: uuid::Uuid,
         model: Option<&str>,
@@ -263,7 +431,7 @@ impl SubagentCatalog {
                 "target_command requires exact parent authorization".to_owned(),
             ));
         }
-        self.run_with_id(uuid::Uuid::new_v4(), args, approved_targets, None)
+        self.run_with_id(uuid::Uuid::new_v4(), args, approved_targets, None, None)
             .await
     }
 
@@ -278,6 +446,7 @@ impl SubagentCatalog {
             args,
             approved_targets,
             approved_command,
+            None,
         )
         .await
     }
@@ -334,6 +503,7 @@ impl SubagentCatalog {
             },
             None,
             None,
+            None,
         )
         .await?;
         Ok(())
@@ -345,11 +515,14 @@ impl SubagentCatalog {
         args: SpawnAgentArgs,
         approved_targets: Option<BTreeSet<PathBuf>>,
         approved_command: Option<String>,
+        restored_workspace: Option<PreparedSubagentWorkspace>,
     ) -> Result<String, AgentError> {
+        let mut dispatch_args = args.clone();
         let mut profile = self
             .profile(args.profile.as_deref())
             .ok_or_else(|| AgentError::Subagent("no subagent profiles configured".to_owned()))?
             .clone();
+        dispatch_args.profile = Some(profile.id.clone());
         // 职责给提示词、工具和写入边界，档位给模型和上下文预算。
         //
         // 预算只放宽不收窄：工种自己声明的窗口是它完成职责的下限，implementer
@@ -370,6 +543,19 @@ impl SubagentCatalog {
                 // 否则 Worker 只剩边界段落、不知道自己是干什么的。
                 profile.hosted_job_prompt = binding.hosted_job_prompt;
             }
+        }
+        if let Some(model) = self
+            .model_overrides
+            .lock()
+            .expect("subagent model overrides")
+            .get(&agent_id)
+            .cloned()
+        {
+            if profile.model.as_deref() != Some(model.as_str()) {
+                profile.provider = profile.provider.with_model(&model)?;
+            }
+            profile.hosted_job_prompt = crate::hosts_job_prompt(&model);
+            profile.model = Some(model);
         }
         let requested_command = args
             .target_command
@@ -454,10 +640,38 @@ impl SubagentCatalog {
                 )));
             }
         }
-        let prepared = self.prepare_workspace(agent_id, profile.worktree).await?;
+        let recovering = restored_workspace.is_some();
+        let prepared = if let Some(prepared) = restored_workspace {
+            if prepared.dedicated != (profile.worktree == SubagentWorktreePolicy::Dedicated) {
+                return Err(AgentError::Subagent(
+                    "worker worktree policy changed since dispatch".into(),
+                ));
+            }
+            prepared
+        } else {
+            self.prepare_workspace(agent_id, profile.worktree).await?
+        };
+        if !recovering && let Some(home) = &self.state_home {
+            super::dispatch_store::save(
+                home,
+                &super::dispatch_store::DispatchRecord {
+                    version: 1,
+                    id: agent_id,
+                    parent_session: self.parent_session,
+                    args: dispatch_args,
+                    approved_targets: approved_targets.clone(),
+                    approved_command: approved_command.clone(),
+                    model: profile.model.clone(),
+                    prepared: prepared.clone(),
+                },
+            )?;
+        }
         let approved_targets = remap_approved_targets(approved_targets, &prepared)?;
         let run = SubagentRun {
             workspace: prepared.workspace.clone(),
+            sandbox: self
+                .sandbox
+                .for_workspace(&self.workspace, &prepared.workspace),
             profile: profile.clone(),
             prompt: prompt.clone(),
             task,
@@ -473,6 +687,7 @@ impl SubagentCatalog {
                 .then(|| self.mcp.clone())
                 .flatten(),
             always_allow_store: self.always_allow_store.clone(),
+            state_home: self.state_home.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -519,6 +734,11 @@ impl SubagentCatalog {
                                 Err(error) => return subagent_task_result(Err(error.into())),
                             };
                             run.profile.model = Some(model);
+                            run.profile.hosted_job_prompt = run
+                                .profile
+                                .model
+                                .as_deref()
+                                .is_some_and(crate::hosts_job_prompt);
                         }
                         let result =
                             run_subagent(run, sink.clone(), agent_id, Some(instruction_inbox))
@@ -574,6 +794,16 @@ impl SubagentCatalog {
                 "Subagent started: agent_id={agent_id}, background_task={id}. Its report will be delivered automatically to the main harness."
             ))
         } else {
+            let cached_report = if recovering {
+                self.state_home
+                    .as_deref()
+                    .map(|home| super::dispatch_store::load_report(home, agent_id))
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            let recovered_report = cached_report.is_some();
             self.sink
                 .emit(AgentEvent::SubagentStarted {
                     id: agent_id,
@@ -590,9 +820,24 @@ impl SubagentCatalog {
                     dedicated_worktree: prepared.dedicated,
                 })
                 .await;
-            let result = run_subagent(run, self.sink.clone(), agent_id, None).await;
-            let result = attach_worktree_report(result, &prepared).await;
-            record_profile_result(&self.failures, &profile_id, &result);
+            let mut result = if let Some(report) = cached_report {
+                Ok(format!(
+                    "[Recovered completed child report; tools and verifier were not rerun.]\n{report}"
+                ))
+            } else {
+                let result = run_subagent(run, self.sink.clone(), agent_id, None).await;
+                attach_worktree_report(result, &prepared).await
+            };
+            if !recovered_report
+                && let Ok(report) = &result
+                && let Some(home) = &self.state_home
+                && let Err(error) = super::dispatch_store::save_report(home, agent_id, report)
+            {
+                result = Err(error);
+            }
+            if !recovered_report {
+                record_profile_result(&self.failures, &profile_id, &result);
+            }
             self.sink
                 .emit(AgentEvent::SubagentCompleted {
                     id: agent_id,
@@ -728,6 +973,7 @@ fn remap_approved_targets(
 fn background_lifecycle_status(status: &BackgroundTaskStatus) -> SubagentLifecycleStatus {
     match status {
         BackgroundTaskStatus::Completed => SubagentLifecycleStatus::Completed,
+        BackgroundTaskStatus::Partial => SubagentLifecycleStatus::Partial,
         BackgroundTaskStatus::Blocked => SubagentLifecycleStatus::Blocked,
         BackgroundTaskStatus::Killed => SubagentLifecycleStatus::Cancelled,
         BackgroundTaskStatus::Running
@@ -740,6 +986,7 @@ fn background_lifecycle_status(status: &BackgroundTaskStatus) -> SubagentLifecyc
 fn subagent_lifecycle_status(result: &Result<String, AgentError>) -> SubagentLifecycleStatus {
     match result {
         Ok(_) => SubagentLifecycleStatus::Completed,
+        Err(AgentError::SubagentPartial { .. }) => SubagentLifecycleStatus::Partial,
         Err(AgentError::Tool(ToolError::ApprovalDenied(_))) => SubagentLifecycleStatus::Blocked,
         Err(_) => SubagentLifecycleStatus::Failed,
     }
@@ -747,6 +994,11 @@ fn subagent_lifecycle_status(result: &Result<String, AgentError>) -> SubagentLif
 
 fn subagent_task_result(result: Result<String, AgentError>) -> TaskResult {
     match result {
+        Err(error @ AgentError::SubagentPartial { .. }) => TaskResult {
+            status: BackgroundTaskStatus::Partial,
+            exit_code: None,
+            output: error.to_string(),
+        },
         Ok(report) => TaskResult {
             status: BackgroundTaskStatus::Completed,
             exit_code: Some(0),
@@ -814,6 +1066,28 @@ mod tests {
         assert!(
             super::super::runner::acquire_file_claim_for_test(&claimed, &files).is_err(),
             "同一个文件的第二个认领必须被拒，哪怕并发数还没到上限"
+        );
+    }
+
+    #[test]
+    fn partial_child_remains_partial_in_background_and_lifecycle() {
+        let error = AgentError::SubagentPartial {
+            reason: crate::AgentStopReason::Incomplete,
+            turns: 3,
+            report: "saved partial work".into(),
+        };
+        let result = Err(error);
+        assert_eq!(
+            subagent_lifecycle_status(&result),
+            SubagentLifecycleStatus::Partial
+        );
+        let task = subagent_task_result(result);
+        assert_eq!(task.status, BackgroundTaskStatus::Partial);
+        assert_eq!(task.exit_code, None);
+        assert!(task.output.contains("saved partial work"));
+        assert_eq!(
+            background_lifecycle_status(&task.status),
+            SubagentLifecycleStatus::Partial
         );
     }
 
@@ -1011,6 +1285,7 @@ mod tests {
         assert!(
             catalog
                 .retry_background_agent(id, Some("new-model"))
+                .await
                 .expect("retry with model")
                 .is_some()
         );

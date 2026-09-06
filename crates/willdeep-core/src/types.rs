@@ -171,6 +171,22 @@ pub struct Completion {
     pub usage: Option<Usage>,
 }
 
+impl Completion {
+    pub fn is_incomplete(&self) -> bool {
+        self.finish_reason.as_deref().is_some_and(|reason| {
+            matches!(
+                reason,
+                "length"
+                    | "max_tokens"
+                    | "incomplete"
+                    | "content_filter"
+                    | "pause_turn"
+                    | "model_context_window_exceeded"
+            )
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub input_tokens: Option<u64>,

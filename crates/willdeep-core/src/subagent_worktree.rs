@@ -10,7 +10,7 @@ pub enum SubagentWorktreePolicy {
     Dedicated,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PreparedSubagentWorkspace {
     pub workspace: PathBuf,
     pub root_workspace: PathBuf,
@@ -116,6 +116,9 @@ impl SubagentWorktreeManager {
         let relative_workspace = canonical_workspace
             .strip_prefix(&canonical_repository)
             .expect("workspace containment checked");
+        let target = tokio::fs::canonicalize(&target).await.map_err(|error| {
+            AgentError::Subagent(format!("resolve created subagent worktree: {error}"))
+        })?;
         Ok(PreparedSubagentWorkspace {
             workspace: target.join(relative_workspace),
             root_workspace: canonical_workspace,

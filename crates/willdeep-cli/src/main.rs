@@ -338,6 +338,7 @@ impl std::fmt::Display for HeadlessRuntimeExecutionError {
             daemon::HeadlessRuntimeStatus::Failed(_) => "Runtime Turn failed",
             daemon::HeadlessRuntimeStatus::Cancelled => "Runtime Turn was cancelled",
             daemon::HeadlessRuntimeStatus::Interrupted => "Runtime Turn was interrupted",
+            daemon::HeadlessRuntimeStatus::Partial => "Runtime Turn is only partially complete",
         };
         formatter.write_str(message)
     }
@@ -680,6 +681,7 @@ async fn run() -> Result<()> {
     let background_tasks = built.background_tasks.clone();
     let context_window = built.context_window;
 
+    let new_session = resumed.is_none();
     let mut session = resumed.unwrap_or_else(|| {
         // 没有提示词就没有标题可派生；占位符由 `Session::new` 自己给，
         // 交互式 TUI 的标题在第一条提示词提交时才成形。
@@ -689,10 +691,16 @@ async fn run() -> Result<()> {
             prompt.as_deref().unwrap_or_default(),
         );
         session.model = cli.model.clone();
+        session.id = built.session_id;
         session
     });
     if session.config.is_none() {
         session.config = Some(cli.config.clone().unwrap_or(config::default_config_path()?));
+    }
+    // Execution ownership requires a durable session. Only initialize newly
+    // allocated IDs here; resumed sessions must be refreshed after claiming.
+    if new_session && !interactive_tui {
+        store.save(&mut session)?;
     }
     relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
@@ -741,6 +749,7 @@ async fn run() -> Result<()> {
         harness::ExecutionOptions {
             allow_compress_command,
             replay_existing_user_message: false,
+            ownership: None,
         },
     )
     .await?;
@@ -757,6 +766,9 @@ async fn run() -> Result<()> {
         println!("{}", completion_json(&outcome, session.id));
     } else if !outcome.compressed {
         println!("{}", outcome.final_text);
+    }
+    if !outcome.stop_reason.is_complete() {
+        return Err(HeadlessRuntimeExecutionError(daemon::HeadlessRuntimeStatus::Partial).into());
     }
     Ok(())
 }
@@ -824,17 +836,30 @@ async fn run_with_runtime(
             RunOutput::Text if !args.quiet => println!("{}", outcome.final_text),
             RunOutput::Json | RunOutput::Ndjson => println!(
                 "{}",
-                completion_json_values(&outcome.final_text, outcome.turns, outcome.session_id)
+                completion_json_values(
+                    &outcome.final_text,
+                    outcome.turns,
+                    outcome.session_id,
+                    &outcome.stop_reason
+                )
             ),
             RunOutput::Text => {}
         }
     } else if cli.json {
         println!(
             "{}",
-            completion_json_values(&outcome.final_text, outcome.turns, outcome.session_id)
+            completion_json_values(
+                &outcome.final_text,
+                outcome.turns,
+                outcome.session_id,
+                &outcome.stop_reason
+            )
         );
     } else {
         println!("{}", outcome.final_text);
+    }
+    if !matches!(outcome.stop_reason.as_str(), "finished" | "goal_complete") {
+        return Err(HeadlessRuntimeExecutionError(daemon::HeadlessRuntimeStatus::Partial).into());
     }
     Ok(())
 }
@@ -902,16 +927,23 @@ fn generate_man_page() -> Result<()> {
 }
 
 fn completion_json(outcome: &harness::HarnessOutcome, session_id: uuid::Uuid) -> serde_json::Value {
-    completion_json_values(&outcome.final_text, outcome.turns, session_id)
+    completion_json_values(
+        &outcome.final_text,
+        outcome.turns,
+        session_id,
+        outcome.stop_reason.as_str(),
+    )
 }
 
 fn completion_json_values(
     final_text: &str,
     turns: usize,
     session_id: uuid::Uuid,
+    stop_reason: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "type": "completed",
+        "type": if matches!(stop_reason, "finished" | "goal_complete") { "completed" } else { "partial" },
+        "stop_reason": stop_reason,
         "turns": turns,
         "text": final_text,
         "session_id": session_id
@@ -1371,6 +1403,16 @@ impl EventSink for TerminalSink {
                 eprintln!("[turn {turn}] preempted by a runtime event")
             }
             AgentEvent::ToolRequested(call) => eprintln!("[tool] {}", call.name),
+            AgentEvent::ProviderProgress(event) => match event {
+                willdeep_core::provider::ProviderEvent::TextDelta(text) => eprint!("{text}"),
+                willdeep_core::provider::ProviderEvent::RetryWait { attempt, delay } => {
+                    eprintln!("[retry {attempt}] waiting {} seconds", delay.as_secs_f64())
+                }
+                willdeep_core::provider::ProviderEvent::Usage(_) => {}
+                willdeep_core::provider::ProviderEvent::RetryStarted { attempt } => {
+                    eprintln!("[retry {attempt}] started")
+                }
+            },
             AgentEvent::ToolCompleted {
                 call,
                 output,
@@ -1428,6 +1470,15 @@ impl EventSink for TerminalSink {
                 if let Some(total) = usage.total_tokens {
                     eprintln!("[subagent] id={id} usage={total}");
                 }
+            }
+            AgentEvent::SubagentRetryStarted { id, attempt } => {
+                eprintln!("[subagent] id={id} retry={attempt} started")
+            }
+            AgentEvent::SubagentRetryWait { id, attempt, delay } => {
+                eprintln!(
+                    "[subagent] id={id} retry={attempt} waiting {} seconds",
+                    delay.as_secs_f64()
+                );
             }
             AgentEvent::SubagentVerdict {
                 id,
@@ -1602,6 +1653,20 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
         AgentEvent::AssistantText(text) => {
             serde_json::json!({"type": "assistant_text", "text": text})
         }
+        AgentEvent::ProviderProgress(event) => match event {
+            willdeep_core::provider::ProviderEvent::RetryStarted { attempt } => {
+                serde_json::json!({"type":"provider_retry_started", "attempt":attempt})
+            }
+            willdeep_core::provider::ProviderEvent::TextDelta(text) => {
+                serde_json::json!({"type":"assistant_text_delta","text":text})
+            }
+            willdeep_core::provider::ProviderEvent::Usage(usage) => {
+                serde_json::json!({"type":"usage_snapshot","usage":usage})
+            }
+            willdeep_core::provider::ProviderEvent::RetryWait { attempt, delay } => {
+                serde_json::json!({"type":"provider_retry_wait","attempt":attempt,"delay_ms":delay.as_millis()})
+            }
+        },
         AgentEvent::ToolRequested(call) => {
             let mut value = serde_json::json!({
                 "type": "tool_requested",
@@ -1723,6 +1788,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "id": id,
             "status": match status {
                 SubagentLifecycleStatus::Completed => "completed",
+                SubagentLifecycleStatus::Partial => "partial",
                 SubagentLifecycleStatus::Blocked => "blocked",
                 SubagentLifecycleStatus::Cancelled => "cancelled",
                 SubagentLifecycleStatus::Failed => "failed",
@@ -1784,6 +1850,13 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "output_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens
         }),
+        AgentEvent::SubagentRetryWait { id, attempt, delay } => serde_json::json!({
+            "type": "subagent_retry_wait", "id": id, "attempt": attempt,
+            "delay_ms": delay.as_millis()
+        }),
+        AgentEvent::SubagentRetryStarted { id, attempt } => {
+            serde_json::json!({"type":"subagent_retry_started", "id":id, "attempt":attempt})
+        }
     }
 }
 
@@ -2144,6 +2217,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let value = completion_json(
             &harness::HarnessOutcome {
+                stop_reason: willdeep_core::AgentStopReason::Finished,
                 final_text: "done".to_owned(),
                 turns: 4,
                 compressed: false,
@@ -2154,7 +2228,30 @@ mod tests {
         assert_eq!(value["turns"], 4);
         assert_eq!(value["text"], "done");
         assert_eq!(value["session_id"], session_id.to_string());
-        assert!(value.as_object().is_some_and(|object| object.len() == 4));
+        assert_eq!(value["stop_reason"], "finished");
+    }
+
+    #[test]
+    fn partial_completion_json_preserves_each_stop_reason() {
+        use willdeep_core::AgentStopReason;
+        for reason in [
+            AgentStopReason::BudgetLimited,
+            AgentStopReason::MaxTurns,
+            AgentStopReason::Incomplete,
+        ] {
+            let value = completion_json(
+                &harness::HarnessOutcome {
+                    stop_reason: reason,
+                    final_text: "saved partial work".to_owned(),
+                    turns: 3,
+                    compressed: false,
+                },
+                uuid::Uuid::new_v4(),
+            );
+            assert_eq!(value["type"], "partial");
+            assert_eq!(value["stop_reason"], reason.as_str());
+            assert_eq!(value["text"], "saved partial work");
+        }
     }
 
     #[test]

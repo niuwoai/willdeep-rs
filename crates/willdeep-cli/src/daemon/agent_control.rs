@@ -141,11 +141,37 @@ pub(super) async fn enqueue_agent_command_internal(
     if agent.parent_id.is_none() || !agent.background {
         return Err(StatusCode::CONFLICT);
     }
-    let task = state
+    let mut task = state
         .tasks
         .get(agent.task_id)
         .await
         .ok_or(StatusCode::NOT_FOUND)?;
+    if kind == AgentCommandKind::Retry
+        && !matches!(
+            task.status,
+            RuntimeTaskStatus::Running
+                | RuntimeTaskStatus::WaitingApproval
+                | RuntimeTaskStatus::WaitingAnswer
+        )
+    {
+        let parent = state
+            .agents
+            .get(agent.parent_id.ok_or(StatusCode::CONFLICT)?)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let current = state
+            .tasks
+            .get(parent.task_id)
+            .await
+            .ok_or(StatusCode::NOT_FOUND)?;
+        if task.session_id.is_none()
+            || current.session_id != task.session_id
+            || current.agent_id != agent.parent_id
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        task = current;
+    }
     if !matches!(
         task.status,
         RuntimeTaskStatus::Running
@@ -160,6 +186,7 @@ pub(super) async fn enqueue_agent_command_internal(
             agent.status,
             RuntimeAgentStatus::Blocked
                 | RuntimeAgentStatus::Completed
+                | RuntimeAgentStatus::Partial
                 | RuntimeAgentStatus::Failed
                 | RuntimeAgentStatus::Cancelled
                 | RuntimeAgentStatus::Interrupted
@@ -170,9 +197,14 @@ pub(super) async fn enqueue_agent_command_internal(
     if !valid_status {
         return Err(StatusCode::CONFLICT);
     }
+    let model = if kind == AgentCommandKind::Retry {
+        model.or_else(|| agent.model.clone())
+    } else {
+        model
+    };
     let command = state
         .agent_commands
-        .enqueue(agent.task_id, agent.id, kind, message, model)
+        .enqueue(task.id, agent.id, kind, message, model)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .events
@@ -180,7 +212,7 @@ pub(super) async fn enqueue_agent_command_internal(
             "agent.command_requested",
             format!(
                 "task_id={} agent_id={} command_id={} kind={kind:?}",
-                agent.task_id, agent.id, command.id
+                task.id, agent.id, command.id
             ),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -350,6 +382,7 @@ async fn apply_command(
         AgentCommandKind::Stop if background.kill_agent(command.agent_id) => (true, None),
         AgentCommandKind::Retry => match subagents
             .retry_background_agent(command.agent_id, command.model.as_deref())
+            .await
         {
             Ok(Some(_)) => (true, None),
             Ok(None) => (

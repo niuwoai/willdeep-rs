@@ -2,7 +2,7 @@ import { Box, Flex, NativeSelect, Text } from "@chakra-ui/react";
 import { languageLabels, languages, type Language, type Messages } from "./i18n";
 import { themeModes, type ThemeMode } from "./theme";
 
-/// 右下角常驻的两个小开关：语言与主题。
+/// 输入区下方的两个小开关：语言与主题，与发送/停止按钮各占布局空间。
 ///
 /// 语言在左栏设置里也有一份，这里再放一个是因为**用得最多的开关不该藏在抽屉
 /// 里**；两处改的是同一个状态，不会各说各话。

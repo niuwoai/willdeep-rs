@@ -346,6 +346,7 @@ fn review(agent: &RuntimeAgent) -> Result<WorktreeReview> {
     if !matches!(
         agent.status,
         RuntimeAgentStatus::Completed
+            | RuntimeAgentStatus::Partial
             | RuntimeAgentStatus::Failed
             | RuntimeAgentStatus::Blocked
             | RuntimeAgentStatus::Cancelled
@@ -589,6 +590,7 @@ mod tests {
                 status: RuntimeAgentStatus::Completed,
                 current_turn: 1,
                 current_tool: None,
+                retry_wait: None,
                 input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,

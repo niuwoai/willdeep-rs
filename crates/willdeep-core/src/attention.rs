@@ -12,6 +12,7 @@ pub enum RuntimeStatus {
     WaitingAnswer,
     Failed,
     Done,
+    Partial,
     Cancelled,
     Unknown,
 }
@@ -23,6 +24,7 @@ impl RuntimeStatus {
             Self::WaitingAnswer => 85,
             Self::Blocked => 80,
             Self::Failed => 70,
+            Self::Partial => 60,
             Self::Working => 50,
             Self::Done => 30,
             Self::Cancelled => 20,
@@ -33,9 +35,11 @@ impl RuntimeStatus {
 
     pub fn section(self) -> Option<AttentionSection> {
         match self {
-            Self::WaitingApproval | Self::WaitingAnswer | Self::Blocked | Self::Failed => {
-                Some(AttentionSection::NeedsYou)
-            }
+            Self::WaitingApproval
+            | Self::WaitingAnswer
+            | Self::Blocked
+            | Self::Failed
+            | Self::Partial => Some(AttentionSection::NeedsYou),
             Self::Working => Some(AttentionSection::Working),
             Self::Done | Self::Cancelled => Some(AttentionSection::Recent),
             Self::Idle | Self::Unknown => None,
@@ -156,6 +160,7 @@ impl AttentionItem {
             BackgroundTaskStatus::Running => RuntimeStatus::Working,
             BackgroundTaskStatus::Blocked => RuntimeStatus::Blocked,
             BackgroundTaskStatus::Completed => RuntimeStatus::Done,
+            BackgroundTaskStatus::Partial => RuntimeStatus::Partial,
             BackgroundTaskStatus::Failed
             | BackgroundTaskStatus::TimedOut
             | BackgroundTaskStatus::LaunchFailed => RuntimeStatus::Failed,

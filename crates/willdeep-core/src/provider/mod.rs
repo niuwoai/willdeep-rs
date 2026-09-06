@@ -2,6 +2,9 @@ mod anthropic;
 mod chat_completions;
 mod common;
 mod responses;
+pub mod sse;
+#[cfg(test)]
+mod stream_test_support;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -132,11 +135,51 @@ pub enum ProviderError {
     Http {
         status: reqwest::StatusCode,
         body: String,
+        retry_after: Option<std::time::Duration>,
+    },
+    #[error("provider request deadline exceeded")]
+    DeadlineExceeded,
+    #[error(
+        "provider retry requires waiting {retry_after_secs} seconds, exceeding the remaining request deadline: {source}"
+    )]
+    RetryDeferred {
+        retry_after_secs: u64,
+        source: Box<ProviderError>,
     },
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
     #[error("provider response did not include a completion")]
     EmptyResponse,
+    #[error("provider stream interrupted: {source}")]
+    StreamInterrupted {
+        source: Box<ProviderError>,
+        partial: Box<Completion>,
+    },
+}
+
+#[async_trait]
+pub trait ProviderEventSink: Send + Sync {
+    async fn emit(&self, event: ProviderEvent);
+}
+
+#[derive(Clone, Debug)]
+pub enum ProviderEvent {
+    TextDelta(String),
+    Usage(crate::types::Usage),
+    RetryWait {
+        attempt: u32,
+        delay: std::time::Duration,
+    },
+    RetryStarted {
+        attempt: u32,
+    },
+}
+
+pub struct NoopProviderEvents;
+
+#[async_trait]
+impl ProviderEventSink for NoopProviderEvents {
+    async fn emit(&self, _event: ProviderEvent) {}
 }
 
 #[async_trait]
@@ -152,6 +195,15 @@ pub trait Provider: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Completion, ProviderError>;
+
+    async fn complete_with_events(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        _events: &dyn ProviderEventSink,
+    ) -> Result<Completion, ProviderError> {
+        self.complete(messages, tools).await
+    }
 }
 
 /// Return the model identifiers exposed by an OpenAI-compatible `/models`

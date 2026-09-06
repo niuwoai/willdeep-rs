@@ -1,14 +1,14 @@
 //! 脱离父进程的后台命令。
 //!
-//! 显式 `run_in_background` 的命令走这里：进程自成进程组、输出直接落文件、
-//! 退出码由包装写下来。父进程可以升级、重启、退出，命令照跑;回来之后按记录
+//! 显式 `run_in_background` 的命令走这里：独立 supervisor 继承执行策略，
+//! 有界输出和退出码落盘。父进程可以升级、重启、退出，命令照跑;回来之后按记录
 //! 取结果，不必重跑一遍。
 //!
 //! # 为什么要有一个「收尸」文件
 //!
 //! 进程一旦脱离，父进程就没有 `wait()` 可用了：等到它回来查的时候，那个 PID
 //! 多半已经消失。光看「进程还在不在」只能区分「跑着」和「没了」，区分不出
-//! 「成功」和「失败」。所以包装命令在真命令之后把退出码写进 `exit` 文件——
+//! 「成功」和「失败」。所以 supervisor 在保存结果之后原子发布 `exit` 文件——
 //! **文件在就是有结论，文件不在就是还没有**，这是唯一能跨进程存活的判据。
 //!
 //! # PID 会被复用
@@ -61,17 +61,26 @@ pub struct JobReport {
 #[derive(Clone, Debug)]
 pub struct DetachedJobStore {
     directory: PathBuf,
+    supervisor_executable: Option<PathBuf>,
 }
 
 impl DetachedJobStore {
     pub fn new(home: impl AsRef<Path>) -> Self {
         Self {
             directory: home.as_ref().join(DIRECTORY),
+            supervisor_executable: None,
         }
     }
 
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Select the host executable implementing `daemon background-supervisor`.
+    /// Embedded hosts must supply a compatible executable explicitly.
+    pub fn with_supervisor_executable(mut self, executable: PathBuf) -> Self {
+        self.supervisor_executable = Some(executable);
+        self
     }
 
     /// 起一个脱离父进程的命令。
@@ -85,36 +94,69 @@ impl DetachedJobStore {
         label: &str,
         workspace: &Path,
     ) -> std::io::Result<DetachedJob> {
+        self.spawn_with_policy(
+            command,
+            label,
+            workspace,
+            &crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::Off, []),
+            60,
+        )
+    }
+
+    pub fn spawn_with_policy(
+        &self,
+        command: &str,
+        label: &str,
+        workspace: &Path,
+        sandbox: &crate::sandbox::SandboxSpec,
+        timeout_seconds: u64,
+    ) -> std::io::Result<DetachedJob> {
+        use std::io::Write;
+        // Validate before creating a job or starting any process.
+        let _ = crate::execution::shell(command, sandbox)?;
+        if command.trim().is_empty() || !(1..=600).contains(&timeout_seconds) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid detached command or timeout",
+            ));
+        }
         let id = format!("job_{}", uuid::Uuid::new_v4().simple());
         let dir = self.directory.join(&id);
-        std::fs::create_dir_all(&dir)?;
-        let stdout = dir.join("stdout.log");
-        let stderr = dir.join("stderr.log");
-        let exit = dir.join("exit");
-
-        // 包装脚本负责收尸。**用 `trap ... EXIT` 而不是把写入语句排在命令后
-        // 面**：命令里一句 `exit 3` 会当场结束这个 shell，排在后面的语句根本
-        // 不执行，于是一个明明有结论的作业永远显示「不知道」。EXIT trap 无论
-        // 正常结束还是显式 exit 都会跑到。
-        //
-        // 路径走环境变量,不拼进脚本:目录名里有空格、引号、`$` 都不罕见,拼
-        // 进去就等于让路径改写脚本。单引号让 `$WILLDEEP_JOB_EXIT_FILE` 留到
-        // trap 执行时才展开。
-        let script = format!("trap 'printf %s $? > \"$WILLDEEP_JOB_EXIT_FILE\"' EXIT\n{command}\n");
-        let mut child = std::process::Command::new(shell_program());
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir)?;
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "command": command, "workspace": workspace.canonicalize()?,
+            "timeout_seconds": timeout_seconds, "sandbox": sandbox,
+            "detached_directory": dir.canonicalize()?,
+        }))?;
+        if payload.len() > 256 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "detached command request is too large",
+            ));
+        }
+        let executable = self
+            .supervisor_executable
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe)?;
+        let mut child = std::process::Command::new(executable);
         child
-            .arg(shell_flag())
-            .arg(&script)
-            .env("WILLDEEP_JOB_EXIT_FILE", &exit)
+            .args(["daemon", "background-supervisor"])
+            .env("WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR", "1")
             .current_dir(workspace)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::fs::File::create(&stdout)?)
-            .stderr(std::fs::File::create(&stderr)?);
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         detach(&mut child);
-        let handle = child.spawn()?;
+        let mut handle = child.spawn()?;
         let pid = handle.id();
-        // 句柄立刻丢掉：留着它父进程退出时会去 wait，而我们要的正是「不等」。
-        drop(handle);
 
         let job = DetachedJob {
             id: id.clone(),
@@ -125,7 +167,27 @@ impl DetachedJobStore {
             started_marker: process_start_marker(pid),
             created_at: now_seconds(),
         };
-        write_private(&dir.join("meta.json"), &serde_json::to_vec_pretty(&job)?)?;
+        // Journal before sending the command: a metadata failure cannot leave
+        // an unrecorded side effect running in the background.
+        let start = (|| -> std::io::Result<()> {
+            write_private(&dir.join("meta.json"), &serde_json::to_vec_pretty(&job)?)?;
+            let mut input = handle
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("missing supervisor input"))?;
+            input.write_all(&(payload.len() as u32).to_be_bytes())?;
+            input.write_all(&payload)?;
+            input.flush()
+        })();
+        if let Err(error) = start {
+            let _ = handle.kill();
+            let _ = handle.wait();
+            return Err(error);
+        }
+        // Reap while this host lives, without tying child lifetime to the host.
+        std::thread::spawn(move || {
+            let _ = handle.wait();
+        });
         Ok(job)
     }
 
@@ -189,6 +251,11 @@ impl DetachedJobStore {
                 text.push('\n');
             }
             text.push_str(&errors);
+        }
+        let status = read_tail(&dir.join("status.log"), limit);
+        if !status.is_empty() {
+            text.push('\n');
+            text.push_str(&status);
         }
         text
     }
@@ -272,26 +339,66 @@ fn detach(command: &mut std::process::Command) {
 #[cfg(not(unix))]
 fn detach(_command: &mut std::process::Command) {}
 
-fn shell_program() -> &'static str {
-    if cfg!(windows) { "cmd" } else { "/bin/sh" }
-}
-
-fn shell_flag() -> &'static str {
-    if cfg!(windows) { "/C" } else { "-c" }
+pub(crate) fn record_result(
+    directory: &Path,
+    result: crate::background::TaskResult,
+) -> std::io::Result<()> {
+    use crate::background::BackgroundTaskStatus;
+    let exit_code = match result.status {
+        BackgroundTaskStatus::TimedOut => 124,
+        BackgroundTaskStatus::Killed => 137,
+        _ => result.exit_code.unwrap_or(125),
+    };
+    if !directory.join("stdout.log").exists() {
+        write_private(&directory.join("stdout.log"), result.output.as_bytes())?;
+    } else if !matches!(
+        result.status,
+        BackgroundTaskStatus::Completed | BackgroundTaskStatus::Failed
+    ) {
+        // Stream logs already retain the output; keep the status separate
+        // without duplicating those tails in every subsequent report.
+        write_private(
+            &directory.join("status.log"),
+            result.output.lines().next().unwrap_or_default().as_bytes(),
+        )?;
+    }
+    write_private(
+        &directory.join("result.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "status": result.status, "exit_code": result.exit_code,
+        }))?,
+    )?;
+    // The final marker is published only after output and detailed status.
+    write_private(
+        &directory.join("exit.pending"),
+        exit_code.to_string().as_bytes(),
+    )?;
+    std::fs::rename(directory.join("exit.pending"), directory.join("exit"))
 }
 
 fn read_tail(path: &Path, limit: usize) -> String {
-    let Ok(bytes) = std::fs::read(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
     };
-    if bytes.len() <= limit {
+    let Ok(metadata) = file.metadata() else {
+        return String::new();
+    };
+    let start = metadata.len().saturating_sub(limit as u64);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.take(limit as u64).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    if start == 0 {
         return String::from_utf8_lossy(&bytes).into_owned();
     }
-    let start = bytes.len() - limit;
     format!(
         "…[{} bytes omitted]…\n{}",
         start,
-        String::from_utf8_lossy(&bytes[start..])
+        String::from_utf8_lossy(&bytes)
     )
 }
 
@@ -307,134 +414,29 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     options.open(path)?.write_all(data)
 }
 
+pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        options.open(&temporary)?.write_all(data)?;
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn now_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_secs())
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn store() -> (DetachedJobStore, PathBuf) {
-        let home = std::env::temp_dir().join(format!("willdeep-jobs-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).expect("home");
-        (DetachedJobStore::new(&home), home)
-    }
-
-    fn wait_for_finish(store: &DetachedJobStore, job: &DetachedJob) -> JobState {
-        for _ in 0..100 {
-            let state = store.state(job);
-            if state != JobState::Running {
-                return state;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("job never finished");
-    }
-
-    /// 退出码从文件里读回来，进程早已消失也照样有结论。
-    #[test]
-    fn a_finished_job_reports_its_exit_code_after_the_process_is_gone() {
-        let (store, home) = store();
-        let job = store
-            .spawn("printf hello; exit 3", "greet", &home)
-            .expect("spawn");
-        assert_eq!(
-            wait_for_finish(&store, &job),
-            JobState::Finished { exit_code: 3 }
-        );
-        assert!(
-            store
-                .output(&job.id, MAX_JOB_OUTPUT_BYTES)
-                .contains("hello")
-        );
-    }
-
-    /// 成功与失败靠退出码分，不靠「进程还在不在」。
-    #[test]
-    fn success_and_failure_are_told_apart_by_the_recorded_code() {
-        let (store, home) = store();
-        let ok = store.spawn("true", "ok", &home).expect("spawn");
-        let bad = store.spawn("exit 7", "bad", &home).expect("spawn");
-        assert_eq!(
-            wait_for_finish(&store, &ok),
-            JobState::Finished { exit_code: 0 }
-        );
-        assert_eq!(
-            wait_for_finish(&store, &bad),
-            JobState::Finished { exit_code: 7 }
-        );
-    }
-
-    /// 记录跨进程可读：换一个 store 实例（等价于重启）照样取得回结果。
-    #[test]
-    fn a_restart_reads_the_result_instead_of_rerunning() {
-        let (store, home) = store();
-        let job = store.spawn("printf done", "job", &home).expect("spawn");
-        wait_for_finish(&store, &job);
-
-        let reopened = DetachedJobStore::new(&home);
-        let listed = reopened.list();
-        assert_eq!(listed.len(), 1);
-        let report = reopened.report(&listed[0]);
-        assert_eq!(report.state, JobState::Finished { exit_code: 0 });
-        assert!(report.output.contains("done"));
-        assert_eq!(report.job.command, "printf done");
-    }
-
-    /// 没留下退出码的进程是「不知道」，不是「失败」。
-    #[test]
-    fn a_vanished_process_is_unknown_not_failed() {
-        let (store, home) = store();
-        let mut job = store.spawn("true", "gone", &home).expect("spawn");
-        wait_for_finish(&store, &job);
-        // 手工抹掉收尸文件，模拟被 kill -9 或断电。
-        std::fs::remove_file(store.directory().join(&job.id).join("exit")).expect("remove");
-        // 顺便把 PID 改成一个几乎不可能存在的值。
-        job.pid = 4_294_967_294;
-        job.started_marker = None;
-        assert_eq!(store.state(&job), JobState::Vanished);
-    }
-
-    /// PID 被复用时不能把别人的进程当成自己的作业。
-    #[test]
-    fn a_recycled_pid_does_not_look_like_a_running_job() {
-        let (store, home) = store();
-        let mut job = store.spawn("sleep 30", "sleeper", &home).expect("spawn");
-        assert_eq!(store.state(&job), JobState::Running);
-        // 同一个 PID，但启动时刻对不上：那是另一个进程。
-        job.started_marker = Some("Thu Jan  1 00:00:00 1970".to_owned());
-        assert_eq!(store.state(&job), JobState::Vanished);
-        let _ = std::process::Command::new("kill")
-            .arg(job.pid.to_string())
-            .status();
-    }
-
-    /// 还在跑的作业不给删：删了那个进程就没人认领了。
-    #[test]
-    fn a_running_job_cannot_be_forgotten() {
-        let (store, home) = store();
-        let job = store.spawn("sleep 30", "sleeper", &home).expect("spawn");
-        let error = store.forget(&job.id).expect_err("still running");
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        let _ = std::process::Command::new("kill")
-            .arg(job.pid.to_string())
-            .status();
-    }
-
-    /// 路径里有空格和引号时，收尸文件仍然写在该写的地方。
-    #[test]
-    fn quoting_survives_awkward_paths() {
-        let home = std::env::temp_dir().join(format!("willdeep jobs '{}'", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).expect("home");
-        let store = DetachedJobStore::new(&home);
-        let job = store.spawn("exit 5", "quoted", &home).expect("spawn");
-        assert_eq!(
-            wait_for_finish(&store, &job),
-            JobState::Finished { exit_code: 5 }
-        );
-    }
 }

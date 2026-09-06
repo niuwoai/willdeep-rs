@@ -9,6 +9,12 @@ pub(super) fn dispatch_prompt(
     tx: &mpsc::UnboundedSender<UiMessage>,
     prompt: String,
 ) -> Result<()> {
+    let checkpoint = willdeep_core::checkpoint::SessionCheckpointSink {
+        store: store.clone(),
+        session_id: session.id,
+    }
+    .claim()?;
+    store.refresh_execution(session)?;
     // `/goal` 是长程续推的开关：目标在场时，宿主会拒绝模型的隐式收口（long-horizon.v1 RA1）。
     if let Some(continuation) = agent.goal_continuation() {
         match app.goal.as_deref() {
@@ -29,7 +35,14 @@ pub(super) fn dispatch_prompt(
             )
             .to_owned(),
     );
-    let history = session.messages.clone();
+    let mut history = session.messages.clone();
+    if let Some(notice) = session
+        .execution_checkpoint
+        .as_ref()
+        .and_then(willdeep_core::checkpoint::CheckpointMetadata::recovery_notice)
+    {
+        history.push(notice);
+    }
     let attachments = std::mem::take(&mut app.attachments)
         .into_iter()
         .map(|value| value.message)
@@ -46,7 +59,10 @@ pub(super) fn dispatch_prompt(
     // 句柄留着，Esc 中断本地轮次时要靠它把在途的 Harness 掐掉。
     app.local_turn = Some(tokio::spawn(async move {
         let _ = tx.send(UiMessage::Finished(
-            agent.run_with_history_message(history, user).await,
+            agent
+                .run_checkpointed(history, user, Some(&checkpoint))
+                .await,
+            checkpoint,
         ));
     }));
     Ok(())
@@ -54,17 +70,36 @@ pub(super) fn dispatch_prompt(
 
 pub(super) fn dispatch_compress(
     app: &mut App,
-    session: &Session,
+    session: &mut Session,
+    store: &SessionStore,
     agent: &Arc<Agent>,
     tx: &mpsc::UnboundedSender<UiMessage>,
-) {
+) -> Result<()> {
+    let ownership = willdeep_core::checkpoint::SessionCheckpointSink {
+        store: store.clone(),
+        session_id: session.id,
+    }
+    .claim()?;
+    store.refresh_execution(session)?;
     app.begin_turn(false, "Compressing context".to_owned());
     let history = session.messages.clone();
     let agent = agent.clone();
     let tx = tx.clone();
+    let store = store.clone();
+    let session_id = session.id;
     app.local_turn = Some(tokio::spawn(async move {
-        let _ = tx.send(UiMessage::Compressed(agent.compress_history(history).await));
+        let _ = tx.send(UiMessage::Compressed(
+            agent
+                .compress_history_recorded(history, &mut |usage| {
+                    store
+                        .record_compression_usage(session_id, usage)
+                        .map_err(|error| willdeep_core::AgentError::Checkpoint(error.to_string()))
+                })
+                .await,
+            ownership,
+        ));
     }));
+    Ok(())
 }
 
 /// 队列里有待投递事件时，开一轮把它们交给模型。
@@ -116,7 +151,13 @@ pub(super) fn dispatch_notification(
     tx: &mpsc::UnboundedSender<UiMessage>,
     notice: String,
 ) -> Result<()> {
+    let checkpoint = willdeep_core::checkpoint::SessionCheckpointSink {
+        store: store.clone(),
+        session_id: session.id,
+    }
+    .claim()?;
     app.begin_turn(false, "Handling background result".to_owned());
+    store.refresh_execution(session)?;
     let history = session.messages.clone();
     let message = Message::user(notice);
     session.messages.push(message.clone());
@@ -125,7 +166,10 @@ pub(super) fn dispatch_notification(
     let tx = tx.clone();
     app.local_turn = Some(tokio::spawn(async move {
         let _ = tx.send(UiMessage::Finished(
-            agent.run_with_history_message(history, message).await,
+            agent
+                .run_checkpointed(history, message, Some(&checkpoint))
+                .await,
+            checkpoint,
         ));
     }));
     Ok(())
@@ -159,4 +203,84 @@ pub(super) fn dispatch_retitle(
             requested: force,
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnusedProvider;
+    #[async_trait::async_trait]
+    impl willdeep_core::provider::Provider for UnusedProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[willdeep_core::types::ToolDefinition],
+        ) -> std::result::Result<
+            willdeep_core::types::Completion,
+            willdeep_core::provider::ProviderError,
+        > {
+            panic!("short history compression must not request a provider");
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_compression_claims_before_dispatch_and_holds_until_result_consumed() {
+        use willdeep_core::checkpoint::SessionCheckpointSink;
+        let root =
+            std::env::temp_dir().join(format!("tui-compression-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "short history");
+        store.save(&mut session).unwrap();
+        let claimant = || SessionCheckpointSink {
+            store: store.clone(),
+            session_id: session.id,
+        };
+        let id = session.id;
+        let competitor = claimant().claim().unwrap();
+        let agent = Arc::new(Agent::new(
+            Arc::new(UnusedProvider),
+            willdeep_core::ToolRegistry::new(&root, willdeep_core::ApprovalMode::ReadOnly).unwrap(),
+            willdeep_core::AgentConfig {
+                max_turns: 1,
+                system_prompt: String::new(),
+                context_window: 32000,
+                token_budget: None,
+            },
+        ));
+        let mut app = App::new(Vec::new(), Language::En);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(dispatch_compress(&mut app, &mut session, &store, &agent, &tx).is_err());
+        assert!(app.local_turn.is_none());
+        drop(competitor);
+        dispatch_compress(&mut app, &mut session, &store, &agent, &tx).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            SessionCheckpointSink {
+                store: store.clone(),
+                session_id: id
+            }
+            .claim()
+            .is_err()
+        );
+        let UiMessage::Compressed(Ok(messages), ownership) = result else {
+            panic!("expected compressed history")
+        };
+        session.replace_with_compressed_messages(messages);
+        store.save(&mut session).unwrap();
+        drop(ownership);
+        assert!(
+            SessionCheckpointSink {
+                store: store.clone(),
+                session_id: id
+            }
+            .claim()
+            .is_ok()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

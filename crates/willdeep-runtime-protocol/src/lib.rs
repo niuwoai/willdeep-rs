@@ -419,6 +419,7 @@ pub enum TurnStatus {
     WaitingApproval,
     WaitingAnswer,
     Completed,
+    Partial,
     Failed,
     Cancelled,
     Interrupted,
@@ -441,6 +442,7 @@ pub struct RuntimeTurn {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
+    Partial,
     Running,
     Completed,
     Failed,
@@ -511,6 +513,7 @@ pub enum AgentStatus {
     WaitingAnswer,
     Blocked,
     Completed,
+    Partial,
     Failed,
     Cancelled,
     Interrupted,
@@ -533,6 +536,8 @@ pub struct RuntimeAgent {
     pub status: AgentStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
+    #[serde(default)]
+    pub retry_wait: Option<AgentRetryWait>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -563,6 +568,12 @@ pub struct RuntimeAgent {
     pub created_at: u64,
     pub updated_at: u64,
     pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRetryWait {
+    pub attempt: u32,
+    pub delay_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -602,6 +613,7 @@ pub enum TaskStatus {
     WaitingApproval,
     WaitingAnswer,
     Completed,
+    Partial,
     Failed,
     Cancelled,
     Interrupted,

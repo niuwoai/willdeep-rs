@@ -2,6 +2,9 @@ version = 1
 default_provider = "some-im"
 
 [agent]
+# Optional per-task acceptance checks; use a task-specific --config when needed.
+# Each check must pass on the final Git snapshot. Does not grant execution permission.
+# verification_commands = ["cargo test --workspace"]
 max_turns = 64
 approval = "smart"
 language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--language

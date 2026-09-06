@@ -135,6 +135,7 @@ pub fn status_label(status: RuntimeStatus) -> &'static str {
         RuntimeStatus::Failed => "failed",
         RuntimeStatus::Working => "running",
         RuntimeStatus::Done => "succeeded",
+        RuntimeStatus::Partial => "partial",
         RuntimeStatus::Cancelled => "denied",
         RuntimeStatus::Idle => "idle",
         RuntimeStatus::Unknown => "unknown",
@@ -253,6 +254,19 @@ impl Notifier {
     }
 
     /// A turn finished. Edge-triggered by the caller, so no de-duplication.
+    pub fn task_stopped(&self, outcome: &willdeep_core::AgentOutcome) {
+        if outcome.stop_reason.is_complete() {
+            self.task_completed(outcome.final_text.as_str());
+        } else {
+            self.attention_required(
+                RuntimeStatus::Partial,
+                "task_partial",
+                outcome.final_text.as_str(),
+            );
+        }
+    }
+
+    /// A completed turn. Partial runs must use task_stopped instead.
     pub fn task_completed(&self, summary: impl Into<String>) {
         let Some(inner) = &self.inner else { return };
         if !inner.on_task_completed {

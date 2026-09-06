@@ -76,6 +76,7 @@ pub(crate) struct RemoteAgent {
     pub status: willdeep_core::RuntimeStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
+    pub retry_wait: Option<willdeep_runtime_protocol::AgentRetryWait>,
     pub total_tokens: Option<u64>,
     pub max_turns: Option<u64>,
     pub token_budget: Option<u64>,
@@ -655,6 +656,7 @@ pub(crate) async fn runtime_snapshot(
                     label: agent.label.clone(),
                     current_turn: agent.current_turn,
                     current_tool: agent.current_tool.clone(),
+                    retry_wait: agent.retry_wait.clone(),
                 },
             )
         })
@@ -890,6 +892,9 @@ fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
                 willdeep_core::RuntimeStatus::Blocked
             }
             willdeep_runtime_protocol::AgentStatus::Completed => willdeep_core::RuntimeStatus::Done,
+            willdeep_runtime_protocol::AgentStatus::Partial => {
+                willdeep_core::RuntimeStatus::Partial
+            }
             willdeep_runtime_protocol::AgentStatus::Failed
             | willdeep_runtime_protocol::AgentStatus::Interrupted => {
                 willdeep_core::RuntimeStatus::Failed
@@ -900,6 +905,7 @@ fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
         },
         current_turn: agent.current_turn,
         current_tool: agent.current_tool,
+        retry_wait: agent.retry_wait.clone(),
         total_tokens: agent.total_tokens,
         max_turns: agent.max_turns,
         token_budget: agent.token_budget,
@@ -1001,6 +1007,7 @@ struct AgentActivity {
     label: Option<String>,
     current_turn: u64,
     current_tool: Option<String>,
+    retry_wait: Option<willdeep_runtime_protocol::AgentRetryWait>,
 }
 
 fn runtime_task_attention(
@@ -1015,6 +1022,7 @@ fn runtime_task_attention(
         TaskStatus::WaitingApproval => willdeep_core::RuntimeStatus::WaitingApproval,
         TaskStatus::WaitingAnswer => willdeep_core::RuntimeStatus::WaitingAnswer,
         TaskStatus::Completed => willdeep_core::RuntimeStatus::Done,
+        TaskStatus::Partial => willdeep_core::RuntimeStatus::Partial,
         TaskStatus::Failed | TaskStatus::Interrupted => willdeep_core::RuntimeStatus::Failed,
         TaskStatus::Cancelled => willdeep_core::RuntimeStatus::Cancelled,
     };
@@ -1053,6 +1061,9 @@ fn runtime_task_attention(
                 .and_then(|activity| activity.current_tool.as_deref())
                 .map(|tool| format!("Current tool: {tool}")),
             task.exit_code.map(|code| format!("Exit code: {code}")),
+            activity
+                .and_then(|activity| activity.retry_wait.as_ref())
+                .map(|wait| format!("Waiting to retry: {} · {}ms", wait.attempt, wait.delay_ms)),
             task.failure_domain
                 .map(|domain| format!("Failure domain: {domain:?}")),
         ]
@@ -1223,6 +1234,7 @@ mod tests {
             label: Some("root".to_owned()),
             current_turn: 15,
             current_tool: Some("run_command".to_owned()),
+            retry_wait: None,
         };
         let item =
             runtime_task_attention(attention_task(Some("发布 Xedit 新版本")), Some(&activity));

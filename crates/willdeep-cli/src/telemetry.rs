@@ -283,6 +283,10 @@ pub fn error_code(error: &willdeep_core::AgentError) -> &'static str {
         AgentError::MaxTurns(_) => "max_turns",
         AgentError::TokenBudgetExceeded { .. } => "token_budget_exceeded",
         AgentError::Subagent(_) => "subagent_failed",
+        AgentError::SubagentPartial { .. } => "subagent_partial",
+        AgentError::Checkpoint(_) => "checkpoint_failed",
+        AgentError::VerificationSnapshot(_) => "verification_snapshot_failed",
+        AgentError::ContextCapacity { .. } => "context_capacity",
     }
 }
 
