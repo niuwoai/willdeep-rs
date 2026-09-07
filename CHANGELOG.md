@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.71.0-rc3] - 2026-09-07
+
+### Fixed
+- 插件清单里认不出的词汇不再让整个包装不上。权限、host action、菜单挂载点三张表两端各自校验，一侧先支持的一项原本会被另一侧判成非法包；实测因此装不上 Xedit 自带的待办（`conversation.write`）、短剧工坊（`ai.image`）与历史回溯（`session.open`）。现在补齐这三项权限与 `session.open`，并把规矩改成：`schemaVersion` 不变时，认不出的权限照收但授不出能力、认不出的 host action 保留命令但执行时拒绝、认不出的菜单位置与字段忽略并记录。仍然拒装的只有结构性错误。
+- `plugin install` / `info` / `approve` 增加 `unsupported here` 一行，Web 端命令列表把这类 handler 标成 `unsupported`，用户不必靠「点了没反应」来发现宿主差异。
+
+### Added
+- 页面桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`，插件可以先问再用，不再撞 `undefined is not a function`。本宿主目前报 `context`、`commands`、`ai.complete`、`ai.providers`。
+
+### Tests
+- 新增 4 项清单测试：共享 schema 的 13 项权限与 `session.open` 全部认识、未知权限/菜单位置/根字段只记录不拒装、未知 host action 落成不可执行的命令。原先钉死严格行为的两项测试改写为新约定。
+
 ## [0.71.0-rc2] - 2026-09-04
 
 ### Fixed

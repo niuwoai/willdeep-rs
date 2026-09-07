@@ -234,6 +234,11 @@ async fn list_plugins(
                             willdeep_core::plugin::CommandHandler::Navigate { .. } => {
                                 "navigate".into()
                             }
+                            // 另一侧宿主才有的处理方式：命令照列，前端据此
+                            // 置灰，而不是让用户点一个永远没反应的菜单项。
+                            willdeep_core::plugin::CommandHandler::Unsupported { .. } => {
+                                "unsupported".into()
+                            }
                         },
                     })
                     .collect()

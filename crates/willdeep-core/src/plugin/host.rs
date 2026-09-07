@@ -52,6 +52,14 @@ pub enum HostError {
     EmptyResource { uri: String },
     #[error("MCP App resource `{uri}` must be text/html;profile=mcp-app, got `{mime}`")]
     WrongResourceMime { uri: String, mime: String },
+    /// 命令用的是另一侧宿主才有的处理方式。包照装、入口照显示，点下去说清楚
+    /// 为什么没反应，好过为了这一条命令把整个插件拒之门外。
+    #[error("plugin `{plugin}` command `{command}` needs {detail}, which this host does not support")]
+    UnsupportedHandler {
+        plugin: String,
+        command: String,
+        detail: String,
+    },
 }
 
 /// 一次命令执行的结果。宿主命令与跳转由界面消化，MCP 工具的返回原样交回页面。
@@ -338,6 +346,11 @@ impl PluginHost {
             })?;
         match &command.handler {
             CommandHandler::Host { action } => Ok(CommandOutcome::Host(*action)),
+            CommandHandler::Unsupported { detail } => Err(HostError::UnsupportedHandler {
+                plugin: plugin_id.to_owned(),
+                command: command_id.to_owned(),
+                detail: detail.clone(),
+            }),
             CommandHandler::Navigate { destination } => Ok(CommandOutcome::Navigate {
                 destination: qualified_destination(plugin_id, destination),
             }),

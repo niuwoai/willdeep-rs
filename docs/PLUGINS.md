@@ -19,7 +19,7 @@
 |---|---|---|
 | 包内容 `~/.willdeep/plugins/<id>/<version>/` | ✅ | Xedit 装过的插件这里直接看得见，反之亦然 |
 | 启用状态 | ❌ 各存各的 | — |
-| 权限审批 | ❌ 各存各的 | 两个宿主的沙箱边界不是一回事：这边是 opaque-origin iframe + CSP，那边是非持久化 WKWebView + 自定义协议。跨宿主复用审批，等于替另一个宿主替用户点了头 |
+| 权限审批 | ❌ 各存各的 | 两个宿主的沙箱边界不是一回事：这边是 opaque-origin iframe + CSP，那边是每插件独立持久化仓的 WKWebView + 自定义协议。跨宿主复用审批，等于替另一个宿主替用户点了头 |
 
 rs 侧的运行状态在 `~/.willdeep/plugin-registry.web.json`（0600，group/other 位
 一旦松掉就拒绝整个存储）。文件名里的 `web` 是提醒：这不是 Xedit 那份。
@@ -130,6 +130,43 @@ SecurityError，而插件在原生宿主里本来是有存储可用的（经典�
 一例）。宿主注入一个垫片：读走随页面下发的快照，写回 `~/.willdeep/plugin-web-storage/<id>.json`，
 每插件隔离，上限 256 KiB。这不是给插件加新能力，是补回它在另一个宿主本来就有的那份。
 
+## 认不出的东西一律降级，不拒装
+
+三张词汇表（权限、host action、菜单挂载点）两端各自实现校验，一侧先支持的
+一项原本会让另一侧把**整个包**判非法。2026-09-07 实测：这边因此装不上 Xedit
+自带的三个插件——待办的 `conversation.write`、短剧工坊的 `ai.image`、历史回溯的
+`session.open`。用户看到的是「装不上」，真相只是这个宿主还没实现其中一项。
+
+现在补齐了那几项，并把规矩改成：`schemaVersion` 不变的前提下，认不出的词汇
+与字段记下来并降级。
+
+| 认不出的东西 | 处理 |
+|---|---|
+| 权限 | 照收照显示，授不出任何能力（宿主的每道门问的都是已知常量） |
+| host action | 命令保留，菜单引用因此不悬空；执行时回 `UnsupportedHandler` |
+| 菜单挂载点 | 这一条菜单不显示，插件其余部分照常 |
+| 清单字段 | 忽略并记录 |
+
+仍然拒装的只有结构性错误：`schemaVersion` 不认识、引用悬空、重复 ID、页面
+缺必填字段、`resourceURI` 不是 `ui://`。
+
+记录下来的条目由 `plugin install` / `info` / `approve` 打成一行
+`unsupported here: …`，Web 端命令列表把它们的 handler 标成 `unsupported`。
+落点：`plugin/manifest.rs` 的 `UnsupportedItems`。
+
+## 能力探测
+
+桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`。这边目前
+报 `['context', 'commands', 'ai.complete', 'ai.providers']`，macOS 宿主那边多得多
+（storage、fs、process、net、chat、events、notify、clipboard 等）。插件先问再用：
+
+```js
+if ((window.willdeep.capabilities || []).includes('fs.write')) { … }
+```
+
+判据是 capabilities，不是 `version`：后者只说各自这套桥的迭代，两端号段
+互不比较大小。
+
 ## 与 macOS 宿主的已知差异
 
 | 项 | macOS | Web |
@@ -139,6 +176,7 @@ SecurityError，而插件在原生宿主里本来是有存储可用的（经典�
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |
 | 图标 | SF Symbols | `web/src/sfSymbols.tsx` 的等价线性图标；认不出的名字回落成圆点 |
 | 安装来源 | 目录 / ZIP / Git / Codex 缓存 / AI 草案 | 目录（`install`）、批量导入（`import`）；ZIP 与 Git 尚未接 |
+| 页面桥能力 | 18 个命名空间 | 4 项（见上）。`openConversation`、`chat.*`、`fs.*`、`process.*`、`net.*` 尚未实现，用到它们的插件（收藏夹、待办）在这边装得上但那部分功能不可用 |
 | 调度 (`schedules`) | 设计中，未实现 | 同 |
 
 ## 代码落点

@@ -188,6 +188,7 @@ async fn info(home: &Path, id: &str) -> Result<()> {
                 .join(", ")
         );
     }
+    print_unsupported(Some(manifest));
     for destination in &manifest.destinations {
         println!(
             "destination: {} ({})",
@@ -239,6 +240,11 @@ fn copy_package(source: &Path, destination: &Path) -> Result<()> {
 async fn install(home: &Path, path: &Path, enable: bool) -> Result<()> {
     let installed = install_one(home, path)?;
     println!("Installed {} {}", installed.0, installed.1);
+    if let Ok(host) = PluginHost::discover(home)
+        && let Ok(package) = host.package(&installed.0)
+    {
+        print_unsupported(package.manifest.as_ref());
+    }
     if enable {
         approve(home, &installed.0).await?;
         set_enabled(home, &installed.0, true).await?;
@@ -386,6 +392,20 @@ async fn import(home: &Path, from: Option<&Path>, enable: bool) -> Result<()> {
     Ok(())
 }
 
+/// 本宿主不认识的清单条目。插件包两端共享，词汇表却是各自实现的：另一侧
+/// 先支持了某个权限或宿主动作，这边只当没看见，但必须说出来——否则用户
+/// 只会看到某个按钮点了没反应，还以为是插件坏了。
+fn print_unsupported(manifest: Option<&willdeep_core::plugin::PluginManifest>) {
+    let Some(manifest) = manifest else { return };
+    if manifest.unsupported.is_empty() {
+        return;
+    }
+    println!(
+        "  unsupported here: {} (declared for another WillDeep host; ignored)",
+        manifest.unsupported.iter().collect::<Vec<_>>().join(", ")
+    );
+}
+
 async fn approve(home: &Path, id: &str) -> Result<()> {
     let host = PluginHost::discover(home)?;
     let package = host.package(id)?;
@@ -411,6 +431,7 @@ async fn approve(home: &Path, id: &str) -> Result<()> {
             permissions.join(", ")
         }
     );
+    print_unsupported(package.manifest.as_ref());
     if !package.mcp_servers.is_empty() {
         println!(
             "  runs:        {}",
