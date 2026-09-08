@@ -134,7 +134,7 @@ impl App {
         self.focus = FocusPane::Prompt;
     }
     pub(super) fn load_session(&mut self, session: &Session) {
-        self.transcript = transcript(&session.messages);
+        self.transcript = session_transcript(session, self.language);
         if self.transcript.is_empty() {
             self.transcript
                 .push(welcome_message(&session.workspace, self.language));
@@ -1343,7 +1343,12 @@ impl App {
     }
     pub(super) fn append_transcript(&mut self, v: String) {
         let previous_height = rendered_transcript_height(&self.transcript, self.transcript_width);
-        self.transcript.push(v);
+        if !v
+            .strip_prefix("WillDeep: ")
+            .is_some_and(|reply| append_plan_reply(&mut self.transcript, reply))
+        {
+            self.transcript.push(v);
+        }
         self.transcript_height =
             rendered_transcript_height(&self.transcript, self.transcript_width);
         if !self.follow_bottom {
@@ -1711,6 +1716,12 @@ impl App {
         }
         match command {
             "/help" => self.append_transcript(help_text(self.language)),
+            "/plan" => {
+                toggle_plan_details(&mut self.transcript);
+                self.transcript_height =
+                    rendered_transcript_height(&self.transcript, self.transcript_width);
+                self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
+            }
             "/exit" => {
                 self.quit_requested = true;
                 self.append_transcript(format!(

@@ -71,6 +71,8 @@ pub struct Session {
     #[serde(default)]
     pub pinned_at: Option<u64>,
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_plan: Option<crate::conversation::Plan>,
     #[serde(default)]
     pub attention_read: BTreeSet<String>,
     #[serde(default)]
@@ -127,6 +129,7 @@ impl Session {
             updated_at: now,
             pinned_at: None,
             messages: Vec::new(),
+            current_plan: None,
             attention_read: BTreeSet::new(),
             runtime_event_cursor: 0,
             runtime_managed: false,
@@ -536,6 +539,8 @@ struct LocalDigestProbe {
 struct MessageProbe {
     #[serde(default)]
     role: String,
+    #[serde(default)]
+    source: Option<String>,
     #[serde(default, deserialize_with = "text_preview")]
     content: Option<String>,
     #[serde(default)]
@@ -545,6 +550,7 @@ struct MessageProbe {
 impl MessageProbe {
     fn is_user_input(&self) -> bool {
         self.role == "user"
+            && self.source.as_deref() != Some("hostInstruction")
             && (self.content.is_some()
                 || self
                     .attachments
@@ -751,6 +757,9 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             };
             Some(Message {
                 role,
+                source: message
+                    .get("source")
+                    .and_then(|source| serde_json::from_value(source.clone()).ok()),
                 content: message
                     .get("content")
                     .and_then(|value| value.as_str())
@@ -791,6 +800,9 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .and_then(|value| value.as_str())
             .and_then(parse_iso8601),
         messages,
+        current_plan: value
+            .get("currentPlan")
+            .and_then(|plan| serde_json::from_value(plan.clone()).ok()),
         attention_read: BTreeSet::new(),
         runtime_event_cursor: 0,
         runtime_managed: false,
@@ -1320,6 +1332,57 @@ mod tests {
         assert_eq!(session.title, "排查 CPU 负载");
         assert_eq!(session.title_source, TitleSource::Legacy);
         assert_eq!(session.swift_source.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridged_sessions_preserve_host_source_and_current_plan() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-source-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("desktop.json");
+        std::fs::write(&path, serde_json::json!({
+            "id": Uuid::new_v4(), "title": "source regression", "workspaceRootPath": ".",
+            "messages": [
+                {"role":"user", "source":"hostInstruction", "content":"The previous Goal phase is complete."},
+                {"role":"user", "source":"operatorInput", "content":"The previous Goal phase is complete."}
+            ],
+            "currentPlan": {"status":"executing", "summary":"核验", "steps":[
+                {"id":Uuid::new_v4(), "text":"验证接口", "status":"in_progress", "detail":"运行测试"}
+            ]}
+        }).to_string()).unwrap();
+        let session = swift_session(&path).unwrap();
+        let items = crate::conversation::project(&session.messages, session.current_plan.as_ref());
+        assert_eq!(items[0].role, "system");
+        assert_eq!(items[1].role, "user");
+        assert_eq!(
+            items[2].plan.as_ref().unwrap().steps[0].status,
+            crate::conversation::StepStatus::InProgress
+        );
+        let restored: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert_eq!(restored.current_plan, session.current_plan);
+        assert_eq!(restored.messages[0].source, session.messages[0].source);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_metadata_save_preserves_newer_plan_state() {
+        let root = std::env::temp_dir().join(format!("willdeep-plan-merge-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "plan merge");
+        store.save(&mut session).unwrap();
+        let mut stale = store.load(session.id).unwrap();
+        let (plan, _) =
+            crate::conversation::parse_plan_reply("```plan\n1. verify\n```", None).unwrap();
+        store
+            .update(session.id, |current| {
+                current.current_plan = Some(plan.clone())
+            })
+            .unwrap();
+        stale.title = "new title".to_owned();
+        stale.title_source = TitleSource::User;
+        store.save(&mut stale).unwrap();
+        assert_eq!(store.load(session.id).unwrap().current_plan, Some(plan));
         std::fs::remove_dir_all(root).unwrap();
     }
 

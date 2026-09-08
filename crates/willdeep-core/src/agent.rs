@@ -733,7 +733,7 @@ impl Agent {
                     && used_tokens >= budget
                 {
                     messages.push(Message::assistant(&completion.content, Vec::new()));
-                    messages.push(Message::user("[budget-limited] The token budget was exhausted after this provider response. None of the tool calls proposed in that response were executed. Resume from the saved results and outstanding work when more budget is available."));
+                    messages.push(Message::host_instruction("[budget-limited] The token budget was exhausted after this provider response. None of the tool calls proposed in that response were executed. Resume from the saved results and outstanding work when more budget is available."));
                     checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
                     return Err(AgentError::TokenBudgetExceeded {
                         budget,
@@ -764,7 +764,7 @@ impl Agent {
                         first_response_millis,
                     });
                 }
-                messages.push(Message::user("[response-incomplete] The provider ended the previous response before completion. No tool calls from that incomplete response were executed. Continue the outstanding work, using smaller complete steps. Do not treat the partial output as task completion."));
+                messages.push(Message::host_instruction("[response-incomplete] The provider ended the previous response before completion. No tool calls from that incomplete response were executed. Continue the outstanding work, using smaller complete steps. Do not treat the partial output as task completion."));
                 continue;
             }
             incomplete_responses = 0;
@@ -797,7 +797,7 @@ impl Agent {
                             first_response_millis,
                         });
                     }
-                    messages.push(Message::user(format!("[completion-verification-required] {feedback} Continue the outstanding task. Do not weaken checks or claim completion. If verification is unavailable, explain the limitation; the runtime will retain a partial result.")));
+                    messages.push(Message::host_instruction(format!("[completion-verification-required] {feedback} Continue the outstanding task. Do not weaken checks or claim completion. If verification is unavailable, explain the limitation; the runtime will retain a partial result.")));
                     continue;
                 }
                 // 长程续推：目标未达且预算未尽时，这里不是终点。
@@ -812,7 +812,7 @@ impl Agent {
                             self.sink
                                 .emit(AgentEvent::GoalContinuationInjected { rung })
                                 .await;
-                            messages.push(Message::user(steering));
+                            messages.push(Message::host_instruction(steering));
                             tools_since_check = 0;
                             continue;
                         }
@@ -820,7 +820,7 @@ impl Agent {
                             self.sink
                                 .emit(AgentEvent::GoalBudgetLimited { reason })
                                 .await;
-                            messages.push(Message::user(steering));
+                            messages.push(Message::host_instruction(steering));
                             tools_since_check = 0;
                             continue;
                         }
@@ -947,7 +947,7 @@ impl Agent {
             kernel.release(&leases);
             return Vec::new();
         };
-        messages.push(Message::user(text));
+        messages.push(Message::host_instruction(text));
         batch.iter().map(|leased| leased.lease_id).collect()
     }
 
@@ -1001,7 +1001,7 @@ impl Agent {
         if instructions.is_empty() {
             return false;
         }
-        messages.push(Message::user(format!(
+        messages.push(Message::host_instruction(format!(
             "Additional instructions from the parent Agent:\n\n{}",
             instructions.join("\n\n")
         )));

@@ -15,6 +15,9 @@ pub enum Role {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    /// Display provenance, independent of the provider-facing role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MessageSource>,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -22,6 +25,13 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageSource {
+    OperatorInput,
+    HostInstruction,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,14 +56,22 @@ impl Message {
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self::plain(Role::User, content)
+        let mut message = Self::plain(Role::User, content);
+        message.source = Some(MessageSource::OperatorInput);
+        message
+    }
+
+    pub fn host_instruction(content: impl Into<String>) -> Self {
+        let mut message = Self::plain(Role::User, content);
+        message.source = Some(MessageSource::HostInstruction);
+        message
     }
 
     pub fn user_with_attachments(
         content: impl Into<String>,
         attachments: Vec<MessageAttachment>,
     ) -> Self {
-        let mut message = Self::plain(Role::User, content);
+        let mut message = Self::user(content);
         message.attachments = attachments;
         message
     }
@@ -61,6 +79,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
+            source: None,
             content: content.into(),
             tool_call_id: None,
             tool_calls,
@@ -71,6 +90,7 @@ impl Message {
     pub fn tool(call: &ToolCall, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
+            source: None,
             content: content.into(),
             tool_call_id: Some(call.id.clone()),
             tool_calls: Vec::new(),
@@ -81,6 +101,7 @@ impl Message {
     fn plain(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
+            source: None,
             content: content.into(),
             tool_call_id: None,
             tool_calls: Vec::new(),
@@ -220,6 +241,7 @@ mod tests {
             Message::tool(&complete, "contents"),
             Message {
                 role: Role::Tool,
+                source: None,
                 content: "legacy orphan".to_owned(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),

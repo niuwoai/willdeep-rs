@@ -1,0 +1,22 @@
+{
+  "version": "0.72.0-rc60",
+  "date": "2026-09-08",
+  "requirements": {
+    "plugin_center_after_plugins_at_top": "passed_browser",
+    "icon_triggered_language_and_theme": "passed_browser",
+    "hide_attached_context_preserve_user_text": "passed_real_runtime_browser",
+    "selection_menu_persistence_and_both_commands": "passed_browser_with_synthetic_plugins"
+  },
+  "checks": {
+    "conversation_unit_tests": {"passed": 11, "failed": 0},
+    "web_lint": "passed",
+    "web_build": "passed_with_chunk_size_warning",
+    "cli_build": "passed",
+    "binary_version": "0.72.0-rc60",
+    "git_diff_check": "passed"
+  },
+  "real_plugin_data_modified": false,
+  "installed": false,
+  "committed": false,
+  "published": false
+}

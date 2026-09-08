@@ -117,14 +117,7 @@ struct ForkSessionResponse {
 #[derive(Serialize)]
 struct SessionDetail {
     id: String,
-    messages: Vec<SessionMessage>,
-}
-
-#[derive(Serialize)]
-struct SessionMessage {
-    role: &'static str,
-    content: String,
-    attachment_count: usize,
+    messages: Vec<willdeep_core::conversation::ConversationItem>,
 }
 
 #[derive(Serialize)]
@@ -1079,22 +1072,8 @@ async fn session_detail(
             "session workspace is not in the server allowlist",
         ));
     }
-    let messages = session
-        .messages
-        .into_iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                Role::User => "user",
-                Role::Assistant if !message.content.trim().is_empty() => "assistant",
-                _ => return None,
-            };
-            Some(SessionMessage {
-                role,
-                content: message.content,
-                attachment_count: message.attachments.len(),
-            })
-        })
-        .collect();
+    let messages =
+        willdeep_core::conversation::project(&session.messages, session.current_plan.as_ref());
     Ok(Json(SessionDetail {
         id: session.id.to_string(),
         messages,

@@ -3,6 +3,7 @@ import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Por
 import { detectLanguage, messages, type Language, type Messages } from "./i18n";
 import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
 import { Markdown } from "./Markdown";
+import { ConversationCard, type ConversationItem, type Plan } from "./ConversationCard";
 import { SidebarSettings } from "./SidebarSettings";
 import { QuickSettings } from "./QuickSettings";
 import { applyThemeMode, storedThemeMode, type ThemeMode } from "./theme";
@@ -17,7 +18,7 @@ import { SfIcon } from "./sfSymbols";
 
 type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
 type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
-type SessionDetail = { id: string; messages: Array<{ role: "user" | "assistant"; content: string; attachment_count: number }> };
+type SessionDetail = { id: string; messages: ConversationItem[] };
 type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed"; startedAt: number; elapsedMs?: number };
 
 /// 一步花了多久。
@@ -36,7 +37,13 @@ function settleActiveSteps(steps: RunStep[], now: number): RunStep[] {
     ? { ...step, status: "done" as const, elapsedMs: step.elapsedMs ?? now - step.startedAt }
     : step);
 }
-type ChatMessage = { id: string; role: "user" | "assistant" | "activity"; content: string; steps?: RunStep[] };
+type ChatMessage = { id: string; role: ConversationItem["role"] | "activity"; content: string; steps?: RunStep[]; plan?: Plan; details?: string[] };
+function sessionChat(detail: SessionDetail, attachmentLabel: string): ChatMessage[] {
+  return detail.messages.map((message, index) => ({
+    id: `${detail.id}-${index}`, role: message.role, plan: message.plan, details: message.details,
+    content: `${message.content}${message.attachment_count ? `\n[${message.attachment_count} ${attachmentLabel}]` : ""}`,
+  }));
+}
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
 type ComposerSkill = { identifier: string; name: string; description: string };
 type ComposerData = { commands: string[]; skills: ComposerSkill[] };
@@ -178,6 +185,7 @@ export function App() {
   const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
   // 轮询闭包里读得到当前会话，而不必把 sessionId 放进依赖数组重开定时器。
   const sessionIdRef = useRef(sessionId);
+  const displayRevisionRef = useRef("");
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const [sessionSearch, setSessionSearch] = useState("");
   const [skillSearch, setSkillSearch] = useState("");
@@ -252,6 +260,7 @@ export function App() {
   const sessionContextEntries = useMemo(() => menuEntries(plugins, "session.context"), [plugins]);
   const composerEntries = useMemo(() => menuEntries(plugins, "composer.more"), [plugins]);
   const [chatSelection, setChatSelection] = useChatSelection(chatViewportRef, chatSelectionEntries.length > 0);
+  useEffect(() => { setChatSelection(null); }, [sessionId, rail, setChatSelection]);
 
   const runMenuEntry = useCallback(async (entry: MenuEntry, args: Record<string, string> = {}) => {
     setPopup(null);
@@ -317,13 +326,24 @@ export function App() {
         ? json<RuntimeEvent[]>(`/api/runtime/events?session=${encodeURIComponent(sessionIdRef.current)}`).catch(() => [] as RuntimeEvent[])
         : Promise.resolve([] as RuntimeEvent[]);
       return Promise.all([json<RuntimeActivity>(`/api/runtime/activity?workspace=${encodeURIComponent(workspace)}`), json<Session[]>("/api/sessions"), eventsRequest])
-        .then(([runtime, currentSessions, events]) => { if (active) { setRuntimeActivity(runtime); setSessions(currentSessions); setRuntimeEvents(events); } })
+        .then(async ([runtime, currentSessions, events]) => {
+          if (!active) return;
+          setRuntimeActivity(runtime); setSessions(currentSessions); setRuntimeEvents(events);
+          const visible = currentSessions.find((item) => item.id === sessionIdRef.current);
+          const revision = visible ? `${visible.id}:${visible.updated_at}:${t.attachmentCount}` : "";
+          if (!visible || activeRunRef.current || displayRevisionRef.current === revision) return;
+          const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(visible.id)}`);
+          if (active && sessionIdRef.current === visible.id && !activeRunRef.current) {
+            displayRevisionRef.current = revision;
+            setChat(sessionChat(detail, t.attachmentCount));
+          }
+        })
         .catch(() => undefined)
         .finally(() => { inFlight = false; });
     };
     void refresh(); const timer = window.setInterval(refresh, 2000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [workspace]);
+  }, [workspace, t.attachmentCount]);
   useEffect(() => { if (followBottomRef.current) endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat, activity]);
 
   const [showArchived, setShowArchived] = useState(false);
@@ -353,11 +373,7 @@ export function App() {
   function applySessionDetail(detail: SessionDetail) {
     setSessionId(detail.id);
     localStorage.setItem(`${lastSessionPrefix}${workspace}`, detail.id);
-    setChat(detail.messages.map((message, index) => ({
-      id: `${detail.id}-${index}`,
-      role: message.role,
-      content: `${message.content}${message.attachment_count ? `\n[${message.attachment_count} ${t.attachmentCount}]` : ""}`,
-    })));
+    setChat(sessionChat(detail, t.attachmentCount));
     followBottomRef.current = true;
   }
 
@@ -716,8 +732,10 @@ export function App() {
     try {
       const response = await fetch("/api/chat/stream", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json", accept: "text/event-stream" }, body: JSON.stringify({ prompt: harnessPrompt, session_id: sessionId || null, workspace, language, attachments: outgoingAttachments }) });
       let answer = "";
+      let completedSessionId = sessionId;
       let terminal = false;
       await readSse(response, async (event) => {
+        if (event.session_id) completedSessionId = event.session_id;
         const result = await applyStreamEvent(event, runId);
         if (result.terminal && result.error) {
           terminalFailure = Boolean(event.turn_id);
@@ -731,6 +749,10 @@ export function App() {
       if (!terminal) throw new Error(t.streamDisconnected);
       updateRun(runId, (steps) => settleActiveSteps(steps, Date.now()));
       setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: answer || t.emptyReply }]);
+      if (completedSessionId) {
+        const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(completedSessionId)}`);
+        applySessionDetail(detail);
+      }
       refreshSessions().catch(() => undefined);
     } catch (reason) {
       const recoverSessionId = activeSessionRef.current;
@@ -844,7 +866,7 @@ export function App() {
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="var(--text-dim)">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.content && <Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "plan" || message.role === "system" ? <ConversationCard key={message.id} plan={message.plan} details={message.details} messages={t} /> : message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.content && <Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="var(--danger-text)" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，

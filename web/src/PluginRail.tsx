@@ -90,7 +90,6 @@ export function PluginRail({ entries, selection, messages, onSelect }: Props) {
           )}
         </Box>
       )}
-      <Box flex="1" />
       {button("center", messages.pluginCenter, "sf:gearshape", selection.kind === "center", () =>
         onSelect({ kind: "center" })
       )}

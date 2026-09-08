@@ -290,7 +290,7 @@ impl CheckpointMetadata {
         if self.status == CheckpointStatus::Completed {
             return None;
         }
-        Some(Message::user(format!(
+        Some(Message::host_instruction(format!(
             "[execution-recovery] The previous run stopped with status {:?} after {} model round(s). \
              Its saved tool results describe work that already happened; do not repeat successful writes. \
              Calls without a recorded result: {:?}. Their effects are UNKNOWN, not failed or safe to replay. \

@@ -159,6 +159,12 @@ pub(super) fn apply_runtime_events(
             latest.runtime_managed = true;
             latest.runtime_event_cursor = app.runtime_event_cursor;
             *session = latest;
+            if let Some(plan) = &session.current_plan {
+                sync_persisted_plan(&mut app.transcript, plan);
+                app.transcript_height =
+                    rendered_transcript_height(&app.transcript, app.transcript_width);
+                app.scroll_from_bottom = app.scroll_from_bottom.min(app.max_scroll());
+            }
         } else {
             session.runtime_event_cursor = app.runtime_event_cursor;
         }

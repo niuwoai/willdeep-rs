@@ -476,7 +476,7 @@ pub(crate) async fn execute_noninteractive(
             .agent
             .run_checkpointed(
                 session.messages.clone(),
-                willdeep_core::Message::user(KERNEL_WAKE_PROMPT),
+                willdeep_core::Message::host_instruction(KERNEL_WAKE_PROMPT),
                 Some(&checkpointer),
             )
             .await?;

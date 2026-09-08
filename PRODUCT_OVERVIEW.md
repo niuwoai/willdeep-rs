@@ -1,12 +1,16 @@
 # Product Overview
 
-> 最后更新：2026-09-06 | 当前版本：v0.72.0-rc58（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-08 | 当前版本：v0.72.0-rc60（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
 ## 核心功能
+
+- Web 插件中心位于左上插件入口之后；语言与主题由图标展开；聊天只显示附件协议边界后的用户正文，选区插件菜单保持到执行或明确关闭。
+
+- Web 与交互式 CLI 保留桌面消息来源与计划状态：宿主指令显示为系统活动，计划/进度块合并为状态卡；CLI 使用 `/plan` 展开或收起最新计划原始记录。展示状态不作为自动验收或停止任务的依据。
 
 - 本地 CLI 与 Runtime 对部分结果统一返回退出码 5，并保留可恢复的结构化输出；真实 DeepSeek 五场景可靠性评测全部通过，报告见 docs/evaluations/agent-reliability-rc58.md；
 

@@ -38,12 +38,13 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 19] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
             "/help",
             "/goal <文本>|off",
+            "/plan",
             "/compress",
             "/model [模型名]",
             "/routing",
@@ -65,6 +66,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 19] {
         Language::En => [
             "/help",
             "/goal <text>|off",
+            "/plan",
             "/compress",
             "/model [model]",
             "/routing",
@@ -86,6 +88,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 19] {
         Language::Ja => [
             "/help",
             "/goal <テキスト>|off",
+            "/plan",
             "/compress",
             "/model [モデル名]",
             "/routing",
@@ -119,7 +122,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 19] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 19] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 20] {
     [
         (
             "/help",
@@ -128,6 +131,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         (
             "/goal",
             language.text("设置持续目标", "Set persistent goal", "継続目標を設定"),
+        ),
+        (
+            "/plan",
+            language.text(
+                "展开或收起最新计划原始记录",
+                "Toggle latest plan records",
+                "最新計画の記録を展開・折りたたむ",
+            ),
         ),
         (
             "/compress",

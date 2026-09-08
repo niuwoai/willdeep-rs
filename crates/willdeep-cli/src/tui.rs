@@ -51,6 +51,7 @@ mod dispatch;
 mod media_ui;
 mod model_commands;
 mod overlay_dismiss;
+mod plan_ui;
 mod rendering;
 mod routing_settings;
 mod runtime_ui;
@@ -71,6 +72,7 @@ use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
 };
+use plan_ui::*;
 use rendering::*;
 use routing_settings::{RoutingSettingsAction, RoutingSettingsState, render_routing_settings};
 use runtime_ui::open_remote_gate;

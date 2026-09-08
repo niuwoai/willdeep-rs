@@ -16,6 +16,17 @@ pub(super) fn colored_transcript_at_width(
 ) -> Text<'static> {
     let mut lines = Vec::new();
     for value in entries {
+        if let Some(card) = decode_plan_entry(value) {
+            lines.extend(render_plan(&card.plan, width));
+            if card.expanded {
+                for detail in card.details {
+                    lines.extend(detail.lines().map(|line| {
+                        Line::styled(line.to_owned(), Style::default().fg(Color::DarkGray))
+                    }));
+                }
+            }
+            continue;
+        }
         if let Some(content) = value.strip_prefix("WillDeep: ") {
             lines.extend(render_assistant_markdown(content, width));
             continue;
@@ -707,25 +718,9 @@ pub(super) fn question_option_row(popup_y: u16, question: &str, width: usize, in
         .saturating_add(index.min(u16::MAX as usize) as u16)
 }
 
+#[cfg(test)]
 pub(super) fn transcript(messages: &[Message]) -> Vec<String> {
-    messages
-        .iter()
-        .filter_map(|message| match message.role {
-            willdeep_core::Role::User => Some(format!(
-                "You: {}{}",
-                message.content,
-                if message.attachments.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{} attachment(s)]", message.attachments.len())
-                }
-            )),
-            willdeep_core::Role::Assistant if !message.content.trim().is_empty() => {
-                Some(format!("WillDeep: {}", message.content))
-            }
-            _ => None,
-        })
-        .collect()
+    projected_transcript(messages, None, Language::En)
 }
 
 /// 状态栏里的 token 计数：过千收敛成 K/M，保留两位小数。

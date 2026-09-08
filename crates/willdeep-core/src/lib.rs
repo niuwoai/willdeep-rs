@@ -2,6 +2,7 @@ pub mod agent;
 pub mod attention;
 pub mod background;
 pub mod checkpoint;
+pub mod conversation;
 pub mod detached_job;
 mod execution;
 pub mod goal;

@@ -1131,6 +1131,7 @@ async fn persisted_orphan_tool_results_are_removed_before_provider_replay() {
         Message::assistant("", Vec::new()),
         Message {
             role: crate::types::Role::Tool,
+            source: None,
             content: "legacy output".to_owned(),
             tool_call_id: None,
             tool_calls: Vec::new(),

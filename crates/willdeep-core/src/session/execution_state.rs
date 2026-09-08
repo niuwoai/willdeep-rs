@@ -26,6 +26,7 @@ pub(super) fn fingerprint(session: &Session) -> Result<[u8; 32], SessionError> {
             &session.workspace,
             session.created_at,
             &session.messages,
+            &session.current_plan,
             &session.attention_read,
             session.runtime_event_cursor,
             session.runtime_managed,
@@ -44,6 +45,7 @@ pub(super) fn copy(source: &Session, target: &mut Session) {
     target.workspace = source.workspace.clone();
     target.created_at = source.created_at;
     target.messages = source.messages.clone();
+    target.current_plan = source.current_plan.clone();
     target.attention_read = source.attention_read.clone();
     target.runtime_event_cursor = source.runtime_event_cursor;
     target.runtime_managed = source.runtime_managed;

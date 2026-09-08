@@ -1,11 +1,10 @@
 import { Box, Flex, NativeSelect, Text } from "@chakra-ui/react";
+import { useEffect, useRef, useState } from "react";
+import { SfIcon } from "./sfSymbols";
 import { languageLabels, languages, type Language, type Messages } from "./i18n";
 import { themeModes, type ThemeMode } from "./theme";
 
-/// 输入区下方的两个小开关：语言与主题，与发送/停止按钮各占布局空间。
-///
-/// 语言在左栏设置里也有一份，这里再放一个是因为**用得最多的开关不该藏在抽屉
-/// 里**；两处改的是同一个状态，不会各说各话。
+/// 输入区下方只保留图标，语言与主题在点击后展开。
 type Props = {
   messages: Messages;
   language: Language;
@@ -15,12 +14,34 @@ type Props = {
 };
 
 export function QuickSettings({ messages: t, language, onLanguageChange, theme, onThemeChange }: Props) {
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!anchor.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); }
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
   const themeLabels: Record<ThemeMode, string> = {
     system: t.themeSystem,
     dark: t.themeDark,
     light: t.themeLight,
   };
-  return <Flex className="quick-settings" gap="3" align="flex-end">
+  return <Box className="quick-settings-anchor" ref={anchor}>
+    <button ref={trigger} type="button" className="quick-settings-trigger" aria-label={t.quickSettings} title={t.quickSettings} aria-expanded={open} aria-controls="quick-settings-panel" onClick={() => setOpen((value) => !value)}>
+      <SfIcon name="sf:gearshape" size={18} />
+    </button>
+    {open && <Flex id="quick-settings-panel" role="group" aria-label={t.quickSettings} className="quick-settings quick-settings-panel" gap="3" align="flex-end">
     <Box>
       <Text className="quick-settings-label">{t.language}</Text>
       <NativeSelect.Root size="xs">
@@ -49,5 +70,6 @@ export function QuickSettings({ messages: t, language, onLanguageChange, theme, 
         <NativeSelect.Indicator />
       </NativeSelect.Root>
     </Box>
-  </Flex>;
+  </Flex>}
+  </Box>;
 }

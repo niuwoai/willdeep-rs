@@ -53,9 +53,8 @@ type SelectionState = { text: string; x: number; y: number } | null;
 /**
  * 监听一个容器里的文字选中。
  *
- * 只认容器内的选中，且选中折叠（点一下取消选中）时立刻清掉——否则气泡会挂在
- * 屏幕上不走。选中的原文只做 trim 与长度上限，不改内容本身：插件拿到的必须是
- * 用户真正看到的那段字。
+ * 在选择手势结束或右键时保存快照。菜单拥有快照直到明确关闭，不能因为
+ * 浏览器焦点切换、轮询刷新或菜单按下造成 selectionchange 就销毁它。
  */
 export function useChatSelection(containerRef: React.RefObject<HTMLElement | null>, enabled: boolean) {
   const [selection, setSelection] = useState<SelectionState>(null);
@@ -65,28 +64,41 @@ export function useChatSelection(containerRef: React.RefObject<HTMLElement | nul
       setSelection(null);
       return;
     }
-    const onSelectionChange = () => {
+    const readSelection = (): SelectionState => {
       const active = window.getSelection();
       const container = containerRef.current;
-      if (!active || active.isCollapsed || !container) {
-        setSelection(null);
-        return;
-      }
-      const anchor = active.anchorNode;
-      if (!anchor || !container.contains(anchor)) {
-        setSelection(null);
-        return;
-      }
+      if (!active || active.isCollapsed || active.rangeCount === 0 || !container) return null;
+      const range = active.getRangeAt(0);
+      if (!container.contains(range.commonAncestorContainer)) return null;
       const text = active.toString().trim();
-      if (!text) {
-        setSelection(null);
-        return;
-      }
-      const rect = active.getRangeAt(0).getBoundingClientRect();
-      setSelection({ text: text.slice(0, 4000), x: rect.left, y: rect.bottom + 6 });
+      if (!text) return null;
+      const rect = range.getBoundingClientRect();
+      return { text: text.slice(0, 4000), x: rect.left, y: rect.bottom + 6 };
     };
-    document.addEventListener("selectionchange", onSelectionChange);
-    return () => document.removeEventListener("selectionchange", onSelectionChange);
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.button === 0 && containerRef.current?.contains(event.target as Node)) setSelection(readSelection());
+    };
+    const onContextMenu = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) return;
+      const selected = readSelection();
+      if (!selected) return;
+      event.preventDefault();
+      setSelection({ ...selected, x: event.clientX, y: event.clientY });
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Shift" || event.shiftKey) {
+        const selected = readSelection();
+        if (selected) setSelection(selected);
+      }
+    };
+    document.addEventListener("pointerup", onPointerUp);
+    document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("keyup", onKeyUp);
+    return () => {
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("contextmenu", onContextMenu);
+      document.removeEventListener("keyup", onKeyUp);
+    };
   }, [containerRef, enabled]);
 
   return [selection, setSelection] as const;

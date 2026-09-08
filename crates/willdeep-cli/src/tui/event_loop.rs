@@ -8,7 +8,7 @@ pub(super) async fn event_loop(
     runtime: &mut TuiRuntime,
     language: Language,
 ) -> Result<()> {
-    let mut initial_transcript = transcript(&session.messages);
+    let mut initial_transcript = session_transcript(session, language);
     if initial_transcript.is_empty() {
         initial_transcript.push(welcome_message(&session.workspace, language));
     }

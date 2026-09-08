@@ -159,7 +159,7 @@ pub(super) fn dispatch_notification(
     app.begin_turn(false, "Handling background result".to_owned());
     store.refresh_execution(session)?;
     let history = session.messages.clone();
-    let message = Message::user(notice);
+    let message = Message::host_instruction(notice);
     session.messages.push(message.clone());
     store.save(session)?;
     let agent = agent.clone();
