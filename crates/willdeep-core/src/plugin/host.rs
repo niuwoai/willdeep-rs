@@ -52,10 +52,16 @@ pub enum HostError {
     EmptyResource { uri: String },
     #[error("MCP App resource `{uri}` must be text/html;profile=mcp-app, got `{mime}`")]
     WrongResourceMime { uri: String, mime: String },
-    /// 清单装得上，但这一条动作本宿主还没实现。拒在执行这一刻，而不是
-    /// 在安装那一刻把整个包判死。
-    #[error("host action `{action}` is not supported by this host")]
-    UnsupportedHostAction { action: String },
+    /// 命令用的是另一侧宿主才有的处理方式。包照装、入口照显示，点下去说清楚
+    /// 为什么没反应，好过为了这一条命令把整个插件拒之门外。
+    #[error(
+        "plugin `{plugin}` command `{command}` needs {detail}, which this host does not support"
+    )]
+    UnsupportedHandler {
+        plugin: String,
+        command: String,
+        detail: String,
+    },
 }
 
 /// 一次命令执行的结果。宿主命令与跳转由界面消化，MCP 工具的返回原样交回页面。
@@ -342,8 +348,10 @@ impl PluginHost {
             })?;
         match &command.handler {
             CommandHandler::Host { action } => {
-                // `session.open` 复用 conversation.read：拿得到 sessionID 的
-                // 插件才有理由打开它，所以不新增权限。另外三个导航类动作零权限。
+                // `session.open` 复用 conversation.read：拿得到 sessionID 的插件
+                // 才有理由打开它，所以不新增权限。另外三个导航类动作零权限。
+                // 与 Swift 侧 `AgentPluginCommandExecutor.executeHost` 同一道门——
+                // 一侧不判，共享插件包就能在这一侧绕过它。
                 if matches!(action, HostAction::SessionOpen)
                     && !package.manifest.as_ref().is_some_and(|manifest| {
                         manifest
@@ -358,8 +366,10 @@ impl PluginHost {
                 }
                 Ok(CommandOutcome::Host(*action))
             }
-            CommandHandler::UnsupportedHost { action } => Err(HostError::UnsupportedHostAction {
-                action: action.clone(),
+            CommandHandler::Unsupported { detail } => Err(HostError::UnsupportedHandler {
+                plugin: plugin_id.to_owned(),
+                command: command_id.to_owned(),
+                detail: detail.clone(),
             }),
             CommandHandler::Navigate { destination } => Ok(CommandOutcome::Navigate {
                 destination: qualified_destination(plugin_id, destination),

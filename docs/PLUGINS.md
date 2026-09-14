@@ -19,7 +19,7 @@
 |---|---|---|
 | 包内容 `~/.willdeep/plugins/<id>/<version>/` | ✅ | Xedit 装过的插件这里直接看得见，反之亦然 |
 | 启用状态 | ❌ 各存各的 | — |
-| 权限审批 | ❌ 各存各的 | 两个宿主的沙箱边界不是一回事：这边是 opaque-origin iframe + CSP，那边是非持久化 WKWebView + 自定义协议。跨宿主复用审批，等于替另一个宿主替用户点了头 |
+| 权限审批 | ❌ 各存各的 | 两个宿主的沙箱边界不是一回事：这边是 opaque-origin iframe + CSP，那边是每插件独立持久化仓的 WKWebView + 自定义协议。跨宿主复用审批，等于替另一个宿主替用户点了头 |
 
 rs 侧的运行状态在 `~/.willdeep/plugin-registry.web.json`（0600，group/other 位
 一旦松掉就拒绝整个存储）。文件名里的 `web` 是提醒：这不是 Xedit 那份。
@@ -179,20 +179,48 @@ SecurityError，而插件在原生宿主里本来是有存储可用的（经典�
 一例）。宿主注入一个垫片：读走随页面下发的快照，写回 `~/.willdeep/plugin-web-storage/<id>.json`，
 每插件隔离，上限 256 KiB。这不是给插件加新能力，是补回它在另一个宿主本来就有的那份。
 
-## 认不出的清单词汇怎么办
+## 认不出的东西一律降级，不拒装
 
-权限、宿主动作、菜单位置三张表在两端各自用白名单校验。一侧先加了一项，
-另一侧**不再**把整个包判非法——用户看到的是「装不上」，真相只是这个宿主还没实现
-其中一项。现在一律记进 `unsupported`（形如 `permission:x` / `hostAction:y` /
-`menu:z`）照装，插件中心显示「本宿主不支持 · 某项」：
+三张词汇表（权限、host action、菜单挂载点）两端各自实现校验，一侧先支持的
+一项原本会让另一侧把**整个包**判非法。2026-09-07 实测：这边因此装不上 Xedit
+自带的三个插件——待办的 `conversation.write`、短剧工坊的 `ai.image`、历史回溯的
+`session.open`。用户看到的是「装不上」，真相只是这个宿主还没实现其中一项。
 
-- 认不出的权限授不出任何东西——宿主的每道门问的都是「有没有这一项**已知**权限」；
-- 认不出的宿主动作在**执行时**才拒（`UnsupportedHostAction`），任意 selector 永远
-  变不成一条能执行的动作；
-- 认不出的菜单位置不显示。
+现在补齐了那几项，并把规矩改成：`schemaVersion` 不变的前提下，认不出的词汇
+与字段记下来并降级。
 
-`networkDomains` 是例外，写法不合规直接拒装：它是 `net.fetch` 唯一的门，
-一条写法含糊的规则等于一扇关不上的门。
+| 认不出的东西 | 处理 |
+|---|---|
+| 权限 | 照收照显示，授不出任何能力（宿主的每道门问的都是已知常量） |
+| host action | 命令保留，菜单引用因此不悬空；执行时回 `UnsupportedHandler` |
+| 菜单挂载点 | 这一条菜单不显示，插件其余部分照常 |
+| 清单字段 | 忽略并记录 |
+
+仍然拒装的只有结构性错误：`schemaVersion` 不认识、引用悬空、重复 ID、页面
+缺必填字段、`resourceURI` 不是 `ui://`、`networkDomains` 写法不合共享 schema
+的 pattern。
+
+最后一条是刻意不降级的：那份名单是 `net.fetch` 唯一的门，不是可选展示项。
+`https://example.com`、`example.com:443` 这类写法装得上却永远匹配不中任何主机，
+插件作者只会拿到一个解释不了的 `hostNotDeclared`。
+
+记录下来的条目由 `plugin install` / `info` / `approve` 打成一行
+`unsupported here: …`，Web 端命令列表把它们的 handler 标成 `unsupported`。
+落点：`plugin/manifest.rs` 的 `UnsupportedItems`。
+
+## 能力探测
+
+桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`。0.73.0-rc1 起
+这边报的是桥 **2.5.0** 的 22 项（见上面的 Bridge 契约），与 macOS 宿主的差集只剩
+`ai.reasoning`——那是流式思考增量，本宿主的 `ai.complete` 一次性返回，所以不报。
+插件先问再用：
+
+```js
+if ((window.willdeep.capabilities || []).includes('fs.write')) { … }
+```
+
+判据是 capabilities，不是 `version`：后者只说各自这套桥的迭代，两端号段
+互不比较大小。
 
 ## 远程选文件
 
@@ -219,6 +247,9 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |
 | 图标 | SF Symbols | `web/src/sfSymbols.tsx` 的等价线性图标；认不出的名字回落成圆点 |
 | 安装来源 | 目录 / ZIP / Git / Codex 缓存 / AI 草案 | 目录（`install`）、批量导入（`import`）；ZIP 与 Git 尚未接 |
+| 页面桥能力 | 桥 2.5.0，23 项 | 桥 2.5.0，22 项（0.73.0-rc1 起）。差集只有 `ai.reasoning`：本宿主的 `ai.complete` 一次性返回，不发思考增量 |
+| `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**；另有一层 macOS 没有的硬地板（外泄 / 接管 / 持久化 / 反取证，确认也不放行） |
+| 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见下） |
 | 调度 (`schedules`) | 设计中，未实现 | 同 |
 
 ## 代码落点
@@ -232,6 +263,7 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | 运行时与每插件 MCP 隔离 | `crates/willdeep-core/src/plugin/host.rs` |
 | MCP `resources/*` | `crates/willdeep-core/src/mcp.rs` |
 | Web API、CSP、资源服务 | `crates/willdeep-cli/src/plugin_web.rs` |
+| 页面能力（fs / process / net / storage / skills / 生图 / 宿主动作） | `crates/willdeep-cli/src/plugin_capabilities.rs` |
 | 注入页面的宿主桥 | `crates/willdeep-cli/src/plugin_bridge.js` |
 | CLI 子命令 | `crates/willdeep-cli/src/plugin_cmd.rs` |
 | 一级入口 / 页面 / 侧栏 / 插件中心 | `web/src/PluginRail.tsx`、`PluginPage.tsx`、`PluginSidebar.tsx`、`PluginCenter.tsx` |

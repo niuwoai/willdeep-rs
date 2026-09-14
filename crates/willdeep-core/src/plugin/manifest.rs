@@ -47,6 +47,38 @@ fn is_valid_key(value: &str) -> bool {
     !value.is_empty() && !value.chars().any(char::is_whitespace)
 }
 
+/// 契约往前长时的兼容面。
+///
+/// 插件包由两个宿主共享，词汇表（权限、宿主动作、菜单位置、字段名）却各自
+/// 用白名单校验。一侧先加了一项，另一侧就把整个包判非法——用户看到的是
+/// 「装不上」，而真相只是这个宿主还没实现其中一个能力。实测中 Xedit 自带的
+/// 十个插件里有三个卡在这上面（待办的 `conversation.write`、短剧工坊的
+/// `ai.image`、历史回溯的 `session.open`）。
+///
+/// 所以未知词汇一律记在这里，不再中断解析：宿主照常装、照常显示，并在审批
+/// 清单里明说这几项本宿主不支持；调用到那一条时才拒。判非法只留给真正的
+/// 结构性错误（引用悬空、页面缺必填字段、schemaVersion 不认识）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnsupportedItems(BTreeSet<String>);
+
+impl UnsupportedItems {
+    fn note(&mut self, kind: &str, value: &str) {
+        self.0.insert(format!("{kind}:{value}"));
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ManifestError {
     #[error("plugin manifest is not valid JSON: {0}")]
@@ -90,8 +122,6 @@ pub enum ManifestError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PluginPermission {
     ConversationRead,
-    /// 插件可以把一句话递给主 Agent（`window.willdeep.chat.*`）。与只读的
-    /// `conversation.read` 分开：它会花钱、会让 Agent 动工作区。
     ConversationWrite,
     WorkspaceRead,
     WorkspaceWrite,
@@ -99,12 +129,8 @@ pub enum PluginPermission {
     NetworkAccess,
     CredentialsUse,
     AiChat,
-    /// 插件页面可以请宿主生成图片（`window.willdeep.ai.generateImage`）。
-    /// 密钥不出宿主，模型落在宿主白名单里。
     AiImage,
     ProvidersRead,
-    /// 只读地拿已启用技能清单（`window.willdeep.skills.list`）。页面拿不到
-    /// SKILL.md 正文，也拿不到磁盘路径；正文由宿主读取并注入。
     SkillsRead,
     ClipboardWrite,
     Notifications,
@@ -290,10 +316,9 @@ pub enum CommandHandler {
     McpTool { server: String, tool: String },
     /// 跳转到已安装并启用的插件目的地。
     Navigate { destination: String },
-    /// 本宿主还不认识的 Host Command。解析时留着而不是判整个包非法——
-    /// 插件包在两端共享，一侧先加了一项动作，另一侧原本会把整个包判死，
-    /// 用户看到的是「装不上」，真相只是这个宿主还没实现这一条。执行时才拒。
-    UnsupportedHost { action: String },
+    /// 本宿主不认识的处理方式（另一侧新加的宿主动作或 handler 类型）。
+    /// 命令仍然存在，菜单引用因此不会悬空，点下去只回一句「不支持」。
+    Unsupported { detail: String },
 }
 
 /// 公开 Host Command v1。任意 selector、类名与脚本文本都被拒绝——白名单是
@@ -304,8 +329,6 @@ pub enum HostAction {
     DestinationSelect,
     SettingsMcp,
     PluginsOpenCenter,
-    /// 打开指定 Agent 会话。执行时额外要求 `conversation.read`：拿得到
-    /// sessionID 的插件才有理由打开它，所以复用已有权限而不新增一条。
     SessionOpen,
 }
 
@@ -482,10 +505,8 @@ pub struct PluginManifest {
     pub commands: Vec<PluginCommand>,
     pub menus: BTreeMap<PluginMenuLocation, Vec<String>>,
     pub settings: Vec<PluginSetting>,
-    /// 本宿主还不认识的词汇，形如 `permission:x`、`hostAction:y`、`menu:z`。
-    /// 与 Swift 侧 `AgentPluginPackageLoader.unsupportedItems` 同形同序，
-    /// 插件中心据此显示「本宿主不支持」，而不是把整个包判非法。
-    pub unsupported: Vec<String>,
+    /// 解析时遇到的、本宿主还不认识的词汇与字段。见 [`UnsupportedItems`]。
+    pub unsupported: UnsupportedItems,
 }
 
 const ROOT_FIELDS: [&str; 5] = [
@@ -503,10 +524,11 @@ impl PluginManifest {
         let object = value.as_object().ok_or(ManifestError::Field {
             field: "<root>".into(),
         })?;
+        let mut unsupported = UnsupportedItems::default();
         for key in object.keys() {
             // `$schema` 是编辑器提示，不是契约的一部分，放行。
             if key != "$schema" && key != "contributes" && !ROOT_FIELDS.contains(&key.as_str()) {
-                return Err(ManifestError::UnknownField(key.clone()));
+                unsupported.note("field", key);
             }
         }
         match object.get("schemaVersion").and_then(Value::as_u64) {
@@ -536,16 +558,17 @@ impl PluginManifest {
             let raw = item.as_str().ok_or(ManifestError::Field {
                 field: "permissions[]".into(),
             })?;
-            // 认不出的权限记下来照装：宿主的每道门问的都是「有没有这一项
-            // **已知**权限」，一个认不出的字符串授不出任何东西。
             match PluginPermission::parse(raw) {
                 Some(permission) => {
                     manifest.permissions.insert(permission);
                 }
-                None => manifest.unsupported.push(format!("permission:{raw}")),
+                None => unsupported.note("permission", raw),
             }
         }
 
+        // `networkDomains` 不走「认不出就降级」那条路：它是 `net.fetch` 唯一的
+        // 门，写法含糊等于一扇关不上的门。与共享 schema 的 pattern 逐字对应，
+        // Swift 侧同名规则在 `AgentPluginPackageLoader.isValidNetworkDomain`。
         for item in array_of(object.get("networkDomains"), "networkDomains")? {
             let raw = item
                 .as_str()
@@ -577,29 +600,30 @@ impl PluginManifest {
         })?;
 
         for item in array_of(contributes.get("destinations"), "contributes.destinations")? {
-            manifest.destinations.push(parse_destination(item)?);
+            manifest
+                .destinations
+                .push(parse_destination(item, &mut unsupported)?);
         }
         for item in array_of(contributes.get("sidebars"), "contributes.sidebars")? {
-            manifest.sidebars.push(parse_sidebar(item)?);
+            manifest
+                .sidebars
+                .push(parse_sidebar(item, &mut unsupported)?);
         }
         for item in array_of(contributes.get("pages"), "contributes.pages")? {
-            manifest.pages.push(parse_page(item)?);
+            manifest.pages.push(parse_page(item, &mut unsupported)?);
         }
         for item in array_of(contributes.get("commands"), "contributes.commands")? {
-            let command = parse_command(item)?;
-            if let CommandHandler::UnsupportedHost { action } = &command.handler {
-                manifest.unsupported.push(format!("hostAction:{action}"));
-            }
-            manifest.commands.push(command);
+            manifest
+                .commands
+                .push(parse_command(item, &mut unsupported)?);
         }
         if let Some(menus) = contributes.get("menus") {
             let menus = menus.as_object().ok_or(ManifestError::Field {
                 field: "contributes.menus".into(),
             })?;
             for (key, value) in menus {
-                // 认不出的挂载点不显示，但不拖垮整个包。
                 let Some(location) = PluginMenuLocation::parse(key) else {
-                    manifest.unsupported.push(format!("menu:{key}"));
+                    unsupported.note("menu", key);
                     continue;
                 };
                 manifest
@@ -608,13 +632,13 @@ impl PluginManifest {
             }
         }
         for item in array_of(contributes.get("settings"), "contributes.settings")? {
-            manifest.settings.push(parse_setting(item)?);
+            manifest
+                .settings
+                .push(parse_setting(item, &mut unsupported)?);
         }
 
+        manifest.unsupported = unsupported;
         manifest.validate_references()?;
-        // 与 Swift 侧同序：插件中心两端显示同一份「本宿主不支持」清单。
-        manifest.unsupported.sort();
-        manifest.unsupported.dedup();
         Ok(manifest)
     }
 
@@ -804,16 +828,19 @@ fn optional_string(object: &serde_json::Map<String, Value>, field: &str) -> Opti
     object.get(field).and_then(Value::as_str).map(str::to_owned)
 }
 
-fn reject_unknown(
+/// 记下这一层里本宿主不认识的字段名，不中断解析。`path` 是给人看的位置，
+/// 比如 `command.handler`，好让 `plugin install` 的提示能指到地方。
+fn note_unknown(
     object: &serde_json::Map<String, Value>,
     allowed: &[&str],
-) -> Result<(), ManifestError> {
+    path: &str,
+    unsupported: &mut UnsupportedItems,
+) {
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
-            return Err(ManifestError::UnknownField(key.clone()));
+            unsupported.note("field", &format!("{path}.{key}"));
         }
     }
-    Ok(())
 }
 
 fn object_of<'a>(
@@ -825,9 +852,12 @@ fn object_of<'a>(
     })
 }
 
-fn parse_destination(value: &Value) -> Result<PluginDestination, ManifestError> {
+fn parse_destination(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<PluginDestination, ManifestError> {
     let object = object_of(value, "destination")?;
-    reject_unknown(
+    note_unknown(
         object,
         &[
             "id",
@@ -838,7 +868,9 @@ fn parse_destination(value: &Value) -> Result<PluginDestination, ManifestError> 
             "toolbarCommandIDs",
             "defaultPinned",
         ],
-    )?;
+        "destination",
+        unsupported,
+    );
     Ok(PluginDestination {
         id: required_id(object, "id")?,
         title_key: required_key(object, "titleKey")?,
@@ -856,9 +888,12 @@ fn parse_destination(value: &Value) -> Result<PluginDestination, ManifestError> 
     })
 }
 
-fn parse_resource(value: &Value) -> Result<McpResourceRef, ManifestError> {
+fn parse_resource(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<McpResourceRef, ManifestError> {
     let object = object_of(value, "resource")?;
-    reject_unknown(object, &["type", "server", "uri"])?;
+    note_unknown(object, &["type", "server", "uri"], "resource", unsupported);
     if let Some(kind) = object.get("type").and_then(Value::as_str)
         && kind != "mcpResource"
     {
@@ -879,9 +914,17 @@ fn parse_resource(value: &Value) -> Result<McpResourceRef, ManifestError> {
     })
 }
 
-fn parse_sidebar(value: &Value) -> Result<PluginSidebar, ManifestError> {
+fn parse_sidebar(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<PluginSidebar, ManifestError> {
     let object = object_of(value, "sidebar")?;
-    reject_unknown(object, &["id", "mode", "schema", "resource"])?;
+    note_unknown(
+        object,
+        &["id", "mode", "schema", "resource"],
+        "sidebar",
+        unsupported,
+    );
     let mode = match object.get("mode").and_then(Value::as_str) {
         // 未声明侧栏时默认复用会话列表，与 Swift 侧一致。
         None => SidebarMode::SessionList,
@@ -895,14 +938,17 @@ fn parse_sidebar(value: &Value) -> Result<PluginSidebar, ManifestError> {
         schema: optional_string(object, "schema"),
         resource: match object.get("resource") {
             None => None,
-            Some(item) => Some(parse_resource(item)?),
+            Some(item) => Some(parse_resource(item, unsupported)?),
         },
     })
 }
 
-fn parse_page(value: &Value) -> Result<PluginPage, ManifestError> {
+fn parse_page(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<PluginPage, ManifestError> {
     let object = object_of(value, "page")?;
-    reject_unknown(
+    note_unknown(
         object,
         &[
             "id",
@@ -912,7 +958,9 @@ fn parse_page(value: &Value) -> Result<PluginPage, ManifestError> {
             "server",
             "resourceURI",
         ],
-    )?;
+        "page",
+        unsupported,
+    );
     let id = required_id(object, "id")?;
     let runtime = object
         .get("runtime")
@@ -974,18 +1022,28 @@ fn parse_page(value: &Value) -> Result<PluginPage, ManifestError> {
     Ok(page)
 }
 
-fn parse_command(value: &Value) -> Result<PluginCommand, ManifestError> {
+fn parse_command(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<PluginCommand, ManifestError> {
     let object = object_of(value, "command")?;
-    reject_unknown(object, &["id", "titleKey", "icon", "handler"])?;
+    note_unknown(
+        object,
+        &["id", "titleKey", "icon", "handler"],
+        "command",
+        unsupported,
+    );
     let id = required_id(object, "id")?;
     let handler_value = object.get("handler").ok_or(ManifestError::Field {
         field: "command.handler".into(),
     })?;
     let handler_object = object_of(handler_value, "command.handler")?;
-    reject_unknown(
+    note_unknown(
         handler_object,
         &["type", "action", "server", "tool", "destination"],
-    )?;
+        "command.handler",
+        unsupported,
+    );
     let handler = match handler_object.get("type").and_then(Value::as_str) {
         Some("host") => {
             let raw = handler_object.get("action").and_then(Value::as_str).ok_or(
@@ -995,9 +1053,12 @@ fn parse_command(value: &Value) -> Result<PluginCommand, ManifestError> {
             )?;
             match HostAction::parse(raw) {
                 Some(action) => CommandHandler::Host { action },
-                None => CommandHandler::UnsupportedHost {
-                    action: raw.to_owned(),
-                },
+                None => {
+                    unsupported.note("hostAction", raw);
+                    CommandHandler::Unsupported {
+                        detail: format!("host action `{raw}`"),
+                    }
+                }
             }
         }
         Some("mcpTool") => CommandHandler::McpTool {
@@ -1007,7 +1068,13 @@ fn parse_command(value: &Value) -> Result<PluginCommand, ManifestError> {
         Some("navigate") => CommandHandler::Navigate {
             destination: required_id(handler_object, "destination")?,
         },
-        _ => {
+        Some(other) => {
+            unsupported.note("handlerType", other);
+            CommandHandler::Unsupported {
+                detail: format!("handler type `{other}`"),
+            }
+        }
+        None => {
             return Err(ManifestError::Field {
                 field: "handler.type".into(),
             });
@@ -1029,9 +1096,12 @@ fn parse_command(value: &Value) -> Result<PluginCommand, ManifestError> {
     })
 }
 
-fn parse_setting(value: &Value) -> Result<PluginSetting, ManifestError> {
+fn parse_setting(
+    value: &Value,
+    unsupported: &mut UnsupportedItems,
+) -> Result<PluginSetting, ManifestError> {
     let object = object_of(value, "setting")?;
-    reject_unknown(
+    note_unknown(
         object,
         &[
             "id",
@@ -1041,7 +1111,9 @@ fn parse_setting(value: &Value) -> Result<PluginSetting, ManifestError> {
             "defaultValue",
             "options",
         ],
-    )?;
+        "setting",
+        unsupported,
+    );
     let setting_type = object
         .get("type")
         .and_then(Value::as_str)
@@ -1115,77 +1187,25 @@ mod tests {
         assert!(!manifest.destinations[0].default_pinned);
     }
 
-    /// 两端共享同一个插件包，但权限、宿主动作、菜单位置三张表各自用白名单
-    /// 校验。一侧先加了一项，另一侧原本会把**整个包**判非法——用户看到的是
-    /// 「装不上」，真相只是这个宿主还没实现其中一项。
     #[test]
-    fn vocabulary_this_host_does_not_know_is_recorded_not_fatal() {
+    fn network_domains_parse_and_lowercase() {
         let source = r#"{
             "schemaVersion": 1,
-            "permissions": ["conversation.read", "telepathy.read"],
+            "permissions": ["network.access"],
+            "networkDomains": ["Some.IM", "*.example.com"],
             "contributes": {
                 "destinations": [{"id":"demo","titleKey":"k","mainPage":"demo.main"}],
-                "pages": [{"id":"demo.main","runtime":"localWeb","entryPath":"ui/index.html"}],
-                "commands": [{"id":"demo.warp","titleKey":"k","handler":{"type":"host","action":"warp.drive"}}],
-                "menus": {"commandPalette":["demo.warp"],"holodeck":["demo.warp"]}
+                "pages": [{"id":"demo.main","runtime":"localWeb","entryPath":"ui/index.html"}]
             }
         }"#;
-        let manifest = PluginManifest::parse(source).expect("unknown vocabulary must not be fatal");
-        assert_eq!(
-            manifest.unsupported,
-            vec![
-                "hostAction:warp.drive".to_owned(),
-                "menu:holodeck".to_owned(),
-                "permission:telepathy.read".to_owned(),
-            ]
-        );
-        // 认不出的权限授不出任何东西：它进不了 permissions 集合。
-        assert_eq!(manifest.permissions.len(), 1);
-        assert!(
-            manifest
-                .permissions
-                .contains(&PluginPermission::ConversationRead)
-        );
-        // 命令留着（菜单引用不能悬空），但执行时会被拒。
-        assert!(matches!(
-            manifest.commands[0].handler,
-            CommandHandler::UnsupportedHost { .. }
-        ));
-        // 认不出的挂载点不显示，认得出的照常挂。
-        assert!(
-            manifest
-                .menus
-                .contains_key(&PluginMenuLocation::CommandPalette)
-        );
-        assert_eq!(manifest.menus.len(), 1);
-    }
-
-    #[test]
-    fn the_new_shared_permissions_and_actions_parse() {
-        let source = r#"{
-            "schemaVersion": 1,
-            "permissions": ["conversation.write", "ai.image", "skills.read"],
-            "networkDomains": ["some.im", "*.example.com"],
-            "contributes": {
-                "destinations": [{"id":"demo","titleKey":"k","mainPage":"demo.main"}],
-                "pages": [{"id":"demo.main","runtime":"localWeb","entryPath":"ui/index.html"}],
-                "commands": [{"id":"demo.open","titleKey":"k","handler":{"type":"host","action":"session.open"}}]
-            }
-        }"#;
-        let manifest = PluginManifest::parse(source).expect("shared vocabulary parses");
-        assert!(manifest.unsupported.is_empty());
-        assert_eq!(manifest.permissions.len(), 3);
+        let manifest = PluginManifest::parse(source).expect("well-formed domains parse");
         assert_eq!(manifest.network_domains, vec!["some.im", "*.example.com"]);
-        assert_eq!(
-            manifest.commands[0].handler,
-            CommandHandler::Host {
-                action: HostAction::SessionOpen
-            }
-        );
+        assert!(manifest.unsupported.is_empty());
     }
 
-    /// `networkDomains` 是 `net.fetch` 唯一的门，一条写法含糊的规则等于一扇
-    /// 关不上的门，所以这里**要**拒，不能像未知权限那样降级放行。
+    /// `networkDomains` 是 `net.fetch` 唯一的门，所以它**不**走「认不出就降级」
+    /// 那条路：写法不合共享 schema 的 pattern 就拒装。装得上却永远匹配不中，
+    /// 插件作者只会看到一个解释不了的 hostNotDeclared。
     #[test]
     fn malformed_network_domains_are_refused() {
         for bad in [
@@ -1193,6 +1213,8 @@ mod tests {
             "https://example.com",
             "example.com/path",
             "example.com:443",
+            "-bad.example.com",
+            "example",
         ] {
             let source = format!(
                 r#"{{"schemaVersion":1,"networkDomains":["{bad}"],"contributes":{{
@@ -1218,20 +1240,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_schema_version_and_fields() {
+    fn rejects_unknown_schema_version_but_only_notes_unknown_fields() {
         let source = MINIMAL.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2");
         assert!(matches!(
             PluginManifest::parse(&source),
             Err(ManifestError::SchemaVersion(2))
         ));
+        // schemaVersion 1 之内的新增字段是另一侧先长出来的东西，装得上、
+        // 记下来，不能判整个包非法。
         let source = MINIMAL.replace(
             "\"schemaVersion\": 1,",
-            "\"schemaVersion\": 1,\"extra\": 1,",
+            "\"schemaVersion\": 1,\"requiredCapabilities\": [\"fs.write\"],",
         );
-        assert!(matches!(
-            PluginManifest::parse(&source),
-            Err(ManifestError::UnknownField(_))
-        ));
+        let manifest = PluginManifest::parse(&source).expect("unknown root field is not fatal");
+        assert!(
+            manifest
+                .unsupported
+                .iter()
+                .any(|item| item == "field:requiredCapabilities")
+        );
     }
 
     #[test]
@@ -1246,26 +1273,93 @@ mod tests {
     }
 
     #[test]
-    /// 任意 selector 永远变不成一条能执行的宿主动作。
-    ///
-    /// 白名单是**字面量**，不是「凡是 plugin. 开头」的命名规则。清单本身
-    /// 现在照收（见 [`vocabulary_this_host_does_not_know_is_recorded_not_fatal`]），
-    /// 但它落进的是 `UnsupportedHost`——`execute_command` 见到这个变体只会
-    /// 报错，任何代码路径都到不了「按这个字符串去做点什么」。
-    #[test]
-    fn arbitrary_host_actions_never_become_executable() {
+    fn arbitrary_host_actions_are_kept_but_unrunnable() {
         let source = r#"{"schemaVersion":1,"contributes":{
             "commands":[{"id":"c","titleKey":"k","handler":{"type":"host","action":"NSApplication.terminate:"}}]}}"#;
-        let manifest = PluginManifest::parse(source).expect("parses");
-        assert_eq!(
-            manifest.commands[0].handler,
-            CommandHandler::UnsupportedHost {
-                action: "NSApplication.terminate:".to_owned()
-            }
+        let manifest = PluginManifest::parse(source).expect("an unknown action is not fatal");
+        // 白名单之外的动作绝不执行，但也绝不因此把整个插件拒之门外：
+        // 命令留在原地，点下去由宿主回一句「不支持」。
+        assert!(matches!(
+            manifest.command("c").map(|command| &command.handler),
+            Some(CommandHandler::Unsupported { .. })
+        ));
+        assert!(
+            manifest
+                .unsupported
+                .iter()
+                .any(|item| item == "hostAction:NSApplication.terminate:")
         );
+    }
+
+    #[test]
+    fn the_permission_vocabulary_matches_the_macos_host() {
+        // 这份名单是跨仓契约：Xedit 的 docs/plugin-schema/willdeep-plugin.schema.json
+        // 里有几项，这里就得认识几项，否则那边装得上的插件这边装不上。
+        for raw in [
+            "conversation.read",
+            "conversation.write",
+            "workspace.read",
+            "workspace.write",
+            "process.execute",
+            "network.access",
+            "credentials.use",
+            "ai.chat",
+            "ai.image",
+            "providers.read",
+            "skills.read",
+            "clipboard.write",
+            "notifications",
+        ] {
+            assert_eq!(
+                PluginPermission::parse(raw).map(PluginPermission::as_str),
+                Some(raw),
+                "permission `{raw}` is in the shared schema but unknown here"
+            );
+        }
         assert_eq!(
-            manifest.unsupported,
-            vec!["hostAction:NSApplication.terminate:".to_owned()]
+            HostAction::parse("session.open"),
+            Some(HostAction::SessionOpen)
+        );
+    }
+
+    #[test]
+    fn a_permission_this_host_lacks_does_not_block_installation() {
+        let source = MINIMAL.replace(
+            "\"schemaVersion\": 1,",
+            "\"schemaVersion\": 1,\"permissions\": [\"workspace.read\", \"telepathy.read\"],",
+        );
+        let manifest = PluginManifest::parse(&source).expect("unknown permission is not fatal");
+        assert!(
+            manifest
+                .permissions
+                .contains(&PluginPermission::WorkspaceRead)
+        );
+        assert_eq!(manifest.permissions.len(), 1);
+        assert!(
+            manifest
+                .unsupported
+                .iter()
+                .any(|item| item == "permission:telepathy.read")
+        );
+    }
+
+    #[test]
+    fn a_menu_location_this_host_lacks_is_dropped_not_fatal() {
+        let source = r#"{"schemaVersion":1,"contributes":{
+            "commands":[{"id":"c","titleKey":"k","handler":{"type":"host","action":"plugin.refresh"}}],
+            "menus":{"commandPalette":["c"],"editor.gutter":["c"]}}}"#;
+        let manifest = PluginManifest::parse(source).expect("unknown menu location is not fatal");
+        assert_eq!(manifest.menus.len(), 1);
+        assert!(
+            manifest
+                .menus
+                .contains_key(&PluginMenuLocation::CommandPalette)
+        );
+        assert!(
+            manifest
+                .unsupported
+                .iter()
+                .any(|item| item == "menu:editor.gutter")
         );
     }
 

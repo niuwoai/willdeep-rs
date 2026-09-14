@@ -51,6 +51,15 @@
   }
 
   window.willdeep = window.willdeep || {};
+  // 同一个插件包跑在两个宿主上，能力集不一样：页面必须能问清楚再用，
+  // 而不是调到一半吃 `undefined is not a function`。写法与 macOS 版同一份：
+  //
+  //     if ((window.willdeep.capabilities || []).includes('fs.write')) { … }
+  //
+  // 判据是 capabilities，不是 version：version 只说这套桥自己的迭代，
+  // 两个宿主的号段互不比较大小。
+  window.willdeep.version = '1.0.0';
+  window.willdeep.capabilities = ['context', 'commands', 'ai.complete', 'ai.providers'];
   window.willdeep.getContext = function () {
     return window.__WILLDEEP_CONTEXT__ || {};
   };

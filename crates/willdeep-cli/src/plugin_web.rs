@@ -281,10 +281,9 @@ async fn list_plugins(
                             willdeep_core::plugin::CommandHandler::Navigate { .. } => {
                                 "navigate".into()
                             }
-                            // 本宿主不认识的动作。照样列出来，但界面据此
-                            // 标灰：用户看到的是「这条本宿主不支持」，
-                            // 而不是一个点下去才报错的按钮。
-                            willdeep_core::plugin::CommandHandler::UnsupportedHost { .. } => {
+                            // 另一侧宿主才有的处理方式：命令照列，前端据此
+                            // 置灰，而不是让用户点一个永远没反应的菜单项。
+                            willdeep_core::plugin::CommandHandler::Unsupported { .. } => {
                                 "unsupported".into()
                             }
                         },
@@ -416,7 +415,13 @@ async fn list_plugins(
                 .unwrap_or_default(),
             settings,
             unsupported: manifest
-                .map(|manifest| manifest.unsupported.clone())
+                .map(|manifest| {
+                    manifest
+                        .unsupported
+                        .iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default(),
             file_picker_commands: manifest
                 .map(|manifest| {

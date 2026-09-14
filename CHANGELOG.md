@@ -2,14 +2,16 @@
 
 ## [0.73.0-rc1] - 2026-09-14
 
+> 清单词汇的降级约定与 `capabilities` 探测在 [0.71.0-rc3](#0710-rc3---2026-09-07) 已落地，本版在其之上补齐**页面能力**本身。
+
 ### Added
-- Web 插件页面宿主补齐到桥 **2.5.0**，与 macOS 版同名同序地提供 22 项能力：`fs.list/read/search/write/patch`、`process.run`、`net.fetch`、`storage`（任意 JSON，与 localStorage 垫片分开存）、`skills.list`、`ai.cancel`、`ai.generateImage`、`ai.tools`、`chat.insert/send`、`events`、`clipboard.write`、`notify`、`conversation.open`。页面据 `window.willdeep.capabilities` 降级，不必再猜宿主有什么。
-- 清单词汇跟上共享 schema：权限新增 `conversation.write` / `ai.image` / `skills.read`，宿主动作新增 `session.open`（执行时复用 `conversation.read`），根字段新增 `networkDomains`（`net.fetch` 的域名白名单，`*.` 只匹配子域）。
-- Web 端远程选文件：需要原生文件框的插件命令改由浏览器弹框、上传到每插件隔离的媒体目录，再把服务端路径当作选择结果交回插件。拦截对象是一张可声明的表，新增插件只加一行。
-- 插件页面跑命令的硬地板：凭据外泄、authorized_keys 接管、持久化安装、反取证四类命中即拒，确认也不放行——插件页面上的确认框给不了用户判断这些所需的上下文。
+- Web 插件页面宿主补齐到桥 **2.5.0**，与 macOS 版同名同序地提供 22 项能力（此前只有 4 项）：`fs.list/read/search/write/patch`、`process.run`、`net.fetch`、`storage`（任意 JSON，与 localStorage 垫片分开存）、`skills.list`、`ai.cancel`、`ai.generateImage`、`ai.tools`、`chat.insert/send`、`events`、`clipboard.write`、`notify`、`conversation.open`。不声明 `ai.reasoning`：本宿主的 `ai.complete` 不流式，声明了页面只会白等一个不来的事件。
+- 清单根字段支持 `networkDomains`——`net.fetch` 的域名白名单，`*.` 只匹配子域不匹配裸域。写法不合共享 schema 的 pattern 直接拒装，不走「认不出就降级」：它是 `net.fetch` 唯一的门，一条含糊的规则等于一扇关不上的门。
+- Web 端远程选文件：需要原生文件框的插件命令改由浏览器弹框、上传到每插件隔离的媒体目录，再把服务端路径当作选择结果交回插件，插件零改动。拦截对象是一张可声明的表，新增插件只加一行。
+- 插件页面跑命令的硬地板：凭据外泄、`authorized_keys` 接管、持久化安装、反取证四类命中即拒，确认也不放行——插件页面上的确认框给不了用户判断这些所需的上下文。地板刻意地窄，`rm -rf ./node_modules`、`git push --force` 照常放行。
 
 ### Changed
-- 本宿主还不认识的权限 / 宿主动作 / 菜单位置不再导致整包判非法，改为记录进 `unsupported` 并照装，执行时才拒；插件中心显示「本宿主不支持 · 某项」。与 macOS 版 `unsupportedItems` 同口径。
+- `session.open` 执行时要求插件声明 `conversation.read`，与 macOS 宿主同一道门；一侧不判，共享插件包就能在这一侧绕过它。
 - `executeCommand` 回给页面的结果改为 **JSON 字符串**，与 macOS 宿主 `sendCommandResult(result: String?)` 一致。此前回的是对象，共享插件包的 `JSON.parse(raw)` 会当场报 `"[object Object]" is not valid JSON`。
 
 ### Fixed
@@ -334,6 +336,17 @@
 ### Changed
 - Agent 可靠性改进开发中：执行检查点、完成与进展判定、上下文保真、统一命令策略、目录规则、流式请求与长任务评估；各项完成证据记录于 `docs/AGENT_RELIABILITY_WORK.md`。
 - 拆分超长手写源码文件，并加入源码行数检查。
+## [0.71.0-rc3] - 2026-09-07
+
+### Fixed
+- 插件清单里认不出的词汇不再让整个包装不上。权限、host action、菜单挂载点三张表两端各自校验，一侧先支持的一项原本会被另一侧判成非法包；实测因此装不上 Xedit 自带的待办（`conversation.write`）、短剧工坊（`ai.image`）与历史回溯（`session.open`）。现在补齐这三项权限与 `session.open`，并把规矩改成：`schemaVersion` 不变时，认不出的权限照收但授不出能力、认不出的 host action 保留命令但执行时拒绝、认不出的菜单位置与字段忽略并记录。仍然拒装的只有结构性错误。
+- `plugin install` / `info` / `approve` 增加 `unsupported here` 一行，Web 端命令列表把这类 handler 标成 `unsupported`，用户不必靠「点了没反应」来发现宿主差异。
+
+### Added
+- 页面桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`，插件可以先问再用，不再撞 `undefined is not a function`。本宿主目前报 `context`、`commands`、`ai.complete`、`ai.providers`。
+
+### Tests
+- 新增 4 项清单测试：共享 schema 的 13 项权限与 `session.open` 全部认识、未知权限/菜单位置/根字段只记录不拒装、未知 host action 落成不可执行的命令。原先钉死严格行为的两项测试改写为新约定。
 
 ## [0.71.0-rc2] - 2026-09-04
 
