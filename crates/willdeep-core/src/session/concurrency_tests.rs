@@ -105,6 +105,49 @@ fn competing_execution_snapshots_are_rejected_without_mutating_disk() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 书签类字段（事件游标）要能写进一份别人刚改过的会话。
+///
+/// 现场：升级 CLI 后第一次开 TUI。`runtime_event_head` 会停掉旧版守护进程、
+/// 起一个新的，新守护在恢复阶段重写会话；TUI 随后拿着换版**之前**捕获的基线
+/// 去写事件游标，`save` 判定执行状态冲突，错误一路抛到顶层，界面还没画出来
+/// 就退出——用户看到的是「一升级就闪退」。
+///
+/// 游标是个可以在任意新快照上无损重放的书签，所以这一步走 `update`：从磁盘
+/// 最新快照起改。这里同时钉住两件事——`save` 在这个场景下确实会冲突（所以
+/// 不能退回去用它），而 `update` 既写进了游标、又保住了对方的消息。
+#[test]
+fn a_bookmark_write_survives_a_concurrent_execution_rewrite() {
+    let (root, store, mut stale) = fixture();
+    // 另一个写者（守护进程恢复）在我们捕获基线之后改了执行状态。
+    store
+        .update(stale.id, |session| {
+            session
+                .messages
+                .push(Message::assistant("daemon recovery", Vec::new()));
+        })
+        .unwrap();
+
+    // 老路子：基线已过期，整次保存失败。
+    let mut via_save = stale.clone();
+    via_save.runtime_event_cursor = 42;
+    assert!(matches!(
+        store.save(&mut via_save),
+        Err(SessionError::ConcurrentUpdate("execution"))
+    ));
+
+    // 现在的路子：书签写进去，对方的消息不丢。
+    stale = store
+        .update(stale.id, |latest| latest.runtime_event_cursor = 42)
+        .unwrap();
+    assert_eq!(stale.runtime_event_cursor, 42);
+    assert_eq!(stale.messages.last().unwrap().content, "daemon recovery");
+
+    let reloaded = store.load(stale.id).unwrap();
+    assert_eq!(reloaded.runtime_event_cursor, 42);
+    assert_eq!(reloaded.messages.last().unwrap().content, "daemon recovery");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn deleted_session_cannot_be_resurrected_by_a_loaded_writer() {
     let (root, store, mut stale) = fixture();
