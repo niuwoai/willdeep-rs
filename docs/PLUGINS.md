@@ -1,6 +1,6 @@
 # 插件系统（Web 宿主）
 
-> 状态：v1 已实现，首发 0.50.0-rc1。
+> 状态：v1 已实现，首发 0.50.0-rc1；宿主能力补齐到桥 2.5.0 于 0.73.0-rc1。
 > Schema：`.willdeep-plugin/plugin.json` schemaVersion 1，与 macOS 版（Xedit）**同一份契约**。
 > 上游设计：Xedit `docs/WILLDEEP_PLUGIN_SYSTEM_DESIGN.md`；宿主能力：`docs/PLUGIN_HOST_CAPABILITIES_DESIGN.md`。
 > 两端联动全景见 [XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
@@ -105,15 +105,59 @@ ID 唯一、命令引用必须存在、progress 必须落在 0…1。
 
 页面侧（宿主注入，见 `crates/willdeep-cli/src/plugin_bridge.js`）：
 
+桥版本 **2.5.0**，与 macOS 宿主 `AgentPluginPageBridgeVersion` 对齐。页面按
+`window.willdeep.capabilities` 降级，而不是猜宿主有什么：
+
 ```js
+window.willdeep.version                            // "2.5.0"
+window.willdeep.capabilities                       // 字符串数组，见下表
+
 window.willdeep.getContext()                       // 目的地上下文
 window.willdeep.selectItem(itemID)
 window.willdeep.refresh()
-window.willdeep.executeCommand(commandID, args)    // → Promise
-window.willdeep.ai.providers()                     // 需要 providers.read 或 ai.chat
-window.willdeep.ai.complete(request)               // 需要 ai.chat
-// 事件：willdeep:context-changed / willdeep:command-result / willdeep:bridge-result
+window.willdeep.executeCommand(commandID, args)    // → Promise<JSON 字符串>
+window.willdeep.openConversation(sessionID)        // 需要 conversation.read
+
+window.willdeep.ai.providers()                     // providers.read 或 ai.chat
+window.willdeep.ai.complete(request)               // ai.chat（request.skills 另需 skills.read）
+window.willdeep.ai.cancel(streamID)                // 按 complete 里传的 streamID 停
+window.willdeep.ai.generateImage(request)          // ai.image
+window.willdeep.skills.list()                      // skills.read
+window.willdeep.fs.list/read/search(...)           // workspace.read
+window.willdeep.fs.write/patch(...)                // workspace.write
+window.willdeep.storage.get/set/remove/keys(...)   // 任意 JSON，无需权限
+window.willdeep.process.run(command)               // process.execute
+window.willdeep.net.fetch(url, init)               // network.access + 清单 networkDomains
+window.willdeep.clipboard.write(text)              // clipboard.write
+window.willdeep.notify({title, body})              // notifications
+window.willdeep.chat.insert/send(text)             // conversation.write
+window.willdeep.events.on(name, cb)                // session.changed / turn.started /
+                                                   // turn.finished / workspace.changed
+// 事件：willdeep:context-changed / willdeep:command-result / willdeep:bridge-result /
+//       willdeep:host-event
 ```
+
+**`executeCommand` 回的是 JSON 字符串，不是对象**，与 macOS 宿主
+`sendCommandResult(result: String?)` 一致。共享插件包一律 `JSON.parse(raw)`，
+回对象会让它们在第一步就报 `"[object Object]" is not valid JSON`。
+
+权限**一律在 Rust 侧核**。前端那一层看着像「浏览器在调 API」，但每个端点第一句
+都是清单权限校验：页面跑在 opaque origin 的沙箱里，它自报的东西一个都不作数。
+
+几条本宿主特有的收口：
+
+- **`process.run` 的确认框弹在宿主页面上**，不在沙箱 iframe 里。iframe 够不着这个
+  接口（`connect-src 'none'` + opaque origin），所以「确认过了」这一位只可能由父
+  页面带上，与 macOS 那个 NSAlert 是同一道门。只读命令直接跑，其余弹框。
+- **硬地板先于确认**：凭据外泄（凭据路径与网络出口同现）、`authorized_keys` 接管、
+  指向下载物的持久化安装、反取证，四类命中即拒，确认也不放行。用户在一个插件页面
+  上看到的确认框，没有足够上下文让他判断 `cat ~/.ssh/id_rsa | curl …` 在同步什么。
+  地板刻意地窄：`rm -rf ./node_modules`、`git push --force`、`cat .env.example` 照常放行。
+- **`net.fetch` 的门是 `networkDomains`，不是权限**。`network.access` 只是开关；
+  没写域名等于没开。https only，回环与内网一律拒，`*.example.com` 匹配子域但不匹配
+  `example.com` 本身（想要就两条都写）。不自动跟随跳转——跳转要重新过白名单。
+- **`fs.*` 的边界与聊天端是同一份工作区白名单**（同一个对象，不是启动时的副本）。
+  路径规范化之后再比对，相对路径按第一个工作区根解释。
 
 `ai.complete` 的三条不变量与 macOS 宿主同值：密钥永不出宿主（页面拿到的只有
 provider id 与模型名，递上来的 baseURL 一律不认）、能力必须在清单里声明、
@@ -125,15 +169,51 @@ MCP Apps 页面直接 `parent.postMessage` 标准 JSON-RPC：`ui/initialize` →
 `ui/notifications/initialized` → `tools/call` / `resources/read`。宿主在 initialized
 之前对后两者回 `-32002`。
 
+**结构化存储与 localStorage 垫片是两套**，存在同一个文件里但键空间分开
+（结构化的那套带一个控制字符前缀）：`window.willdeep.storage.*` 存任意 JSON、
+异步、跨刷新；垫片只存字符串，给那些本来就在用 `localStorage` 的插件。不分开的话，
+一个插件同时用两套 API 就会互相覆盖，而且垫片会把 JSON 当字符串吐回去。
+
 **localStorage 垫片**：opaque origin 里 `window.localStorage` 直接抛
 SecurityError，而插件在原生宿主里本来是有存储可用的（经典游戏厅的最高分就是
 一例）。宿主注入一个垫片：读走随页面下发的快照，写回 `~/.willdeep/plugin-web-storage/<id>.json`，
 每插件隔离，上限 256 KiB。这不是给插件加新能力，是补回它在另一个宿主本来就有的那份。
 
+## 认不出的清单词汇怎么办
+
+权限、宿主动作、菜单位置三张表在两端各自用白名单校验。一侧先加了一项，
+另一侧**不再**把整个包判非法——用户看到的是「装不上」，真相只是这个宿主还没实现
+其中一项。现在一律记进 `unsupported`（形如 `permission:x` / `hostAction:y` /
+`menu:z`）照装，插件中心显示「本宿主不支持 · 某项」：
+
+- 认不出的权限授不出任何东西——宿主的每道门问的都是「有没有这一项**已知**权限」；
+- 认不出的宿主动作在**执行时**才拒（`UnsupportedHostAction`），任意 selector 永远
+  变不成一条能执行的动作；
+- 认不出的菜单位置不显示。
+
+`networkDomains` 是例外，写法不合规直接拒装：它是 `net.fetch` 唯一的门，
+一条写法含糊的规则等于一扇关不上的门。
+
+## 远程选文件
+
+Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 MCP 服务里那种
+「`osascript` 弹原生框」的选文件路子在这里不成立——框会弹在没人看的屏幕上，
+然后超时。这类命令由宿主接管：浏览器弹文件框 → 上传到每插件隔离的
+`~/.willdeep/plugin-media/<id>/` → 把落地的**服务端绝对路径**当作选择结果交回插件，
+外面照样包一层 MCP 的 `content[0].text`。插件一行不用改。
+
+要接管哪些工具是一张可声明的表（`plugin_web.rs` 的 `FILE_PICKER_TOOLS`，
+三元组 `(插件 ID, MCP 服务, 工具名)`），新增插件只加一行。宿主侧会校验回来的路径
+确实落在这个插件的媒体目录里——页面自报一个 `/etc/passwd` 就能把任意文件喂给
+后续工具，这道门关在服务端。
+
 ## 与 macOS 宿主的已知差异
 
 | 项 | macOS | Web |
 |---|---|---|
+| `ai.reasoning` | 有，流式思考增量 | **没有**。本宿主的 `ai.complete` 一次性返回，所以这一项不出现在 `capabilities` 里——声明一个自己不发的事件，插件会白等 |
+| `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**。另有一条 macOS 没有的硬地板（见上） |
+| 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见上） |
 | `defaultPinned` | `bundled` 来源可占住入口，用户不能取消 | 只影响排序建议。rs 没有 bundled 来源，插件一律来自共享目录 |
 | MCP 工具执行确认 | 非 bundled 来源每次执行都要用户点头 | 目前不逐条确认；边界由启用前的权限审批把住 |
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |

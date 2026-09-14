@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.73.0-rc1] - 2026-09-14
+
+### Added
+- Web 插件页面宿主补齐到桥 **2.5.0**，与 macOS 版同名同序地提供 22 项能力：`fs.list/read/search/write/patch`、`process.run`、`net.fetch`、`storage`（任意 JSON，与 localStorage 垫片分开存）、`skills.list`、`ai.cancel`、`ai.generateImage`、`ai.tools`、`chat.insert/send`、`events`、`clipboard.write`、`notify`、`conversation.open`。页面据 `window.willdeep.capabilities` 降级，不必再猜宿主有什么。
+- 清单词汇跟上共享 schema：权限新增 `conversation.write` / `ai.image` / `skills.read`，宿主动作新增 `session.open`（执行时复用 `conversation.read`），根字段新增 `networkDomains`（`net.fetch` 的域名白名单，`*.` 只匹配子域）。
+- Web 端远程选文件：需要原生文件框的插件命令改由浏览器弹框、上传到每插件隔离的媒体目录，再把服务端路径当作选择结果交回插件。拦截对象是一张可声明的表，新增插件只加一行。
+- 插件页面跑命令的硬地板：凭据外泄、authorized_keys 接管、持久化安装、反取证四类命中即拒，确认也不放行——插件页面上的确认框给不了用户判断这些所需的上下文。
+
+### Changed
+- 本宿主还不认识的权限 / 宿主动作 / 菜单位置不再导致整包判非法，改为记录进 `unsupported` 并照装，执行时才拒；插件中心显示「本宿主不支持 · 某项」。与 macOS 版 `unsupportedItems` 同口径。
+- `executeCommand` 回给页面的结果改为 **JSON 字符串**，与 macOS 宿主 `sendCommandResult(result: String?)` 一致。此前回的是对象，共享插件包的 `JSON.parse(raw)` 会当场报 `"[object Object]" is not valid JSON`。
+
+### Fixed
+- 插件包内含 git worktree 时装不上：digest 只对**目录**按名跳过 `.git`，而安装时的复制对任意类型都按名跳过，两边算的不是同一个集合，于是恒报 `package changed while copying`。
+
 ## [0.72.0-rc60] - 2026-09-08
 
 ### Fixed

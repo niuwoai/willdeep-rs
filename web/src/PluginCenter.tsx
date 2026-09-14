@@ -27,6 +27,9 @@ type Props = {
 function permissionLabel(messages: Messages, permission: string): string {
   const table: Record<string, string> = {
     "conversation.read": messages.pluginPermConversationRead,
+    "conversation.write": messages.pluginPermConversationWrite,
+    "ai.image": messages.pluginPermAiImage,
+    "skills.read": messages.pluginPermSkillsRead,
     "workspace.read": messages.pluginPermWorkspaceRead,
     "workspace.write": messages.pluginPermWorkspaceWrite,
     "process.execute": messages.pluginPermProcessExecute,
@@ -111,6 +114,13 @@ export function PluginCenter({ plugins, failures, messages, onChanged }: Props) 
                   {plugin.mcp_servers.map((server) => (
                     <span key={server} className="plugin-chip mcp">
                       MCP · {server}
+                    </span>
+                  ))}
+                  {/* 包照装，但这几条本宿主还没实现。说出来，总比让用户
+                      点一个永远没反应的按钮强。 */}
+                  {plugin.unsupported.map((item) => (
+                    <span key={item} className="plugin-chip quiet">
+                      {messages.pluginUnsupported} · {item}
                     </span>
                   ))}
                 </Flex>

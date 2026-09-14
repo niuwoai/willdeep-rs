@@ -712,8 +712,11 @@ export function App() {
     if (text.includes("\n") || text.length > 200) { event.preventDefault(); setAttachments((current) => [...current, { kind: "text", name: `${t.pastedText}-${current.length + 1}.txt`, content: text }]); }
   }
 
-  async function send() {
-    const typed = prompt.trim();
+  // `override` 给插件的 `window.willdeep.chat.send` 用：它递进来的文本要
+  // 立刻起一个回合，而 setPrompt 是异步的——读 state 会读到上一轮的值。
+  // 走的是与用户敲回车完全相同的这条路：审批档位与沙箱一个都不绕。
+  async function send(override?: string) {
+    const typed = (override ?? prompt).trim();
     if (selectedSession?.archived) { setError(`${t.requestFailed}: ${t.archived}`); return; }
     if (typed === "/clear") { setChat([]); setPrompt(""); return; }
     if (typed === "/help") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: t.helpText }]); setPrompt(""); return; }
@@ -792,7 +795,10 @@ export function App() {
         event.preventDefault();
         setPopup({ entries, x: event.clientX, y: event.clientY, args: { item: componentId } });
       }} />}
-      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} />
+      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} busy={busy} onChatText={(text, sendNow) => {
+        setRail({ kind: "conversation" });
+        if (sendNow) void send(text); else setPrompt(text);
+      }} onOpenSession={(id) => { setRail({ kind: "conversation" }); void loadSessionRef.current(id); }} />
       {pluginOverlays}
     </Flex>;
   }

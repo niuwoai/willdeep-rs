@@ -9,7 +9,8 @@ export type PluginCommandView = {
   id: string;
   title: string;
   icon: string | null;
-  handler: "host" | "mcpTool" | "navigate";
+  /** `unsupported`：清单里声明了、但本宿主还没实现的 Host Command。 */
+  handler: "host" | "mcpTool" | "navigate" | "unsupported";
 };
 
 export type PluginDestinationView = {
@@ -56,6 +57,10 @@ export type PluginView = {
   commands: PluginCommandView[];
   menus: Record<string, string[]>;
   settings: PluginSettingView[];
+  /** 本宿主还不认识的清单词汇：`permission:x` / `hostAction:y` / `menu:z`。 */
+  unsupported: string[];
+  /** 要由浏览器弹文件框、而不是交给 MCP 服务的命令 ID。 */
+  file_picker_commands: string[];
   /** 从没批准过的包没有这一项——算它要读遍包内容，那是「点批准」时才做的事。 */
   digest?: string;
 };
@@ -170,14 +175,88 @@ export function pluginProviders(pluginId: string) {
 }
 
 export function pluginComplete(pluginId: string, payload: unknown) {
-  return request<{ text: string; model: string; providerID: string }>(
+  return request<{ text: string; model: string; providerID: string; toolCalls: unknown[] }>(
     `/api/plugins/${encodeURIComponent(pluginId)}/ai/complete`,
     jsonBody(payload)
   );
 }
 
+export function pluginCancel(pluginId: string, streamID: string) {
+  return request<{ cancelled: boolean }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/ai/cancel`,
+    jsonBody({ streamID })
+  );
+}
+
+export function pluginGenerateImage(pluginId: string, payload: unknown) {
+  return request<{ mediaURL: string; filePath: string; model: string; providerID: string }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/ai/image`,
+    jsonBody(payload)
+  );
+}
+
+export function pluginSkills(pluginId: string) {
+  return request<{ skills: unknown[] }>(`/api/plugins/${encodeURIComponent(pluginId)}/skills`);
+}
+
+/** fs.list / read / search / write / patch。越界与权限都由宿主判，这里只转发。 */
+export function pluginFs(pluginId: string, action: string, payload: unknown) {
+  return request<Record<string, unknown>>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/fs/${encodeURIComponent(action)}`,
+    jsonBody(payload)
+  );
+}
+
+export function pluginRunProcess(pluginId: string, command: string, confirmed: boolean) {
+  return request<{ summary: string; output: string; exitCode: number; truncated: boolean }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/process/run`,
+    jsonBody({ command, confirmed })
+  );
+}
+
+export function pluginFetch(pluginId: string, payload: unknown) {
+  return request<{ status: number; headers: Record<string, string>; body: string; truncated: boolean }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/net/fetch`,
+    jsonBody(payload)
+  );
+}
+
+/**
+ * 效果发生在浏览器里、但「准不准」由宿主判的那几条：剪贴板、通知、
+ * 把文本递给主 Agent、订阅宿主事件、打开会话。宿主只回准不准。
+ */
+export function pluginHostAction(pluginId: string, action: string, payload: unknown) {
+  return request<Record<string, unknown>>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/host/${encodeURIComponent(action)}`,
+    jsonBody(payload)
+  );
+}
+
+/** 浏览器选好的文件上传到宿主，回服务端绝对路径。 */
+export function uploadPluginFile(pluginId: string, name: string, data: string) {
+  return request<{ path: string; mediaURL: string; byteSize: number }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/files`,
+    jsonBody({ name, data })
+  );
+}
+
+export function readPluginStorage(pluginId: string, key?: string) {
+  const suffix = key === undefined ? "" : `?key=${encodeURIComponent(key)}`;
+  return request<{ value?: unknown; keys?: string[] }>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/storage${suffix}`
+  );
+}
+
 export function writePluginStorage(pluginId: string, key: string, value: string | null) {
   return request(`/api/plugins/${encodeURIComponent(pluginId)}/storage`, jsonBody({ key, value }));
+}
+
+/** 结构化存储（`window.willdeep.storage.*`）：值是任意 JSON，与垫片分开存。 */
+export function writePluginStore(pluginId: string, key: string, json: unknown | null) {
+  return request(
+    `/api/plugins/${encodeURIComponent(pluginId)}/storage`,
+    jsonBody({ key, scope: "store", json })
+  );
 }
 
 export function clearPluginStorage(pluginId: string) {

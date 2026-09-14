@@ -52,6 +52,10 @@ pub enum HostError {
     EmptyResource { uri: String },
     #[error("MCP App resource `{uri}` must be text/html;profile=mcp-app, got `{mime}`")]
     WrongResourceMime { uri: String, mime: String },
+    /// 清单装得上，但这一条动作本宿主还没实现。拒在执行这一刻，而不是
+    /// 在安装那一刻把整个包判死。
+    #[error("host action `{action}` is not supported by this host")]
+    UnsupportedHostAction { action: String },
 }
 
 /// 一次命令执行的结果。宿主命令与跳转由界面消化，MCP 工具的返回原样交回页面。
@@ -337,7 +341,26 @@ impl PluginHost {
                 id: command_id.to_owned(),
             })?;
         match &command.handler {
-            CommandHandler::Host { action } => Ok(CommandOutcome::Host(*action)),
+            CommandHandler::Host { action } => {
+                // `session.open` 复用 conversation.read：拿得到 sessionID 的
+                // 插件才有理由打开它，所以不新增权限。另外三个导航类动作零权限。
+                if matches!(action, HostAction::SessionOpen)
+                    && !package.manifest.as_ref().is_some_and(|manifest| {
+                        manifest
+                            .permissions
+                            .contains(&PluginPermission::ConversationRead)
+                    })
+                {
+                    return Err(HostError::PermissionDenied {
+                        plugin: plugin_id.to_owned(),
+                        permission: PluginPermission::ConversationRead.as_str().to_owned(),
+                    });
+                }
+                Ok(CommandOutcome::Host(*action))
+            }
+            CommandHandler::UnsupportedHost { action } => Err(HostError::UnsupportedHostAction {
+                action: action.clone(),
+            }),
             CommandHandler::Navigate { destination } => Ok(CommandOutcome::Navigate {
                 destination: qualified_destination(plugin_id, destination),
             }),
