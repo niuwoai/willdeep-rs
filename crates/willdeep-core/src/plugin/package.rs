@@ -514,15 +514,18 @@ fn collect_files(
         if metadata.file_type().is_symlink() {
             continue;
         }
+        // 装机产物与版本库内部状态不是插件的一部分，也不该把 digest 拖成
+        // 分钟级。按**名字**跳过，不看它是目录还是文件：git worktree 的
+        // `.git` 就是一个普通文件，只跳目录的话它会进 digest，而安装时的
+        // 复制按名字跳过了它——两边算的不是同一个集合，结果是这个包永远
+        // 报「package changed while copying」，装不上。
+        if matches!(
+            entry.file_name().to_str(),
+            Some("node_modules") | Some(".git") | Some(".cache")
+        ) {
+            continue;
+        }
         if metadata.is_dir() {
-            // 装机产物不是插件的一部分，也不该把 digest 拖成分钟级。
-            let name = entry.file_name();
-            if matches!(
-                name.to_str(),
-                Some("node_modules") | Some(".git") | Some(".cache")
-            ) {
-                continue;
-            }
             collect_files(root, &path, out, total)?;
             continue;
         }

@@ -106,21 +106,16 @@ export function PluginMenuPopup({ entries, x, y, onRun, onClose }: PopupProps) {
   closeRef.current = onClose;
 
   useEffect(() => {
-    const dismiss = (event: MouseEvent) => {
+    const dismiss = (event: PointerEvent) => {
       if (!ref.current?.contains(event.target as Node)) closeRef.current();
     };
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && closeRef.current();
-    // 延迟一帧再挂 click 监听。打开菜单的那一次点击还在往 window 冒泡，
-    // 立刻挂上去的话它会把刚弹出来的菜单当场关掉——表现就是「点了没反应」。
-    const armed = window.setTimeout(() => {
-      window.addEventListener("click", dismiss);
-      window.addEventListener("contextmenu", dismiss);
-    }, 0);
+    // 菜单由 pointerup/contextmenu 打开；只在下一次外部按下时关闭，
+    // 避免同一次选中/右键手势末尾的 click 将它立即关掉。
+    window.addEventListener("pointerdown", dismiss);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.clearTimeout(armed);
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("contextmenu", dismiss);
+      window.removeEventListener("pointerdown", dismiss);
       window.removeEventListener("keydown", onKey);
     };
   }, []);
@@ -128,7 +123,7 @@ export function PluginMenuPopup({ entries, x, y, onRun, onClose }: PopupProps) {
   if (entries.length === 0) return null;
 
   return (
-    <Box ref={ref} className="plugin-popup" style={{ left: position.left, top: position.top }} role="menu">
+    <Box ref={ref} className="plugin-popup" style={{ left: position.left, top: position.top }} role="menu" onMouseDown={(event) => event.preventDefault()} onContextMenu={(event) => event.preventDefault()}>
       {entries.map((entry) => (
         <button
           key={`${entry.pluginId}:${entry.commandId}`}

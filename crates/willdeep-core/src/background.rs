@@ -26,6 +26,7 @@ pub enum BackgroundTaskKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
+    Partial,
     Running,
     Blocked,
     Completed,

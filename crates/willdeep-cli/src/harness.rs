@@ -20,6 +20,8 @@ use crate::{
     resolve_base, resolve_dialect, resolve_provider,
 };
 
+mod verification;
+
 /// 把三个 Worker 档位各自解析成一个模型绑定。
 ///
 /// 优先级从高到低：
@@ -186,6 +188,7 @@ pub(crate) const KERNEL_WAKE_PROMPT: &str =
     "Runtime events arrived while you were away. Review them and continue.";
 
 pub(crate) struct BuiltHarness {
+    pub session_id: uuid::Uuid,
     pub agent: Arc<Agent>,
     pub workspace: PathBuf,
     pub skills: Arc<willdeep_core::SkillCatalog>,
@@ -204,21 +207,26 @@ pub(crate) struct BuiltHarness {
 }
 
 pub(crate) struct HarnessOutcome {
+    pub stop_reason: willdeep_core::AgentStopReason,
     pub final_text: String,
     pub turns: usize,
     pub compressed: bool,
 }
 
 pub(crate) struct RuntimeHarnessOutcome {
+    pub stop_reason: willdeep_core::AgentStopReason,
     pub final_text: String,
     pub turns: usize,
     pub session_id: uuid::Uuid,
+    pub message_end: usize,
+    pub message_generation: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default)]
 pub(crate) struct ExecutionOptions {
     pub allow_compress_command: bool,
     pub replay_existing_user_message: bool,
+    pub ownership: Option<willdeep_core::checkpoint::ClaimedSessionCheckpointSink>,
 }
 
 pub(crate) async fn execute_runtime(
@@ -226,6 +234,7 @@ pub(crate) async fn execute_runtime(
     request: crate::daemon::SubmitTask,
     connection: RuntimeConnection,
     sink: Arc<dyn EventSink>,
+    prepare_execution: impl FnOnce(&willdeep_core::Session) -> Result<()>,
 ) -> Result<RuntimeHarnessOutcome> {
     let loaded = LoadedConfig::load(request.config.as_deref())?;
     let language = Language::parse(loaded.file.agent.language.as_deref())?;
@@ -259,7 +268,20 @@ pub(crate) async fn execute_runtime(
         web_input_json: false,
     };
     let store = willdeep_core::SessionStore::new(home);
+    let ownership = request
+        .session_id
+        .map(|session_id| {
+            willdeep_core::checkpoint::SessionCheckpointSink {
+                store: store.clone(),
+                session_id,
+            }
+            .claim()
+        })
+        .transpose()?;
     let resumed = request.session_id.map(|id| store.load(id)).transpose()?;
+    if let Some(session) = &resumed {
+        prepare_execution(session)?;
+    }
     let built = build(
         &cli,
         &loaded,
@@ -276,11 +298,13 @@ pub(crate) async fn execute_runtime(
     )
     .await?;
     let mut session = resumed.unwrap_or_else(|| {
-        willdeep_core::Session::new(
+        let mut session = willdeep_core::Session::new(
             built.workspace.clone(),
             request.profile.clone(),
             &request.prompt,
-        )
+        );
+        session.id = built.session_id;
+        session
     });
     if session.config.is_none() {
         session.config = request.config.clone();
@@ -295,13 +319,17 @@ pub(crate) async fn execute_runtime(
         ExecutionOptions {
             allow_compress_command: true,
             replay_existing_user_message: request.replay_existing_user_message,
+            ownership,
         },
     )
     .await?;
     Ok(RuntimeHarnessOutcome {
+        stop_reason: outcome.stop_reason,
         final_text: outcome.final_text,
         turns: outcome.turns,
         session_id: session.id,
+        message_end: session.messages.len(),
+        message_generation: session.compression_generation,
     })
 }
 
@@ -314,14 +342,30 @@ pub(crate) async fn execute_noninteractive(
     language: Language,
     options: ExecutionOptions,
 ) -> Result<HarnessOutcome> {
+    let checkpointer = match options.ownership {
+        Some(ownership) => ownership,
+        None => willdeep_core::checkpoint::SessionCheckpointSink {
+            store: store.clone(),
+            session_id: session.id,
+        }
+        .claim()?,
+    };
+    store.refresh_execution(session)?;
     if options.allow_compress_command && prompt.trim() == "/compress" {
-        let messages = built
+        let result = built
             .agent
-            .compress_history(session.messages.clone())
-            .await?;
+            .compress_history_recorded(session.messages.clone(), &mut |usage| {
+                store
+                    .record_compression_usage(session.id, usage)
+                    .map_err(|error| willdeep_core::AgentError::Checkpoint(error.to_string()))
+            })
+            .await;
+        store.refresh_execution(session)?;
+        let messages = result?;
         let changed = session.replace_with_compressed_messages(messages);
         store.save(session)?;
         return Ok(HarnessOutcome {
+            stop_reason: willdeep_core::AgentStopReason::Finished,
             final_text: language
                 .text(
                     if changed {
@@ -361,7 +405,14 @@ pub(crate) async fn execute_noninteractive(
             user_message,
         )
     } else {
-        let history = session.messages.clone();
+        let mut history = session.messages.clone();
+        if let Some(notice) = session
+            .execution_checkpoint
+            .as_ref()
+            .and_then(willdeep_core::checkpoint::CheckpointMetadata::recovery_notice)
+        {
+            history.push(notice);
+        }
         let user_message = willdeep_core::Message::user_with_attachments(&prompt, attachments);
         session.messages.push(user_message.clone());
         store.save(session)?;
@@ -377,8 +428,10 @@ pub(crate) async fn execute_noninteractive(
     );
     let run_result = built
         .agent
-        .run_with_history_message(history, user_message)
+        .run_checkpointed(history, user_message, Some(&checkpointer))
         .await;
+    // Synchronize even on error: files may already have changed during this run.
+    *session = store.load(session.id)?;
     match &run_result {
         Ok(outcome) => turn_telemetry.finish(
             crate::telemetry::global(),
@@ -387,25 +440,7 @@ pub(crate) async fn execute_noninteractive(
         Err(error) => turn_telemetry.finish(crate::telemetry::global(), Err(error)),
     }
     let mut outcome = run_result?;
-    if outcome.stop_reason == willdeep_core::AgentStopReason::MaxTurns {
-        // 触顶交出的是部分结果，得让人一眼看出它没收敛，而不是当成终稿。
-        // 说明同时写进会话历史：下一轮模型也该知道上一轮是被掐断的。
-        let notice = language
-            .text(
-                "⚠ 轮次上限 {n} 已用尽，任务未收敛。以下是最后一段结果，改动已落盘但可能不完整；继续对话可接着做。",
-                "⚠ The {n}-turn limit was reached before the task converged. Below is the last partial result; edits are on disk but may be incomplete. Continue the conversation to carry on.",
-                "⚠ ターン上限 {n} に達し、タスクは収束していません。以下は最後の部分結果です。変更は保存済みですが不完全な可能性があります。会話を続けて再開できます。",
-            )
-            .replace("{n}", &outcome.turns.to_string());
-        outcome
-            .messages
-            .push(willdeep_core::Message::assistant(&notice, Vec::new()));
-        outcome.final_text = if outcome.final_text.trim().is_empty() {
-            notice
-        } else {
-            format!("{notice}\n\n{}", outcome.final_text)
-        };
-    }
+    present_partial_outcome(&mut outcome, language);
     session.messages = outcome.messages.clone();
     store.save(session)?;
     loop {
@@ -439,8 +474,13 @@ pub(crate) async fn execute_noninteractive(
         }
         outcome = built
             .agent
-            .run_with_history(session.messages.clone(), KERNEL_WAKE_PROMPT.to_owned())
+            .run_checkpointed(
+                session.messages.clone(),
+                willdeep_core::Message::host_instruction(KERNEL_WAKE_PROMPT),
+                Some(&checkpointer),
+            )
             .await?;
+        *session = store.load(session.id)?;
         session.messages = outcome.messages.clone();
         store.save(session)?;
         willdeep_core::kernel_store::flush(&built.kernel, &built.kernel_store);
@@ -457,7 +497,7 @@ pub(crate) async fn execute_noninteractive(
     built
         .notifier
         .set_session(&session.id.to_string(), Some(session.title.as_str()));
-    built.notifier.task_completed(outcome.final_text.as_str());
+    built.notifier.task_stopped(&outcome);
     built.notifier.flush().await;
     if let Some(error) = built.notifier.take_error() {
         // There is no TUI notice line on this path, so stderr is the only way
@@ -472,10 +512,49 @@ pub(crate) async fn execute_noninteractive(
         );
     }
     Ok(HarnessOutcome {
+        stop_reason: outcome.stop_reason,
         final_text: outcome.final_text,
         turns: outcome.turns,
         compressed: false,
     })
+}
+
+pub(crate) fn present_partial_outcome(
+    outcome: &mut willdeep_core::AgentOutcome,
+    language: Language,
+) {
+    use willdeep_core::AgentStopReason;
+    let notice = match outcome.stop_reason {
+        AgentStopReason::Finished | AgentStopReason::GoalComplete => return,
+        AgentStopReason::MaxTurns => language.text(
+            "⚠ 轮次上限 {n} 已用尽，任务未收敛。改动已落盘但可能不完整；继续对话可接着做。",
+            "⚠ The {n}-turn limit was reached. The task is incomplete; saved changes can be continued.",
+            "⚠ ターン上限 {n} に達しました。タスクは未完了です。保存済みの変更から続行できます。",
+        ),
+        AgentStopReason::Incomplete => language.text(
+            "⚠ 模型输出未完整结束。以下为部分结果，不能视为任务完成；未完整返回的工具调用没有执行。",
+            "⚠ The provider response is incomplete. This is a partial result, not task completion. Incomplete tool calls were not executed.",
+            "⚠ モデルの応答が未完了です。以下は部分的な結果です。未完了のツール呼び出しは実行していません。",
+        ),
+        AgentStopReason::Unverified => language.text(
+            "⚠ 当前改动缺少有效的通过验证记录，任务仅部分完成。",
+            "⚠ Current changes lack valid passing verification; the task is only partially complete.",
+            "⚠ 現在の変更には有効な検証成功記録がなく、タスクは部分完了です。",
+        ),
+        AgentStopReason::BudgetLimited => language.text(
+            "⚠ 执行预算已用尽，目标尚未完成。以下为交接信息。",
+            "⚠ The execution budget was exhausted; the goal remains incomplete. Handover follows.",
+            "⚠ 実行予算に達しました。目標は未完了です。以下は引き継ぎ情報です。",
+        ),
+    }.replace("{n}", &outcome.turns.to_string());
+    outcome
+        .messages
+        .push(willdeep_core::Message::assistant(&notice, Vec::new()));
+    outcome.final_text = if outcome.final_text.trim().is_empty() {
+        notice
+    } else {
+        format!("{notice}\n\n{}", outcome.final_text)
+    };
 }
 
 pub(crate) async fn build(
@@ -486,6 +565,9 @@ pub(crate) async fn build(
     resumed: Option<&willdeep_core::Session>,
     frontend: HarnessFrontend,
 ) -> Result<BuiltHarness> {
+    let session_id = resumed
+        .map(|session| session.id)
+        .unwrap_or_else(uuid::Uuid::new_v4);
     let selected_profile_name = cli.profile.as_deref().or_else(|| {
         resumed
             .as_ref()
@@ -643,6 +725,7 @@ pub(crate) async fn build(
     ));
     let verification_home = home.to_path_buf();
     let verification_workspace = workspace.clone();
+    let verification_snapshot_workspace = workspace.clone();
     // The judge answers one YES/NO per ambiguous command: on some.im that is
     // the gateway's managed `someim-security-guard` policy, elsewhere the
     // session's own model. `[agent] judge_model` overrides both.
@@ -666,7 +749,8 @@ pub(crate) async fn build(
     let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
     let hooks = build_hooks(&loaded.file.hooks).context("read [[hooks]]")?;
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
-        .with_sandbox(sandbox)
+        .with_output_store(&home.join("tool-outputs"))
+        .with_sandbox(sandbox.clone())
         .with_hooks(hooks)
         .with_approver(approver)
         .with_approval_reporter(move |trace| {
@@ -678,17 +762,20 @@ pub(crate) async fn build(
         // 显式后台命令脱离父进程：Runtime 升级或重启之后，回来取结果就行，
         // 不必把一条跑了半小时的命令再跑一遍。
         .with_detached_jobs(Arc::new(willdeep_core::DetachedJobStore::new(home)))
+        .with_fallible_verification_snapshot(move || {
+            verification::snapshot(&verification_snapshot_workspace)
+        })
         .with_verification_reporter(move |verification| {
             let home = verification_home.clone();
             let workspace = verification_workspace.clone();
-            let Ok(snapshot) = daemon::diff_review::snapshot(&workspace) else {
+            let Some(snapshot_id) = verification.snapshot_id.clone() else {
                 return;
             };
             tokio::spawn(async move {
                 let _ = daemon::diff_review::remote_record_verification(
                     &home,
                     &workspace,
-                    snapshot.id,
+                    snapshot_id,
                     verification,
                 )
                 .await;
@@ -704,7 +791,7 @@ pub(crate) async fn build(
         tools = tools.with_safety_judge(judge);
     }
     let tools = tools;
-    let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace);
+    let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace)?;
     if !skills.list().is_empty() {
         system_prompt.push_str(
             "\n\n# Available skills\nUse list_skills to search and read_skill before applying a relevant skill. Entries may carry a tier: `tier=worker` marks a skill whose steps fit a small-context worker — prefer dispatching it via spawn_agent with a task packet instead of running it inline; `tier=deep` marks work that needs the largest window available. Untagged skills run at the session's default tier.\n",
@@ -795,7 +882,11 @@ pub(crate) async fn build(
             .as_deref()
             .is_some_and(willdeep_core::hosts_job_prompt);
     }
+    tools
+        .require_verifications(&loaded.file.agent.verification_commands)
+        .map_err(anyhow::Error::msg)?;
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
+        .with_sandbox(sandbox)
         .with_worktree_root(home.join("worktrees").join("subagents"))
         // Task packets may name a skill; the runtime inlines its body so the
         // worker never spends turns fetching its own instructions.
@@ -804,6 +895,8 @@ pub(crate) async fn build(
         .with_mcp(mcp)
         // Worker 与父会话共享已批准的精确动作。没有这条，后台 Worker 会在人
         // 刚刚批过的同一条命令上再卡一次，而它自己没有审批 UI。
+        .with_state_home(home.join("workers"))
+        .with_parent_session(session_id)
         .with_always_allow_store(home.join("always-allow.json"))
         .with_event_sink(sink.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
@@ -923,6 +1016,7 @@ pub(crate) async fn build(
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
+        session_id,
         agent: Arc::new(agent),
         workspace,
         skills,

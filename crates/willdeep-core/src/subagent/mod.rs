@@ -21,6 +21,9 @@
 mod audit;
 mod brief;
 mod catalog;
+mod checkpoint;
+mod dispatch_store;
+mod file_leases;
 mod profiles;
 mod runner;
 mod text;
@@ -37,7 +40,7 @@ pub use profiles::{
 };
 pub use types::{
     PUBLIC_SUBAGENT_IDS, SubagentProfile, SubagentShell, SubagentWriteScope, TaskPacket,
-    TaskVerifier, public_profile_id,
+    TaskVerifier, public_profile_id, public_trade_contract,
 };
 
 pub(crate) use types::SpawnAgentArgs;

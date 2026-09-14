@@ -9,6 +9,13 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 
+#[path = "headless_runtime/automatic_compression.rs"]
+mod automatic_compression;
+#[path = "headless_runtime/foreground_recovery.rs"]
+mod foreground_recovery;
+#[path = "headless_runtime/local_partial.rs"]
+mod local_partial;
+
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -106,6 +113,355 @@ fn task_diagnostics_reports_the_failing_tool_that_events_redact() {
         "公共事件流不得泄露工具参数"
     );
 
+    guard.stop_daemon();
+}
+
+#[test]
+fn explicit_verification_survives_runtime_restart_and_config_removal() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert_success(&init, "initialize verification workspace");
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let original = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        original.replace(
+            "[agent]",
+            "[agent]\nverification_commands = [\"cargo test --workspace\"]",
+        ),
+    )
+    .unwrap();
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+    let run = |session: Option<&str>| {
+        let mut command = willdeep(&home);
+        command.args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+        ]);
+        if let Some(session) = session {
+            command.args(["--session", session]);
+        }
+        command.arg("complete the objective").output().unwrap()
+    };
+    let first = run(None);
+    assert_eq!(
+        first.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["type"], "partial");
+    assert_eq!(first["stop_reason"], "unverified");
+    let session = first["session_id"].as_str().unwrap();
+    assert_eq!(provider.requests(), 3);
+    let saved = willdeep_core::SessionStore::new(&home)
+        .load(session.parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        saved.execution_checkpoint.unwrap().required_verifications,
+        vec!["cargo test --workspace"]
+    );
+    assert_eq!(
+        runtime_state(&home, "turns.json")[0]["metadata"]["status"],
+        "partial"
+    );
+
+    let stop = willdeep(&home).args(["daemon", "stop"]).output().unwrap();
+    assert_success(&stop, "stop Runtime before reconstructing executor");
+    std::fs::write(&config, original).unwrap();
+    let resumed = run(Some(session));
+    assert_eq!(
+        resumed.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["type"], "partial");
+    assert_eq!(resumed["stop_reason"], "unverified");
+    assert_eq!(resumed["session_id"], session);
+    assert_eq!(provider.requests(), 6);
+
+    let independent = run(None);
+    assert_success(
+        &independent,
+        "new independent task has no configured verification contract",
+    );
+    let independent: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
+    assert_eq!(independent["type"], "completed");
+    assert_ne!(independent["session_id"], session);
+    assert_eq!(provider.requests(), 7);
+    guard.stop_daemon();
+}
+
+#[test]
+fn partial_runtime_turn_returns_nonzero_and_can_continue() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::IncompleteThenSuccess);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+    let first = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+            "complete the objective",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        first.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(result["type"], "partial");
+    assert_eq!(result["stop_reason"], "incomplete");
+    assert!(
+        result["text"]
+            .as_str()
+            .unwrap()
+            .contains("partial evidence")
+    );
+    let session = result["session_id"].as_str().unwrap();
+    let turns = runtime_state(&home, "turns.json");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["metadata"]["status"], "partial");
+    assert!(turns[0]["metadata"]["message_end"].as_u64().unwrap() > 0);
+    let agents = runtime_state(&home, "agents.json");
+    let root_agent = agents
+        .iter()
+        .find(|agent| agent["parent_id"].is_null())
+        .unwrap();
+    assert_eq!(root_agent["status"], "partial");
+    assert!(root_agent["completed_at"].as_u64().is_some());
+    assert!(root_agent["current_tool"].is_null());
+    assert_eq!(provider.requests(), 3);
+    let second = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            session,
+            "--output",
+            "json",
+            "continue the remaining work",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&second, "continue partial Runtime turn");
+    let result: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(result["type"], "completed");
+    assert_eq!(result["text"], MOCK_REPLY);
+    assert_eq!(provider.requests(), 4, "previous requests must not replay");
+    guard.stop_daemon();
+}
+
+#[test]
+fn web_partial_stream_closes_and_resume_preserves_partial_status() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::IncompleteThenSuccess);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let listen = free_loopback_address();
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+    let mut web = ChildGuard(Some(
+        willdeep(&home)
+            .args([
+                "--web",
+                "--listen",
+                &listen,
+                "--config",
+                path_text(&config),
+                "--workspace",
+                path_text(&workspace),
+            ])
+            .spawn()
+            .unwrap(),
+    ));
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = reqwest::Client::new();
+        let base = format!("http://{listen}");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if client
+                    .get(format!("{base}/health"))
+                    .send()
+                    .await
+                    .is_ok_and(|response| response.status().is_success())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let response = client
+            .post(format!("{base}/api/chat/stream"))
+            .json(&serde_json::json!({
+                "prompt": "finish all work", "workspace": workspace.canonicalize().unwrap(),
+                "language": "en", "attachments": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let mut body = tokio::time::timeout(Duration::from_secs(15), response.text())
+            .await
+            .expect("partial stream must close")
+            .unwrap();
+        let mut terminal = None;
+        while let Some(event) = pop_sse_json(&mut body) {
+            assert_ne!(event["type"], "completed");
+            if event["type"] == "partial" {
+                terminal = Some(event);
+            }
+        }
+        let terminal = terminal.expect("partial terminal event");
+        assert!(
+            terminal["text"]
+                .as_str()
+                .unwrap()
+                .contains("partial evidence")
+        );
+        let session = terminal["session_id"].as_str().unwrap();
+        let response = client
+            .get(format!("{base}/api/sessions/{session}/stream?language=en"))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let mut body = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("resumed partial stream must close")
+            .unwrap();
+        let mut resumed_partial = false;
+        while let Some(event) = pop_sse_json(&mut body) {
+            assert_ne!(event["type"], "completed");
+            assert_ne!(event["type"], "error");
+            resumed_partial |= event["type"] == "partial";
+        }
+        assert!(resumed_partial);
+        assert_eq!(provider.requests(), 3, "resume must not generate again");
+    });
+    web.stop();
+    guard.stop_daemon();
+}
+
+#[test]
+fn web_text_delta_arrives_before_provider_is_allowed_to_finish() {
+    struct ReleaseOnDrop(Arc<AtomicBool>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::StreamingUntilReleased);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let listen = free_loopback_address();
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+    let mut web = ChildGuard(Some(
+        willdeep(&home)
+            .args([
+                "--web",
+                "--listen",
+                &listen,
+                "--config",
+                path_text(&config),
+                "--workspace",
+                path_text(&workspace),
+            ])
+            .spawn()
+            .unwrap(),
+    ));
+    let _release = ReleaseOnDrop(provider.release_stream.clone());
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = reqwest::Client::new();
+        let base = format!("http://{listen}");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !client.get(format!("{base}/health")).send().await.is_ok_and(|response| response.status().is_success()) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        let response = client.post(format!("{base}/api/chat/stream")).json(&serde_json::json!({
+            "prompt":"answer", "workspace":workspace.canonicalize().unwrap(), "language":"en", "attachments":[]
+        })).send().await.unwrap();
+        assert!(response.status().is_success());
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                while let Some(event) = pop_sse_json(&mut buffer) {
+                    assert_ne!(event["type"], "completed");
+                    if event["type"] == "assistant_text_delta" {
+                        assert_eq!(event["text"], "live prefix");
+                        return;
+                    }
+                }
+                let chunk = stream.next().await.expect("stream stays open").unwrap();
+                buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+            }
+        }).await.expect("text must arrive while generation is still pending");
+        provider.release_stream.store(true, Ordering::SeqCst);
+        let mut completed = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(chunk) = stream.next().await {
+                buffer.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+                while let Some(event) = pop_sse_json(&mut buffer) {
+                    if event["type"] == "completed" {
+                        assert_eq!(event["text"], "live prefix");
+                        completed = true;
+                    }
+                }
+            }
+        }).await.expect("finished generation closes the stream");
+        assert!(completed);
+    });
+    web.stop();
     guard.stop_daemon();
 }
 
@@ -599,7 +955,7 @@ fn public_api_spawns_and_waits_for_a_read_only_child_agent() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&home).expect("create test home");
     std::fs::create_dir_all(&workspace).expect("create test workspace");
-    let provider = MockProvider::start_waiting_root();
+    let provider = MockProvider::start_with_mode(MockMode::WaitRootThenRetryChild);
     let config = root.join("config.toml");
     write_private_config(&config, provider.api_base());
     let mut session = willdeep_core::Session::new(workspace.clone(), None, "external spawn");
@@ -680,6 +1036,47 @@ fn public_api_spawns_and_waits_for_a_read_only_child_agent() {
         .as_str()
         .expect("spawned Agent ID");
 
+    let async_runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = runtime_client(&home);
+    let child_uuid = child_id.parse::<uuid::Uuid>().unwrap();
+    wait_until(Duration::from_secs(10), || {
+        let agents = async_runtime.block_on(client.agents()).unwrap();
+        let willdeep_runtime_protocol::ApiResponse::Ok { data, .. } = agents else {
+            panic!("agent.list failed");
+        };
+        assert!(
+            data.iter()
+                .filter(|agent| agent.parent_id.is_none())
+                .all(|agent| agent.retry_wait.is_none()),
+            "child retry must not mark the root as waiting"
+        );
+        data.iter()
+            .find(|agent| agent.id == child_uuid)
+            .is_some_and(|agent| {
+                agent.retry_wait.as_ref().is_some_and(|wait| {
+                    assert_eq!(
+                        agent.status,
+                        willdeep_runtime_protocol::AgentStatus::Running
+                    );
+                    assert_eq!(wait.attempt, 1);
+                    assert_eq!(wait.delay_ms, 2000);
+                    true
+                })
+            })
+    });
+    wait_until(Duration::from_secs(10), || {
+        if provider.requests() != 3 {
+            return false;
+        }
+        let willdeep_runtime_protocol::ApiResponse::Ok { data, .. } =
+            async_runtime.block_on(client.agent(child_uuid)).unwrap()
+        else {
+            panic!("agent.get failed");
+        };
+        data.retry_wait.is_none() && data.status == willdeep_runtime_protocol::AgentStatus::Running
+    });
+    provider.release_stream.store(true, Ordering::SeqCst);
+
     let wait_params = root.join("agent-wait.json");
     write_json(
         &wait_params,
@@ -699,11 +1096,478 @@ fn public_api_spawns_and_waits_for_a_read_only_child_agent() {
         serde_json::from_slice(&wait.stdout).expect("parse Agent wait envelope");
     assert_eq!(wait_envelope["data"]["id"], child_id);
     assert_eq!(wait_envelope["data"]["status"], "completed");
+    assert!(wait_envelope["data"]["retry_wait"].is_null());
     assert_eq!(wait_envelope["data"]["label"], "external scout");
+    let persisted = willdeep_core::SessionStore::new(home.join("workers"))
+        .load(child_id.parse().expect("child UUID"))
+        .expect("persisted Worker history");
+    assert_eq!(
+        persisted.execution_checkpoint.unwrap().status,
+        willdeep_core::checkpoint::CheckpointStatus::Completed
+    );
+    assert!(
+        persisted
+            .messages
+            .iter()
+            .any(|message| message.role == willdeep_core::Role::Assistant)
+    );
+    assert_eq!(
+        provider.requests(),
+        3,
+        "root reaches Provider once; child retries its one 429 exactly once"
+    );
+}
+
+#[test]
+fn root_retry_wait_is_observable_through_public_runtime_api() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::RetryRoot);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root.clone(), home.clone());
+    let child = willdeep(&home)
+        .args([
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+            "retry root request",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut process = ChildGuard(Some(child));
+    wait_until(Duration::from_secs(10), || provider.requests() > 0);
+    let client = runtime_client(&home);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut root_id = None;
+    wait_until(Duration::from_secs(10), || {
+        let willdeep_runtime_protocol::ApiResponse::Ok { data, .. } =
+            runtime.block_on(client.agents()).unwrap()
+        else {
+            panic!("agent.list failed");
+        };
+        let Some(agent) = data.iter().find(|agent| agent.parent_id.is_none()) else {
+            return false;
+        };
+        root_id = Some(agent.id);
+        agent
+            .retry_wait
+            .as_ref()
+            .is_some_and(|wait| wait.attempt == 1 && wait.delay_ms == 2000)
+    });
+    let root_id = root_id.unwrap();
+    wait_until(Duration::from_secs(10), || {
+        if provider.requests() != 2 {
+            return false;
+        }
+        let willdeep_runtime_protocol::ApiResponse::Ok { data, .. } =
+            runtime.block_on(client.agent(root_id)).unwrap()
+        else {
+            panic!("agent.get failed");
+        };
+        data.retry_wait.is_none() && data.status == willdeep_runtime_protocol::AgentStatus::Running
+    });
+    provider.release_stream.store(true, Ordering::SeqCst);
+    wait_until(Duration::from_secs(10), || {
+        process.0.as_mut().unwrap().try_wait().unwrap().is_some()
+    });
+    let result = process.0.take().unwrap().wait_with_output().unwrap();
+    assert_success(&result, "root Provider retry");
+    let willdeep_runtime_protocol::ApiResponse::Ok { data, .. } =
+        runtime.block_on(client.agent(root_id)).unwrap()
+    else {
+        panic!("final agent.get failed");
+    };
+    assert_eq!(
+        data.status,
+        willdeep_runtime_protocol::AgentStatus::Completed
+    );
+    assert!(data.retry_wait.is_none());
+    assert_eq!(provider.requests(), 2);
+}
+
+#[test]
+fn local_ndjson_exposes_completed_foreground_child_for_evaluation() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::DelegateThenSuccess);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root, home.clone());
+    let output = willdeep(&home)
+        .args([
+            "run",
+            "--local",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "ndjson",
+            "Delegate a read-only diagnosis then report the result",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output, "local delegated evaluation output");
+    let events = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let (index, started) = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| event["type"] == "subagent_started")
+        .expect("real child start event");
+    assert_eq!(started["profile"], "scout");
+    assert_eq!(started["background"], false);
+    let terminal = events[index + 1..]
+        .iter()
+        .find(|event| event["type"] == "subagent_completed" && event["id"] == started["id"])
+        .expect("same child completion event");
+    assert_eq!(terminal["status"], "completed");
+    let final_event = events.last().unwrap();
+    assert_eq!(final_event["type"], "completed");
+    assert!(final_event["session_id"].as_str().is_some());
+    assert_eq!(
+        provider.requests(),
+        3,
+        "root delegation, child response and parent integration"
+    );
+    let resumed = willdeep(&home)
+        .args([
+            "run",
+            "--local",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            final_event["session_id"].as_str().unwrap(),
+            "--output",
+            "json",
+            "continue the existing local session",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&resumed, "resume local evaluation session");
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["type"], "completed");
+    assert_eq!(resumed["session_id"], final_event["session_id"]);
+    assert_eq!(provider.requests(), 4);
+}
+
+#[test]
+fn local_compression_bridge_preserves_seeded_constraint_then_resumes() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root.clone(), home.clone());
+    let id = uuid::Uuid::new_v4();
+    let constraint = "Fix sum_to. Change only src/lib.rs; preserve all other files and run tests.";
+    let mut messages = vec![serde_json::json!({"role":"user", "content":constraint})];
+    for index in 0..10 {
+        messages.push(serde_json::json!({"role":"assistant", "content":format!("Historical inspection {index}; no changes made.")}));
+    }
+    // Same minimal serialized fixture shape used by the Ruby evaluator.
+    write_json(
+        &home.join("sessions").join(format!("{id}.json")),
+        serde_json::json!({"version":1,"id":id,"title":"Compression evaluation","workspace":workspace,"profile":null,"created_at":1,"updated_at":1,"messages":messages}),
+    );
+    let mut command = willdeep(&home)
+        .args([
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--resume",
+            &id.to_string(),
+            "--no-tui",
+            "--json",
+            "--web-input-json",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    command
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"prompt":"/compress","attachments":[]}"#)
+        .unwrap();
+    let output = command.wait_with_output().unwrap();
+    assert_success(&output, "explicit evaluation compression");
+    let events = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "compression_completed")
+    );
+    let store = willdeep_core::SessionStore::new(&home);
+    let compressed = store.load(id).unwrap();
+    assert_eq!(compressed.compression_generation, 1);
+    assert_eq!(compressed.manual_compression_usage.reported_calls, 1);
+    assert_eq!(compressed.manual_compression_usage.input_tokens, 5);
+    assert_eq!(compressed.manual_compression_usage.output_tokens, 3);
+    assert!(compressed.messages.len() < 11);
+    assert!(
+        compressed
+            .messages
+            .iter()
+            .any(|message| message.role == willdeep_core::Role::User
+                && message.content == constraint)
+    );
+    let resumed = willdeep(&home)
+        .args([
+            "run",
+            "--local",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            &id.to_string(),
+            "--output",
+            "json",
+            "Continue the original task under its original constraints",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&resumed, "resume compressed evaluation");
+    let reloaded_usage = store.load(id).unwrap().manual_compression_usage;
+    assert_eq!(reloaded_usage.reported_calls, 1);
+    assert_eq!(
+        (reloaded_usage.input_tokens, reloaded_usage.output_tokens),
+        (5, 3)
+    );
+    assert!(
+        store
+            .load(id)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.role == willdeep_core::Role::User
+                && message.content == constraint)
+    );
     assert_eq!(
         provider.requests(),
         2,
-        "root and child must each reach Provider"
+        "one actual summary and one resumed request"
+    );
+}
+
+#[test]
+fn local_interrupted_write_resumes_without_replay() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::CheckpointThenWait);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root.clone(), home.clone());
+    let controller = root.join("interrupt.rb");
+    write_private_text(
+        &controller,
+        r#"
+require 'json'
+require File.join(ARGV.shift, 'scripts/lib/agent_eval_process')
+require File.expand_path('agent_eval_recovery', File.dirname($LOADED_FEATURES.find { |p| p.end_with?('/agent_eval_process.rb') }))
+home, workspace, config, binary = ARGV
+observed = nil
+observer = lambda { observed = AgentEvalRecovery.boundary(home, workspace); !observed.nil? }
+env = {'WILLDEEP_HOME' => home}
+%w[WILLDEEP_API_BASE WILLDEEP_API_KEY WILLDEEP_CONFIG WILLDEEP_LANGUAGE WILLDEEP_MODEL].each { |key| env[key] = nil }
+command = [binary, 'run', '--local', '--config', config, '--workspace', workspace, '--full-auto', '--output', 'json', 'Append the marker exactly once.']
+code, timeout, elapsed, injected = AgentEvalProcess.run(command, env, workspace, 20, home, interrupt_when: observer)
+post = observed && AgentEvalRecovery.boundary(home, workspace, id: observed[:session_id])
+puts JSON.generate({code: code, timeout: timeout, injected: injected, observed: observed, boundary_preserved: post == observed && !post.nil?})
+"#,
+    );
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("ruby")
+        .args([
+            path_text(&controller),
+            path_text(&repository),
+            path_text(&home),
+            path_text(&workspace),
+            path_text(&config),
+            env!("CARGO_BIN_EXE_willdeep"),
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output, "interrupt controller");
+    let evidence: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(evidence["injected"], true, "{evidence}");
+    assert_eq!(evidence["timeout"], false, "{evidence}");
+    assert_eq!(evidence["boundary_preserved"], true, "{evidence}");
+    assert!(evidence["code"].is_null());
+    let id = evidence["observed"]["session_id"].as_str().unwrap();
+    provider.release_stream.store(true, Ordering::SeqCst);
+    let resumed = willdeep(&home)
+        .args([
+            "run",
+            "--local",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--session",
+            id,
+            "--output",
+            "json",
+            "Continue without repeating the completed marker write",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&resumed, "resume interrupted marker write");
+    let result: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(result["session_id"], id);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("progress.log")).unwrap(),
+        "checkpoint-once\n"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("sessions").join(format!("{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["execution_checkpoint"]["status"], "completed");
+    let marker_calls = saved["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .flatten()
+        .filter(|call| call["id"] == "marker-once")
+        .count();
+    assert_eq!(marker_calls, 1);
+    assert!(
+        (3..=4).contains(&provider.requests()),
+        "initial request, local safety judge and resume; interruption may precede the next HTTP request"
+    );
+}
+
+#[test]
+fn public_retry_restores_child_after_daemon_and_parent_harness_restart() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = MockProvider::start_with_mode(MockMode::WaitRootsForRecoveredChild);
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut session = willdeep_core::Session::new(workspace.clone(), None, "restore child");
+    session.config = Some(config.clone());
+    willdeep_core::SessionStore::new(&home)
+        .save(&mut session)
+        .unwrap();
+    let _guard = TestGuard::new(root.clone(), home.clone());
+    let root_turn = || {
+        willdeep(&home)
+            .args([
+                "run",
+                "--config",
+                path_text(&config),
+                "--workspace",
+                path_text(&workspace),
+                "--session",
+                &session.id.to_string(),
+                "wait for user input",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert_eq!(root_turn().status.code(), Some(4));
+    let params = root.join("spawn.json");
+    write_json(
+        &params,
+        serde_json::json!({"session_id":session.id,"prompt":"inspect without edits","profile":"scout"}),
+    );
+    let spawn = willdeep(&home)
+        .args(["api", "agent.spawn", "--params-file", path_text(&params)])
+        .output()
+        .unwrap();
+    assert_success(&spawn, "spawn persisted child");
+    let envelope: serde_json::Value = serde_json::from_slice(&spawn.stdout).unwrap();
+    let id = envelope["data"]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let client = runtime_client(&home);
+    wait_until(
+        Duration::from_secs(10),
+        || matches!(rt.block_on(client.agent(id)).unwrap(), willdeep_runtime_protocol::ApiResponse::Ok { data, .. } if data.status == willdeep_runtime_protocol::AgentStatus::Completed),
+    );
+    let willdeep_runtime_protocol::ApiResponse::Ok { data: old, .. } =
+        rt.block_on(client.agent(id)).unwrap()
+    else {
+        panic!("missing child")
+    };
+    assert_eq!(provider.requests(), 2);
+    assert_success(
+        &willdeep(&home).args(["daemon", "stop"]).output().unwrap(),
+        "stop original Runtime",
+    );
+    assert_eq!(root_turn().status.code(), Some(4));
+    let client = runtime_client(&home);
+    let response = rt
+        .block_on(client.retry_agent(id, uuid::Uuid::new_v4()))
+        .unwrap();
+    assert!(
+        matches!(response, willdeep_runtime_protocol::ApiResponse::Ok { .. }),
+        "{response:?}"
+    );
+    wait_until(
+        Duration::from_secs(10),
+        || matches!(rt.block_on(client.agent(id)).unwrap(), willdeep_runtime_protocol::ApiResponse::Ok { data, .. } if data.task_id != old.task_id && data.parent_id == old.parent_id && data.status == willdeep_runtime_protocol::AgentStatus::Completed),
+    );
+    assert_eq!(
+        provider.requests(),
+        4,
+        "two parent turns and two executions of the same restored child"
+    );
+    let worker = willdeep_core::SessionStore::new(home.join("workers"))
+        .load(id)
+        .unwrap();
+    assert_eq!(
+        worker
+            .messages
+            .iter()
+            .filter(|message| message.role == willdeep_core::Role::Assistant
+                && message.content == MOCK_REPLY)
+            .count(),
+        2
     );
 }
 
@@ -1021,6 +1885,7 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
         &mut completed,
         serde_json::json!({
             "command": supervisor_print_command(),
+            "sandbox": { "policy": "Off", "writable_roots": [] },
             "workspace": workspace,
             "timeout_seconds": 10
         }),
@@ -1045,6 +1910,7 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
         &mut disconnected,
         serde_json::json!({
             "command": supervisor_wait_command(),
+            "sandbox": { "policy": "Off", "writable_roots": [] },
             "workspace": workspace,
             "timeout_seconds": 60
         }),
@@ -1070,6 +1936,34 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
     #[cfg(unix)]
     wait_until(Duration::from_secs(5), || !process_exists(child_pid));
     std::fs::remove_dir_all(root).expect("remove supervisor test root");
+}
+
+#[cfg(unix)]
+#[test]
+fn background_supervisor_applies_read_only_sandbox() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut child = spawn_background_supervisor(&home);
+    let liveness = send_supervisor_request(
+        &mut child,
+        serde_json::json!({
+            "command": "touch sandbox-must-not-write",
+            "workspace": workspace,
+            "timeout_seconds": 10,
+            "sandbox": { "policy": "ReadOnly", "writable_roots": [] }
+        }),
+    );
+    let output = child.wait_with_output().unwrap();
+    drop(liveness);
+    assert_success(&output, "read-only supervisor result");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(result["status"], "completed");
+    assert!(!workspace.join("sandbox-must-not-write").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn spawn_background_supervisor(home: &Path) -> std::process::Child {
@@ -1196,15 +2090,7 @@ fn event_kind_count(events: &[serde_json::Value], kind: &str) -> usize {
 }
 
 async fn open_idle_event_stream(home: &Path) -> willdeep_runtime_client::NdjsonEventStream {
-    let state: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(home.join("runtime/daemon.json")).expect("read Runtime state"),
-    )
-    .expect("parse Runtime state");
-    let address = state["address"].as_str().expect("Runtime state address");
-    let token = state["token"].as_str().expect("Runtime state token");
-    let client =
-        willdeep_runtime_client::RuntimeClient::new(format!("http://{address}"), token.to_owned())
-            .expect("create Runtime event Client");
+    let client = runtime_client(home);
     let mut stream = client
         .stream_events(0, 1_000, None)
         .await
@@ -1223,6 +2109,17 @@ async fn open_idle_event_stream(home: &Path) -> willdeep_runtime_client::NdjsonE
             Err(_) => return stream,
         }
     }
+}
+
+fn runtime_client(home: &Path) -> willdeep_runtime_client::RuntimeClient {
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("runtime/daemon.json")).expect("read Runtime state"),
+    )
+    .expect("parse Runtime state");
+    let address = state["address"].as_str().expect("Runtime state address");
+    let token = state["token"].as_str().expect("Runtime state token");
+    willdeep_runtime_client::RuntimeClient::new(format!("http://{address}"), token.to_owned())
+        .expect("create Runtime Client")
 }
 
 async fn assert_event_stream_closed(stream: &mut willdeep_runtime_client::NdjsonEventStream) {
@@ -1674,6 +2571,8 @@ impl Drop for TestGuard {
 }
 
 struct MockProvider {
+    captured_requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    release_stream: Arc<AtomicBool>,
     address: std::net::SocketAddr,
     stop: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
@@ -1687,10 +2586,6 @@ impl MockProvider {
 
     fn start_with_status(status: u16) -> Self {
         Self::start_with_mode(MockMode::Status(status))
-    }
-
-    fn start_waiting_root() -> Self {
-        Self::start_with_mode(MockMode::WaitThenSuccess)
     }
 
     fn start_delayed(delay: Duration) -> Self {
@@ -1711,6 +2606,10 @@ impl MockProvider {
         let requests = Arc::new(AtomicUsize::new(0));
         let worker_stop = Arc::clone(&stop);
         let worker_requests = Arc::clone(&requests);
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let worker_captured = captured_requests.clone();
+        let release_stream = Arc::new(AtomicBool::new(false));
+        let worker_release = release_stream.clone();
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1725,6 +2624,8 @@ impl MockProvider {
                         axum::routing::post(mock_provider_response),
                     )
                     .with_state(MockProviderState {
+                        captured_requests: worker_captured,
+                        release_stream: worker_release,
                         mode,
                         requests: worker_requests,
                     });
@@ -1739,6 +2640,8 @@ impl MockProvider {
             });
         });
         Self {
+            captured_requests,
+            release_stream,
             address,
             stop,
             requests,
@@ -1757,9 +2660,16 @@ impl MockProvider {
 
 #[derive(Clone, Copy)]
 enum MockMode {
+    ForegroundRecovery,
+    WaitRootsForRecoveredChild,
+    CheckpointThenWait,
+    DelegateThenSuccess,
+    WaitRootThenRetryChild,
+    RetryRoot,
+    StreamingUntilReleased,
     Success,
+    IncompleteThenSuccess,
     Status(u16),
-    WaitThenSuccess,
     DelayedSuccess(Duration),
     /// 第一轮请求一个注定失败的工具（读不存在的文件），之后正常收尾。
     FailingToolThenSuccess,
@@ -1767,6 +2677,7 @@ enum MockMode {
 
 impl Drop for MockProvider {
     fn drop(&mut self) {
+        self.release_stream.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             thread.join().expect("join mock Provider");
@@ -1776,6 +2687,8 @@ impl Drop for MockProvider {
 
 #[derive(Clone)]
 struct MockProviderState {
+    captured_requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    release_stream: Arc<AtomicBool>,
     mode: MockMode,
     requests: Arc<AtomicUsize>,
 }
@@ -1784,22 +2697,98 @@ async fn mock_provider_response(
     axum::extract::State(state): axum::extract::State<MockProviderState>,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    serde_json::from_slice::<serde_json::Value>(&body).expect("parse Provider request JSON");
+    state.captured_requests.lock().unwrap().push(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("parse Provider request JSON"),
+    );
     let request_index = state.requests.fetch_add(1, Ordering::Relaxed);
+    if matches!(state.mode, MockMode::ForegroundRecovery) {
+        return foreground_recovery::response(state, body, request_index).await;
+    }
+    if matches!(state.mode, MockMode::CheckpointThenWait) && request_index == 2 {
+        while !state.release_stream.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    if matches!(
+        state.mode,
+        MockMode::WaitRootThenRetryChild | MockMode::RetryRoot
+    ) {
+        let first = usize::from(matches!(state.mode, MockMode::WaitRootThenRetryChild));
+        if request_index == first {
+            return axum::response::Response::builder()
+                .status(429)
+                .header("retry-after", "2")
+                .body(axum::body::Body::from("rate limited"))
+                .unwrap();
+        }
+        if request_index == first + 1 {
+            while !state.release_stream.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    if matches!(state.mode, MockMode::StreamingUntilReleased) {
+        let stream = futures_util::stream::unfold(
+            (0, state.release_stream),
+            |(step, release)| async move {
+                let frame = match step {
+                    0 => {
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"live prefix\"},\"finish_reason\":null}]}\n\n"
+                    }
+                    1 => {
+                        while !release.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                    }
+                    _ => return None,
+                };
+                Some((
+                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                        frame.as_bytes(),
+                    )),
+                    (step + 1, release),
+                ))
+            },
+        );
+        return axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+    }
     if let MockMode::DelayedSuccess(delay) = state.mode {
         tokio::time::sleep(delay).await;
     }
     let status = match state.mode {
         MockMode::Status(status) => status,
         MockMode::Success
-        | MockMode::WaitThenSuccess
+        | MockMode::ForegroundRecovery
+        | MockMode::WaitRootsForRecoveredChild
+        | MockMode::CheckpointThenWait
+        | MockMode::DelegateThenSuccess
+        | MockMode::WaitRootThenRetryChild
+        | MockMode::RetryRoot
+        | MockMode::StreamingUntilReleased
+        | MockMode::IncompleteThenSuccess
         | MockMode::DelayedSuccess(_)
         | MockMode::FailingToolThenSuccess => 200,
     };
-    let body = if matches!(state.mode, MockMode::FailingToolThenSuccess) && request_index == 0 {
+    let body = if matches!(state.mode, MockMode::CheckpointThenWait) && request_index == 0 {
+        let command = r#"ruby -e 'File.open("progress.log", "a") { |file| file.write("checkpoint-once\n") }'"#;
+        serde_json::json!({"choices":[{"message":{"content":null,"tool_calls":[{"id":"marker-once","type":"function","function":{"name":"run_command","arguments":serde_json::json!({"command":command}).to_string()}}]},"finish_reason":"tool_calls"}]}).to_string()
+    } else if matches!(state.mode, MockMode::CheckpointThenWait) && request_index == 1 {
+        serde_json::json!({"choices":[{"message":{"content":"<verdict>YES</verdict>"},"finish_reason":"stop"}]}).to_string()
+    } else if matches!(state.mode, MockMode::DelegateThenSuccess) && request_index == 0 {
+        serde_json::json!({"choices":[{"message":{"content":null,"tool_calls":[{"id":"delegate-diagnosis","type":"function","function":{"name":"spawn_agent","arguments":serde_json::json!({"profile":"scout","prompt":"Inspect the task without editing files and report your diagnosis","run_in_background":false}).to_string()}}]},"finish_reason":"tool_calls"}]}).to_string()
+    } else if matches!(state.mode, MockMode::FailingToolThenSuccess) && request_index == 0 {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"read_missing","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"definitely-missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
     } else if mode_is_waiting_root(state.mode, request_index) {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"ask_root","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"keep the root active?\",\"options\":[\"yes\"]}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
+    } else if matches!(state.mode, MockMode::IncompleteThenSuccess) && request_index < 3 {
+        serde_json::json!({
+            "choices": [{"message": {"content": "partial evidence", "tool_calls": []}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+        }).to_string()
     } else if status == 200 {
         format!(
             r#"{{"choices":[{{"message":{{"content":"{MOCK_REPLY}","tool_calls":[]}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}}}"#
@@ -1817,5 +2806,6 @@ async fn mock_provider_response(
 }
 
 fn mode_is_waiting_root(mode: MockMode, request_index: usize) -> bool {
-    matches!(mode, MockMode::WaitThenSuccess) && request_index == 0
+    (matches!(mode, MockMode::WaitRootThenRetryChild) && request_index == 0)
+        || (matches!(mode, MockMode::WaitRootsForRecoveredChild) && matches!(request_index, 0 | 2))
 }

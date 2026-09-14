@@ -81,7 +81,7 @@ pub struct RoundObservation {
 
 impl RoundObservation {
     pub fn made_progress(&self) -> bool {
-        self.tools_executed > 0 || self.background_active
+        self.tools_executed > 0
     }
 }
 
@@ -243,7 +243,7 @@ fn rung_for(consecutive_no_progress: u32) -> ContinuationRung {
 
 fn declares_complete(reply: &str) -> bool {
     let normalized = reply.to_ascii_lowercase();
-    normalized.contains(GOAL_COMPLETE_MARKER)
+    normalized.trim_start().starts_with(GOAL_COMPLETE_MARKER)
 }
 
 fn format_elapsed(elapsed: Duration) -> String {
@@ -294,8 +294,11 @@ fn continuation_steering(
         steering.push_str("The previous round did make progress.\n");
     } else {
         steering.push_str(
-            "The previous round produced no tool activity and no live background work.\n",
+            "The previous round produced no new successful tool evidence. Repeated results and failed attempts are not progress.\n",
         );
+    }
+    if observation.background_active {
+        steering.push_str("Background work is still registered. Inspect its current status/output or wait for a completion event; its existence alone does not prove progress. Do not repeatedly poll unchanged state.\n");
     }
     match rung {
         ContinuationRung::Guidance => {}
@@ -396,7 +399,7 @@ mod tests {
         let continuation = goal_with(GoalBudget::default());
         let decision = continuation
             .evaluate(
-                "Everything is verified. <goal-status>complete</goal-status> Shipped rc7.",
+                "<goal-status>complete</goal-status> Everything is verified. Shipped rc7.",
                 progressed(),
             )
             .expect("goal active");
@@ -405,18 +408,18 @@ mod tests {
     }
 
     #[test]
-    fn background_work_counts_as_progress_so_waiting_is_not_a_stall() {
+    fn unchanged_background_work_does_not_reset_the_progress_ladder() {
         let continuation = goal_with(GoalBudget::default());
         let waiting = RoundObservation {
             tools_executed: 0,
             background_active: true,
         };
-        for _ in 0..6 {
+        for round in 1..=6 {
             let decision = continuation.evaluate("waiting for CI", waiting).unwrap();
             let ContinuationDecision::Continue { rung, .. } = decision else {
                 panic!("expected continue while waiting on background work");
             };
-            assert_eq!(rung, ContinuationRung::Guidance);
+            assert_eq!(rung, rung_for(round));
         }
     }
 

@@ -14,7 +14,7 @@ export type RuntimeTool = {
   task_id: string;
   agent_id: string;
   name: string;
-  status: "running" | "completed" | "failed" | "interrupted";
+  status: "running" | "completed" | "partial" | "failed" | "interrupted";
   started_at_ms: number;
   completed_at_ms: number | null;
 };
@@ -41,6 +41,7 @@ export type RuntimeAgent = {
   status: string;
   current_turn: number;
   current_tool: string | null;
+  retry_wait?: { attempt: number; delay_ms: number } | null;
   total_tokens: number | null;
   elapsed_seconds: number;
   finished_seconds_ago: number | null;
@@ -108,6 +109,7 @@ function runtimeStatus(status: string, t: Messages) {
   if (status === "done" || status === "completed") return t.toolDone;
   if (status === "cancelled") return t.cancelled;
   if (status === "interrupted") return t.interrupted;
+  if (status === "partial") return t.partial;
   if (status === "blocked") return t.blocked;
   if (status === "idle") return t.idle;
   return t.unknownValue;
@@ -226,17 +228,17 @@ export function RuntimeSidebar({ activity, events, onIgnoreEvent, messages: t, o
     </VStack>}
     {sidebarAgents.length > 0 && <VStack align="stretch" gap="1" mt="3">
       {sidebarAgents.slice(0, 4).map((agent) => <Box key={agent.id} pl={agent.parent_id ? "3" : "0"}>
-        <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Flex align="center" gap="1" flexShrink="0"><Text color="var(--text-dim)">{runtimeStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "agent", id: agent.id })}>{t.details}</Button></Flex></Flex>
+        <Flex justify="space-between" gap="2" fontSize="xs"><Text overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.label || agent.profile || t.agent}</Text><Flex align="center" gap="1" flexShrink="0"><Text color="var(--text-dim)">{agent.retry_wait ? t.retryWaiting : runtimeStatus(agent.status, t)} · {t.turn} {agent.current_turn}</Text><Button size="2xs" variant="ghost" onClick={() => setDetail({ kind: "agent", id: agent.id })}>{t.details}</Button></Flex></Flex>
         <Text fontSize="2xs" color="var(--text-faint)" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{agent.model || t.unknownValue} · {agent.total_tokens ?? t.unknownValue} {t.tokenUnit} · {agentDuration(agent, t)}{agent.dedicated_worktree ? ` · ${agent.worktree_branch || t.worktree}` : ""}</Text>
         {agent.background && <Flex gap="1" mt="1">
           {agent.status === "working" && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "prompt"))}>{t.instruct}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "stop"))}>{t.stop}</Button></>}
-          {["blocked", "failed", "done", "cancelled"].includes(agent.status) && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry"))}>{t.retry}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry_model", agent.model))}>{t.changeModel}</Button></>}
+          {["blocked", "failed", "done", "partial", "cancelled"].includes(agent.status) && <><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry"))}>{t.retry}</Button><Button size="2xs" variant="ghost" disabled={controlBusy} onClick={() => void runControl(() => onAgentAction(agent.id, "retry_model", agent.model))}>{t.changeModel}</Button></>}
         </Flex>}
       </Box>)}
     </VStack>}
     {detail && <RuntimeDetailPanel activity={activity} messages={t} target={detail} onClose={() => setDetail(null)} />}
     {activity.tools[0] && <Text mt="2" fontSize="xs" color="var(--text-faint)" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
-      {activity.tools[0].name} · {activity.tools[0].status === "running" ? t.toolRunning : activity.tools[0].status === "completed" ? t.toolDone : t.toolFailed}
+      {activity.tools[0].name} · {activity.tools[0].status === "running" ? t.toolRunning : activity.tools[0].status === "completed" ? t.toolDone : activity.tools[0].status === "partial" ? t.partial : t.toolFailed}
     </Text>}
     </>}
   </Box>;

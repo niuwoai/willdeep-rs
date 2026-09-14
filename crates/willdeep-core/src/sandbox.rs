@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// 写入围栏的档位。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SandboxPolicy {
     /// 不加沙箱。用户显式选择，或平台不支持。
     #[default]
@@ -72,7 +72,7 @@ impl SandboxPolicy {
 }
 
 /// 一次沙箱执行的完整描述。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SandboxSpec {
     pub policy: SandboxPolicy,
     /// 允许写入的根，全部为 canonical 路径。空列表在 `WorkspaceWrite` 档下
@@ -81,6 +81,27 @@ pub struct SandboxSpec {
 }
 
 impl SandboxSpec {
+    /// Move workspace-local grants into a dedicated worker checkout. External
+    /// grants stay explicit; a narrower root never becomes the entire checkout.
+    pub fn for_workspace(&self, parent: &Path, child: &Path) -> Self {
+        let parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        let child = child.canonicalize().unwrap_or_else(|_| child.to_path_buf());
+        let mut roots = Vec::new();
+        for root in &self.writable_roots {
+            if let Ok(relative) = root.strip_prefix(&parent) {
+                roots.push(child.join(relative));
+            } else {
+                roots.push(root.clone());
+                if parent.starts_with(root) {
+                    roots.push(child.clone());
+                }
+            }
+        }
+        Self::new(self.policy, roots)
+    }
+
     /// 把调用方给的路径规范化后建 spec。规范化不了的路径（不存在、权限不足）
     /// 直接丢弃：一条进不了 profile 的路径，好过一条写着符号链接、内核永远
     /// 匹配不上的路径——后者会以「命令莫名其妙失败」的形式出现。
@@ -418,6 +439,32 @@ mod tests {
         let spec = workspace_spec(vec![indirect]);
 
         assert_eq!(spec.writable_roots, vec![nested]);
+    }
+
+    #[test]
+    fn worker_checkout_preserves_narrow_grants_and_external_roots() {
+        let scratch = Scratch::new("worker-grants");
+        let parent = scratch.child("parent");
+        let child = scratch.child("worker");
+        let external = scratch.child("cache");
+        std::fs::create_dir_all(parent.join("src")).unwrap();
+        std::fs::create_dir_all(child.join("src")).unwrap();
+        let spec = workspace_spec(vec![parent.join("src"), external.clone()]);
+        let mapped = spec.for_workspace(&parent, &child);
+        assert_eq!(mapped.policy, SandboxPolicy::WorkspaceWrite);
+        assert_eq!(mapped.writable_roots, vec![child.join("src"), external]);
+        assert!(!mapped.writable_roots.contains(&child));
+    }
+
+    #[test]
+    fn worker_checkout_does_not_gain_writes_from_read_only_parent() {
+        let scratch = Scratch::new("worker-read-only");
+        let parent = scratch.child("parent");
+        let child = scratch.child("worker");
+        let spec = SandboxSpec::new(SandboxPolicy::ReadOnly, [parent.clone()]);
+        let mapped = spec.for_workspace(&parent, &child);
+        assert_eq!(mapped.policy, SandboxPolicy::ReadOnly);
+        assert!(mapped.writable_roots.is_empty());
     }
 
     #[test]

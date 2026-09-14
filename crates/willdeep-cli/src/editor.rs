@@ -255,7 +255,10 @@ mod tests {
         };
         let summary = attachment.summary();
         assert!(summary.starts_with("Pasted text · 4 lines · "), "{summary}");
-        assert!(summary.ends_with("「scripts/tsing_hub_probe.rb 是现成脚手架，可以…」"), "{summary}");
+        assert!(
+            summary.ends_with("「scripts/tsing_hub_probe.rb 是现成脚手架，可以…」"),
+            "{summary}"
+        );
 
         let short = text_preview("  https://hub-beta.example.com/v1  ");
         assert_eq!(short, "https://hub-beta.example.com/v1");

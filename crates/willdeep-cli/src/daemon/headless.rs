@@ -4,6 +4,7 @@ const EVENT_PAGE_LIMIT: usize = 200;
 
 #[derive(Clone, Debug)]
 pub(crate) struct HeadlessRuntimeOutcome {
+    pub stop_reason: String,
     pub session_id: uuid::Uuid,
     pub final_text: String,
     pub turns: usize,
@@ -11,6 +12,7 @@ pub(crate) struct HeadlessRuntimeOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeadlessRuntimeStatus {
+    Partial,
     WaitingApproval,
     WaitingAnswer,
     Failed(Option<willdeep_runtime_protocol::FailureDomain>),
@@ -104,7 +106,10 @@ pub(crate) async fn execute_headless_turn(
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
                     continue;
                 };
-                if value.get("type").and_then(serde_json::Value::as_str) == Some("completed") {
+                if matches!(
+                    value.get("type").and_then(serde_json::Value::as_str),
+                    Some("completed" | "partial")
+                ) {
                     completed_payload = Some(value.clone());
                 } else {
                     on_event(value);
@@ -117,10 +122,20 @@ pub(crate) async fn execute_headless_turn(
 
         use willdeep_runtime_protocol::TurnStatus;
         match turn.status {
-            TurnStatus::Completed => {
+            TurnStatus::Completed | TurnStatus::Partial => {
                 let (final_text, turns) = completion_values(completed_payload.as_ref())
                     .unwrap_or_else(|| (session_final_text(home, request.session_id), 0));
                 return Ok(Ok(HeadlessRuntimeOutcome {
+                    stop_reason: completed_payload
+                        .as_ref()
+                        .and_then(|value| value.get("stop_reason"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(if turn.status == TurnStatus::Partial {
+                            "incomplete"
+                        } else {
+                            "finished"
+                        })
+                        .to_owned(),
                     session_id: request.session_id,
                     final_text,
                     turns,

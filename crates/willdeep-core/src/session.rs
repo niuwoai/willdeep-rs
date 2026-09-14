@@ -9,6 +9,31 @@ use uuid::Uuid;
 use crate::session_title::{self, TitleSource};
 use crate::types::{Message, Role, ToolCall, sanitize_tool_history};
 
+#[cfg(test)]
+mod concurrency_tests;
+mod execution_state;
+mod metadata;
+
+/// Only reported manual-compression usage; missing provider usage is not zero.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct CompressionUsage {
+    pub reported_calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+pub(crate) struct ExecutionGuard(std::fs::File);
+
+impl Drop for ExecutionGuard {
+    fn drop(&mut self) {
+        // A concurrently forked child may briefly inherit this descriptor before
+        // exec closes it. Explicit unlock releases ownership at our boundary.
+        if let Err(error) = self.0.unlock() {
+            eprintln!("failed to release session execution lock: {error}");
+        }
+    }
+}
+
 pub const SESSION_VERSION: u32 = 1;
 
 /// 默认家目录名，`~/<DEFAULT_HOME_DIRECTORY>` 即未设置 `WILLDEEP_HOME` 时 CLI 用的家目录。
@@ -26,6 +51,8 @@ pub struct CompressionCheckpoint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(skip)]
+    metadata_baseline: Option<metadata::Metadata>,
     pub version: u32,
     pub id: Uuid,
     pub title: String,
@@ -44,6 +71,8 @@ pub struct Session {
     #[serde(default)]
     pub pinned_at: Option<u64>,
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_plan: Option<crate::conversation::Plan>,
     #[serde(default)]
     pub attention_read: BTreeSet<String>,
     #[serde(default)]
@@ -56,15 +85,32 @@ pub struct Session {
     pub compression_generation: u64,
     #[serde(default)]
     pub compression_checkpoint: Option<CompressionCheckpoint>,
+    #[serde(default)]
+    pub manual_compression_usage: CompressionUsage,
+    #[serde(default)]
+    pub execution_checkpoint: Option<crate::checkpoint::CheckpointMetadata>,
     #[serde(skip)]
     pub swift_source: Option<PathBuf>,
 }
 
 impl Session {
+    /// Fork the current history under a fresh identity. The source's optimistic
+    /// save baseline cannot authorize writes to this new session.
+    pub fn fork_snapshot(&self) -> Self {
+        let mut fork = self.clone();
+        fork.id = Uuid::new_v4();
+        fork.metadata_baseline = None;
+        fork.created_at = now();
+        fork.updated_at = fork.created_at;
+        fork.swift_source = None;
+        fork
+    }
+
     pub fn new(workspace: PathBuf, profile: Option<String>, prompt: &str) -> Self {
         let now = now();
         let derived = session_title::derive_from_prompt(prompt, false);
         Self {
+            metadata_baseline: None,
             version: SESSION_VERSION,
             id: Uuid::new_v4(),
             title: derived.clone(),
@@ -83,12 +129,15 @@ impl Session {
             updated_at: now,
             pinned_at: None,
             messages: Vec::new(),
+            current_plan: None,
             attention_read: BTreeSet::new(),
             runtime_event_cursor: 0,
             runtime_managed: false,
             goal: None,
             compression_generation: 0,
             compression_checkpoint: None,
+            manual_compression_usage: CompressionUsage::default(),
+            execution_checkpoint: None,
             swift_source: None,
         }
     }
@@ -144,7 +193,7 @@ impl SessionStore {
     }
     pub fn load(&self, id: Uuid) -> Result<Session, SessionError> {
         let local = self.path(id);
-        let session: Session = if local.exists() {
+        let mut session: Session = if local.exists() {
             serde_json::from_slice(&std::fs::read(local)?)?
         } else if let Some(path) = swift_session_directory(&self.directory)
             .map(|dir| dir.join(format!("{id}.json")))
@@ -161,6 +210,7 @@ impl SessionStore {
         if session.version != SESSION_VERSION {
             return Err(SessionError::Version(session.version));
         }
+        session.metadata_baseline = Some(metadata::Metadata::capture(&session)?);
         Ok(session)
     }
     pub fn latest(&self) -> Result<Option<Session>, SessionError> {
@@ -231,17 +281,122 @@ impl SessionStore {
                 }
             }
         }
+        for session in &mut values {
+            session.metadata_baseline = Some(metadata::Metadata::capture(session)?);
+        }
         values.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         Ok(values)
     }
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
+        let _guard = self.lock_session(session.id)?;
+        match (session.metadata_baseline.clone(), self.load(session.id)) {
+            (Some(baseline), Ok(latest)) => baseline.merge(session, &latest)?,
+            (None, Ok(_)) => return Err(SessionError::ConcurrentUpdate("missing baseline")),
+            (None, Err(SessionError::Io(error)))
+                if error.kind() == std::io::ErrorKind::NotFound => {}
+            (_, Err(error)) => return Err(error),
+        }
         session.updated_at = now();
-        self.write(session)
+        self.write(session)?;
+        session.metadata_baseline = Some(metadata::Metadata::capture(session)?);
+        Ok(())
+    }
+
+    /// Read and change a session under the same cross-process lock.
+    /// Callers must only change the fields they own; unlike save, this never
+    /// writes a snapshot loaded before another writer's update.
+    pub fn update(
+        &self,
+        id: Uuid,
+        change: impl FnOnce(&mut Session),
+    ) -> Result<Session, SessionError> {
+        let _guard = self.lock_session(id)?;
+        let mut session = self.load(id)?;
+        change(&mut session);
+        session.updated_at = now();
+        self.write(&session)?;
+        session.metadata_baseline = Some(metadata::Metadata::capture(&session)?);
+        Ok(session)
+    }
+
+    fn lock_session(&self, id: Uuid) -> Result<std::fs::File, SessionError> {
+        let directory = self.directory.join(".locks");
+        std::fs::create_dir_all(&directory)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Lock files retain their inode. Removing them would let another writer
+        // lock a replacement while an existing descriptor still owns the old lock.
+        let lock = options.open(directory.join(format!("{id}.lock")))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    pub(crate) fn acquire_execution(&self, id: Uuid) -> Result<ExecutionGuard, SessionError> {
+        let directory = self.directory.join(".executions");
+        std::fs::create_dir_all(&directory)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Keep the inode stable across runs. The OS releases ownership on crash;
+        // no PID expiry heuristic can steal a still-live execution.
+        let guard = options.open(directory.join(format!("{id}.lock")))?;
+        guard.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => SessionError::ConcurrentUpdate("active execution"),
+            std::fs::TryLockError::Error(error) => SessionError::Io(error),
+        })?;
+        let guard = ExecutionGuard(guard);
+        self.load(id)?;
+        Ok(guard)
+    }
+    /// Refresh execution state after cancellation without overwriting local UI preferences.
+    pub fn refresh_execution(&self, session: &mut Session) -> Result<(), SessionError> {
+        match self.load(session.id) {
+            Ok(saved)
+                if saved.execution_checkpoint.is_some()
+                    || saved.manual_compression_usage.reported_calls > 0 =>
+            {
+                if let Some(baseline) = &mut session.metadata_baseline {
+                    baseline.refresh_execution(&saved)?;
+                }
+                execution_state::copy(&saved, session);
+            }
+            Ok(_) => {}
+            Err(SessionError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+    pub fn record_compression_usage(
+        &self,
+        id: Uuid,
+        usage: &crate::types::Usage,
+    ) -> Result<(), SessionError> {
+        self.update(id, |session| {
+            let total = &mut session.manual_compression_usage;
+            total.reported_calls = total.reported_calls.saturating_add(1);
+            total.input_tokens = total
+                .input_tokens
+                .saturating_add(usage.input_tokens.unwrap_or(0));
+            total.output_tokens = total
+                .output_tokens
+                .saturating_add(usage.output_tokens.unwrap_or(0));
+        })?;
+        Ok(())
     }
     /// 置顶/取消置顶。不改动 `updated_at`，避免打乱最近使用排序；
     /// 对 Xedit 桥接会话就地补丁其 JSON 的 `pinnedAt`（ISO8601），
     /// 不在本地生成会覆盖 Xedit 实时内容的影子副本。
     pub fn set_pinned(&self, id: Uuid, pinned: bool) -> Result<Session, SessionError> {
+        let _guard = self.lock_session(id)?;
         let mut session = self.load(id)?;
         session.pinned_at = if pinned { Some(now()) } else { None };
         if let Some(source) = session.swift_source.clone() {
@@ -266,19 +421,34 @@ impl SessionStore {
         } else {
             self.write(&session)?;
         }
+        session.metadata_baseline = Some(metadata::Metadata::capture(&session)?);
         Ok(session)
     }
     fn write(&self, session: &Session) -> Result<(), SessionError> {
+        use std::io::Write;
         std::fs::create_dir_all(&self.directory)?;
         let data = serde_json::to_vec_pretty(session)?;
         let temporary = self
             .directory
             .join(format!(".{}.{}.tmp", session.id, Uuid::new_v4()));
-        std::fs::write(&temporary, data)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&temporary, self.path(session.id))?;
+        #[cfg(unix)]
+        std::fs::File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
     pub fn delete(&self, id: Uuid) -> Result<bool, SessionError> {
+        let _guard = self.lock_session(id)?;
         let path = self.path(id);
         if !path.exists() {
             return Ok(false);
@@ -369,6 +539,8 @@ struct LocalDigestProbe {
 struct MessageProbe {
     #[serde(default)]
     role: String,
+    #[serde(default)]
+    source: Option<String>,
     #[serde(default, deserialize_with = "text_preview")]
     content: Option<String>,
     #[serde(default)]
@@ -378,6 +550,7 @@ struct MessageProbe {
 impl MessageProbe {
     fn is_user_input(&self) -> bool {
         self.role == "user"
+            && self.source.as_deref() != Some("hostInstruction")
             && (self.content.is_some()
                 || self
                     .attachments
@@ -584,6 +757,9 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             };
             Some(Message {
                 role,
+                source: message
+                    .get("source")
+                    .and_then(|source| serde_json::from_value(source.clone()).ok()),
                 content: message
                     .get("content")
                     .and_then(|value| value.as_str())
@@ -603,6 +779,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         .map(|value| value.as_secs())
         .unwrap_or_default();
     Ok(Session {
+        metadata_baseline: None,
         version: SESSION_VERSION,
         id,
         title: value
@@ -623,12 +800,17 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
             .and_then(|value| value.as_str())
             .and_then(parse_iso8601),
         messages,
+        current_plan: value
+            .get("currentPlan")
+            .and_then(|plan| serde_json::from_value(plan.clone()).ok()),
         attention_read: BTreeSet::new(),
         runtime_event_cursor: 0,
         runtime_managed: false,
         goal: None,
         compression_generation: 0,
         compression_checkpoint: None,
+        manual_compression_usage: CompressionUsage::default(),
+        execution_checkpoint: None,
         swift_source: Some(path.to_path_buf()),
     })
 }
@@ -660,6 +842,8 @@ fn swift_tool_calls(message: &serde_json::Value) -> Vec<ToolCall> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    #[error("concurrent session update conflicts on {0}; reload before retrying")]
+    ConcurrentUpdate(&'static str),
     #[error("unsupported session version {0}")]
     Version(u32),
     #[error(transparent)]
@@ -745,6 +929,133 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_execution_save_preserves_newer_metadata() {
+        let root = std::env::temp_dir().join(format!("willdeep-stale-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut original = Session::new(root.clone(), None, "initial");
+        store.save(&mut original).unwrap();
+        let mut stale = store.load(original.id).unwrap();
+        store
+            .update(original.id, |session| {
+                session.title = "user renamed".into();
+                session.title_source = TitleSource::User;
+                session.model = Some("new model".into());
+            })
+            .unwrap();
+        store.set_pinned(original.id, true).unwrap();
+        stale
+            .messages
+            .push(Message::assistant("new execution result", Vec::new()));
+        store.save(&mut stale).unwrap();
+        let saved = store.load(original.id).unwrap();
+        assert_eq!(saved.title, "user renamed");
+        assert_eq!(saved.title_source, TitleSource::User);
+        assert_eq!(saved.model.as_deref(), Some("new model"));
+        assert!(saved.pinned_at.is_some());
+        assert_eq!(
+            saved.messages.last().unwrap().content,
+            "new execution result"
+        );
+        assert_eq!(stale.title, saved.title);
+        let json = serde_json::to_value(saved).unwrap();
+        assert!(json.get("metadata_baseline").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_title_cannot_overwrite_a_concurrent_user_title() {
+        let root = std::env::temp_dir().join(format!("willdeep-title-race-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "initial");
+        store.save(&mut session).unwrap();
+        let mut automatic = store.load(session.id).unwrap();
+        store
+            .update(session.id, |session| {
+                session.title = "my title".into();
+                session.title_source = TitleSource::User;
+            })
+            .unwrap();
+        automatic.title = "automatic title".into();
+        automatic.title_source = TitleSource::Summarized;
+        automatic
+            .messages
+            .push(Message::assistant("saved result", Vec::new()));
+        store.save(&mut automatic).unwrap();
+        assert_eq!(automatic.title, "my title");
+        assert_eq!(automatic.title_source, TitleSource::User);
+        assert_eq!(store.load(session.id).unwrap().messages.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_metadata_save_fails_without_overwriting_disk() {
+        let root = std::env::temp_dir().join(format!("willdeep-conflict-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "initial");
+        store.save(&mut session).unwrap();
+        let mut stale = store.load(session.id).unwrap();
+        store
+            .update(session.id, |session| session.title = "newer title".into())
+            .unwrap();
+        stale.title = "conflicting title".into();
+        stale.messages.push(Message::user("must not be persisted"));
+        assert!(matches!(
+            store.save(&mut stale),
+            Err(SessionError::ConcurrentUpdate("title"))
+        ));
+        let saved = store.load(session.id).unwrap();
+        assert_eq!(saved.title, "newer title");
+        assert!(saved.messages.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_execution_title_and_pin() {
+        let root = std::env::temp_dir().join(format!("willdeep-session-lock-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "initial");
+        store.save(&mut session).unwrap();
+        let id = session.id;
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                let root = &root;
+                scope.spawn(move || {
+                    let writer = SessionStore::new(root);
+                    for _ in 0..25 {
+                        writer
+                            .update(id, |session| {
+                                session
+                                    .execution_checkpoint
+                                    .get_or_insert_with(Default::default)
+                                    .turns += 1;
+                            })
+                            .unwrap();
+                    }
+                });
+            }
+            let root = &root;
+            scope.spawn(move || {
+                let writer = SessionStore::new(root);
+                for index in 0..25 {
+                    writer
+                        .update(id, |session| {
+                            session.title = format!("title {index}");
+                            session.title_source = TitleSource::User;
+                        })
+                        .unwrap();
+                    writer.set_pinned(id, true).unwrap();
+                }
+            });
+        });
+        let saved = store.load(id).unwrap();
+        assert_eq!(saved.execution_checkpoint.unwrap().turns, 75);
+        assert_eq!(saved.title, "title 24");
+        assert_eq!(saved.title_source, TitleSource::User);
+        assert!(saved.pinned_at.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn atomically_round_trips_session() {
         let root = std::env::temp_dir().join(format!("willdeep-session-{}", Uuid::new_v4()));
@@ -1021,6 +1332,57 @@ mod tests {
         assert_eq!(session.title, "排查 CPU 负载");
         assert_eq!(session.title_source, TitleSource::Legacy);
         assert_eq!(session.swift_source.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridged_sessions_preserve_host_source_and_current_plan() {
+        let root = std::env::temp_dir().join(format!("willdeep-swift-source-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("desktop.json");
+        std::fs::write(&path, serde_json::json!({
+            "id": Uuid::new_v4(), "title": "source regression", "workspaceRootPath": ".",
+            "messages": [
+                {"role":"user", "source":"hostInstruction", "content":"The previous Goal phase is complete."},
+                {"role":"user", "source":"operatorInput", "content":"The previous Goal phase is complete."}
+            ],
+            "currentPlan": {"status":"executing", "summary":"核验", "steps":[
+                {"id":Uuid::new_v4(), "text":"验证接口", "status":"in_progress", "detail":"运行测试"}
+            ]}
+        }).to_string()).unwrap();
+        let session = swift_session(&path).unwrap();
+        let items = crate::conversation::project(&session.messages, session.current_plan.as_ref());
+        assert_eq!(items[0].role, "system");
+        assert_eq!(items[1].role, "user");
+        assert_eq!(
+            items[2].plan.as_ref().unwrap().steps[0].status,
+            crate::conversation::StepStatus::InProgress
+        );
+        let restored: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert_eq!(restored.current_plan, session.current_plan);
+        assert_eq!(restored.messages[0].source, session.messages[0].source);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_metadata_save_preserves_newer_plan_state() {
+        let root = std::env::temp_dir().join(format!("willdeep-plan-merge-{}", Uuid::new_v4()));
+        let store = SessionStore::new(&root);
+        let mut session = Session::new(root.clone(), None, "plan merge");
+        store.save(&mut session).unwrap();
+        let mut stale = store.load(session.id).unwrap();
+        let (plan, _) =
+            crate::conversation::parse_plan_reply("```plan\n1. verify\n```", None).unwrap();
+        store
+            .update(session.id, |current| {
+                current.current_plan = Some(plan.clone())
+            })
+            .unwrap();
+        stale.title = "new title".to_owned();
+        stale.title_source = TitleSource::User;
+        store.save(&mut stale).unwrap();
+        assert_eq!(store.load(session.id).unwrap().current_plan, Some(plan));
         std::fs::remove_dir_all(root).unwrap();
     }
 

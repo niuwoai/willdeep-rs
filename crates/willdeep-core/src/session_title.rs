@@ -125,9 +125,11 @@ pub fn derive_from_prompt(prompt: &str, has_attachments: bool) -> String {
 /// 的提示词派生会得到一个断章取义的标题（第 40 轮的「继续」），而第一条用户
 /// 消息才是这段对话真正在说的事。
 pub fn derive_from_messages(messages: &[Message]) -> Option<String> {
-    let first_user = messages
-        .iter()
-        .find(|message| message.role == Role::User && !message.content.trim().is_empty())?;
+    let first_user = messages.iter().find(|message| {
+        message.role == Role::User
+            && message.source != Some(crate::types::MessageSource::HostInstruction)
+            && !message.content.trim().is_empty()
+    })?;
     let title = derive_from_prompt(&first_user.content, !first_user.attachments.is_empty());
     (!is_placeholder(&title)).then_some(title)
 }

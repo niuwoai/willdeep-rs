@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -12,7 +11,7 @@ use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::background::{
@@ -45,13 +44,15 @@ const MAX_SUBAGENT_WRITE_TARGETS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandVerification {
+    pub snapshot_id: Option<String>,
     pub command: String,
     pub exit_code: Option<i32>,
     pub status: VerificationStatus,
     pub summary: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
     Passed,
     Failed,
@@ -60,6 +61,7 @@ pub enum VerificationStatus {
 }
 
 type VerificationReporter = Arc<dyn Fn(CommandVerification) + Send + Sync>;
+type VerificationSnapshot = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
 
 /// Why a command ran without an approval card — or why it needed one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,8 +169,8 @@ pub enum ToolError {
     InvalidGlob(String),
     #[error("filesystem operation failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("command timed out after {0} seconds")]
-    CommandTimeout(u64),
+    #[error("command timed out after {seconds} seconds\n{output}")]
+    CommandTimeout { seconds: u64, output: String },
     #[error("network operation failed: {0}")]
     Network(String),
     #[error(transparent)]
@@ -218,6 +220,8 @@ pub struct ToolRegistry {
     always_allowed: Arc<Mutex<HashSet<String>>>,
     always_allow_path: Option<PathBuf>,
     verification_reporter: Option<VerificationReporter>,
+    verification_snapshot: Option<VerificationSnapshot>,
+    verification_records: Arc<Mutex<verification::EvidenceRecords>>,
     safety_judge: Option<Arc<dyn SafetyJudge>>,
     task_context: Arc<Mutex<String>>,
     approval_reporter: Option<ApprovalReporter>,
@@ -228,6 +232,7 @@ pub struct ToolRegistry {
     hooks: HookRegistry,
     /// 只用于 hook 事件的溯源字段，不参与任何判定。
     session_id: Option<String>,
+    output_store: crate::tool_output::ToolOutputStore,
 }
 
 impl ToolRegistry {
@@ -243,6 +248,10 @@ impl ToolRegistry {
             )));
         }
         Ok(Self {
+            output_store: crate::tool_output::ToolOutputStore::new(
+                &std::env::temp_dir().join("willdeep-tool-outputs"),
+                &workspace,
+            ),
             workspace,
             approval_mode,
             approver: Arc::new(DenyApprover),
@@ -262,13 +271,18 @@ impl ToolRegistry {
             always_allowed: Arc::new(Mutex::new(HashSet::new())),
             always_allow_path: None,
             verification_reporter: None,
+            verification_snapshot: None,
+            verification_records: Arc::new(Mutex::new(verification::EvidenceRecords::default())),
             safety_judge: None,
             task_context: Arc::new(Mutex::new(String::new())),
             approval_reporter: None,
             sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
             hooks: HookRegistry::default(),
             session_id: None,
-        })
+        }
+        // Completion evidence belongs to the executor, even when its caller
+        // does not subscribe to external verification reports.
+        .with_verification_reporter(|_| {}))
     }
 
     /// 注册生命周期挂钩。与审批闸门是两回事：闸门问的是用户，hook 问的是
@@ -276,6 +290,14 @@ impl ToolRegistry {
     pub fn with_hooks(mut self, hooks: HookRegistry) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    pub(crate) fn allows_parallel_read(&self, call: &ToolCall) -> bool {
+        self.hooks.is_empty()
+            && matches!(
+                call.name.as_str(),
+                "read_file" | "list_directory" | "search_files" | "grep_files" | "read_tool_output"
+            )
     }
 
     /// 带上会话标识，hook 的审计记录里才对得上是哪一次会话。
@@ -298,20 +320,6 @@ impl ToolRegistry {
     pub fn with_sandbox(mut self, sandbox: SandboxSpec) -> Self {
         self.sandbox = sandbox;
         self
-    }
-
-    /// 建一条 shell 命令，能套围栏就套。套不上（平台不支持、这一档不需要）
-    /// 就退回裸 shell —— 退回是静默的，但 [`crate::sandbox::available`] 让
-    /// 上层能查出「这台机器上根本没有围栏」，不至于以为自己有。
-    fn shell_command(&self, command: &str) -> Command {
-        match self.sandbox.command_line(SHELL_PROGRAM, command) {
-            Some(argv) => {
-                let mut process = Command::new(&argv[0]);
-                process.args(&argv[1..]);
-                process
-            }
-            None => platform_shell(command),
-        }
     }
 
     /// Attach the AI judge consulted for commands the static classifier
@@ -370,7 +378,27 @@ impl ToolRegistry {
     where
         F: Fn(CommandVerification) + Send + Sync + 'static,
     {
-        self.verification_reporter = Some(Arc::new(reporter));
+        let records = self.verification_records.clone();
+        self.verification_reporter = Some(Arc::new(move |record| {
+            let mut records = records.lock().unwrap_or_else(|error| error.into_inner());
+            records.record(record.clone());
+            drop(records);
+            reporter(record);
+        }));
+        self
+    }
+    pub fn with_verification_snapshot<F>(self, capture: F) -> Self
+    where
+        F: Fn() -> Option<String> + Send + Sync + 'static,
+    {
+        self.with_fallible_verification_snapshot(move || Ok(capture()))
+    }
+    /// `Ok(None)` means snapshots are unsupported; `Err` means capture failed.
+    pub fn with_fallible_verification_snapshot<F>(mut self, capture: F) -> Self
+    where
+        F: Fn() -> Result<Option<String>, String> + Send + Sync + 'static,
+    {
+        self.verification_snapshot = Some(Arc::new(capture));
         self
     }
     pub fn with_always_allow_store(mut self, path: PathBuf) -> Result<Self, ToolError> {
@@ -577,8 +605,22 @@ impl ToolRegistry {
         &self.workspace
     }
 
+    pub fn with_output_store(mut self, root: &Path) -> Self {
+        self.output_store = crate::tool_output::ToolOutputStore::new(root, &self.workspace);
+        self
+    }
+
+    pub(crate) fn archive_output(&self, text: &str) -> Result<String, ToolError> {
+        Ok(self.output_store.save(text)?)
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = vec![
+            definition(
+                "read_tool_output",
+                "Read a page of an archived tool result by its opaque id. Offsets and limits count Unicode characters; maximum 8000 characters per page.",
+                json!({"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":8000}},"required":["id"],"additionalProperties":false}),
+            ),
             definition(
                 "list_skills",
                 "List installed WillDeep/Codex-compatible skills. Read a relevant skill before applying it.",
@@ -680,12 +722,25 @@ impl ToolRegistry {
                 json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"],"additionalProperties":false}),
             ),
             definition(
+                "list_agent_recoveries",
+                "List saved foreground children owned by this parent session, including completed reports. Use after an interrupted spawn_agent instead of starting a replacement. Follow next_after_id to retrieve later pages.",
+                json!({"type":"object","properties":{"after_id":{"type":"string","format":"uuid"}},"additionalProperties":false}),
+            ),
+            definition(
+                "resume_agent",
+                "Resume a saved foreground child from list_agent_recoveries using its original task, approved files and worktree. Accepts no task or permission overrides. If a completed report was saved, return it without repeating tools or verification. Cannot start a new child or resume another parent's child.",
+                json!({"type":"object","properties":{"agent_id":{"type":"string","format":"uuid"}},"required":["agent_id"],"additionalProperties":false}),
+            ),
+            definition(
                 "spawn_agent",
-                "Delegate a self-contained task to an isolated child. Responsibility and model are separate choices. The public trades are generalist (investigation across files and repository state), implementer (bounded coding), tester (tests and verification), reviewer (independent correctness/safety review), and ops_runner (bounded command execution); legacy specialist IDs remain internally compatible but are not public choices. worker_tier picks the model: standard by default, advanced for harder reasoning, expert only after smaller tiers were attempted and a runtime-validated escalation ticket explains why decomposition cannot work. Children cannot spawn agents or show approval UI. A command-capable child uses static safety rules first and AI review only for the ambiguous, non-sensitive middle. If review declines or is unavailable, it returns the exact command; the parent may respawn ops_runner with target_command, which requests one-time human approval for that identical command. Pass task whenever possible so the worker receives known facts, exact read/write files, and a verifier instead of rediscovering them.",
+                format!(
+                    "Delegate a self-contained task to an isolated child. {} Expert requires a runtime-validated escalation ticket after smaller tiers were attempted. Children cannot spawn agents or show approval UI. Commands use static safety rules, then AI review for non-sensitive ambiguity; declined commands can be returned to the parent for exact target_command approval. Pass task with known facts, read/write files and a verifier.",
+                    crate::subagent::public_trade_contract()
+                ),
                 json!({"type":"object","properties":{
                     "prompt":{"type":"string","description":"Free-text instruction. Still required when `task` is present; keep it to what the packet does not already say."},
                     "label":{"type":"string"},
-                    "profile":{"type":"string","enum":["generalist","implementer","tester","reviewer","ops_runner"],"description":"The responsibility. Independent of worker_tier."},
+                    "profile":{"type":"string","enum":crate::subagent::PUBLIC_SUBAGENT_IDS,"description":"The responsibility. Independent of worker_tier."},
                     "worker_tier":{"type":"string","enum":["standard","advanced","expert"],"description":"Model tier. Defaults to standard; expert requires the escalation ticket."},
                     "run_in_background":{"type":"boolean"},
                     "target_file":{"type":"string","description":"Single write target for the editor profile."},
@@ -781,7 +836,7 @@ impl ToolRegistry {
             ]);
         }
         if let Some(allowed) = &self.allowed_tools {
-            tools.retain(|tool| allowed.contains(&tool.name));
+            tools.retain(|tool| allowed.contains(&tool.name) || tool.name == "read_tool_output");
         }
         tools
     }
@@ -822,6 +877,14 @@ impl ToolRegistry {
 
     async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
         match call.name.as_str() {
+            "read_tool_output" => {
+                let args: OutputPageArgs = parse(call)?;
+                Ok(self.output_store.page(
+                    &args.id,
+                    args.offset.unwrap_or(0),
+                    args.limit.unwrap_or(8000),
+                )?)
+            }
             "list_skills" => self.list_skills(parse(call)?),
             "read_skill" => self.read_skill(parse(call)?),
             "list_mcp_tools" => {
@@ -1520,7 +1583,13 @@ impl ToolRegistry {
             // 都不影响它，回来只取结果，不重跑。
             if let Some(jobs) = self.detached_jobs.clone() {
                 let job = jobs
-                    .spawn(&args.command, &description, &self.workspace)
+                    .spawn_with_policy(
+                        &args.command,
+                        &description,
+                        &self.workspace,
+                        &self.sandbox,
+                        timeout,
+                    )
                     .map_err(ToolError::Io)?;
                 return Ok(format!(
                     "Background job started: {} (pid {}). It survives a Runtime restart; read it with get_job_output.",
@@ -1529,23 +1598,38 @@ impl ToolRegistry {
             }
             let command = args.command;
             let workspace = self.workspace.clone();
+            let sandbox = self.sandbox.clone();
             let verification_reporter = self.verification_reporter.clone();
+            let verification_snapshot = self.verification_snapshot.clone();
             let id = self.background.start_retriable(
                 BackgroundTaskKind::Shell,
                 description,
                 move || {
                     let command = command.clone();
                     let workspace = workspace.clone();
+                    let sandbox = sandbox.clone();
                     let verification_reporter = verification_reporter.clone();
+                    let verification_snapshot = verification_snapshot.clone();
                     async move {
-                        let result =
-                            run_background_shell(command.clone(), workspace, timeout).await;
+                        let snapshot_id =
+                            capture_verification_snapshot(verification_snapshot.as_ref(), &command);
+                        let mut result =
+                            run_background_shell(command.clone(), workspace, timeout, sandbox)
+                                .await;
+                        let status = verification::finish_verification(
+                            verification_snapshot.as_ref(),
+                            &command,
+                            &snapshot_id,
+                            verification_status(&result.status),
+                            &mut result.output,
+                        );
                         report_verification(
                             verification_reporter.as_ref(),
                             &command,
                             result.exit_code,
-                            verification_status(&result.status),
+                            status,
                             &result.output,
+                            snapshot_id,
                         );
                         result
                     }
@@ -1555,48 +1639,68 @@ impl ToolRegistry {
                 "Background task started: {id}. Completion will be delivered automatically; use get_job_output for details."
             ));
         }
-        let mut command = self.shell_command(&args.command);
-        command
-            .current_dir(&self.workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let child = command.spawn()?;
-        let output = match tokio::time::timeout(
+        let snapshot_id =
+            capture_verification_snapshot(self.verification_snapshot.as_ref(), &args.command);
+        let output = match crate::execution::run_capture(
+            &args.command,
+            &self.workspace,
+            &self.sandbox,
             std::time::Duration::from_secs(timeout),
-            child.wait_with_output(),
+            self.command_output_limit(),
         )
         .await
         {
-            Ok(output) => output?,
-            Err(_) => {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                 report_verification(
                     self.verification_reporter.as_ref(),
                     &args.command,
                     None,
                     VerificationStatus::TimedOut,
-                    &format!("command timed out after {timeout} seconds"),
+                    &error.to_string(),
+                    snapshot_id,
                 );
-                return Err(ToolError::CommandTimeout(timeout));
+                return Err(ToolError::CommandTimeout {
+                    seconds: timeout,
+                    output: error.to_string(),
+                });
+            }
+            Err(error) => {
+                report_verification(
+                    self.verification_reporter.as_ref(),
+                    &args.command,
+                    None,
+                    VerificationStatus::Failed,
+                    &error.to_string(),
+                    snapshot_id,
+                );
+                return Err(error.into());
             }
         };
-        let text = format!(
+        let mut text = format!(
             "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        report_verification(
-            self.verification_reporter.as_ref(),
+        let status = verification::finish_verification(
+            self.verification_snapshot.as_ref(),
             &args.command,
-            output.status.code(),
+            &snapshot_id,
             if output.status.success() {
                 VerificationStatus::Passed
             } else {
                 VerificationStatus::Failed
             },
+            &mut text,
+        );
+        report_verification(
+            self.verification_reporter.as_ref(),
+            &args.command,
+            output.status.code(),
+            status,
             &text,
+            snapshot_id,
         );
         let mut text = truncate_bytes(text, self.command_output_limit());
         // 把「命令自己错了」和「命令被围栏拦了」分开说。不分开的话，用户看到的
@@ -1938,6 +2042,19 @@ impl ToolRegistry {
         }
     }
 
+    pub(crate) async fn approve_uncertain_replay(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let description = format!(
+            "Retry {} with the same arguments as an interrupted call whose effects are unknown? This may repeat an external or file side effect. Approval applies only to this attempt.",
+            call.name
+        );
+        match self.approver.approve(&description, false).await {
+            ApprovalDecision::AllowOnce => Ok(()),
+            _ => Err(ToolError::ApprovalDenied(
+                "uncertain replay requires one-time approval".into(),
+            )),
+        }
+    }
+
     async fn require_rememberable_approval(
         &self,
         description: &str,
@@ -2126,297 +2243,11 @@ impl ToolRegistry {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct BackgroundSupervisorRequest {
-    command: String,
-    workspace: PathBuf,
-    timeout_seconds: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BackgroundSupervisorResult {
-    status: BackgroundTaskStatus,
-    exit_code: Option<i32>,
-    output: String,
-}
-
-#[cfg(not(test))]
-async fn run_background_shell(
-    command: String,
-    workspace: PathBuf,
-    timeout_seconds: u64,
-) -> TaskResult {
-    match run_supervised_background_shell(command, workspace, timeout_seconds).await {
-        Ok(result) => TaskResult {
-            status: result.status,
-            exit_code: result.exit_code,
-            output: result.output,
-        },
-        Err(error) => TaskResult {
-            status: BackgroundTaskStatus::LaunchFailed,
-            exit_code: Some(-1),
-            output: format!("background supervisor failed: {error}"),
-        },
-    }
-}
-
-#[cfg(test)]
-async fn run_background_shell(
-    command: String,
-    workspace: PathBuf,
-    timeout_seconds: u64,
-) -> TaskResult {
-    let mut process = platform_shell(&command);
-    process
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), async {
-        process.spawn()?.wait_with_output().await
-    })
-    .await
-    {
-        Ok(Ok(output)) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            TaskResult {
-                status: if output.status.success() {
-                    BackgroundTaskStatus::Completed
-                } else {
-                    BackgroundTaskStatus::Failed
-                },
-                exit_code: output.status.code(),
-                output: text,
-            }
-        }
-        Ok(Err(error)) => TaskResult {
-            status: BackgroundTaskStatus::LaunchFailed,
-            exit_code: Some(-1),
-            output: error.to_string(),
-        },
-        Err(_) => TaskResult {
-            status: BackgroundTaskStatus::TimedOut,
-            exit_code: None,
-            output: format!("command timed out after {timeout_seconds} seconds"),
-        },
-    }
-}
-
-#[cfg(not(test))]
-async fn run_supervised_background_shell(
-    command: String,
-    workspace: PathBuf,
-    timeout_seconds: u64,
-) -> anyhow::Result<BackgroundSupervisorResult> {
-    let request = BackgroundSupervisorRequest {
-        command,
-        workspace,
-        timeout_seconds,
-    };
-    let payload = serde_json::to_vec(&request)?;
-    anyhow::ensure!(
-        payload.len() <= MAX_SUPERVISOR_REQUEST_BYTES,
-        "background supervisor request is too large"
-    );
-    let executable = std::env::current_exe()?;
-    let mut process = Command::new(executable);
-    process
-        .args(["daemon", "background-supervisor"])
-        .env(BACKGROUND_SUPERVISOR_ENV, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(false);
-    let mut child = process.spawn()?;
-    let mut liveness = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("background supervisor stdin is unavailable"))?;
-    let length = u32::try_from(payload.len())?.to_be_bytes();
-    liveness.write_all(&length).await?;
-    liveness.write_all(&payload).await?;
-    liveness.flush().await?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("background supervisor stdout is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("background supervisor stderr is unavailable"))?;
-    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES));
-    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES));
-    let status = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_seconds.saturating_add(10)),
-        child.wait(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("background supervisor did not stop after its deadline"))??;
-    drop(liveness);
-    let stdout = stdout_task.await??;
-    let stderr = stderr_task.await??;
-    anyhow::ensure!(
-        status.success(),
-        "background supervisor exited with {:?}: {}",
-        status.code(),
-        String::from_utf8_lossy(&stderr).trim()
-    );
-    serde_json::from_slice(&stdout)
-        .map_err(|error| anyhow::anyhow!("decode background supervisor result: {error}"))
-}
-
-pub async fn run_background_supervisor() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        std::env::var(BACKGROUND_SUPERVISOR_ENV).as_deref() == Ok("1"),
-        "background supervisor is an internal command"
-    );
-    let mut input = tokio::io::stdin();
-    let mut length = [0_u8; 4];
-    input.read_exact(&mut length).await?;
-    let length = u32::from_be_bytes(length) as usize;
-    anyhow::ensure!(
-        length <= MAX_SUPERVISOR_REQUEST_BYTES,
-        "background supervisor request is too large"
-    );
-    let mut payload = vec![0_u8; length];
-    input.read_exact(&mut payload).await?;
-    let request: BackgroundSupervisorRequest = serde_json::from_slice(&payload)?;
-    anyhow::ensure!(
-        !request.command.trim().is_empty(),
-        "background command is empty"
-    );
-    anyhow::ensure!(
-        request.timeout_seconds > 0 && request.timeout_seconds <= MAX_COMMAND_TIMEOUT_SECS,
-        "background command timeout is invalid"
-    );
-    let workspace = request.workspace.canonicalize()?;
-    anyhow::ensure!(
-        workspace.is_dir(),
-        "background Workspace is not a directory"
-    );
-
-    let mut shell = platform_shell(&request.command);
-    configure_background_process(&mut shell);
-    shell
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut shell = shell.spawn()?;
-    let shell_stdout = shell
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("background shell stdout is unavailable"))?;
-    let shell_stderr = shell
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("background shell stderr is unavailable"))?;
-    let stdout_task = tokio::spawn(read_bounded(shell_stdout, MAX_COMMAND_OUTPUT_BYTES));
-    let stderr_task = tokio::spawn(read_bounded(shell_stderr, MAX_COMMAND_OUTPUT_BYTES));
-    drop(input);
-    let mut parent_disconnect = watch_parent_disconnect()?;
-    let (status, exit_code) = tokio::select! {
-        status = shell.wait() => {
-            let status = status?;
-            let kind = if status.success() {
-                BackgroundTaskStatus::Completed
-            } else {
-                BackgroundTaskStatus::Failed
-            };
-            (kind, status.code())
-        }
-        parent = &mut parent_disconnect => {
-            parent.map_err(|_| anyhow::anyhow!("background parent watcher stopped"))??;
-            terminate_background_process(&mut shell).await;
-            (BackgroundTaskStatus::Killed, None)
-        }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout_seconds)) => {
-            terminate_background_process(&mut shell).await;
-            (BackgroundTaskStatus::TimedOut, None)
-        }
-    };
-    let mut output = String::from_utf8_lossy(&stdout_task.await??).into_owned();
-    output.push_str(&String::from_utf8_lossy(&stderr_task.await??));
-    let output = truncate_bytes(output, MAX_COMMAND_OUTPUT_BYTES);
-    let result = BackgroundSupervisorResult {
-        status,
-        exit_code,
-        output,
-    };
-    let mut stdout = tokio::io::stdout();
-    stdout.write_all(&serde_json::to_vec(&result)?).await?;
-    stdout.flush().await?;
-    Ok(())
-}
-
-fn watch_parent_disconnect() -> anyhow::Result<tokio::sync::oneshot::Receiver<std::io::Result<()>>>
-{
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("willdeep-parent-watch".to_owned())
-        .spawn(move || {
-            let mut input = std::io::stdin();
-            let mut buffer = [0_u8; 64];
-            let result = loop {
-                match std::io::Read::read(&mut input, &mut buffer) {
-                    Ok(0) => break Ok(()),
-                    Ok(_) => {}
-                    Err(error) => break Err(error),
-                }
-            };
-            let _ = sender.send(result);
-        })?;
-    Ok(receiver)
-}
-
-#[cfg(unix)]
-fn configure_background_process(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.as_std_mut().process_group(0);
-}
-
-#[cfg(windows)]
-fn configure_background_process(_command: &mut Command) {}
-
-async fn terminate_background_process(process: &mut tokio::process::Child) {
-    #[cfg(unix)]
-    {
-        // `try_wait == None` means the group leader is still an unreaped live
-        // child, so its PID cannot be reused between this check and killpg.
-        if process.try_wait().ok().flatten().is_none()
-            && let Some(pid) = process.id()
-            && let Ok(group) = i32::try_from(pid)
-        {
-            // SAFETY: the child was placed in a fresh process group before
-            // spawn and remains unreaped above; a negative PID targets only
-            // that owned group rather than an unrelated process.
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
-            }
-        }
-    }
-    let _ = process.kill().await;
-    let _ = process.wait().await;
-}
-
-async fn read_bounded<R: AsyncRead + Unpin>(
-    mut reader: R,
-    limit: usize,
-) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(limit.min(8 * 1024));
-    let mut chunk = [0_u8; 8 * 1024];
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok(output);
-        }
-        let remaining = limit.saturating_sub(output.len());
-        output.extend_from_slice(&chunk[..read.min(remaining)]);
-    }
-}
+mod background_shell;
+mod verification;
+use background_shell::run_background_shell;
+pub use background_shell::run_background_supervisor;
+use verification::{capture_verification_snapshot, report_verification, verification_status};
 
 fn validate_workspace_relative(requested: &str) -> Result<(), ToolError> {
     let path = Path::new(requested);
@@ -2575,84 +2406,6 @@ fn rule_carries_credentials(rule: &str) -> bool {
             .unwrap_or(rule)
             .trim(),
     )
-}
-
-fn verification_status(status: &BackgroundTaskStatus) -> VerificationStatus {
-    match status {
-        BackgroundTaskStatus::Completed => VerificationStatus::Passed,
-        BackgroundTaskStatus::TimedOut => VerificationStatus::TimedOut,
-        BackgroundTaskStatus::LaunchFailed => VerificationStatus::LaunchFailed,
-        BackgroundTaskStatus::Failed
-        | BackgroundTaskStatus::Killed
-        | BackgroundTaskStatus::Blocked
-        | BackgroundTaskStatus::Running => VerificationStatus::Failed,
-    }
-}
-
-fn report_verification(
-    reporter: Option<&VerificationReporter>,
-    command: &str,
-    exit_code: Option<i32>,
-    status: VerificationStatus,
-    output: &str,
-) {
-    let Some(reporter) = reporter else {
-        return;
-    };
-    if !is_verification_command(command) || contains_sensitive_command(command) {
-        return;
-    }
-    let summary = output
-        .lines()
-        .rev()
-        .take(40)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    reporter(CommandVerification {
-        command: command.trim().to_owned(),
-        exit_code,
-        status,
-        summary: truncate_utf8_bytes(summary, MAX_VERIFICATION_SUMMARY_BYTES),
-    });
-}
-
-fn is_verification_command(command: &str) -> bool {
-    let normalized = command.trim_start().to_ascii_lowercase();
-    [
-        "cargo test",
-        "cargo nextest",
-        "go test",
-        "pytest",
-        "python -m pytest",
-        "python3 -m pytest",
-        "ruby test",
-        "bundle exec rspec",
-        "bundle exec rake test",
-        "swift test",
-        "xcodebuild test",
-        "yarn test",
-        "yarn run test",
-        "npm test",
-        "npm run test",
-        "pnpm test",
-        "pnpm run test",
-        "dotnet test",
-        "mvn test",
-        "mvn verify",
-        "gradle test",
-        "./gradlew test",
-        "make test",
-    ]
-    .iter()
-    .any(|prefix| {
-        normalized == *prefix
-            || normalized
-                .strip_prefix(prefix)
-                .is_some_and(|tail| tail.starts_with(char::is_whitespace))
-    })
 }
 
 fn contains_sensitive_command(command: &str) -> bool {
@@ -3049,6 +2802,13 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+struct OutputPageArgs {
+    id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct ListSkillsArgs {
     query: Option<String>,
 }
@@ -3191,1382 +2951,4 @@ struct EditArgs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct AllowApprover;
-    #[async_trait]
-    impl Approver for AllowApprover {
-        async fn approve(
-            &self,
-            _description: &str,
-            _always_allow_available: bool,
-        ) -> ApprovalDecision {
-            ApprovalDecision::AllowOnce
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn mcp_schemas_are_loaded_on_demand_through_two_fixed_tools() {
-        let script = r#"read init
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}'
-read initialized
-read list
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}}'
-read call
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"pong"}]}}'
-"#;
-        let mut configs = BTreeMap::new();
-        configs.insert(
-            "mock".to_owned(),
-            crate::mcp::McpServerConfig {
-                command: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), script.to_owned()],
-                env: BTreeMap::new(),
-                startup_timeout_seconds: 5,
-                enabled: true,
-            },
-        );
-        let mcp = Arc::new(McpRegistry::connect(&configs).await.expect("connect MCP"));
-        let root =
-            std::env::temp_dir().join(format!("willdeep-mcp-tools-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).expect("workspace");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_mcp(mcp)
-            .with_approver(Arc::new(AllowApprover));
-        let names = registry
-            .definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"list_mcp_tools".to_owned()));
-        assert!(names.contains(&"call_mcp_tool".to_owned()));
-        assert!(!names.iter().any(|name| name.starts_with("mcp__")));
-
-        let listed = registry
-            .execute(&ToolCall {
-                id: "list".to_owned(),
-                name: "list_mcp_tools".to_owned(),
-                arguments: json!({"query":"echo"}).to_string(),
-            })
-            .await
-            .expect("search MCP tools");
-        assert!(listed.contains("mcp__mock__echo"));
-        assert!(listed.contains("parameters"));
-        let called = registry
-            .execute(&ToolCall {
-                id: "call".to_owned(),
-                name: "call_mcp_tool".to_owned(),
-                arguments: json!({"name":"mcp__mock__echo","arguments":{"text":"ping"}})
-                    .to_string(),
-            })
-            .await
-            .expect("call MCP tool");
-        assert!(called.contains("pong"));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    struct AlwaysApprover(AtomicUsize);
-    #[async_trait]
-    impl Approver for AlwaysApprover {
-        async fn approve(&self, _description: &str, available: bool) -> ApprovalDecision {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            if available {
-                ApprovalDecision::AlwaysAllow
-            } else {
-                ApprovalDecision::AllowOnce
-            }
-        }
-    }
-
-    struct AnswerApprover;
-    #[async_trait]
-    impl Approver for AnswerApprover {
-        async fn approve(&self, _description: &str, _available: bool) -> ApprovalDecision {
-            ApprovalDecision::Deny
-        }
-        async fn ask_user(&self, question: UserQuestion) -> Option<String> {
-            assert_eq!(question.options, vec!["Rust", "Go"]);
-            Some("Other <custom>".to_owned())
-        }
-    }
-
-    fn workspace(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("willdeep-{name}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&path).expect("create fixture workspace");
-        path
-    }
-
-    fn git(root: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("run git fixture command");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[tokio::test]
-    async fn read_file_matches_swift_line_number_contract() {
-        let root = workspace("read");
-        std::fs::write(root.join("file.txt"), "one\ntwo\nthree\n").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-        let output = registry
-            .read_file(ReadArgs {
-                path: "file.txt".to_owned(),
-                offset: Some(2),
-                limit: Some(2),
-                max_bytes: None,
-            })
-            .await
-            .expect("read");
-        assert_eq!(output, "     2  two\n     3  three\n");
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn git_history_tools_are_bounded_read_only_and_path_scoped() {
-        let root = workspace("git-history");
-        git(&root, &["init"]);
-        git(&root, &["config", "user.name", "WillDeep Test"]);
-        git(&root, &["config", "user.email", "test@example.invalid"]);
-        std::fs::write(root.join("history.txt"), "first\nsecond\n").expect("first fixture");
-        git(&root, &["add", "history.txt"]);
-        git(&root, &["commit", "-m", "initial history"]);
-        std::fs::write(root.join("history.txt"), "first\nchanged\n").expect("second fixture");
-        git(&root, &["add", "history.txt"]);
-        git(&root, &["commit", "-m", "update history"]);
-
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-        let log = registry
-            .git_log(GitLogArgs {
-                path: Some("history.txt".to_owned()),
-                max_count: Some(1),
-                author: Some("WillDeep Test".to_owned()),
-                since: None,
-            })
-            .await
-            .expect("git log");
-        assert!(log.contains("update history"));
-        assert!(!log.contains("initial history"));
-        assert_eq!(log.lines().count(), 1);
-
-        let blame = registry
-            .git_blame(GitBlameArgs {
-                path: "history.txt".to_owned(),
-                start_line: None,
-                end_line: None,
-            })
-            .await
-            .expect("git blame");
-        assert!(blame.contains("WillDeep Test"));
-        assert!(blame.contains("first"));
-        assert!(blame.contains("changed"));
-
-        let invalid_range = registry
-            .git_blame(GitBlameArgs {
-                path: "history.txt".to_owned(),
-                start_line: Some(3),
-                end_line: Some(2),
-            })
-            .await;
-        assert!(invalid_range.is_err());
-        let escape = registry
-            .git_blame(GitBlameArgs {
-                path: "../../etc/passwd".to_owned(),
-                start_line: None,
-                end_line: None,
-            })
-            .await;
-        assert!(matches!(escape, Err(ToolError::OutsideWorkspace(_))));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn existing_symlink_escape_is_rejected() {
-        let root = workspace("escape");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-        let result = registry.resolve_existing("../../etc/passwd");
-        assert!(matches!(result, Err(ToolError::OutsideWorkspace(_))));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn workspace_access_applies_exact_edit() {
-        let root = workspace("edit");
-        std::fs::write(root.join("file.txt"), "alpha beta").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess).expect("registry");
-        registry
-            .edit_file(EditArgs {
-                path: "file.txt".to_owned(),
-                old_string: "beta".to_owned(),
-                new_string: "gamma".to_owned(),
-                replace_all: None,
-            })
-            .await
-            .expect("edit");
-        assert_eq!(
-            std::fs::read_to_string(root.join("file.txt")).expect("read"),
-            "alpha gamma"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn a_blocking_hook_stops_the_tool_before_it_runs() {
-        // 引擎能拦是一回事，接没接上工具分发是另一回事。这条钉的是后者。
-        let root = workspace("hook-gate");
-        let target = root.join("file.txt");
-        std::fs::write(&target, "unchanged").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_hooks(crate::hooks::HookRegistry::new(vec![crate::hooks::Hook {
-                name: "change-ticket".to_owned(),
-                event: crate::hooks::HookEvent::PreTool,
-                command: "echo '缺少变更单编号' >&2; exit 1".to_owned(),
-                blocking: true,
-                timeout: std::time::Duration::from_secs(5),
-                on_error: crate::hooks::HookFailure::Deny,
-            }]));
-
-        let result = registry
-            .execute(&ToolCall {
-                id: "write".to_owned(),
-                name: "edit_file".to_owned(),
-                arguments: serde_json::json!({
-                    "path": "file.txt",
-                    "old_string": "unchanged",
-                    "new_string": "changed"
-                })
-                .to_string(),
-            })
-            .await;
-
-        let Err(ToolError::HookDenied(message)) = result else {
-            panic!("hook 应当拦下这次调用：{result:?}");
-        };
-        assert!(message.contains("change-ticket"), "{message}");
-        assert!(message.contains("缺少变更单编号"), "{message}");
-        // 拦住的意思是文件没被动过，不是"改完了再报个错"。
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unchanged");
-    }
-
-    #[tokio::test]
-    async fn an_observer_hook_sees_the_call_without_blocking_it() {
-        let root = workspace("hook-audit");
-        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
-        let log = root.join("audit.log");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_hooks(crate::hooks::HookRegistry::new(vec![crate::hooks::Hook {
-                name: "audit".to_owned(),
-                event: crate::hooks::HookEvent::PreTool,
-                command: format!("cat >> {}", log.display()),
-                blocking: false,
-                timeout: std::time::Duration::from_secs(5),
-                on_error: crate::hooks::HookFailure::Deny,
-            }]));
-
-        let result = registry
-            .execute(&ToolCall {
-                id: "edit".to_owned(),
-                name: "edit_file".to_owned(),
-                arguments: serde_json::json!({
-                    "path": "file.txt",
-                    "old_string": "unchanged",
-                    "new_string": "changed"
-                })
-                .to_string(),
-            })
-            .await;
-
-        assert!(result.is_ok(), "{result:?}");
-        let recorded = std::fs::read_to_string(&log).expect("审计 hook 应当收到事件");
-        assert!(recorded.contains("\"event\":\"pre_tool\""), "{recorded}");
-        assert!(recorded.contains("edit_file"), "{recorded}");
-    }
-
-    #[tokio::test]
-    async fn read_only_policy_blocks_write_capable_tools_before_approval() {
-        let root = workspace("read-only");
-        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::ReadOnly).expect("registry");
-        let result = registry
-            .execute(&ToolCall {
-                id: "write".to_owned(),
-                name: "edit_file".to_owned(),
-                arguments: serde_json::json!({
-                    "path": "file.txt",
-                    "old_string": "unchanged",
-                    "new_string": "changed"
-                })
-                .to_string(),
-            })
-            .await;
-        assert!(matches!(result, Err(ToolError::ReadOnlyPolicy(_))));
-        assert_eq!(
-            std::fs::read_to_string(root.join("file.txt")).expect("read"),
-            "unchanged"
-        );
-        assert!(matches!(
-            registry
-                .approve_subagent_write_set(&["file.txt".to_owned()])
-                .await,
-            Err(ToolError::ReadOnlyPolicy(_))
-        ));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn always_allow_scope_for_a_post_is_the_registrable_domain() {
-        let domain = |raw: &str| registrable_domain(&reqwest::Url::parse(raw).expect("url"));
-        assert_eq!(domain("https://api.example.com/hooks/1"), "example.com");
-        assert_eq!(domain("https://upload.EXAMPLE.com/x"), "example.com");
-        // 后两段截法会把这个截成 co.uk，一条规则放行整个英国二级域。
-        assert_eq!(domain("https://example.co.uk/x"), "example.co.uk");
-        assert_eq!(domain("https://api.example.co.uk/x"), "example.co.uk");
-        assert_eq!(domain("https://203.0.113.7:8443/x"), "203.0.113.7");
-        assert_eq!(domain("https://[2001:db8::1]/x"), "2001:db8::1");
-    }
-
-    #[tokio::test]
-    async fn a_remembered_post_rule_covers_every_subdomain_of_one_registrable_domain() {
-        let root = workspace("web-post-approval");
-        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
-            .expect("registry")
-            .with_approver(approver.clone());
-        let post = |raw: &str| reqwest::Url::parse(raw).expect("url");
-        registry
-            .require_web_post_approval(
-                &post("https://api.example.com/hooks/1"),
-                12,
-                "application/json",
-            )
-            .await
-            .expect("first POST is approved and remembered");
-        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
-        // 同一注册域名下换了子域和路径，规则仍然命中，不再打断用户。
-        registry
-            .require_web_post_approval(
-                &post("https://upload.example.com/files"),
-                9_000,
-                "text/plain",
-            )
-            .await
-            .expect("same registrable domain reuses the stored rule");
-        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
-        // 换个域名就得重新问一次。
-        registry
-            .require_web_post_approval(
-                &post("https://api.other.com/hooks/1"),
-                12,
-                "application/json",
-            )
-            .await
-            .expect("a different domain is approved on its own");
-        assert_eq!(approver.0.load(Ordering::SeqCst), 2);
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn read_only_mode_refuses_a_post_before_any_approval() {
-        let root = workspace("web-post-read-only");
-        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
-        let registry = ToolRegistry::new(&root, ApprovalMode::ReadOnly)
-            .expect("registry")
-            .with_approver(approver.clone());
-        let result = registry
-            .require_web_post_approval(
-                &reqwest::Url::parse("https://api.example.com/hooks/1").expect("url"),
-                12,
-                "application/json",
-            )
-            .await;
-        assert!(matches!(result, Err(ToolError::ReadOnlyPolicy(_))));
-        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn web_fetch_methods_are_limited_to_get_and_post() {
-        assert!(matches!(parse_web_method(None), Ok(WebMethod::Get)));
-        assert!(matches!(parse_web_method(Some(" ")), Ok(WebMethod::Get)));
-        assert!(matches!(
-            parse_web_method(Some("post")),
-            Ok(WebMethod::Post)
-        ));
-        assert!(parse_web_method(Some("PUT")).is_err());
-    }
-
-    #[tokio::test]
-    async fn public_web_reads_skip_approval_outside_strict_mode() {
-        let root = workspace("web-read-approval");
-        // 默认 approver 是 DenyApprover：只要还问，就会拿到 Err。
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Smart,
-            ApprovalMode::WorkspaceAccess,
-        ] {
-            let registry = ToolRegistry::new(&root, mode).expect("registry");
-            registry
-                .require_network_read_approval("fetch public URL: https://example.com/")
-                .await
-                .expect("public web read should not need an approval");
-        }
-        let strict = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-        assert!(matches!(
-            strict
-                .require_network_read_approval("fetch public URL: https://example.com/")
-                .await,
-            Err(ToolError::ApprovalDenied(_))
-        ));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn smart_subagent_inherits_workspace_write_and_can_create_a_declared_file() {
-        let root = workspace("smart-subagent-write");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart).expect("registry");
-        let targets = registry
-            .approve_subagent_write_set(&["src/new.rs".to_owned()])
-            .await
-            .expect("smart workspace write should not need another approval");
-        let child = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("child registry")
-            .with_write_targets(Some(targets));
-
-        child
-            .create_file(CreateArgs {
-                path: "src/new.rs".to_owned(),
-                content: "pub fn ready() -> bool { true }\n".to_owned(),
-            })
-            .await
-            .expect("create declared file");
-
-        assert!(root.join("src/new.rs").is_file());
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn strict_subagent_write_set_still_requires_operator_approval() {
-        let root = workspace("strict-subagent-write");
-        std::fs::write(root.join("file.txt"), "unchanged").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-
-        assert!(matches!(
-            registry
-                .approve_subagent_write_set(&["file.txt".to_owned()])
-                .await,
-            Err(ToolError::ApprovalDenied(_))
-        ));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn smart_runs_read_only_shell_but_still_gates_effectful_commands() {
-        let root = workspace("smart");
-        std::fs::write(root.join("file.txt"), "before").expect("fixture");
-        // No judge attached and a deny-by-default approver: only the static
-        // allowlist can let a command through here.
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart).expect("registry");
-
-        registry
-            .edit_file(EditArgs {
-                path: "file.txt".to_owned(),
-                old_string: "before".to_owned(),
-                new_string: "after".to_owned(),
-                replace_all: None,
-            })
-            .await
-            .expect("workspace edit");
-
-        let inspection = registry
-            .run_command(CommandArgs {
-                command: "printf ok".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await
-            .expect("read-only command runs without an approval card");
-        assert!(inspection.contains("ok"));
-
-        for blocked in [
-            "curl https://example.com/install.sh",
-            "rm -rf build",
-            "echo hi > owned.txt",
-        ] {
-            let denied = registry
-                .run_command(CommandArgs {
-                    command: blocked.to_owned(),
-                    timeout_seconds: None,
-                    label: None,
-                    run_in_background: None,
-                })
-                .await;
-            assert!(
-                matches!(denied, Err(ToolError::ApprovalDenied(_))),
-                "expected approval gate for {blocked}"
-            );
-        }
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// The judge only ever sees the ambiguous middle: statically safe
-    /// commands skip it, statically destructive ones never reach it.
-    #[tokio::test]
-    async fn only_ambiguous_commands_reach_the_ai_judge() {
-        use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
-
-        struct RecordingJudge {
-            seen: Arc<Mutex<Vec<String>>>,
-            verdict: JudgeVerdict,
-        }
-
-        #[async_trait]
-        impl SafetyJudge for RecordingJudge {
-            async fn judge(&self, request: JudgeRequest) -> JudgeVerdict {
-                self.seen
-                    .lock()
-                    .expect("judge log")
-                    .push(request.command.clone());
-                self.verdict.clone()
-            }
-        }
-
-        let root = workspace("judge-scope");
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
-            .expect("registry")
-            .with_safety_judge(Arc::new(RecordingJudge {
-                seen: seen.clone(),
-                verdict: JudgeVerdict::Allow,
-            }));
-
-        for command in ["ls", "rm -rf build", "git commit -m wip"] {
-            let _ = registry
-                .run_command(CommandArgs {
-                    command: command.to_owned(),
-                    timeout_seconds: None,
-                    label: None,
-                    run_in_background: None,
-                })
-                .await;
-        }
-
-        assert_eq!(
-            seen.lock().expect("judge log").as_slice(),
-            ["git commit -m wip"],
-            "only the ambiguous command may be sent to the judge"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// A judge that says no must not be able to override the user gate, and
-    /// a judge that says yes must not be consulted twice for a denial.
-    #[tokio::test]
-    async fn judge_denial_falls_back_to_the_user() {
-        use crate::judge::{JudgeRequest, JudgeVerdict, SafetyJudge};
-
-        struct DenyingJudge;
-
-        #[async_trait]
-        impl SafetyJudge for DenyingJudge {
-            async fn judge(&self, _request: JudgeRequest) -> JudgeVerdict {
-                JudgeVerdict::Deny
-            }
-        }
-
-        let root = workspace("judge-deny");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
-            .expect("registry")
-            .with_safety_judge(Arc::new(DenyingJudge));
-        let denied = registry
-            .run_command(CommandArgs {
-                command: "git commit -m wip".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await;
-        assert!(matches!(denied, Err(ToolError::ApprovalDenied(_))));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn reviewed_child_never_sends_dangerous_or_sensitive_commands_to_the_judge() {
-        struct RecordingJudge(Arc<Mutex<Vec<String>>>);
-
-        #[async_trait]
-        impl SafetyJudge for RecordingJudge {
-            async fn judge(&self, request: JudgeRequest) -> JudgeVerdict {
-                self.0.lock().expect("seen").push(request.command);
-                JudgeVerdict::Allow
-            }
-        }
-
-        let root = workspace("reviewed-child-boundary");
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
-            .expect("registry")
-            .with_reviewed_subagent_shell(true)
-            .with_safety_judge(Arc::new(RecordingJudge(seen.clone())));
-
-        let reviewed = registry
-            .run_command(CommandArgs {
-                command: "printf reviewed > result.txt".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await;
-        assert!(
-            reviewed.is_ok(),
-            "AI-approved bounded command: {reviewed:?}"
-        );
-        for command in [
-            "rm -rf build",
-            "cat ~/.ssh/id_ed25519",
-            "cat .env",
-            "printenv",
-        ] {
-            let denied = registry
-                .run_command(CommandArgs {
-                    command: command.to_owned(),
-                    timeout_seconds: None,
-                    label: None,
-                    run_in_background: None,
-                })
-                .await;
-            let Err(ToolError::ApprovalDenied(message)) = denied else {
-                panic!("reviewed child must refuse {command}");
-            };
-            assert!(
-                message.contains(command),
-                "denial must return exact command"
-            );
-            assert!(message.contains("target_command"));
-        }
-        assert_eq!(
-            seen.lock().expect("seen").as_slice(),
-            ["printf reviewed > result.txt"]
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn human_preapproval_is_exact_and_does_not_authorize_a_decorated_command() {
-        let root = workspace("reviewed-child-human");
-        let exact = "printf human > exact.txt";
-        let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
-            .expect("registry")
-            .with_reviewed_subagent_shell(true)
-            .with_preapproved_commands([exact.to_owned()]);
-        registry
-            .run_command(CommandArgs {
-                command: exact.to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await
-            .expect("exact human-authorized command");
-        let decorated = registry
-            .run_command(CommandArgs {
-                command: format!("{exact} && printf extra"),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await;
-        assert!(matches!(decorated, Err(ToolError::ApprovalDenied(_))));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn search_files_returns_literal_matches_with_rg_or_fallback() {
-        let root = workspace("search");
-        std::fs::write(root.join("sample.rs"), "fn alpha() {}\n").expect("fixture");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict).expect("registry");
-        let output = registry
-            .search_files(SearchArgs {
-                query: "ALPHA".to_owned(),
-                max_results: None,
-            })
-            .expect("search");
-        assert!(output.contains("sample.rs:1:"));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn html_cleanup_removes_executable_content() {
-        let text = html_to_text("<h1>Hello &amp; world</h1><script>secret()</script><p>Body</p>");
-        assert!(text.contains("Hello & world"));
-        assert!(text.contains("Body"));
-        assert!(!text.contains("secret"));
-    }
-
-    #[test]
-    fn private_addresses_are_not_public() {
-        assert!(!is_public_ip("127.0.0.1".parse().expect("IPv4")));
-        assert!(!is_public_ip("10.0.0.1".parse().expect("IPv4")));
-        assert!(!is_public_ip("::1".parse().expect("IPv6")));
-        assert!(is_public_ip("1.1.1.1".parse().expect("IPv4")));
-    }
-
-    #[test]
-    fn redirect_policy_recognizes_same_hostname_across_https_upgrade() {
-        let http = reqwest::Url::parse("http://example.com/old").expect("http URL");
-        let https = reqwest::Url::parse("https://EXAMPLE.com/new").expect("https URL");
-        let other = reqwest::Url::parse("https://cdn.example.com/new").expect("other URL");
-        assert!(same_hostname(&http, &https));
-        assert!(!same_hostname(&https, &other));
-    }
-
-    #[test]
-    fn redirect_loop_key_ignores_client_side_fragments() {
-        let first = reqwest::Url::parse("https://example.com/page#first").unwrap();
-        let second = reqwest::Url::parse("https://example.com/page#second").unwrap();
-        assert_eq!(redirect_key(&first), redirect_key(&second));
-    }
-
-    #[test]
-    fn chunked_web_response_stops_at_the_hard_byte_limit() {
-        let mut output = vec![0; MAX_WEB_RESPONSE_BYTES - 2];
-        append_web_chunk(&mut output, &[1, 2]).unwrap();
-        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
-        let error = append_web_chunk(&mut output, &[3]).unwrap_err();
-        assert!(error.to_string().contains("3 MiB"));
-        assert_eq!(output.len(), MAX_WEB_RESPONSE_BYTES);
-    }
-
-    #[tokio::test]
-    async fn subagent_write_target_rejects_every_other_file() {
-        let root = workspace("subagent-target");
-        std::fs::write(root.join("allowed.txt"), "before").expect("allowed fixture");
-        std::fs::write(root.join("other.txt"), "before").expect("other fixture");
-        let target = root
-            .join("allowed.txt")
-            .canonicalize()
-            .expect("canonical target");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_write_targets(Some(BTreeSet::from([target])));
-
-        registry
-            .edit_file(EditArgs {
-                path: "allowed.txt".to_owned(),
-                old_string: "before".to_owned(),
-                new_string: "after".to_owned(),
-                replace_all: None,
-            })
-            .await
-            .expect("approved target");
-        let denied = registry
-            .edit_file(EditArgs {
-                path: "other.txt".to_owned(),
-                old_string: "before".to_owned(),
-                new_string: "after".to_owned(),
-                replace_all: None,
-            })
-            .await;
-        assert!(matches!(denied, Err(ToolError::OutsideWorkspace(_))));
-        assert_eq!(
-            std::fs::read_to_string(root.join("other.txt")).expect("other"),
-            "before"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// The file-set write channel is the single-file channel generalized, so
-    /// the same three gates have to hold for a set: every declared file is
-    /// writable, and anything outside it is refused with a path back to the
-    /// parent rather than a bare denial.
-    #[tokio::test]
-    async fn subagent_file_set_allows_every_declared_file_and_nothing_else() {
-        let root = workspace("subagent-file-set");
-        for name in ["impl.rs", "test.rs", "other.rs"] {
-            std::fs::write(root.join(name), "before").expect("fixture");
-        }
-        let targets = ["impl.rs", "test.rs"]
-            .iter()
-            .map(|name| root.join(name).canonicalize().expect("canonical"))
-            .collect::<BTreeSet<_>>();
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_write_targets(Some(targets));
-
-        for name in ["impl.rs", "test.rs"] {
-            registry
-                .edit_file(EditArgs {
-                    path: name.to_owned(),
-                    old_string: "before".to_owned(),
-                    new_string: "after".to_owned(),
-                    replace_all: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("declared file {name} must be writable: {error}"));
-        }
-        let denied = registry
-            .edit_file(EditArgs {
-                path: "other.rs".to_owned(),
-                old_string: "before".to_owned(),
-                new_string: "after".to_owned(),
-                replace_all: None,
-            })
-            .await;
-        let Err(ToolError::OutsideWorkspace(message)) = denied else {
-            panic!("a file outside the declared set must be refused");
-        };
-        assert!(
-            message.contains("dispatched again"),
-            "the refusal must tell the worker how to widen its scope, got: {message}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("other.rs")).expect("other"),
-            "before"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// The worker-skill hint is deterministic and main-agent-only: a listing
-    /// that surfaces a worker-tier skill carries the dispatch recipe, and a
-    /// child — which cannot spawn — never sees it.
-    #[test]
-    fn list_skills_hints_worker_dispatch_only_for_the_main_agent() {
-        let root = workspace("skill-hint");
-        let dir = root.join(".willdeep/skills/convert");
-        std::fs::create_dir_all(&dir).expect("skill dir");
-        std::fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: convert\ndescription: convert images\ntier: worker\n---\n# Steps",
-        )
-        .expect("skill");
-
-        let skills = Arc::new(crate::skills::SkillCatalog::discover(&root, &[]));
-        let main = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_skills(skills.clone())
-            .with_delegation_hints(true);
-        let listing = main
-            .list_skills(ListSkillsArgs { query: None })
-            .expect("list");
-        assert!(listing.contains("tier=worker"));
-        assert!(
-            listing.contains("<delegation-hint tier=\"worker\">") && listing.contains("convert"),
-            "the recipe must ride the listing: {listing}"
-        );
-
-        let child = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_skills(skills);
-        let listing = child
-            .list_skills(ListSkillsArgs { query: None })
-            .expect("list");
-        assert!(
-            !listing.contains("delegation-hint"),
-            "a child cannot spawn, so the hint is noise for it"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// The history trade composes its own git queries, so its gate is a shape,
-    /// not a literal. The shape has to hold in both directions: any read-only
-    /// git command runs, and everything else — including commands the static
-    /// classifier would happily wave through for the main agent — does not.
-    #[tokio::test]
-    async fn a_read_only_git_worker_composes_git_queries_and_nothing_else() {
-        let root = workspace("git-shell");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_read_only_git_shell(true);
-        for command in [
-            "git status",
-            "git log -p -3",
-            "git show HEAD~1",
-            "git diff a b",
-        ] {
-            registry
-                .run_command(CommandArgs {
-                    command: command.to_owned(),
-                    timeout_seconds: None,
-                    label: None,
-                    run_in_background: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("read-only git must run ({command}): {error}"));
-        }
-        for command in [
-            "ls",
-            "git push origin main",
-            "git commit -m x",
-            "cat /etc/hosts",
-        ] {
-            let denied = registry
-                .run_command(CommandArgs {
-                    command: command.to_owned(),
-                    timeout_seconds: None,
-                    label: None,
-                    run_in_background: None,
-                })
-                .await;
-            assert!(
-                matches!(denied, Err(ToolError::ApprovalDenied(_))),
-                "`{command}` is not a read-only git query and must be refused"
-            );
-        }
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// A symlink above the workspace must not turn an approved file into a
-    /// forbidden one.
-    ///
-    /// This is the failure the live-fire range found first: on macOS the
-    /// worker's workspace sat under `/var/...` (a symlink to `/private/var`),
-    /// the approved target kept the `/var` spelling, and the edit path was
-    /// canonicalized to `/private/var` before the comparison. The worker sent
-    /// the correct one-line patch on its first turn and was refused every
-    /// time — with a message naming the very path it had asked for. Both
-    /// sides of that comparison have to be canonical.
-    #[tokio::test]
-    async fn an_approved_target_reached_through_a_symlink_is_still_writable() {
-        let root = workspace("write-target-symlink");
-        std::fs::write(root.join("impl.rs"), "before").expect("fixture");
-        let link = std::env::temp_dir().join(format!("willdeep-link-{}", uuid::Uuid::new_v4()));
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&root, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
-
-        // The uncanonicalized spelling: exactly what a worktree root reached
-        // through a symlinked parent hands over.
-        let registry = ToolRegistry::new(&link, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_write_targets(Some(BTreeSet::from([link.join("impl.rs")])));
-        registry
-            .edit_file(EditArgs {
-                path: "impl.rs".to_owned(),
-                old_string: "before".to_owned(),
-                new_string: "after".to_owned(),
-                replace_all: None,
-            })
-            .await
-            .expect("an approved file stays writable through a symlinked workspace");
-        assert_eq!(
-            std::fs::read_to_string(root.join("impl.rs")).expect("impl"),
-            "after"
-        );
-        std::fs::remove_file(&link).expect("cleanup link");
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// A worker with a verifier may run that verifier and nothing else — not
-    /// even a command the static classifier would happily wave through.
-    #[tokio::test]
-    async fn a_command_allowlisted_worker_runs_only_its_verifier() {
-        let root = workspace("verifier-allowlist");
-        let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_command_allowlist(Some(HashSet::from(["echo verified".to_owned()])));
-        registry
-            .run_command(CommandArgs {
-                command: "echo verified".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await
-            .expect("the declared verifier must run");
-        let denied = registry
-            .run_command(CommandArgs {
-                command: "ls".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await;
-        assert!(
-            matches!(denied, Err(ToolError::ApprovalDenied(_))),
-            "a read-only command outside the allowlist must still be refused"
-        );
-        // A decorated verifier is the common near-miss, and the refusal has to
-        // name the exact command that would work — otherwise the worker guesses
-        // again, and each guess costs a turn.
-        let decorated = registry
-            .run_command(CommandArgs {
-                command: "echo verified 2>&1".to_owned(),
-                timeout_seconds: None,
-                label: None,
-                run_in_background: None,
-            })
-            .await;
-        let Err(ToolError::ApprovalDenied(message)) = decorated else {
-            panic!("a decorated verifier is not the declared command");
-        };
-        assert!(
-            message.contains("echo verified"),
-            "the refusal must quote the command that is allowed, got: {message}"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn only_test_and_build_shaped_commands_are_delegable() {
-        assert_eq!(
-            delegable_failure_profile("cargo test -p willdeep-core"),
-            Some("test_fixer")
-        );
-        assert_eq!(delegable_failure_profile("pytest -q"), Some("test_fixer"));
-        assert_eq!(
-            delegable_failure_profile("cargo clippy --all-targets"),
-            Some("build_fixer")
-        );
-        assert_eq!(delegable_failure_profile("make -j8"), Some("build_fixer"));
-        // Not every failing command is a fixable local defect.
-        assert_eq!(delegable_failure_profile("git push origin main"), None);
-        assert_eq!(delegable_failure_profile("curl https://example.com"), None);
-    }
-
-    /// The delegation hint is the deterministic half of "make workers visible",
-    /// so it has to survive the real command path: appended on a failing build
-    /// command for the main agent, absent for a subagent that cannot spawn.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_failing_test_command_carries_a_delegation_hint_for_the_main_agent_only() {
-        let root = workspace("delegable-failure");
-        // `cargo test` outside any crate: statically safe, always fails, instant.
-        let hinted = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .with_delegation_hints(true)
-            .run_command(CommandArgs {
-                command: "cargo test -p willdeep-core".to_owned(),
-                timeout_seconds: Some(30),
-                label: None,
-                run_in_background: None,
-            })
-            .await
-            .expect("run cargo test");
-        assert!(
-            hinted.contains("test_fixer") && hinted.contains("delegation-hint"),
-            "the main agent must be offered the test_fixer worker, got: {hinted}"
-        );
-        let plain = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
-            .expect("registry")
-            .run_command(CommandArgs {
-                command: "cargo test -p willdeep-core".to_owned(),
-                timeout_seconds: Some(30),
-                label: None,
-                run_in_background: None,
-            })
-            .await
-            .expect("run cargo test");
-        assert!(
-            !plain.contains("delegation-hint"),
-            "a subagent cannot spawn anything, so it must not be told to delegate: {plain}"
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn approved_background_command_returns_handle_and_publishes_completion() {
-        let root = workspace("background-command");
-        let background = Arc::new(BackgroundTaskRegistry::default());
-        let mut events = background.subscribe();
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_approver(Arc::new(AllowApprover))
-            .with_background_tasks(background.clone());
-        let command = if cfg!(windows) {
-            "Write-Output background-ok"
-        } else {
-            "printf background-ok"
-        };
-        let result = registry
-            .run_command(CommandArgs {
-                command: command.to_owned(),
-                timeout_seconds: Some(10),
-                label: Some("test command".to_owned()),
-                run_in_background: Some(true),
-            })
-            .await
-            .expect("start");
-        assert!(result.contains("job_"));
-        let event = events.recv().await.expect("completion");
-        assert_eq!(event.snapshot.status, BackgroundTaskStatus::Completed);
-        assert!(
-            background
-                .output(&event.snapshot.id, 20)
-                .expect("output")
-                .contains("background-ok")
-        );
-        let retried = background.retry(&event.snapshot.id).expect("retry command");
-        let retried_event = events.recv().await.expect("retry completion");
-        assert_eq!(retried_event.snapshot.id, retried);
-        assert_eq!(
-            retried_event.snapshot.status,
-            BackgroundTaskStatus::Completed
-        );
-        assert!(
-            background
-                .output(&retried, 20)
-                .unwrap()
-                .contains("background-ok")
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn always_allow_is_persisted_and_reused_for_exact_signature() {
-        let root = workspace("always-allow");
-        let store = root.join("rules.json");
-        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_approver(approver.clone())
-            .with_always_allow_store(store.clone())
-            .expect("store");
-        registry
-            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
-            .await
-            .expect("first");
-        registry
-            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
-            .await
-            .expect("remembered");
-        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
-        let reloaded = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_always_allow_store(store)
-            .expect("reload");
-        reloaded
-            .require_rememberable_approval("run cargo test", "command-exact:cargo test".to_owned())
-            .await
-            .expect("persisted");
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn ask_user_accepts_custom_answer_and_escapes_markup() {
-        let root = workspace("ask-user");
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_approver(Arc::new(AnswerApprover));
-        let answer = registry
-            .ask_user(AskUserArgs {
-                question: "Choose language".to_owned(),
-                options: Some(vec!["Rust".to_owned(), "Go".to_owned()]),
-                multi_select: Some(false),
-            })
-            .await
-            .expect("answer");
-        assert_eq!(answer, "<user_answer>Other &lt;custom&gt;</user_answer>");
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn command_always_allow_signature_is_exact_and_rejects_shell_composition() {
-        assert_eq!(
-            command_signature(" cargo   test --all ").as_deref(),
-            Some("command-exact:cargo test --all")
-        );
-        assert_eq!(command_signature("cargo test && deploy"), None);
-    }
-
-    /// A stored rule is the command verbatim. If a command carrying a key
-    /// could be remembered, the key would live in `always-allow.json`
-    /// indefinitely — so such commands are approvable but never rememberable.
-    #[test]
-    fn commands_carrying_credentials_are_never_rememberable() {
-        for command in [
-            "MODEL_API_KEY=sk_live_0123456789abcdef ruby scripts/probe.rb",
-            "curl -H Authorization: Bearer sk-0123456789abcdef https://example.com",
-            "mysql --password hunter2 -e select 1",
-            "deploy --token ghp_0123456789abcdef",
-        ] {
-            assert_eq!(
-                command_signature(command),
-                None,
-                "credential-bearing command must not mint a rule: {command}"
-            );
-        }
-        // The guard must not swallow ordinary commands that merely mention a
-        // key-shaped word without a value.
-        assert_eq!(
-            command_signature("grep -r api_key src").as_deref(),
-            Some("command-exact:grep -r api_key src")
-        );
-    }
-
-    /// The macOS app writes into this same file (`AgentSharedAlwaysAllowStore`),
-    /// and Foundation's `JSONEncoder` does not spell JSON the way `serde_json`
-    /// does: it pretty-prints with two spaces and escapes forward slashes as
-    /// `\/`. Both are legal JSON, but "legal" is not the same as "we checked".
-    /// The bytes below are a verbatim capture of that encoder's output.
-    ///
-    /// The second half is the part that actually matters: a rule minted by the
-    /// app must equal the signature minted here. Two normalizations that agree
-    /// on the format but disagree on the string would leave both apps writing
-    /// rules the other can never match — a shared file that shares nothing.
-    #[tokio::test]
-    async fn a_store_written_by_the_macos_app_loads_and_matches_here() {
-        let root = workspace("always-allow-swift");
-        let store = root.join("rules.json");
-        let swift_encoded = "[\n  \"command-exact:cargo test --all\",\n  \
-             \"command-exact:git push origin main\",\n  \
-             \"command-exact:ls \\/tmp\\/data\"\n]";
-        std::fs::write(&store, swift_encoded).expect("seed store");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600))
-                .expect("chmod");
-        }
-
-        let approver = Arc::new(AlwaysApprover(AtomicUsize::new(0)));
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_approver(approver.clone())
-            .with_always_allow_store(store)
-            .expect("app-written store must load");
-
-        // `\/` has to arrive as `/`, or the escaped rules silently never match.
-        let signature = command_signature("ls  /tmp/data").expect("signature");
-        assert_eq!(signature, "command-exact:ls /tmp/data");
-        registry
-            .require_rememberable_approval("run ls", signature)
-            .await
-            .expect("rule pinned by the app is honored here");
-        assert_eq!(
-            approver.0.load(Ordering::SeqCst),
-            0,
-            "the operator already approved this in the other app; asking again is the bug"
-        );
-
-        // A wider command in the same family is a different rule: the app pins
-        // families locally but publishes only the exact command, so nothing
-        // here may widen beyond what was approved.
-        registry
-            .require_rememberable_approval(
-                "run cargo",
-                command_signature("cargo test --all -- --nocapture").expect("signature"),
-            )
-            .await
-            .expect("approved");
-        assert_eq!(approver.0.load(Ordering::SeqCst), 1);
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn credential_rules_are_pruned_from_an_existing_store_on_load() {
-        let root = workspace("always-allow-prune");
-        let store = root.join("rules.json");
-        let leaked = "command-exact:API_KEY=sk_live_0123456789abcdef ruby probe.rb";
-        let clean = "command-exact:cargo test";
-        std::fs::write(
-            &store,
-            serde_json::to_vec(&vec![leaked.to_owned(), clean.to_owned()]).expect("encode"),
-        )
-        .expect("seed store");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600))
-                .expect("chmod");
-        }
-
-        let registry = ToolRegistry::new(&root, ApprovalMode::Strict)
-            .expect("registry")
-            .with_always_allow_store(store.clone())
-            .expect("store");
-        let rules = registry
-            .always_allowed
-            .lock()
-            .expect("always allow rules")
-            .clone();
-        assert!(rules.contains(clean), "clean rule must survive");
-        assert!(!rules.contains(leaked), "leaked rule must be dropped");
-
-        // The rewrite is the point: the secret must be gone from disk, not
-        // merely ignored in memory.
-        let on_disk = std::fs::read_to_string(&store).expect("read store");
-        assert!(!on_disk.contains("sk_live_0123456789abcdef"));
-        assert!(on_disk.contains("cargo test"));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    /// The old hard-coded `cargo test | grep` carve-out is gone; the general
-    /// classifier must still cover everything it used to allow, and must
-    /// still refuse everything it used to refuse.
-    #[test]
-    fn smart_mode_still_covers_the_former_test_pipeline_carve_out() {
-        use crate::safety::{CommandSafety, classify};
-        assert_eq!(
-            classify("cargo test -p willdeep 2>&1 | grep -E 'FAILED|warning' | head -40"),
-            CommandSafety::AlwaysSafe
-        );
-        assert_eq!(
-            classify("cargo test --workspace"),
-            CommandSafety::AlwaysSafe
-        );
-        assert_ne!(classify("cargo run"), CommandSafety::AlwaysSafe);
-        assert_ne!(
-            classify("cargo test | tee result.txt"),
-            CommandSafety::AlwaysSafe
-        );
-        assert_ne!(
-            classify("cargo test > result.txt"),
-            CommandSafety::AlwaysSafe
-        );
-        assert_eq!(
-            classify("cargo test && touch owned"),
-            CommandSafety::AlwaysSafe
-        );
-        assert_ne!(classify("cargo test $(danger)"), CommandSafety::AlwaysSafe);
-    }
-
-    #[test]
-    fn verification_reporting_is_bounded_and_rejects_sensitive_commands() {
-        let reported = Arc::new(Mutex::new(Vec::new()));
-        let sink = reported.clone();
-        let reporter: VerificationReporter = Arc::new(move |value| {
-            sink.lock().unwrap().push(value);
-        });
-        report_verification(
-            Some(&reporter),
-            "cargo test --workspace",
-            Some(1),
-            VerificationStatus::Failed,
-            &"失败".repeat(10_000),
-        );
-        report_verification(
-            Some(&reporter),
-            "API_KEY=secret cargo test",
-            Some(0),
-            VerificationStatus::Passed,
-            "ok",
-        );
-        report_verification(
-            Some(&reporter),
-            "cargo build",
-            Some(0),
-            VerificationStatus::Passed,
-            "ok",
-        );
-
-        let values = reported.lock().unwrap();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].command, "cargo test --workspace");
-        assert_eq!(values[0].exit_code, Some(1));
-        assert!(values[0].summary.len() <= MAX_VERIFICATION_SUMMARY_BYTES);
-        assert!(std::str::from_utf8(values[0].summary.as_bytes()).is_ok());
-    }
-}
+mod tests;

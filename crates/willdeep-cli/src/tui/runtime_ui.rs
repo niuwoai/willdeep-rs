@@ -159,6 +159,12 @@ pub(super) fn apply_runtime_events(
             latest.runtime_managed = true;
             latest.runtime_event_cursor = app.runtime_event_cursor;
             *session = latest;
+            if let Some(plan) = &session.current_plan {
+                sync_persisted_plan(&mut app.transcript, plan);
+                app.transcript_height =
+                    rendered_transcript_height(&app.transcript, app.transcript_width);
+                app.scroll_from_bottom = app.scroll_from_bottom.min(app.max_scroll());
+            }
         } else {
             session.runtime_event_cursor = app.runtime_event_cursor;
         }
@@ -380,6 +386,32 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                     app.language.text("正在使用", "using", "使用中")
                 ));
             }
+        }
+        Some("provider_retry_started" | "subagent_retry_started") => {
+            app.record_progress(format!(
+                "Runtime · {} · {}",
+                short_event_agent(&value),
+                app.language.text("正在重试", "Retrying", "再試行中")
+            ));
+        }
+        Some("subagent_retry_wait" | "provider_retry_wait") => {
+            let id = short_event_agent(&value);
+            let attempt = value
+                .get("attempt")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            let delay = value
+                .get("delay_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            app.record_progress(format!(
+                "Runtime · {} {id} · {} {attempt} · {}s",
+                app.language
+                    .text("子 Agent", "subagent", "サブエージェント"),
+                app.language
+                    .text("等待重试", "Waiting to retry", "再試行を待機中"),
+                delay.div_ceil(1000)
+            ));
         }
         Some("subagent_tool_completed") => {
             let id = short_event_agent(&value);

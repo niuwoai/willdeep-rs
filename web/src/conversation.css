@@ -1,0 +1,18 @@
+.conversation-card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; background: var(--bg-panel); }
+.conversation-card-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.conversation-card-heading span, .conversation-card-details, .conversation-plan-steps p { color: var(--text-dim); font-size: 13px; }
+.conversation-plan-steps { list-style: none; padding: 0; margin: 12px 0 0; }
+.conversation-plan-steps li { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; overflow-wrap: anywhere; }
+.conversation-plan-status { flex: 0 0 5em; font-size: 12px; }
+.conversation-plan-steps li[data-status="done"] .conversation-plan-status { color: var(--success, #70bd98); }
+.conversation-plan-steps li[data-status="failed"] .conversation-plan-status { color: var(--danger, #e89393); }
+.conversation-plan-steps p { margin: 4px 0 0; }
+.conversation-card-details { margin-top: 12px; }
+.conversation-card-details summary { cursor: pointer; }
+.conversation-card-details pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 12px 0; }
+
+.quick-settings-anchor { align-self: flex-end; position: relative; flex-shrink: 0; }
+.quick-settings-trigger { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--text-dim); cursor: pointer; }
+.quick-settings-trigger:hover, .quick-settings-trigger[aria-expanded="true"] { background: var(--bg-panel); color: var(--text); }
+.quick-settings-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.quick-settings-panel { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 30; width: max-content; max-width: calc(100vw - 24px); }

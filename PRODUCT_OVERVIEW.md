@@ -1,12 +1,48 @@
 # Product Overview
 
-> 最后更新：2026-09-04 | 当前版本：v0.71.0-rc2
+> 最后更新：2026-09-14 | 当前版本：v0.73.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
 ## 核心功能
+
+- Web 插件宿主提供与 macOS 版同名同序的桥 2.5.0 能力（文件、命令、代发网络、结构化存储、技能清单、生图、把文本递给主 Agent、宿主事件），共享插件包零改动即可在两端运行；本宿主认不出的清单词汇降级显示为「本宿主不支持」而不是拒装；需要原生文件框的插件在 Web 上改由浏览器选文件并上传。详见 docs/PLUGINS.md。
+
+- Web 插件中心位于左上插件入口之后；语言与主题由图标展开；聊天只显示附件协议边界后的用户正文，选区插件菜单保持到执行或明确关闭。
+
+- Web 与交互式 CLI 保留桌面消息来源与计划状态：宿主指令显示为系统活动，计划/进度块合并为状态卡；CLI 使用 `/plan` 展开或收起最新计划原始记录。展示状态不作为自动验收或停止任务的依据。
+
+- 本地 CLI 与 Runtime 对部分结果统一返回退出码 5，并保留可恢复的结构化输出；真实 DeepSeek 五场景可靠性评测全部通过，报告见 docs/evaluations/agent-reliability-rc58.md；
+
+- JSON 与 Markdown 可靠性评测报告均展示完成率、误报率、恢复率、耗时、Token 及人工介入；未取得的指标不冒充零值；
+
+- 检查点故障注入覆盖工具已写入、结果未保存时取消：磁盘恢复保留未知效果原调用，广泛自动授权不能触发同参数重放；
+
+- 目标循环对重复错误与不变的成功读取升级无进展提示，真实 Agent 回归验证其不会持续重置进展或误报完成；
+
+- 自动压缩有真实 CLI 阈值集成回归，直接核对发送给模型的原始用户约束、近期工具调用配对与持久化用量；
+
+- Web 语言/主题快捷设置位于输入区下方，避免遮挡发送或停止；根聊天重试等待及提交响应到达前停止均有真实浏览器回归；
+
+- 前台 Worker 恢复列表支持超过 4096 条记录的游标分页，分页候选内存保持有界；
+
+- 前台与受管后台验证成功后复核起止文件快照，快照变化或读取失败不会留下可复用的通过证据；
+
+- Web 后台 Agent 重试等待、刷新恢复与停止操作有真实浏览器回归；复现见 docs/WEB_RUNTIME_RETRY_QA.md；
+
+- 手工和自动压缩保留未知副作用的完整工具批次，超限归档不删除原参数及恢复约束；
+
+- 恢复时保留缺失工具结果的未知效果及原参数；重复同名同参数副作用调用需一次性确认，不能沿用自动放行，确认后仍受现有权限和沙箱约束；
+
+- 手工压缩的已报告模型用量随会话持久保存，覆盖 TUI 与非交互入口，失败后保留消耗，续跑不会重复累计；
+
+- 自动上下文压缩的已知模型用量纳入 Agent 预算、结果和检查点，空摘要及备用调用也计入；达到预算上限时阻止后续模型请求；
+
+- Git 验证快照与改动归因纳入子模块内部暂存、未暂存和未跟踪内容，HEAD 不变时也使旧证据失效；
+
+- 主任务与子 Agent 的 Provider 重试等待保存在 Runtime Agent 记录并经公共协议传递；TUI/Web 列表显示等待，开始重试、任务终止或 Runtime 重启时清除，运行中停止入口保持可用；
 
 - 与 macOS WillDeep 共用 `~/.willdeep/config.toml` 的 `[notifications]` Schema：保留桌面通知声音设置，校验本地或远程 HTTP(S) Webhook 地址，并在「任务完成」「需要人处理」两类时机实际投递 Webhook；投递为旁路，失败不影响 agent；Webhook 地址按普通个人偏好落盘，不使用 Keychain；
 - Chat Completions、Responses、Anthropic Messages 三协议；
@@ -16,7 +52,13 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Web Fetch 对每次跳转重做公网目标校验，同域自动跟随、跨域重新审批，并以环路、次数、超时和流式 3 MiB 硬限制约束响应；
 - Git 状态、Diff、受限提交历史与逐行归因，以及 Shell 命令；
 - 多轮 Tool Call Harness；
+- Worker 派工、历史与工具输出保存在私有持久目录；Runtime 重启后续跑同一父会话，后台 Worker 可显式重试，前台 Worker 可用 list_agent_recoveries / resume_agent 查询恢复；沿用原 ID、任务包、写集合及工作树，已有前台完成报告直接交回，不重复工具或 verifier；
+- 未完成任务的执行检查点保留按快照与命令区分的验收状态，重建执行器后继续阻止未解决的验证失败；任务级验收条件与完整重启恢复仍在开发中；
+- 可通过任务专用配置的 `agent.verification_commands` 指定必须通过的检查；清单在未完成任务检查点中固定，所有检查必须绑定最终 Git 快照，移除配置不能绕过恢复中的要求；自然语言验收项与完整重启派工仍待补齐；
+- 连续流式文本按约 250 毫秒或 16 KiB 合并检查点写入，首段、用量和工具执行边界立即保存，正常取消刷新尾部；强杀进程或断电可能丢失尚未刷新的一小段文本，工具副作用记录不采用该延迟策略；
+- 持久会话执行所有权覆盖 Harness 提交、后台续轮及本地 TUI 提示词/手工压缩，运行与结果保存期间拒绝同会话竞争执行；Runtime 队列边界与其他写入入口仍在统一验收；
 - 工作区路径边界和写操作审批；
+- 目录规则在执行前刷新，Shell/MCP/派工的规则发现不受搜索忽略文件影响；根任务与 Worker 共用全局用户规则，规则读取失败或超长时明确报错；
 - 命令型子 Worker 使用“确定性静态分类 → 任务上下文 AI Safety Judge → 父 Agent 精确命令人类授权”三级链路；危险形状、凭据内容与敏感路径不进入 AI，Judge 拒绝或不可用时绝不自动执行，`target_command` 的一次性授权也不能被参数拼接或命令替换扩权；
 - 人类输出与 NDJSON 自动化输出；
 - `willdeep run` 默认通过持久 Runtime 执行，支持 Prompt/stdin、文本与图片附件、Session 续接、断开后继续、text/JSON/NDJSON、静默模式和稳定退出码；`--local` 保留显式进程内兼容入口；
@@ -35,7 +77,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Daemon 重启将运行中的 Child Agent、Tool 与后台 Shell 明确收敛为 Interrupted，未应用 Agent 命令收敛为 Rejected，未真正启动的外部 Spawn Child 收敛为 Failed；后台 Shell 以 `background_shell:<job_id>` 精确绑定 Session、Turn、Task 与 Root Agent，恢复事件仅写一次且只含稳定归属 ID，专属 Worktree 原地保留供后续 Diff/合并/隔离；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；
 - Root/Child Agent 持久记录实际模型，统一 API、TUI 与 Web Agent 树展示父子层级、模型、状态、工具、耗时、Token 和 Worktree；
-- TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；后台 Agent 可在详情中用键盘或鼠标补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 既有草稿；Prompt 原文不额外持久化或下发；
+- TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；后台 Agent 可在详情中用键盘或鼠标补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 既有草稿；公开 Agent 详情不下发 Prompt 原文；原派工提示词随私有恢复记录保存；
 - 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
 - `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；

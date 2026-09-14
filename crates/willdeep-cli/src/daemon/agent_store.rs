@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "agent_store_recovery_tests.rs"]
+mod recovery_tests;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RuntimeAgentStatus {
@@ -9,6 +13,7 @@ pub(crate) enum RuntimeAgentStatus {
     WaitingAnswer,
     Blocked,
     Completed,
+    Partial,
     Failed,
     Cancelled,
     Interrupted,
@@ -44,6 +49,8 @@ pub(crate) struct RuntimeAgent {
     pub status: RuntimeAgentStatus,
     pub current_turn: u64,
     pub current_tool: Option<String>,
+    #[serde(default)]
+    pub retry_wait: Option<willdeep_runtime_protocol::AgentRetryWait>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -105,6 +112,8 @@ impl AgentStore {
                     | RuntimeAgentStatus::WaitingAnswer
             ) {
                 agent.status = RuntimeAgentStatus::Interrupted;
+                agent.retry_wait = None;
+                agent.current_tool = None;
                 agent.completed_at = Some(now());
                 agent.updated_at = now();
                 agent.error = Some("Runtime restarted while agent was active".to_owned());
@@ -162,6 +171,7 @@ impl AgentStore {
             status,
             current_turn: 0,
             current_tool: None,
+            retry_wait: None,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -208,6 +218,7 @@ impl AgentStore {
             agent.profile = profile;
             agent.model = model;
             agent.status = status;
+            agent.retry_wait = None;
             agent.current_turn = 0;
             agent.current_tool = None;
             agent.max_turns = None;
@@ -247,6 +258,7 @@ impl AgentStore {
             status,
             current_turn: 0,
             current_tool: None,
+            retry_wait: None,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -313,6 +325,7 @@ impl AgentStore {
             status: RuntimeAgentStatus::Queued,
             current_turn: 0,
             current_tool: None,
+            retry_wait: None,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -346,6 +359,7 @@ impl AgentStore {
             return Ok(());
         }
         agent.status = RuntimeAgentStatus::Failed;
+        agent.retry_wait = None;
         agent.updated_at = now();
         agent.completed_at = Some(now());
         agent.error = Some(error);
@@ -364,11 +378,13 @@ impl AgentStore {
     ) -> Result<()> {
         self.update_task_agent(task_id, |agent| {
             agent.status = status;
+            agent.retry_wait = None;
             agent.updated_at = now();
             agent.error = error;
             if matches!(
                 status,
                 RuntimeAgentStatus::Completed
+                    | RuntimeAgentStatus::Partial
                     | RuntimeAgentStatus::Failed
                     | RuntimeAgentStatus::Cancelled
                     | RuntimeAgentStatus::Interrupted
@@ -408,8 +424,36 @@ impl AgentStore {
             return Ok(());
         };
         match value.get("type").and_then(|value| value.as_str()) {
+            Some("provider_retry_wait") => {
+                let wait = retry_wait_from_event(&value)?;
+                self.update_task_agent(task_id, |agent| {
+                    if agent.status == RuntimeAgentStatus::Running {
+                        agent.retry_wait = Some(wait);
+                    }
+                    agent.updated_at = now();
+                })
+            }
+            Some("provider_retry_started") => self.update_task_agent(task_id, |agent| {
+                agent.retry_wait = None;
+                agent.updated_at = now();
+            }),
+            Some("subagent_retry_wait") => {
+                let wait = retry_wait_from_event(&value)?;
+                self.update_child_from_event(&value, |agent| {
+                    if agent.status == RuntimeAgentStatus::Running {
+                        agent.retry_wait = Some(wait);
+                    }
+                    agent.updated_at = now();
+                })
+            }
+            Some("subagent_retry_started") => self.update_child_from_event(&value, |agent| {
+                agent.retry_wait = None;
+                agent.updated_at = now();
+            }),
             Some("turn_started") => self.update_task_agent(task_id, |agent| {
                 agent.status = RuntimeAgentStatus::Running;
+                agent.completed_at = None;
+                agent.retry_wait = None;
                 agent.current_turn = value
                     .get("turn")
                     .and_then(|value| value.as_u64())
@@ -417,6 +461,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("tool_requested") => self.update_task_agent(task_id, |agent| {
+                agent.retry_wait = None;
                 agent.current_tool = value
                     .get("name")
                     .and_then(|value| value.as_str())
@@ -425,6 +470,7 @@ impl AgentStore {
             }),
             Some("tool_completed") => self.update_task_agent(task_id, |agent| {
                 agent.current_tool = None;
+                agent.retry_wait = None;
                 agent.updated_at = now();
             }),
             Some("usage") => self.update_task_agent(task_id, |agent| {
@@ -457,6 +503,8 @@ impl AgentStore {
             }),
             Some("subagent_turn_started") => self.update_child_from_event(&value, |agent| {
                 agent.status = RuntimeAgentStatus::Running;
+                agent.completed_at = None;
+                agent.retry_wait = None;
                 agent.current_turn = value
                     .get("turn")
                     .and_then(|value| value.as_u64())
@@ -464,6 +512,7 @@ impl AgentStore {
                 agent.updated_at = now();
             }),
             Some("subagent_tool_requested") => self.update_child_from_event(&value, |agent| {
+                agent.retry_wait = None;
                 agent.current_tool = value
                     .get("name")
                     .and_then(|value| value.as_str())
@@ -472,6 +521,7 @@ impl AgentStore {
             }),
             Some("subagent_tool_completed") => self.update_child_from_event(&value, |agent| {
                 agent.current_tool = None;
+                agent.retry_wait = None;
                 agent.updated_at = now();
             }),
             Some("subagent_usage") => self.update_child_from_event(&value, |agent| {
@@ -494,7 +544,16 @@ impl AgentStore {
             .parse::<uuid::Uuid>()
             .context("subagent_started has invalid id")?;
         let mut agents = self.lock()?;
+        let parent = agents
+            .values()
+            .find(|agent| agent.task_id == task_id && agent.parent_id.is_none())
+            .context("Runtime root agent not found for subagent")?
+            .clone();
         if let Some(agent) = agents.get_mut(&id) {
+            if agent.parent_id != Some(parent.id) {
+                bail!("restored subagent belongs to a different parent");
+            }
+            agent.task_id = task_id;
             agent.profile = value
                 .get("profile")
                 .and_then(|value| value.as_str())
@@ -526,6 +585,8 @@ impl AgentStore {
             agent.worktree_merged_at = None;
             agent.worktree_quarantined_at = None;
             agent.status = RuntimeAgentStatus::Running;
+            agent.completed_at = None;
+            agent.retry_wait = None;
             agent.current_turn = 0;
             agent.current_tool = None;
             agent.max_turns = value.get("max_turns").and_then(|value| value.as_u64());
@@ -591,6 +652,7 @@ impl AgentStore {
                 status: RuntimeAgentStatus::Running,
                 current_turn: 0,
                 current_tool: None,
+                retry_wait: None,
                 input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
@@ -628,10 +690,13 @@ impl AgentStore {
         };
         agent.status = match value.get("status").and_then(|value| value.as_str()) {
             Some("completed") => RuntimeAgentStatus::Completed,
+            Some("partial") => RuntimeAgentStatus::Partial,
             Some("blocked") => RuntimeAgentStatus::Blocked,
             Some("cancelled") => RuntimeAgentStatus::Cancelled,
             _ => RuntimeAgentStatus::Failed,
         };
+        agent.retry_wait = None;
+        agent.current_tool = None;
         agent.updated_at = now();
         agent.completed_at = Some(now());
         agent.report = value
@@ -723,8 +788,117 @@ fn load_agents(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeAgent>> {
     Ok(agents.into_iter().map(|agent| (agent.id, agent)).collect())
 }
 
+fn retry_wait_from_event(
+    value: &serde_json::Value,
+) -> Result<willdeep_runtime_protocol::AgentRetryWait> {
+    let attempt = value
+        .get("attempt")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .context("retry event has invalid attempt")?;
+    let delay_ms = value
+        .get("delay_ms")
+        .and_then(|v| v.as_u64())
+        .context("retry event has invalid delay")?;
+    Ok(willdeep_runtime_protocol::AgentRetryWait { attempt, delay_ms })
+}
+
 fn persist_agents(path: &Path, agents: &HashMap<uuid::Uuid, RuntimeAgent>) -> Result<()> {
     let mut agents = agents.values().cloned().collect::<Vec<_>>();
     agents.sort_by_key(|agent| agent.created_at);
     write_json_atomic(path, &agents)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn retry_wait_is_durable_and_cleared_at_execution_boundaries() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-retry-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("agents.json");
+        let store = AgentStore::open(path.clone()).unwrap();
+        let task = uuid::Uuid::new_v4();
+        let parent = store
+            .ensure_root(task, root.clone(), None, None, RuntimeAgentStatus::Running)
+            .unwrap();
+        let child = uuid::Uuid::new_v4();
+        store
+            .apply_harness_event(
+                task,
+                &serde_json::json!({"type":"subagent_started", "id":child, "profile":"reader"})
+                    .to_string(),
+            )
+            .unwrap();
+        for (id, prefix) in [(parent.id, "provider"), (child, "subagent")] {
+            let wait = serde_json::json!({"type":format!("{prefix}_retry_wait"),"id":id,"attempt":2,"delay_ms":1500}).to_string();
+            store.apply_harness_event(task, &wait).unwrap();
+            let saved = load_agents(&path).unwrap().remove(&id).unwrap();
+            assert_eq!(saved.retry_wait.as_ref().unwrap().attempt, 2);
+            assert_eq!(saved.retry_wait.as_ref().unwrap().delay_ms, 1500);
+            store.apply_harness_event(task, &serde_json::json!({"type":format!("{prefix}_retry_started"),"id":id,"attempt":2}).to_string()).unwrap();
+            assert!(store.get(id).unwrap().unwrap().retry_wait.is_none());
+            for boundary in ["turn_started", "tool_requested"] {
+                store.apply_harness_event(task, &wait).unwrap();
+                let kind = if prefix == "subagent" {
+                    format!("subagent_{boundary}")
+                } else {
+                    boundary.into()
+                };
+                store
+                    .apply_harness_event(
+                        task,
+                        &serde_json::json!({"type":kind,"id":id,"turn":2,"name":"read_file"})
+                            .to_string(),
+                    )
+                    .unwrap();
+                assert!(store.get(id).unwrap().unwrap().retry_wait.is_none());
+            }
+            store.apply_harness_event(task, &wait).unwrap();
+            if prefix == "provider" {
+                store
+                    .set_status_for_task(task, RuntimeAgentStatus::Cancelled, None)
+                    .unwrap();
+            } else {
+                store.apply_harness_event(task, &serde_json::json!({"type":"subagent_completed","id":id,"status":"partial"}).to_string()).unwrap();
+            }
+            store.apply_harness_event(task, &wait).unwrap();
+            assert!(
+                store.get(id).unwrap().unwrap().retry_wait.is_none(),
+                "late wait must not revive a terminal agent"
+            );
+            let kind = if prefix == "subagent" {
+                "subagent_turn_started"
+            } else {
+                "turn_started"
+            };
+            store
+                .apply_harness_event(
+                    task,
+                    &serde_json::json!({"type":kind,"id":id,"turn":3}).to_string(),
+                )
+                .unwrap();
+            store.apply_harness_event(task, &wait).unwrap();
+        }
+        drop(store);
+        let store = AgentStore::open(path.clone()).unwrap();
+        for id in [parent.id, child] {
+            let agent = store.get(id).unwrap().unwrap();
+            assert_eq!(agent.status, RuntimeAgentStatus::Interrupted);
+            assert!(agent.retry_wait.is_none());
+            assert!(agent.current_tool.is_none());
+            let mut old = serde_json::to_value(agent).unwrap();
+            old.as_object_mut().unwrap().remove("retry_wait");
+            assert!(
+                serde_json::from_value::<RuntimeAgent>(old)
+                    .unwrap()
+                    .retry_wait
+                    .is_none()
+            );
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

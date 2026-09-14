@@ -27,7 +27,7 @@ pub use host::{
 pub use manifest::{
     CodexManifest, CommandHandler, HostAction, ManifestError, PageRuntime, PluginCommand,
     PluginDestination, PluginManifest, PluginMenuLocation, PluginPage, PluginPermission,
-    PluginSetting, PluginSidebar, SettingType, SidebarMode,
+    PluginSetting, PluginSidebar, SettingType, SidebarMode, UnsupportedItems,
 };
 pub use package::{
     McpServerSpec, PackageError, PluginPackage, PluginSource, discover, installed_versions,

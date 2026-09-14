@@ -74,6 +74,7 @@ pub(super) fn observe(
         AgentEvent::BackgroundShellCompleted { id, status, .. } => {
             let status = match status {
                 willdeep_core::BackgroundTaskStatus::Completed => ToolStatus::Completed,
+                willdeep_core::BackgroundTaskStatus::Partial => ToolStatus::Partial,
                 willdeep_core::BackgroundTaskStatus::Killed => ToolStatus::Interrupted,
                 willdeep_core::BackgroundTaskStatus::Running => ToolStatus::Running,
                 willdeep_core::BackgroundTaskStatus::Blocked

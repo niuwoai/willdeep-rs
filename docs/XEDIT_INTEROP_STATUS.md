@@ -1,7 +1,7 @@
 # Xedit ↔ willdeep-rs 联动现状与路径
 
-> 初次勘察：2026-08-21；最近同步复核：2026-08-31（Worker 三档）。|
-> rs：0.52.0-rc2 | Xedit：1.312.0-rc2。
+> 初次勘察：2026-08-21；最近同步复核：2026-09-14（插件桥 2.5.0 与清单词汇对齐）。|
+> rs：0.73.0-rc1 | Xedit：1.343.0-rc1（插件桥 2.5.0）。
 > 本文是**现状盘点与路径建议**；工具能力清单见 `XEDIT_TOOL_PARITY.md`（工具维度），
 > 双端逐项对照表见 `SKILL_WORKERS.md` 对照一节，战略基调见 Xedit 仓库
 > `docs/CROSS_PLATFORM_CLI_STRATEGY.md`（决策 3：rs 先独立发展，协议先行，
@@ -43,8 +43,9 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | 本地辅助模型 | 语义对齐、配置存储暂不共享：复用单模型，本地优先后远端回退，低置信度才做模型路由 | `config.rs` `[local_model]`、`harness.rs`、`routing.rs` | `AgentLocalModelSupport.swift`、`AppStateAgentWorkerRouting.swift` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |
 | **插件包** `~/.willdeep/plugins/<id>/<version>/` | **双向共享包内容，状态各存各的**（0.50.0-rc1 起） | `crates/willdeep-core/src/plugin/`、`plugin_web.rs`、`plugin_bridge.js`；见 [PLUGINS.md](PLUGINS.md) | `AgentPluginRegistry.swift` 等 11 个文件；`docs/WILLDEEP_PLUGIN_SYSTEM_DESIGN.md` |
-| 插件清单 schema | 同一份契约，两端各自实现校验 | `plugin/manifest.rs`（含菜单位置白名单往返测试） | `docs/plugin-schema/willdeep-plugin.schema.json` |
-| 插件页面桥 `window.willdeep.*` | 逐方法对齐，传输层各异 | `plugin_bridge.js`（postMessage） | `AgentPluginPageHost.swift`（WKWebView messageHandlers） |
+| 插件清单 schema | 同一份契约，两端各自实现校验；**认不出的词汇两端都降级照装**（0.73.0-rc1 起，rs 与 `unsupportedItems` 同口径） | `plugin/manifest.rs`（含菜单位置白名单往返测试） | `docs/plugin-schema/willdeep-plugin.schema.json`、`AgentPluginPackageLoader.unsupportedItems` |
+| 插件页面桥 `window.willdeep.*` | 桥 **2.5.0** 逐方法对齐（0.73.0-rc1 起），传输层各异；rs 缺 `ai.reasoning`（无流式思考增量），故不在其 `capabilities` 里 | `plugin_bridge.js`（postMessage）+ `plugin_capabilities.rs` | `AgentPluginPageHost.swift`（WKWebView messageHandlers）、`AgentPluginPageBridgeVersion.swift` |
+| 插件「选文件」 | **语义相同，落地不同**：Xedit 由插件自己弹原生框；rs Web 由宿主接管为浏览器选 + 上传，回同样形状的服务端路径 | `plugin_web.rs` `FILE_PICKER_TOOLS` | 插件 MCP 服务内的 `osascript` |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
 | `model-catalog.v1.json` 模型目录 | **canonical 契约已定，代码未接入** | `docs/SHARED_MODEL_CATALOG.md` + JSON Schema/示例 | 计划由 `AgentProviderLibrary` / some.im public model catalog 迁移；真实凭据只存 `credential_ref` |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |

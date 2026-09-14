@@ -46,16 +46,29 @@ pub(crate) struct PluginWebState {
     pub host: Arc<PluginHost>,
     pub config_path: PathBuf,
     pub home: PathBuf,
+    /// 与聊天端**同一份**工作区白名单（同一个 Arc，不是副本）。
+    /// `window.willdeep.fs.*` 与 `process.run` 的边界就是它。
+    pub workspaces: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     storage_lock: Mutex<()>,
+    /// 在跑的 `ai.complete`，按页面给的 streamID 索引。没传 streamID 的
+    /// 请求停不了——页面手上没有别的把手，这一点与 macOS 宿主一致。
+    ai_streams: Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl PluginWebState {
-    pub fn new(host: Arc<PluginHost>, config_path: PathBuf, home: PathBuf) -> Self {
+    pub fn new(
+        host: Arc<PluginHost>,
+        config_path: PathBuf,
+        home: PathBuf,
+        workspaces: Arc<std::sync::RwLock<Vec<PathBuf>>>,
+    ) -> Self {
         Self {
             host,
             config_path,
             home,
+            workspaces,
             storage_lock: Mutex::new(()),
+            ai_streams: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -86,10 +99,39 @@ pub(crate) fn router(state: Arc<PluginWebState>) -> Router {
         )
         .route("/api/plugins/{plugin}/ai/providers", get(ai_providers))
         .route("/api/plugins/{plugin}/ai/complete", post(ai_complete))
+        .route("/api/plugins/{plugin}/ai/cancel", post(ai_cancel))
+        .route(
+            "/api/plugins/{plugin}/ai/image",
+            post(crate::plugin_capabilities::ai_generate_image),
+        )
+        .route(
+            "/api/plugins/{plugin}/skills",
+            get(crate::plugin_capabilities::skills_list),
+        )
+        .route(
+            "/api/plugins/{plugin}/fs/{action}",
+            post(crate::plugin_capabilities::fs_endpoint),
+        )
+        .route(
+            "/api/plugins/{plugin}/process/run",
+            post(crate::plugin_capabilities::process_run),
+        )
+        .route(
+            "/api/plugins/{plugin}/net/fetch",
+            post(crate::plugin_capabilities::net_fetch),
+        )
+        .route(
+            "/api/plugins/{plugin}/host/{action}",
+            post(crate::plugin_capabilities::host_action),
+        )
         .route(
             "/api/plugins/{plugin}/storage",
-            post(write_plugin_storage).delete(clear_plugin_storage),
+            get(read_plugin_storage)
+                .post(write_plugin_storage)
+                .delete(clear_plugin_storage),
         )
+        .route("/api/plugins/{plugin}/files", post(upload_plugin_file))
+        .route("/plugin-media/{plugin}/{file}", get(serve_plugin_media))
         .route("/plugin-page/{plugin}/{page}", get(serve_plugin_page))
         .route("/plugin-host/{plugin}/{*path}", get(serve_plugin_asset))
         .with_state(state)
@@ -161,6 +203,11 @@ struct PluginView {
     commands: Vec<PluginCommandView>,
     menus: BTreeMap<String, Vec<String>>,
     settings: Vec<PluginSettingView>,
+    /// 本宿主还不认识的清单词汇（`permission:x` / `hostAction:y` / `menu:z`）。
+    /// 与 macOS 宿主同形：包照装，界面标明这几条本宿主不支持。
+    unsupported: Vec<String>,
+    /// 要由浏览器弹文件框、而不是交给 MCP 服务的命令。
+    file_picker_commands: Vec<String>,
     /// 内容指纹。从没批准过的包这里是空的——算它要读遍包内容，而那一步
     /// 属于「点批准」的时候，不属于「列个清单」的时候。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,6 +280,11 @@ async fn list_plugins(
                             }
                             willdeep_core::plugin::CommandHandler::Navigate { .. } => {
                                 "navigate".into()
+                            }
+                            // 另一侧宿主才有的处理方式：命令照列，前端据此
+                            // 置灰，而不是让用户点一个永远没反应的菜单项。
+                            willdeep_core::plugin::CommandHandler::Unsupported { .. } => {
+                                "unsupported".into()
                             }
                         },
                     })
@@ -362,6 +414,30 @@ async fn list_plugins(
                 })
                 .unwrap_or_default(),
             settings,
+            unsupported: manifest
+                .map(|manifest| {
+                    manifest
+                        .unsupported
+                        .iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            file_picker_commands: manifest
+                .map(|manifest| {
+                    manifest
+                        .commands
+                        .iter()
+                        .filter(|command| match &command.handler {
+                            willdeep_core::plugin::CommandHandler::McpTool { server, tool } => {
+                                intercepts_file_picker(&package.id, server, tool)
+                            }
+                            _ => false,
+                        })
+                        .map(|command| command.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
             // 批准过的包在 approval_gap 里已经算过一次，这里走进程内缓存。
             digest: if never_approved {
                 None
@@ -601,6 +677,16 @@ async fn execute_command(
     } else {
         request.arguments
     };
+    // 「选文件」类命令在这里改道，**不进** MCP 服务：那边只会去弹一个
+    // 没人看得见的原生框（界面在浏览器里，服务可能在另一台机器上），
+    // 然后一直等到超时。浏览器选好、上传落地之后，宿主直接合成那个工具
+    // 本该返回的结果。
+    {
+        let package = state.host.package(&plugin)?;
+        if command_intercepts_file_picker(package, &plugin, &command) {
+            return Ok(Json(file_picker_response(&state, &plugin, &arguments)?));
+        }
+    }
     Ok(Json(
         match state
             .host
@@ -752,6 +838,32 @@ struct AiMessage {
 }
 
 #[derive(Deserialize)]
+struct AiCancelRequest {
+    #[serde(default, rename = "streamID")]
+    stream_id: String,
+}
+
+/// `window.willdeep.ai.cancel`。按 `complete()` 里传的 streamID 找那一条。
+///
+/// 没传 streamID 的请求停不了，如实回 `{"cancelled": false}`——报成成功
+/// 只会让页面以为停住了，然后继续等一个还在跑的回答。
+async fn ai_cancel(
+    State(state): State<Arc<PluginWebState>>,
+    Path(plugin): Path<String>,
+    Json(request): Json<AiCancelRequest>,
+) -> Result<Json<Value>, PluginWebError> {
+    state.host.permits(&plugin, PluginPermission::AiChat)?;
+    let key = stream_key(&plugin, request.stream_id.trim());
+    let sender = state.ai_streams.lock().await.remove(&key);
+    let cancelled = sender.is_some_and(|sender| sender.send(()).is_ok());
+    Ok(Json(json!({"cancelled": cancelled})))
+}
+
+fn stream_key(plugin: &str, stream_id: &str) -> String {
+    format!("{plugin}\u{0}{stream_id}")
+}
+
+#[derive(Deserialize)]
 struct AiCompleteRequest {
     #[serde(default)]
     system: Option<String>,
@@ -763,6 +875,31 @@ struct AiCompleteRequest {
     model: Option<String>,
     #[serde(default)]
     max_output_tokens: Option<u32>,
+    /// 页面给这一轮起的名字，`ai.cancel` 按它停。不传就停不了。
+    #[serde(default, rename = "streamID")]
+    stream_id: Option<String>,
+    /// 技能 identifier。正文由**宿主**读出来注入，页面既拿不到正文也拿不到
+    /// 磁盘路径。需要 skills.read。
+    #[serde(default)]
+    skills: Vec<String>,
+    /// 页面声明的工具。宿主只负责把声明递给模型、把模型的调用请求交回页面，
+    /// **不替页面执行**任何一个——执行发生在插件自己的代码里。
+    #[serde(default)]
+    tools: Vec<AiToolDefinition>,
+}
+
+/// 与 macOS 宿主同值：一轮最多 3 个技能、4 个工具。放宽等于让插件把整个
+/// 上下文预算吃掉，而这两项都是它自己声明的。
+const MAX_AI_SKILLS: usize = 3;
+const MAX_AI_TOOLS: usize = 4;
+
+#[derive(Deserialize)]
+struct AiToolDefinition {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    parameters: Option<Value>,
 }
 
 /// `window.willdeep.ai.complete`：让插件借宿主的手问一次模型。
@@ -834,9 +971,54 @@ async fn ai_complete(
 
     let provider = build_provider(provider_config)
         .map_err(|_| PluginWebError::BadRequest("unavailable".to_owned()))?;
+
+    if request.skills.len() > MAX_AI_SKILLS {
+        return Err(PluginWebError::BadRequest("tooManySkills".to_owned()));
+    }
+    if request.tools.len() > MAX_AI_TOOLS {
+        return Err(PluginWebError::BadRequest("tooManyTools".to_owned()));
+    }
+    // 技能正文在宿主这一侧读出来拼进 system，页面全程接触不到文件。
+    let mut skill_text = String::new();
+    if !request.skills.is_empty() {
+        state.host.permits(&plugin, PluginPermission::SkillsRead)?;
+        let roots = state
+            .workspaces
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let root = roots
+            .first()
+            .cloned()
+            .ok_or_else(|| PluginWebError::BadRequest("noWorkspace".to_owned()))?;
+        let catalog = willdeep_core::SkillCatalog::discover(&root, &[]);
+        for identifier in &request.skills {
+            let body = catalog
+                .read(identifier, None)
+                .map_err(|_| PluginWebError::BadRequest(format!("unknownSkill: {identifier}")))?;
+            skill_text.push_str(&body);
+            skill_text.push('\n');
+        }
+    }
+    let tools: Vec<willdeep_core::types::ToolDefinition> = request
+        .tools
+        .iter()
+        .map(|tool| willdeep_core::types::ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool
+                .parameters
+                .clone()
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        })
+        .collect();
+
     let mut messages = Vec::new();
     if let Some(system) = request.system.filter(|item| !item.trim().is_empty()) {
         messages.push(Message::system(system));
+    }
+    if !skill_text.trim().is_empty() {
+        messages.push(Message::system(skill_text));
     }
     for message in request.messages {
         messages.push(match message.role.as_str() {
@@ -845,18 +1027,61 @@ async fn ai_complete(
             _ => Message::user(message.content),
         });
     }
-    let completion = provider
-        .complete(&messages, &[])
-        .await
-        .map_err(|error| PluginWebError::BadRequest(format!("unavailable: {error}")))?;
+    // 注册可取消句柄。页面不传 streamID 就没有把手，这一轮跑到底为止。
+    let cancel_key = request
+        .stream_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| stream_key(&plugin, item));
+    let mut cancel_rx = match &cancel_key {
+        Some(key) => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state.ai_streams.lock().await.insert(key.clone(), tx);
+            Some(rx)
+        }
+        None => None,
+    };
+    let completion = {
+        let call = provider.complete(&messages, &tools);
+        let outcome = match cancel_rx.as_mut() {
+            Some(rx) => tokio::select! {
+                result = call => Some(result),
+                _ = rx => None,
+            },
+            None => Some(call.await),
+        };
+        if let Some(key) = &cancel_key {
+            state.ai_streams.lock().await.remove(key);
+        }
+        match outcome {
+            Some(result) => result
+                .map_err(|error| PluginWebError::BadRequest(format!("unavailable: {error}")))?,
+            None => return Err(PluginWebError::BadRequest("cancelled".to_owned())),
+        }
+    };
     let text = completion.content.trim().to_owned();
-    if text.is_empty() {
+    // 只发了工具调用、正文为空是**正常**的一轮，不是空响应：按空响应报错
+    // 会把整条工具链在第一步掐断。
+    if text.is_empty() && completion.tool_calls.is_empty() {
         return Err(PluginWebError::BadRequest("emptyResponse".to_owned()));
     }
+    let tool_calls: Vec<Value> = completion
+        .tool_calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.parsed_arguments().unwrap_or_else(|_| json!({})),
+            })
+        })
+        .collect();
     Ok(Json(json!({
         "text": text,
         "model": model_name,
         "providerID": profile_name,
+        "toolCalls": tool_calls,
     })))
 }
 
@@ -905,10 +1130,55 @@ fn write_storage(
     std::fs::write(&path, source).map_err(|error| PluginWebError::Internal(error.to_string()))
 }
 
+/// 结构化存储（`window.willdeep.storage.*`）在同一份文件里的键前缀。
+///
+/// localStorage 垫片写的是裸键，两套 API 共用一个文件；不分开的话，一个
+/// 插件同时用两套 API 就会互相覆盖，而且垫片会把 JSON 当字符串吐回去。
+/// 前缀里的控制字符是故意的：合法的 localStorage 键不会长这样。
+const STORE_PREFIX: &str = "\u{1}store:";
+
 #[derive(Deserialize)]
 struct StorageWrite {
     key: String,
     value: Option<String>,
+    /// `"store"` 是结构化 API，缺省是 localStorage 垫片。
+    #[serde(default)]
+    scope: Option<String>,
+    /// 结构化 API 的值：任意 JSON。垫片走上面的 `value`。
+    #[serde(default)]
+    json: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct StorageQuery {
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// `window.willdeep.storage.get` / `.keys`。带 key 回一条，不带回键名清单。
+async fn read_plugin_storage(
+    State(state): State<Arc<PluginWebState>>,
+    Path(plugin): Path<String>,
+    Query(query): Query<StorageQuery>,
+) -> Result<Json<Value>, PluginWebError> {
+    state.host.package(&plugin)?;
+    let data = read_storage(&state.home, &plugin);
+    match query.key {
+        Some(key) => {
+            let stored = data
+                .get(&format!("{STORE_PREFIX}{key}"))
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .unwrap_or(Value::Null);
+            Ok(Json(json!({"value": stored})))
+        }
+        None => {
+            let keys: Vec<&str> = data
+                .keys()
+                .filter_map(|key| key.strip_prefix(STORE_PREFIX))
+                .collect();
+            Ok(Json(json!({"keys": keys})))
+        }
+    }
 }
 
 async fn write_plugin_storage(
@@ -919,15 +1189,28 @@ async fn write_plugin_storage(
     state.host.package(&plugin)?;
     let _guard = state.storage_lock.lock().await;
     let mut data = read_storage(&state.home, &plugin);
-    match request.value {
+    let structured = request.scope.as_deref() == Some("store");
+    let key = if structured {
+        format!("{STORE_PREFIX}{}", request.key)
+    } else {
+        request.key.clone()
+    };
+    let value = if structured {
+        request
+            .json
+            .map(|item| serde_json::to_string(&item).unwrap_or_else(|_| "null".to_owned()))
+    } else {
+        request.value
+    };
+    match value {
         Some(value) => {
             if value.len() > MAX_STORAGE_BYTES {
                 return Err(PluginWebError::BadRequest("value too large".to_owned()));
             }
-            data.insert(request.key, value);
+            data.insert(key, value);
         }
         None => {
-            data.remove(&request.key);
+            data.remove(&key);
         }
     }
     write_storage(&state.home, &plugin, &data)?;
@@ -942,6 +1225,178 @@ async fn clear_plugin_storage(
     let _guard = state.storage_lock.lock().await;
     write_storage(&state.home, &plugin, &BTreeMap::new())?;
     Ok(Json(json!({"cleared": true})))
+}
+
+// ---------------------------------------------------------------- 远程选文件
+
+/// 上传上限。参照图这类东西 20 MiB 足够，再大就该走插件自己的服务。
+const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// **本宿主要接管的「选文件」工具。**
+///
+/// macOS 宿主上，这些工具在 MCP 服务里 `osascript` 弹一个原生选择框。
+/// rs 的界面在浏览器里、服务可能跑在另一台机器上，那条路根本不成立：
+/// 弹出来的框（如果有）在服务器的屏幕上，用户看不见。
+///
+/// 所以这里把这类调用拦下来，改成「浏览器选文件 → 上传到本插件隔离的
+/// 媒体目录 → 把落地的**服务端绝对路径**当作选择结果交回去」。插件包
+/// 一行不用改：它拿到的仍然是一个能给后续工具用的路径。
+///
+/// 做成表而不是 if-else，是因为下一个要选文件的插件只该加一行，不该
+/// 再写一遍这段逻辑。三元组是 (插件 ID, MCP 服务, 工具名)。
+const FILE_PICKER_TOOLS: [(&str, &str, &str); 1] = [(
+    "willdeep-video-studio",
+    "video-studio",
+    "video.pick_reference",
+)];
+
+pub(crate) fn intercepts_file_picker(plugin: &str, server: &str, tool: &str) -> bool {
+    FILE_PICKER_TOOLS
+        .iter()
+        .any(|(id, service, name)| *id == plugin && *service == server && *name == tool)
+}
+
+/// 命令 ID 走的是同一张表：命令的 handler 指向某个 MCP 工具，
+/// 拦截要发生在「派发之前」，否则请求已经进了 MCP 服务，那边只会去弹
+/// 一个没人看得见的框，然后超时。
+pub(crate) fn command_intercepts_file_picker(
+    package: &willdeep_core::plugin::PluginPackage,
+    plugin: &str,
+    command_id: &str,
+) -> bool {
+    let Some(command) = package
+        .manifest
+        .as_ref()
+        .and_then(|manifest| manifest.command(command_id))
+    else {
+        return false;
+    };
+    match &command.handler {
+        willdeep_core::plugin::CommandHandler::McpTool { server, tool } => {
+            intercepts_file_picker(plugin, server, tool)
+        }
+        _ => false,
+    }
+}
+
+/// 合成被拦截的那个工具本该返回的结果。
+///
+/// 外面再包一层 MCP 的 `content[0].text`：插件解析的是那一层，直接给业务
+/// 对象的话，`payload.ok` 永远是 undefined，每条命令都会被当成失败。
+fn file_picker_response(
+    state: &PluginWebState,
+    plugin: &str,
+    arguments: &Value,
+) -> Result<CommandResponse, PluginWebError> {
+    let raw = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        // 没带路径说明调用方没走「浏览器选文件」那一步。如实报错，
+        // 不要退回去调那个在本宿主上必然失败的工具。
+        .ok_or_else(|| PluginWebError::BadRequest("filePickerRequired".to_owned()))?;
+    let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, plugin)?;
+    // 路径必须是本插件媒体目录里刚落地的那一份。页面自报一个
+    // `/etc/passwd` 就能把任意文件喂给后续工具——这道门关在这里。
+    let canonical = std::path::Path::new(raw)
+        .canonicalize()
+        .map_err(|_| PluginWebError::BadRequest("invalidSelection".to_owned()))?;
+    let root = directory
+        .canonicalize()
+        .map_err(|error| PluginWebError::Internal(error.to_string()))?;
+    if !canonical.starts_with(&root) || !canonical.is_file() {
+        return Err(PluginWebError::BadRequest("invalidSelection".to_owned()));
+    }
+    let payload = json!({"ok": true, "path": canonical.display().to_string()});
+    Ok(CommandResponse {
+        kind: "tool",
+        action: None,
+        destination: None,
+        result: Some(json!({
+            "content": [{"type": "text", "text": payload.to_string()}],
+        })),
+    })
+}
+
+#[derive(Deserialize)]
+struct UploadRequest {
+    #[serde(default)]
+    name: String,
+    /// base64 的文件内容。走 JSON 而不是 multipart：上传这条路只有宿主
+    /// 页面会走，省一个解析器就少一处攻击面。
+    #[serde(default)]
+    data: String,
+}
+
+/// 浏览器选好的文件落到服务端。回的是**服务端绝对路径**——这正是被拦截的
+/// 那个工具原本要返回的东西，插件因此不用知道文件从哪来。
+async fn upload_plugin_file(
+    State(state): State<Arc<PluginWebState>>,
+    Path(plugin): Path<String>,
+    Json(request): Json<UploadRequest>,
+) -> Result<Json<Value>, PluginWebError> {
+    state.host.package(&plugin)?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(request.data.as_bytes())
+        .map_err(|_| PluginWebError::BadRequest("invalidData".to_owned()))?;
+    if bytes.is_empty() || bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(PluginWebError::BadRequest("invalidSize".to_owned()));
+    }
+    // 文件名由浏览器给，只取扩展名并净化：名字里的路径分隔符和 `..`
+    // 一个都不许活到落盘那一刻。
+    let extension = std::path::Path::new(&request.name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| value.len() <= 8 && value.chars().all(|item| item.is_ascii_alphanumeric()))
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, &plugin)?;
+    let filename = format!(
+        "upload-{}.{extension}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or_default()
+    );
+    let file = directory.join(&filename);
+    std::fs::write(&file, &bytes).map_err(|error| PluginWebError::Internal(error.to_string()))?;
+    Ok(Json(json!({
+        "path": file.display().to_string(),
+        "mediaURL": format!("/plugin-media/{plugin}/{filename}"),
+        "byteSize": bytes.len(),
+    })))
+}
+
+/// 插件媒体目录的只读出口：生成图与上传件。文件名只认本目录里的一层，
+/// 不接受任何分隔符，所以走不出这个目录。
+async fn serve_plugin_media(
+    State(state): State<Arc<PluginWebState>>,
+    Path((plugin, file)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, PluginWebError> {
+    state.host.package(&plugin)?;
+    if file.contains('/') || file.contains('\\') || file.contains("..") {
+        return Err(PluginWebError::BadRequest("invalidPath".to_owned()));
+    }
+    let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, &plugin)?;
+    let path = directory.join(&file);
+    let bytes = std::fs::read(&path).map_err(|_| {
+        PluginWebError::Host(HostError::UnknownContribution {
+            plugin: plugin.clone(),
+            kind: "media",
+            id: file.clone(),
+        })
+    })?;
+    let mut response = (
+        [(header::CONTENT_TYPE, mime_for(&file))],
+        [(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")],
+        bytes,
+    )
+        .into_response();
+    apply_sandbox_cors(&mut response, &headers);
+    Ok(response)
 }
 
 // ---------------------------------------------------------------- 页面服务
@@ -1020,7 +1475,14 @@ fn apply_sandbox_cors(response: &mut Response, headers: &HeaderMap) {
 /// 把宿主桥注入页面的 `<head>`。找不到 `<head>` 就自己包一层——
 /// 插件页面不一定是完整文档，MCP App 资源尤其常是个片段。
 fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
-    let storage_json = serde_json::to_string(storage).unwrap_or_else(|_| "{}".to_owned());
+    // 只把垫片自己的键注进快照：结构化存储走异步 API，塞进 localStorage
+    // 快照只会让同名的两份数据互相打架。
+    let shim: BTreeMap<&str, &str> = storage
+        .iter()
+        .filter(|(key, _)| !key.starts_with(STORE_PREFIX))
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let storage_json = serde_json::to_string(&shim).unwrap_or_else(|_| "{}".to_owned());
     let bootstrap = format!(
         "<script>window.__WILLDEEP_STORAGE__ = {storage_json};</script>\n<script>{BRIDGE_SCRIPT}</script>"
     );

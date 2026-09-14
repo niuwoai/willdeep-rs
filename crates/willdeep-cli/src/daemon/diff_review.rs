@@ -1668,7 +1668,13 @@ async fn authorized_workspace(
 pub(crate) fn snapshot(workspace: &Path) -> Result<DiffSnapshot> {
     let status = git(
         workspace,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
     )?;
     let mut files = parse_status(&status);
     apply_numstat(workspace, false, &mut files)?;
@@ -1684,7 +1690,7 @@ pub(crate) fn snapshot(workspace: &Path) -> Result<DiffSnapshot> {
         .map(|value| String::from_utf8_lossy(&value).trim().to_owned())
         .filter(|value| !value.is_empty());
     Ok(DiffSnapshot {
-        id: snapshot_id(workspace, &status)?,
+        id: snapshot_id(workspace, &status, head.as_deref())?,
         workspace: workspace.to_path_buf(),
         head,
         files,
@@ -1696,11 +1702,52 @@ pub(crate) fn snapshot(workspace: &Path) -> Result<DiffSnapshot> {
 
 pub(crate) fn capture(workspace: &Path) -> Result<DiffCapture> {
     let snapshot = snapshot(workspace)?;
+    let index = git(workspace, &["ls-files", "--stage", "-z"])?;
+    let mut indexed = BTreeMap::<String, Vec<Vec<u8>>>::new();
+    for entry in index
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let split = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("invalid Git index entry")?;
+        indexed
+            .entry(String::from_utf8_lossy(&entry[split + 1..]).into_owned())
+            .or_default()
+            .push(entry[..split].to_vec());
+    }
     let mut fingerprints = BTreeMap::new();
     for file in &snapshot.files {
         let mut hasher = DefaultHasher::new();
-        file.hash(&mut hasher);
-        stat_fingerprint(workspace, &file.path, &mut hasher);
+        // Display statistics can be omitted above the untracked-file threshold;
+        // that presentation decision is not a change to an existing file.
+        (
+            &file.path,
+            &file.old_path,
+            &file.kind,
+            file.staged,
+            file.unstaged,
+        )
+            .hash(&mut hasher);
+        let entry = indexed.get(&file.path);
+        entry.hash(&mut hasher);
+        let path = workspace.join(&file.path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && entry.is_some_and(|entries| {
+                        entries.iter().any(|entry| entry.starts_with(b"160000 "))
+                    }) =>
+            {
+                submodule_fingerprint(&path, &mut hasher, 0)?;
+            }
+            Ok(_) => content_fingerprint(&path, &mut hasher)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "missing".hash(&mut hasher)
+            }
+            Err(error) => return Err(error.into()),
+        }
         fingerprints.insert(file.path.clone(), hasher.finish());
     }
     Ok(DiffCapture {
@@ -1709,27 +1756,9 @@ pub(crate) fn capture(workspace: &Path) -> Result<DiffCapture> {
     })
 }
 
-/// 把一个路径的「当前样子」压进 hasher：长度 + 修改时间。
-///
-/// 这里刻意不读文件内容。归因的置信度是 [`AttributionConfidence::ToolWindow`]
-/// ——判断的是「工具那段时间窗口里这个路径动没动」，不是内容级比对。工具改文件
-/// 一定会推进 mtime，而 [`DiffFile`] 自身已经带上了 staged/unstaged 与增删行数。
-/// 早先的实现为每个文件跑两次 `git diff` 再读一遍全文，在一个摊平成 6.8k 文件的
-/// 工作区里要跑三分钟，而这三分钟是卡在事件写盘之前的。
-fn stat_fingerprint(workspace: &Path, path: &str, hasher: &mut DefaultHasher) {
-    match std::fs::symlink_metadata(workspace.join(path)) {
-        Ok(metadata) => {
-            metadata.len().hash(hasher);
-            metadata.modified().ok().hash(hasher);
-        }
-        // 读不到（已删除、权限不足、路径是目录条目）本身也是一种可比对的状态。
-        Err(_) => None::<std::time::SystemTime>.hash(hasher),
-    }
-}
-
 /// 在阻塞线程池上跑 [`capture`]。
 ///
-/// 里面全是 `git` 子进程和 `stat`，放在 async worker 上会占着线程不放——同一个
+/// Git 索引批量读取，普通文件比较内容；放在 async worker 上会占着线程不放——同一个
 /// runtime 还扛着事件写盘和控制面接口。
 pub(crate) async fn capture_blocking(workspace: PathBuf) -> Result<DiffCapture> {
     tokio::task::spawn_blocking(move || capture(&workspace)).await?
@@ -1946,8 +1975,53 @@ fn apply_numstat(
     Ok(())
 }
 
-fn snapshot_id(workspace: &Path, status: &[u8]) -> Result<String> {
+fn snapshot_id(workspace: &Path, status: &[u8], head: Option<&str>) -> Result<String> {
+    snapshot_id_at_depth(workspace, status, head, 0)
+}
+
+const MAX_SUBMODULE_DEPTH: usize = 32;
+
+fn submodule_fingerprint(path: &Path, hasher: &mut DefaultHasher, depth: usize) -> Result<()> {
+    anyhow::ensure!(
+        depth < MAX_SUBMODULE_DEPTH,
+        "submodule nesting exceeds snapshot limit"
+    );
+    // An uninitialized checkout must not let Git discover the parent repository.
+    if !path.join(".git").exists() {
+        "uninitialized-submodule".hash(hasher);
+        return Ok(());
+    }
+    let status = git(
+        path,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )?;
+    let head = git(path, &["rev-parse", "HEAD"])?;
+    snapshot_id_at_depth(
+        path,
+        &status,
+        Some(String::from_utf8_lossy(&head).trim()),
+        depth + 1,
+    )?
+    .hash(hasher);
+    Ok(())
+}
+
+fn snapshot_id_at_depth(
+    workspace: &Path,
+    status: &[u8],
+    head: Option<&str>,
+    depth: usize,
+) -> Result<String> {
     let mut hasher = DefaultHasher::new();
+    // Two clean checkouts can contain entirely different code. Empty status and
+    // diff output must not let verification from one commit authorize another.
+    head.hash(&mut hasher);
     status.hash(&mut hasher);
     git(workspace, &["diff", "--binary", "--no-ext-diff"])?.hash(&mut hasher);
     git(
@@ -1955,16 +2029,78 @@ fn snapshot_id(workspace: &Path, status: &[u8]) -> Result<String> {
         &["diff", "--cached", "--binary", "--no-ext-diff"],
     )?
     .hash(&mut hasher);
-    // 未跟踪文件不在上面两条全量 diff 里，得单独记一笔。同样只取长度和 mtime：
-    // 读全文会让一个塞着构建缓存的工作区每次快照都吞掉几百 MB 的读盘。
+    // Include every initialized gitlink, even when user configuration hides its
+    // dirty status. Parent diff text only contains HEAD and a generic dirty flag.
+    let index = git(workspace, &["ls-files", "--stage", "-z"])?;
+    for entry in index
+        .split(|byte| *byte == 0)
+        .filter(|entry| entry.starts_with(b"160000 "))
+    {
+        let split = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("invalid gitlink index entry")?;
+        let relative = std::str::from_utf8(&entry[split + 1..]).context("non-UTF8 gitlink path")?;
+        relative.hash(&mut hasher);
+        let path = workspace.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => submodule_fingerprint(&path, &mut hasher, depth)?,
+            Ok(_) => content_fingerprint(&path, &mut hasher)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "missing-submodule".hash(&mut hasher)
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Verification records use this ID: metadata alone cannot prove that
+    // untracked inputs still contain the bytes that were tested.
     for file in parse_status(status)
         .into_values()
         .filter(|file| file.kind == DiffFileKind::Untracked)
     {
         file.path.hash(&mut hasher);
-        stat_fingerprint(workspace, &file.path, &mut hasher);
+        content_fingerprint(&workspace.join(&file.path), &mut hasher)?;
     }
     Ok(format!("diff-{:016x}", hasher.finish()))
+}
+
+fn content_fingerprint(path: &Path, hasher: &mut DefaultHasher) -> Result<()> {
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        "symlink".hash(hasher);
+        std::fs::read_link(path)?.hash(hasher);
+        return Ok(());
+    }
+    anyhow::ensure!(metadata.is_file(), "unsupported verification input type");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options.open(path)?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "verification input changed type"
+    );
+    "file".hash(hasher);
+    metadata.len().hash(hasher);
+    metadata.permissions().readonly().hash(hasher);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode().hash(hasher);
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..read]);
+    }
+    Ok(())
 }
 
 fn safe_revert(
@@ -2125,11 +2261,87 @@ mod tests {
         );
     }
 
-    /// 一个塞满构建缓存的工作区（GOCACHE 指到仓库内是常见吃法）不该让快照退化成
-    /// 逐文件读盘。真实案例里 6.8k 个未跟踪文件让一次 capture 跑了三分钟，而它是
-    /// 卡在事件写盘前面的，界面上看着就是 Agent 死了。
     #[test]
-    fn capture_stays_cheap_when_untracked_files_explode() {
+    fn dirty_submodule_content_invalidates_snapshot_and_attribution() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-submodule-{}", uuid::Uuid::new_v4()));
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        for repo in [&root, &child] {
+            run_git(repo, &["init"]);
+            run_git(repo, &["config", "user.email", "test@willdeep.invalid"]);
+            run_git(repo, &["config", "user.name", "WillDeep Test"]);
+        }
+        std::fs::write(child.join("tracked.txt"), "base\n").unwrap();
+        run_git(&child, &["add", "tracked.txt"]);
+        run_git(&child, &["commit", "-m", "seed"]);
+        run_git(&root, &["add", "child"]);
+        run_git(&root, &["commit", "-m", "gitlink"]);
+        run_git(&root, &["config", "diff.ignoreSubmodules", "all"]);
+        std::fs::write(child.join("tracked.txt"), "user\n").unwrap();
+        let before = capture(&root).unwrap();
+        std::fs::write(child.join("tracked.txt"), "next\n").unwrap();
+        let after = capture(&root).unwrap();
+        assert_ne!(before.snapshot.id, after.snapshot.id);
+        assert_ne!(
+            before.fingerprints.get("child"),
+            after.fingerprints.get("child")
+        );
+        run_git(&child, &["add", "tracked.txt"]);
+        let staged = snapshot(&root).unwrap();
+        assert_ne!(after.snapshot.id, staged.id);
+        std::fs::write(child.join("untracked.txt"), "one\n").unwrap();
+        let untracked = snapshot(&root).unwrap();
+        std::fs::write(child.join("untracked.txt"), "two\n").unwrap();
+        assert_ne!(untracked.id, snapshot(&root).unwrap().id);
+        assert_eq!(snapshot(&root).unwrap().id, snapshot(&root).unwrap().id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uninitialized_submodule_does_not_recurse_into_parent() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-uninitialized-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        run_git(&root, &["init"]);
+        let mut first = DefaultHasher::new();
+        submodule_fingerprint(&root.join("empty"), &mut first, 0).unwrap();
+        let mut second = DefaultHasher::new();
+        submodule_fingerprint(&root.join("empty"), &mut second, 0).unwrap();
+        assert_eq!(first.finish(), second.finish());
+        assert!(submodule_fingerprint(&root, &mut second, MAX_SUBMODULE_DEPTH).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_commits_have_distinct_snapshot_ids() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-diff-head-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        let unborn = snapshot(&root).unwrap();
+        run_git(&root, &["commit", "--allow-empty", "-m", "first"]);
+        let first = snapshot(&root).unwrap();
+        std::fs::write(root.join("tracked.txt"), "different code\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "-m", "second"]);
+        let second = snapshot(&root).unwrap();
+        assert!(unborn.files.is_empty() && first.files.is_empty() && second.files.is_empty());
+        assert_ne!(unborn.id, first.id);
+        assert_ne!(first.id, second.id);
+        run_git(
+            &root,
+            &["checkout", "--detach", first.head.as_deref().unwrap()],
+        );
+        assert_eq!(snapshot(&root).unwrap().id, first.id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 大量未跟踪文件省略行数统计，但仍参与验收内容指纹。
+    #[test]
+    fn capture_omits_line_counts_when_untracked_files_explode() {
         let root = std::env::temp_dir().join(format!("willdeep-diff-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".cache")).expect("workspace");
         run_git(&root, &["init"]);
@@ -2138,6 +2350,8 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "one\n").expect("seed");
         run_git(&root, &["add", "tracked.txt"]);
         run_git(&root, &["commit", "-m", "seed"]);
+        std::fs::write(root.join("untouched.txt"), "user content\n").unwrap();
+        let before = capture(&root).unwrap();
         for index in 0..UNTRACKED_SCAN_MAX_FILES + 64 {
             std::fs::write(
                 root.join(".cache").join(format!("{index}.bin")),
@@ -2147,8 +2361,13 @@ mod tests {
         }
 
         let captured = capture(&root).expect("capture");
+        assert_eq!(
+            before.fingerprints.get("untouched.txt"),
+            captured.fingerprints.get("untouched.txt"),
+            "omitting line counts must not attribute an untouched file"
+        );
         assert!(captured.snapshot.files.len() > UNTRACKED_SCAN_MAX_FILES);
-        // 越过阈值后不再逐个读内容，行数就停在 0——这是刻意放弃的展示精度。
+        // 越过阈值后省略行数统计；不影响快照的内容验证。
         assert!(
             captured
                 .snapshot
@@ -2160,7 +2379,7 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
-    /// 指纹改用长度 + mtime 之后，未跟踪文件的内容变化仍要能落进归因。
+    /// 未跟踪文件的内容变化必须进入归因。
     #[test]
     fn capture_still_notices_untracked_content_changes() {
         let root = std::env::temp_dir().join(format!("willdeep-diff-{}", uuid::Uuid::new_v4()));
@@ -2183,6 +2402,115 @@ mod tests {
             after.fingerprints.get("scratch.txt")
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn attribution_detects_equal_length_changes_with_preserved_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-attribution-content-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        std::fs::write(root.join("tracked.txt"), "clean\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "--quiet", "-m", "seed"]);
+        for name in ["tracked.txt", "untracked.txt"] {
+            let path = root.join(name);
+            std::fs::write(&path, "alpha\n").unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let before = capture(&root).unwrap();
+            std::fs::write(&path, "bravo\n").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            let after = capture(&root).unwrap();
+            assert_ne!(before.snapshot.id, after.snapshot.id);
+            assert_ne!(
+                before.fingerprints.get(name),
+                after.fingerprints.get(name),
+                "changed bytes must be attributed for {name}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn attribution_detects_index_changes_when_worktree_bytes_are_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-attribution-index-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.email", "test@willdeep.invalid"]);
+        run_git(&root, &["config", "user.name", "WillDeep Test"]);
+        let path = root.join("tracked.txt");
+        std::fs::write(&path, "clean\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "--quiet", "-m", "seed"]);
+        std::fs::write(&path, "alpha\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        std::fs::write(&path, "bravo\n").unwrap();
+        let before = capture(&root).unwrap();
+        std::fs::write(&path, "delta\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        std::fs::write(&path, "bravo\n").unwrap();
+        let after = capture(&root).unwrap();
+        assert_ne!(
+            before.fingerprints.get("tracked.txt"),
+            after.fingerprints.get("tracked.txt")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn untracked_verification_detects_equal_length_changes_with_preserved_mtime() {
+        let root = std::env::temp_dir().join(format!("willdeep-content-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "--quiet"]);
+        let path = root.join("input.txt");
+        std::fs::write(&path, "alpha\n").unwrap();
+        let original_time = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let before = snapshot(&root).unwrap();
+        std::fs::write(&path, "bravo\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_time))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            original_time
+        );
+        let after = snapshot(&root).unwrap();
+        assert_ne!(before.id, after.id);
+        assert_eq!(after.id, snapshot(&root).unwrap().id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_fingerprint_hashes_links_without_following_them() {
+        let root = std::env::temp_dir().join(format!("willdeep-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("link");
+        std::os::unix::fs::symlink("missing-a", &path).unwrap();
+        let mut before = DefaultHasher::new();
+        content_fingerprint(&path, &mut before).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing-b", &path).unwrap();
+        let mut after = DefaultHasher::new();
+        content_fingerprint(&path, &mut after).unwrap();
+        assert_ne!(before.finish(), after.finish());
+        assert!(content_fingerprint(&root, &mut DefaultHasher::new()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

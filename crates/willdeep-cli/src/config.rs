@@ -190,6 +190,8 @@ pub struct HookSettings {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSettings {
+    #[serde(default)]
+    pub verification_commands: Vec<String>,
     pub max_turns: Option<usize>,
     pub approval: Option<String>,
     pub language: Option<String>,
@@ -395,6 +397,8 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             path.display()
         );
     }
+    willdeep_core::ToolRegistry::validate_required_verifications(&file.agent.verification_commands)
+        .map_err(anyhow::Error::msg)?;
     if let Some(max_turns) = file.agent.max_turns
         && !(1..=100).contains(&max_turns)
     {
@@ -602,6 +606,19 @@ fn enforce_secret_file_permissions(_file: &ConfigFile, _path: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_explicit_verification_commands_and_defaults_to_no_contract() {
+        let configured: ConfigFile =
+            toml::from_str("[agent]\nverification_commands = ['cargo test --workspace']\n")
+                .unwrap();
+        assert_eq!(
+            configured.agent.verification_commands,
+            vec!["cargo test --workspace"]
+        );
+        let defaults: ConfigFile = toml::from_str("[agent]\nmax_turns = 4\n").unwrap();
+        assert!(defaults.agent.verification_commands.is_empty());
+    }
 
     #[test]
     fn parses_multiple_provider_profiles() {

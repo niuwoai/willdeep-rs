@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{client, endpoint, openai_auth, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
+mod streaming;
 
 pub struct ChatCompletionsProvider {
     config: ProviderConfig,
@@ -24,6 +25,15 @@ impl ChatCompletionsProvider {
 
 #[async_trait]
 impl Provider for ChatCompletionsProvider {
+    async fn complete_with_events(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        events: &dyn super::ProviderEventSink,
+    ) -> Result<Completion, ProviderError> {
+        streaming::complete(self, messages, tools, events).await
+    }
+
     fn with_model(&self, model: &str) -> Result<std::sync::Arc<dyn Provider>, ProviderError> {
         let mut config = self.config.clone();
         config.model = model.to_owned();
@@ -49,33 +59,7 @@ impl Provider for ChatCompletionsProvider {
         let request =
             openai_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
         let bytes = send_retrying(request, &self.config).await?;
-        let response: ChatResponse = serde_json::from_slice(&bytes)
-            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(ProviderError::EmptyResponse)?;
-        Ok(Completion {
-            content: choice.message.content.unwrap_or_default(),
-            tool_calls: choice
-                .message
-                .tool_calls
-                .into_iter()
-                .map(|call| ToolCall {
-                    id: call.id,
-                    name: call.function.name,
-                    arguments: call.function.arguments,
-                })
-                .collect(),
-            finish_reason: choice.finish_reason,
-            usage: response.usage.map(|usage| Usage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-                total_tokens: usage.total_tokens,
-                cache_read_tokens: usage.cache_read_tokens(),
-            }),
-        })
+        decode_completion(&bytes)
     }
 }
 
@@ -321,4 +305,34 @@ mod usage_tests {
             "a gateway that says nothing must not be reported as a cache miss"
         );
     }
+}
+
+fn decode_completion(bytes: &[u8]) -> Result<Completion, ProviderError> {
+    let response: ChatResponse = serde_json::from_slice(bytes)
+        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+    let choice = response
+        .choices
+        .into_iter()
+        .next()
+        .ok_or(ProviderError::EmptyResponse)?;
+    Ok(Completion {
+        content: choice.message.content.unwrap_or_default(),
+        tool_calls: choice
+            .message
+            .tool_calls
+            .into_iter()
+            .map(|call| ToolCall {
+                id: call.id,
+                name: call.function.name,
+                arguments: call.function.arguments,
+            })
+            .collect(),
+        finish_reason: choice.finish_reason,
+        usage: response.usage.map(|usage| Usage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens(),
+        }),
+    })
 }

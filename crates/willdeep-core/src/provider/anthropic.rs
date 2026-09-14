@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{anthropic_auth, anthropic_endpoint, client, send_retrying};
 use super::{Provider, ProviderConfig, ProviderError};
 use crate::types::{Completion, Message, MessageAttachment, Role, ToolCall, ToolDefinition, Usage};
+mod streaming;
 
 pub struct AnthropicMessagesProvider {
     config: ProviderConfig,
@@ -24,6 +25,15 @@ impl AnthropicMessagesProvider {
 
 #[async_trait]
 impl Provider for AnthropicMessagesProvider {
+    async fn complete_with_events(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        events: &dyn super::ProviderEventSink,
+    ) -> Result<Completion, ProviderError> {
+        streaming::complete(self, messages, tools, events).await
+    }
+
     fn with_model(&self, model: &str) -> Result<std::sync::Arc<dyn Provider>, ProviderError> {
         let mut config = self.config.clone();
         config.model = model.to_owned();
@@ -48,43 +58,7 @@ impl Provider for AnthropicMessagesProvider {
         let request =
             anthropic_auth(self.client.post(self.endpoint.clone()), &self.config).json(&body);
         let bytes = send_retrying(request, &self.config).await?;
-        let response: AnthropicResponse = serde_json::from_slice(&bytes)
-            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-        let mut text = Vec::new();
-        let mut tool_calls = Vec::new();
-        for block in response.content {
-            match block.kind.as_str() {
-                "text" => {
-                    if let Some(value) = block.text {
-                        text.push(value);
-                    }
-                }
-                "tool_use" => tool_calls.push(ToolCall {
-                    id: block.id.unwrap_or_else(|| "tool_unknown".to_owned()),
-                    name: block.name.unwrap_or_default(),
-                    arguments: serde_json::to_string(&block.input.unwrap_or_default())
-                        .unwrap_or_else(|_| "{}".to_owned()),
-                }),
-                _ => {}
-            }
-        }
-        if text.is_empty() && tool_calls.is_empty() {
-            return Err(ProviderError::EmptyResponse);
-        }
-        Ok(Completion {
-            content: text.join(""),
-            tool_calls,
-            finish_reason: response.stop_reason,
-            usage: response.usage.map(|usage| Usage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: match (usage.input_tokens, usage.output_tokens) {
-                    (Some(input), Some(output)) => Some(input + output),
-                    _ => None,
-                },
-                cache_read_tokens: usage.cache_read_input_tokens,
-            }),
-        })
+        decode_completion(&bytes)
     }
 }
 
@@ -269,6 +243,46 @@ struct AnthropicUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+}
+
+fn decode_completion(bytes: &[u8]) -> Result<Completion, ProviderError> {
+    let response: AnthropicResponse = serde_json::from_slice(bytes)
+        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+    let mut text = Vec::new();
+    let mut tool_calls = Vec::new();
+    for block in response.content {
+        match block.kind.as_str() {
+            "text" => {
+                if let Some(value) = block.text {
+                    text.push(value);
+                }
+            }
+            "tool_use" => tool_calls.push(ToolCall {
+                id: block.id.unwrap_or_else(|| "tool_unknown".to_owned()),
+                name: block.name.unwrap_or_default(),
+                arguments: serde_json::to_string(&block.input.unwrap_or_default())
+                    .unwrap_or_else(|_| "{}".to_owned()),
+            }),
+            _ => {}
+        }
+    }
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(ProviderError::EmptyResponse);
+    }
+    Ok(Completion {
+        content: text.join(""),
+        tool_calls,
+        finish_reason: response.stop_reason,
+        usage: response.usage.map(|usage| Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: match (usage.input_tokens, usage.output_tokens) {
+                (Some(input), Some(output)) => Some(input + output),
+                _ => None,
+            },
+            cache_read_tokens: usage.cache_read_input_tokens,
+        }),
+    })
 }
 
 #[cfg(test)]

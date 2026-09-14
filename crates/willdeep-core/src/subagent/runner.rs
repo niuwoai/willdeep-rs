@@ -55,6 +55,20 @@ impl EventSink for ChildEventSink {
                 })
             }
             AgentEvent::Usage(usage) => Some(AgentEvent::SubagentUsage { id: self.id, usage }),
+            AgentEvent::ProviderProgress(crate::provider::ProviderEvent::RetryWait {
+                attempt,
+                delay,
+            }) => Some(AgentEvent::SubagentRetryWait {
+                id: self.id,
+                attempt,
+                delay,
+            }),
+            AgentEvent::ProviderProgress(crate::provider::ProviderEvent::RetryStarted {
+                attempt,
+            }) => Some(AgentEvent::SubagentRetryStarted {
+                id: self.id,
+                attempt,
+            }),
             _ => None,
         };
         if let Some(event) = event {
@@ -129,6 +143,7 @@ impl Drop for FileClaim {
 #[derive(Clone)]
 pub(super) struct SubagentRun {
     pub(super) workspace: PathBuf,
+    pub(super) sandbox: crate::sandbox::SandboxSpec,
     pub(super) profile: SubagentProfile,
     pub(super) prompt: String,
     pub(super) task: Option<TaskPacket>,
@@ -145,6 +160,7 @@ pub(super) struct SubagentRun {
     /// 父会话的 always-allow 存储路径，见
     /// [`SubagentCatalog::with_always_allow_store`](super::catalog::SubagentCatalog::with_always_allow_store)。
     pub(super) always_allow_store: Option<PathBuf>,
+    pub(super) state_home: Option<PathBuf>,
 }
 
 /// Run a worker to a verdict.
@@ -164,6 +180,7 @@ pub(super) async fn run_subagent(
 ) -> Result<String, AgentError> {
     let SubagentRun {
         workspace,
+        sandbox,
         profile,
         prompt,
         task,
@@ -176,10 +193,17 @@ pub(super) async fn run_subagent(
         approved_command,
         mcp,
         always_allow_store,
+        state_home,
     } = run;
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
         None => None,
+    };
+    let _file_leases = match (&state_home, &approved_targets) {
+        (Some(home), Some(targets)) if !targets.is_empty() => {
+            Some(super::file_leases::FileLeases::acquire(home, targets)?)
+        }
+        _ => None,
     };
     // Read the anchor before the worker touches anything: with the commit the
     // run started from, this record replays.
@@ -233,6 +257,8 @@ pub(super) async fn run_subagent(
             command_review_context.clone(),
             mcp.clone(),
             always_allow_store.clone(),
+            &sandbox,
+            state_home.as_deref(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -246,7 +272,7 @@ pub(super) async fn run_subagent(
                 None => report,
             });
         };
-        let result = run_verifier(&workspace, verifier).await?;
+        let result = run_verifier(&workspace, verifier, &sandbox).await?;
         if result.passed {
             lifecycle_sink
                 .emit(verdict(Some(true), attempt, &CitationAudit::default()))
@@ -317,6 +343,8 @@ async fn run_once(
     command_review_context: String,
     mcp: Option<Arc<crate::mcp::McpRegistry>>,
     always_allow_store: Option<PathBuf>,
+    sandbox: &crate::sandbox::SandboxSpec,
+    state_home: Option<&Path>,
 ) -> Result<String, AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
@@ -338,8 +366,12 @@ async fn run_once(
         allowed.retain(|name| !WRITE_TOOLS.contains(&name.as_str()));
     }
     let mut tools = ToolRegistry::new(workspace, approval)?
+        .with_sandbox(sandbox.clone())
         .with_allowed_tools(allowed)
         .with_write_targets(approved_targets.clone());
+    if let Some(home) = state_home {
+        tools = tools.with_output_store(&home.join("tool-outputs"));
+    }
     if let Some(path) = always_allow_store {
         // 坏掉的规则文件不该让一次派工失败：Worker 退回「什么都要批」，而它
         // 没有审批 UI，于是照常报告哪一步被拦下，由父会话去请人批。
@@ -387,11 +419,17 @@ async fn run_once(
     // A relay-hosted trade already carries its job prompt server-side. Sending
     // the client's copy too would put two descriptions of the same trade in
     // one context — and when they drift, the worker gets to pick.
-    let system_prompt = if profile.hosted_job_prompt {
+    let mut system_prompt = if profile.hosted_job_prompt {
         boundary
     } else {
         format!("{boundary}\n\n{}", profile.capability_prompt)
     };
+    if let Some(rules) = crate::prompt::global_user_instructions()
+        .map_err(|error| AgentError::Subagent(error.to_string()))?
+    {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&rules);
+    }
     let timeout_seconds = profile.timeout_seconds;
     let mut agent = Agent::new(
         profile.provider.clone(),
@@ -410,7 +448,13 @@ async fn run_once(
     if let Some(inbox) = instruction_inbox {
         agent = agent.with_instruction_inbox(inbox);
     }
-    let run = Box::pin(agent.run(brief));
+    let run = Box::pin(async {
+        if let Some(home) = state_home {
+            super::checkpoint::run(&agent, home, workspace, agent_id, &profile.id, brief).await
+        } else {
+            agent.run(brief).await
+        }
+    });
     let outcome = if let Some(seconds) = timeout_seconds {
         tokio::time::timeout(Duration::from_secs(seconds), run)
             .await
@@ -422,11 +466,12 @@ async fn run_once(
     };
     // 子 Agent 触顶同样交部分结果，但父 Agent 得知道它没收敛，
     // 否则会把一份半成品当成经过验证的答案。
-    if outcome.stop_reason == crate::agent::AgentStopReason::MaxTurns {
-        return Ok(format!(
-            "{}\n\n[Note: this child agent hit its {}-turn limit before finishing; the result above is partial and may be incomplete.]",
-            outcome.final_text, outcome.turns
-        ));
+    if !outcome.stop_reason.is_complete() {
+        return Err(AgentError::SubagentPartial {
+            reason: outcome.stop_reason,
+            turns: outcome.turns,
+            report: outcome.final_text,
+        });
     }
     Ok(outcome.final_text)
 }
@@ -442,28 +487,17 @@ struct VerifierResult {
 async fn run_verifier(
     workspace: &Path,
     verifier: &TaskVerifier,
+    sandbox: &crate::sandbox::SandboxSpec,
 ) -> Result<VerifierResult, AgentError> {
-    let mut command = crate::tools::platform_shell(&verifier.command);
-    command
-        .current_dir(workspace)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().map_err(|error| {
-        AgentError::Subagent(format!("verifier command failed to start: {error}"))
-    })?;
-    let output = tokio::time::timeout(
+    const MAX_VERIFIER_OUTPUT_BYTES: usize = 128 * 1024;
+    let output = crate::execution::run_capture(
+        &verifier.command,
+        workspace,
+        sandbox,
         Duration::from_secs(VERIFIER_TIMEOUT_SECONDS),
-        child.wait_with_output(),
+        MAX_VERIFIER_OUTPUT_BYTES,
     )
     .await
-    .map_err(|_| {
-        AgentError::Subagent(format!(
-            "verifier command timed out after {VERIFIER_TIMEOUT_SECONDS} seconds: {}",
-            verifier.command
-        ))
-    })?
     .map_err(|error| AgentError::Subagent(format!("verifier command failed: {error}")))?;
     let exit_code = output.status.code().unwrap_or(-1);
     let combined = format!(
@@ -549,6 +583,129 @@ mod tests {
     use crate::subagent::types::SpawnAgentArgs;
     use crate::subagent::{SubagentCatalog, builtin_profiles};
     use crate::types::{Completion, Message, ToolDefinition};
+
+    #[tokio::test]
+    async fn child_retry_wait_reaches_parent_without_child_text() {
+        let parent = Arc::new(CaptureSink::default());
+        let id = uuid::Uuid::new_v4();
+        let sink = ChildEventSink {
+            id,
+            parent: parent.clone(),
+        };
+        sink.emit(AgentEvent::ProviderProgress(
+            crate::provider::ProviderEvent::TextDelta("private child text".into()),
+        ))
+        .await;
+        sink.emit(AgentEvent::ProviderProgress(
+            crate::provider::ProviderEvent::RetryWait {
+                attempt: 2,
+                delay: Duration::from_millis(1500),
+            },
+        ))
+        .await;
+        sink.emit(AgentEvent::ProviderProgress(
+            crate::provider::ProviderEvent::RetryStarted { attempt: 2 },
+        ))
+        .await;
+        let events = parent.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], AgentEvent::SubagentRetryWait { id: child, attempt: 2, delay }
+            if *child == id && *delay == Duration::from_millis(1500))
+        );
+        assert!(
+            matches!(events[1], AgentEvent::SubagentRetryStarted { id: child, attempt: 2 } if child == id)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verifier_obeys_inherited_read_only_sandbox() {
+        let (_catalog, root) = fixture();
+        let verifier = TaskVerifier {
+            command: "touch forbidden-verifier-write".to_owned(),
+            expected_exit_code: None,
+        };
+        let sandbox = crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::ReadOnly, []);
+        let result = run_verifier(&root, &verifier, &sandbox).await;
+        assert!(!root.join("forbidden-verifier-write").exists());
+        if let Ok(result) = result {
+            assert!(!result.passed);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A successful check cannot certify an explicitly unfinished worker run.
+    #[tokio::test]
+    async fn truncated_child_cannot_be_promoted_by_a_passing_verifier() {
+        struct Truncated;
+        #[async_trait]
+        impl Provider for Truncated {
+            async fn complete(
+                &self,
+                _: &[Message],
+                _: &[ToolDefinition],
+            ) -> Result<Completion, ProviderError> {
+                Ok(Completion {
+                    content: "partial implementation".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("length".into()),
+                    usage: None,
+                })
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-partial-verifier-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let sink = Arc::new(CaptureSink::default());
+        let catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(Arc::new(Truncated)),
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_event_sink(sink.clone());
+        let error = catalog
+            .run(
+                SpawnAgentArgs {
+                    prompt: "finish implementation".into(),
+                    profile: Some("scout".into()),
+                    run_in_background: Some(false),
+                    task: Some(TaskPacket {
+                        goal: "complete implementation".into(),
+                        verifier: Some(TaskVerifier {
+                            command: "true".into(),
+                            expected_exit_code: None,
+                        }),
+                        ..TaskPacket::default()
+                    }),
+                    ..SpawnAgentArgs::default()
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        let report = error.to_string();
+        assert!(matches!(
+            error,
+            AgentError::SubagentPartial {
+                reason: crate::AgentStopReason::Incomplete,
+                ..
+            }
+        ));
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
+            event,
+            AgentEvent::SubagentCompleted {
+                status: crate::agent::SubagentLifecycleStatus::Partial,
+                ..
+            }
+        )));
+        assert!(report.contains("partial implementation"), "{report}");
+        assert!(report.contains("partial"));
+        assert!(!report.contains("verdict=\"passed\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// With the job prompt hosted, the client sends the boundary paragraph and
     /// nothing else: two copies of a trade description that can drift is worse
