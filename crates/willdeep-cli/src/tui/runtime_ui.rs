@@ -154,11 +154,35 @@ pub(super) fn apply_runtime_events(
     if advanced {
         if session.runtime_managed {
             let attention_read = session.attention_read.clone();
-            let mut latest = store.load(session.id)?;
-            latest.attention_read.extend(attention_read);
-            latest.runtime_managed = true;
-            latest.runtime_event_cursor = app.runtime_event_cursor;
-            *session = latest;
+            let cursor = app.runtime_event_cursor;
+            // 这一轮由守护进程执行，**AI 输出每到一块它就写一次这个文件**。
+            // 此前这里是 load → 改 → save：基线在 load 那一刻定格，save 时磁盘
+            // 早已又变了，而游标算在执行指纹里（session/execution_state.rs），
+            // 于是每次输出到达都可能判成执行冲突，`?` 一抛整个 TUI 退出——用户
+            // 看到的就是「AI 刚要输出就闪退」，而那一轮其实已经跑完。
+            //
+            // `update` 在会话锁内从磁盘最新快照起改，没有这个窗口：守护进程
+            // 刚写进去的消息全部保留，这里只叠加自己的游标与已读标记。
+            let apply = |latest: &mut Session| {
+                latest.attention_read.extend(attention_read);
+                latest.runtime_managed = true;
+                latest.runtime_event_cursor = cursor;
+            };
+            match store.load(session.id) {
+                // 空会话不为游标落盘，与 `tui::run` 的启动写入同一条规则：
+                // 别的工作区的事件照样会推进游标，光坐着不说话不该因此多出
+                // 一条空会话。只在内存里对齐，游标随第一条消息一起写下去。
+                Ok(mut latest) if latest.messages.is_empty() => {
+                    apply(&mut latest);
+                    *session = latest;
+                }
+                Ok(_) => *session = store.update(session.id, apply)?,
+                // 托管会话理应已经落过盘；真没有就让它保持内存态，
+                // 下一次事件或提交时再写。
+                Err(willdeep_core::session::SessionError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             if let Some(plan) = &session.current_plan {
                 sync_persisted_plan(&mut app.transcript, plan);
                 app.transcript_height =
@@ -167,11 +191,11 @@ pub(super) fn apply_runtime_events(
             }
         } else {
             session.runtime_event_cursor = app.runtime_event_cursor;
-        }
-        // 同 `tui::run` 的启动写入：空会话不为游标落盘。别的工作区的事件照样
-        // 会推进游标，光坐着不说话也能把一条空会话写出来。
-        if !session.messages.is_empty() {
-            store.save(session)?;
+            // 同上：空会话不为游标落盘。托管分支不走这里——那边已经在锁内
+            // 写过了，再存一次又会开一个新的竞态窗口。
+            if !session.messages.is_empty() {
+                store.save(session)?;
+            }
         }
     }
     Ok(())
@@ -613,6 +637,62 @@ mod tests {
         let persisted = store.load(session.id).unwrap();
         assert_eq!(persisted.id, session.id);
         assert!(persisted.messages.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 守护进程正在执行这一轮时，前台跟随事件写游标不能把自己写死。
+    ///
+    /// 现场：AI 输出每到一块守护进程就写一次会话文件。此前这里是
+    /// load → 改 → save，基线在 load 那刻定格，save 时磁盘已经又变了，而游标
+    /// 算在执行指纹里，于是判成执行冲突、`?` 抛出、TUI 在「结果刚要显示」时退出。
+    ///
+    /// 这条测试模拟那个窗口：拿到快照之后、写回之前，另一个写者（守护进程）
+    /// 追加了一条消息。旧写法必然失败；现在这条路必须既写进游标、又保住
+    /// 守护进程刚写的消息。
+    #[test]
+    fn following_runtime_events_survives_a_daemon_write_mid_turn() {
+        let (root, store) = temporary_store("tui-runtime-follow-race");
+        let mut session = Session::new(root.clone(), None, "managed session");
+        session.runtime_managed = true;
+        session.messages.push(Message::user("请开始"));
+        store.save(&mut session).unwrap();
+
+        // 前台此刻手上的快照（基线已定格）。
+        let mut visible = store.load(session.id).unwrap();
+
+        // 守护进程在这中间写入了这一轮的输出。
+        store
+            .update(session.id, |latest| {
+                latest
+                    .messages
+                    .push(Message::assistant("模型输出", Vec::new()));
+            })
+            .unwrap();
+
+        // 旧写法：改游标再 save —— 整个失败。
+        let mut stale = visible.clone();
+        stale.runtime_event_cursor = 6385;
+        assert!(matches!(
+            store.save(&mut stale),
+            Err(willdeep_core::session::SessionError::ConcurrentUpdate(
+                "execution"
+            ))
+        ));
+
+        // 现在这条路：锁内从最新快照起改。
+        visible = store
+            .update(session.id, |latest| {
+                latest.runtime_managed = true;
+                latest.runtime_event_cursor = 6385;
+            })
+            .unwrap();
+
+        assert_eq!(visible.runtime_event_cursor, 6385);
+        assert_eq!(
+            visible.messages.last().unwrap().content,
+            "模型输出",
+            "守护进程刚写的输出必须保住"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
