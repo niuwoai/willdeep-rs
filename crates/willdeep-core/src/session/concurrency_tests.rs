@@ -148,6 +148,47 @@ fn a_bookmark_write_survives_a_concurrent_execution_rewrite() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 一个纯标志位的写入，会被判成执行状态冲突。
+///
+/// `runtime_managed` 算在执行指纹里（见 `execution_state::fingerprint`），所以
+/// 会话被运行时接管时，守护进程只置了这一个位，握着执行所有权的前台进程再存
+/// 自己刚跑完的一轮，就会撞上 `ConcurrentUpdate("execution")`——TUI 因此在
+/// 「AI 结果刚要显示」的那一刻退出，整轮输出丢掉。
+///
+/// 这条测试钉住这个事实本身（它是真实存在的语义，不是 bug），以及前台该怎么
+/// 收场：`update` 从最新快照起改，标志位保住、本轮结果也保住。
+#[test]
+fn a_finished_turn_is_not_lost_when_the_runtime_flips_an_ownership_flag() {
+    let (root, store, mut stale) = fixture();
+    // 守护进程接管：只动 runtime_managed 这一个位。
+    store
+        .update(stale.id, |session| session.runtime_managed = true)
+        .unwrap();
+
+    // 前台刚跑完一轮，把结果写回去——旧路子在这里整个失败。
+    let mut via_save = stale.clone();
+    via_save
+        .messages
+        .push(Message::assistant("turn result", Vec::new()));
+    assert!(matches!(
+        store.save(&mut via_save),
+        Err(SessionError::ConcurrentUpdate("execution"))
+    ));
+
+    // 现在的路子：重载最新快照再放上本轮消息，两边都不丢。
+    let messages = via_save.messages.clone();
+    stale = store
+        .update(stale.id, |latest| latest.messages = messages)
+        .unwrap();
+    assert!(stale.runtime_managed, "运行时置的位必须保住");
+    assert_eq!(stale.messages.last().unwrap().content, "turn result");
+
+    let reloaded = store.load(stale.id).unwrap();
+    assert!(reloaded.runtime_managed);
+    assert_eq!(reloaded.messages.last().unwrap().content, "turn result");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn deleted_session_cannot_be_resurrected_by_a_loaded_writer() {
     let (root, store, mut stale) = fixture();
