@@ -8,6 +8,38 @@ pub(super) async fn event_loop(
     runtime: &mut TuiRuntime,
     language: Language,
 ) -> Result<()> {
+    // 先跟运行时对齐，再渲染。`runtime_event_head` 会在 CLI 版本变化时停掉旧
+    // 守护进程、起一个新的，而新守护在恢复阶段会重写会话文件；把这一步放在
+    // 组装 transcript 之后，屏幕上就是一份守护进程刚刚改过的过期记录。
+    if session.runtime_event_cursor == 0 {
+        let head = crate::daemon::runtime_event_head(&runtime.home)
+            .await
+            .unwrap_or_default();
+        session.runtime_event_cursor = head;
+        // 一条还没说过话的会话不该为了记一个事件游标就落盘。此前每开一次 TUI
+        // 不敲字就关，磁盘上就多一条 0 消息会话，历史列表被它们挤满——而它们
+        // 什么都没记录。游标会在第一条提示词落盘时一起写下去；在那之前丢掉它
+        // 的唯一后果是下次从事件流头部重读，而空会话没有任何东西要重放。
+        if !session.messages.is_empty() {
+            // 用 `update` 而不是 `save`：这里写的只是事件游标这一个书签，而上面
+            // 那次 `runtime_event_head` 可能刚好发生过守护进程换版重启——它在恢复
+            // 阶段写过这个会话，于是 `save` 手上的基线在这一刻已经过期，冲突会以
+            // `concurrent session update conflicts on execution` 把整个 TUI 打死
+            // （升级后第一次启动必现）。`update` 从磁盘最新快照起改，书签重放上去
+            // 无损，顺带把守护进程刚恢复出来的内容接回内存。
+            match store.update(session.id, |latest| latest.runtime_event_cursor = head) {
+                Ok(latest) => *session = latest,
+                // 还没落过盘的会话没有「最新快照」可改，按原路首次写入。
+                Err(willdeep_core::session::SessionError::Io(error))
+                    if error.kind() == io::ErrorKind::NotFound =>
+                {
+                    store.save(session)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     let mut initial_transcript = session_transcript(session, language);
     if initial_transcript.is_empty() {
         initial_transcript.push(welcome_message(&session.workspace, language));
@@ -17,18 +49,6 @@ pub(super) async fn event_loop(
         mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
     app.media = MediaState::detect(media_resize_tx);
     app.goal = session.goal.clone();
-    if session.runtime_event_cursor == 0 {
-        session.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
-            .await
-            .unwrap_or_default();
-        // 一条还没说过话的会话不该为了记一个事件游标就落盘。此前每开一次 TUI
-        // 不敲字就关，磁盘上就多一条 0 消息会话，历史列表被它们挤满——而它们
-        // 什么都没记录。游标会在第一条提示词落盘时一起写下去；在那之前丢掉它
-        // 的唯一后果是下次从事件流头部重读，而空会话没有任何东西要重放。
-        if !session.messages.is_empty() {
-            store.save(session)?;
-        }
-    }
     app.runtime_event_cursor = session.runtime_event_cursor;
     app.workspace = Some(session.workspace.clone());
     app.workspace_status = workspace_status(&session.workspace, language);
