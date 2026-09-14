@@ -1,5 +1,35 @@
 use super::*;
 
+/// 落一轮已经跑完的结果；撞上并发执行冲突时，重载最新快照再写一次。
+///
+/// 为什么这里可以「重载后照写」，而 `SessionStore::save` 的冲突判定又必须留着：
+/// 本轮的执行所有权由本进程持有（调用方在保存之后才 drop `ownership`），手里这
+/// 份消息就是这条会话的权威续写。磁盘上那点变化不是另一轮对话——实测是会话被
+/// 运行时接管时守护进程把 `runtime_managed` 置了位，而这个字段恰好算在执行指纹
+/// 里（见 `session/execution_state.rs`），于是一次纯标志位的写入被判成了执行状态
+/// 冲突。
+///
+/// 此前这里直接 `?`：用户敲完提示词、模型跑完一整轮，**结果刚要显示的那一刻**
+/// TUI 退出，而那一轮的输出连同 token 一起丢掉。为一个标志位赔上一整轮，怎么算
+/// 都不划算。
+///
+/// 取舍说明：如果磁盘上真有另一轮对话（两个执行者同时写一条会话），这里会用本轮
+/// 结果覆盖它。那种情况本身已经是坏的，而原先的行为是两边都保不住——至少这样能
+/// 保住用户刚刚等来的这一轮。
+fn persist_turn_result(session: &mut Session, store: &SessionStore) -> Result<()> {
+    match store.save(session) {
+        Ok(()) => Ok(()),
+        Err(willdeep_core::session::SessionError::ConcurrentUpdate(_)) => {
+            let messages = std::mem::take(&mut session.messages);
+            // `update` 在锁内从磁盘最新快照起改：别人刚写进去的字段全部保留，
+            // 只把本轮的消息放上去。
+            *session = store.update(session.id, |latest| latest.messages = messages)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -1011,9 +1041,9 @@ pub(super) async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);app.transient_thought=None;runtime.notifier.task_stopped(&outcome);app.append_transcript(format!("WillDeep: {}",outcome.final_text));app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;store.save(session)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
+                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);app.transient_thought=None;runtime.notifier.task_stopped(&outcome);app.append_transcript(format!("WillDeep: {}",outcome.final_text));app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;persist_turn_result(session,store)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
                 UiMessage::Finished(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: {e}"));app.finish_turn();},
-                UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);store.save(session)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
+                UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);persist_turn_result(session,store)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
