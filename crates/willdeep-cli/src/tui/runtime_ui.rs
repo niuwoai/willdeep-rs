@@ -669,17 +669,9 @@ mod tests {
             })
             .unwrap();
 
-        // 旧写法：改游标再 save —— 整个失败。
-        let mut stale = visible.clone();
-        stale.runtime_event_cursor = 6385;
-        assert!(matches!(
-            store.save(&mut stale),
-            Err(willdeep_core::session::SessionError::ConcurrentUpdate(
-                "execution"
-            ))
-        ));
-
-        // 现在这条路：锁内从最新快照起改。
+        // 游标已经不算执行状态（见 session/execution_state.rs），所以单写书签
+        // 本身不会再被判冲突。这里仍走 `update`：在会话锁内一次读改写，不给
+        // 守护进程的写入留下「读到的和写回去的不是同一版」的窗口。
         visible = store
             .update(session.id, |latest| {
                 latest.runtime_managed = true;
