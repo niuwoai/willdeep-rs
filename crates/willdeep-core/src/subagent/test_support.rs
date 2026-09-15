@@ -43,6 +43,7 @@ impl Provider for ReportProvider {
         assert!(messages[0].content.contains("cannot spawn another agent"));
         assert!(tools.iter().all(|tool| tool.name != "spawn_agent"));
         Ok(Completion {
+            reasoning: None,
             content: "subagent report".to_owned(),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_owned()),
@@ -67,6 +68,7 @@ impl Provider for ModelProvider {
     ) -> Result<Completion, ProviderError> {
         self.seen.lock().unwrap().push(self.model.clone());
         Ok(Completion {
+            reasoning: None,
             content: format!("report from {}", self.model),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_owned()),

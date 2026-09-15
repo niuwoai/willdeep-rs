@@ -36,6 +36,7 @@ async fn first_response_latency_is_captured_before_stream_completion() {
                 .await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             Ok(Completion {
+                reasoning: None,
                 content: "ready".into(),
                 tool_calls: Vec::new(),
                 usage: None,
@@ -79,6 +80,7 @@ async fn configured_verification_reaches_the_model_and_blocks_unchecked_completi
                     && message.content.contains("cargo test --workspace")
             }));
             Ok(Completion {
+                reasoning: None,
                 content: "done".into(),
                 tool_calls: Vec::new(),
                 usage: None,
@@ -125,6 +127,7 @@ async fn changed_workspace_cannot_finish_without_current_verification() {
         ) -> Result<Completion, ProviderError> {
             std::fs::write(self.0.join("revision"), "changed").unwrap();
             Ok(Completion {
+                reasoning: None,
                 content: "<goal-status>complete</goal-status> Everything is complete".into(),
                 tool_calls: Vec::new(),
                 usage: None,
@@ -338,6 +341,7 @@ impl Provider for TruncatedProvider {
             );
         }
         Ok(Completion {
+            reasoning: None,
             content: if incomplete {
                 "partial"
             } else {
@@ -431,6 +435,7 @@ impl Provider for InstructionProvider {
             }));
         }
         Ok(Completion {
+            reasoning: None,
             content: if call == 0 {
                 "first answer"
             } else {
@@ -452,6 +457,7 @@ impl Provider for UsageProvider {
         _tools: &[ToolDefinition],
     ) -> Result<Completion, ProviderError> {
         Ok(Completion {
+            reasoning: None,
             content: "would otherwise finish".to_owned(),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_owned()),
@@ -486,6 +492,7 @@ impl Provider for RecordingProvider {
             .expect("requests")
             .push(messages.to_vec());
         Ok(Completion {
+            reasoning: None,
             content: self
                 .replies
                 .lock()
@@ -531,6 +538,7 @@ impl Provider for EndlessToolProvider {
     ) -> Result<Completion, ProviderError> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         Ok(Completion {
+            reasoning: None,
             content: format!("still working, step {call}"),
             tool_calls: vec![crate::types::ToolCall {
                 id: format!("call-{call}"),
@@ -757,6 +765,7 @@ impl Provider for SlowThenFastProvider {
             panic!("preemption must cancel this request");
         }
         Ok(Completion {
+            reasoning: None,
             content: "picked up after the interrupt".to_owned(),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_owned()),
@@ -1133,6 +1142,7 @@ async fn persisted_orphan_tool_results_are_removed_before_provider_replay() {
             role: crate::types::Role::Tool,
             source: None,
             content: "legacy output".to_owned(),
+            reasoning: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
             attachments: Vec::new(),

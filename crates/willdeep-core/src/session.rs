@@ -765,6 +765,10 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_owned(),
+                // 桌面端会话把思维链存成 reasoningContent / reasoning，导入时带上，
+                // 否则续聊的第一条请求就会被 thinking 模型拒掉。
+                reasoning: swift_string(message, "reasoningContent")
+                    .or_else(|| swift_string(message, "reasoning")),
                 tool_call_id,
                 tool_calls,
                 attachments: Vec::new(),

@@ -714,6 +714,9 @@ impl Agent {
                 }
             };
             let response_incomplete = completion.is_incomplete();
+            // 思考型模型要求把这一轮的思维链随 assistant 消息回传，否则下一轮
+            // 带着工具调用的历史会被上游整条拒掉。
+            let reasoning = completion.reasoning.clone();
             if let Some(usage) = completion.usage {
                 input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                 output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
@@ -852,7 +855,10 @@ impl Agent {
                     first_response_millis,
                 });
             }
-            messages.push(Message::assistant(content, completion.tool_calls.clone()));
+            messages.push(
+                Message::assistant(content, completion.tool_calls.clone())
+                    .with_reasoning(reasoning),
+            );
             checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
             let mut rules_changed = false;
             let mut parallel_results = self

@@ -180,6 +180,7 @@ async fn restarting_an_unverified_run_preserves_its_original_baseline() {
         ) -> Result<Completion, ProviderError> {
             std::fs::write(self.0.join("revision"), "changed").unwrap();
             Ok(Completion {
+                reasoning: None,
                 content: "finished".into(),
                 tool_calls: Vec::new(),
                 usage: None,
@@ -246,6 +247,7 @@ impl Provider for WriteThenStop {
             return Err(ProviderError::EmptyResponse);
         }
         Ok(Completion {
+            reasoning: None,
             content: "Create the requested file".to_owned(),
             tool_calls: vec![ToolCall {
                 id: "write-once".to_owned(),
@@ -380,6 +382,7 @@ impl Provider for StreamThenWrite {
             ))
             .await;
         Ok(Completion {
+            reasoning: None,
             content: "write".into(),
             finish_reason: Some("tool_calls".into()),
             usage: None,
@@ -462,6 +465,7 @@ impl Provider for StreamThenStop {
         Err(ProviderError::StreamInterrupted {
             source: Box::new(ProviderError::EmptyResponse),
             partial: Box::new(Completion {
+                reasoning: None,
                 content: "streamed text".into(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("incomplete".into()),

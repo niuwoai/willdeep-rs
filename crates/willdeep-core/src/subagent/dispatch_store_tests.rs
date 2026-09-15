@@ -60,6 +60,7 @@ impl Provider for RecoveryParent {
             }
         };
         Ok(Completion {
+            reasoning: None,
             content: "recovered".into(),
             tool_calls: call.into_iter().collect(),
             finish_reason: Some("stop".into()),
@@ -206,6 +207,7 @@ impl Provider for RecoveryProvider {
     ) -> Result<Completion, ProviderError> {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Ok(Completion {
+                reasoning: None,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "write-once".into(),
@@ -224,6 +226,7 @@ impl Provider for RecoveryProvider {
             _ => {
                 *self.resumed.lock().unwrap() = messages.to_vec();
                 Ok(Completion {
+                    reasoning: None,
                     content: "finished".into(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),

@@ -98,7 +98,79 @@ fn finish_reason_must_match_the_actual_tool_calls() {
     assert!(state.finish().is_err());
 }
 
+#[test]
+fn reasoning_deltas_are_kept_for_replay_without_leaking_into_the_answer() {
+    let mut state = State::default();
+    push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"先看"}}]}),
+    )
+    .unwrap();
+    // 有的网关把同一份思维链平铺成 reasoning，不能两个字段都收，否则重复。
+    push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"日志","reasoning":"日志"}}]}),
+    )
+    .unwrap();
+    push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"content":"好的"},"finish_reason":"stop"}]}),
+    )
+    .unwrap();
+    let result = state.finish().unwrap();
+    assert_eq!(result.content, "好的");
+    assert_eq!(result.reasoning.as_deref(), Some("先看日志"));
+}
+
 use crate::provider::stream_test_support::{Events, frame, server};
+
+/// DeepSeek 一类 thinking 模型要求上一轮的思维链原样回传，少了这条，只要历史里
+/// 出现过工具调用，整条请求就是 400；`arguments` 则必须是合法 JSON 对象，否则
+/// 另一批上游会以 `function.arguments must be valid JSON` 拒掉同一条历史。
+#[tokio::test]
+async fn replayed_history_carries_reasoning_and_repairs_broken_tool_arguments() {
+    let payload =
+        frame(json!({"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}))
+            + "data: [DONE]\n\n";
+    let (url, requests, task) = server(payload).await;
+    let provider = ChatCompletionsProvider::new(ProviderConfig::new(
+        crate::provider::ProviderKind::OpenAiCompatible,
+        crate::provider::ApiDialect::ChatCompletions,
+        url,
+        "test-key",
+        "test-model",
+    ))
+    .unwrap();
+    let call = ToolCall {
+        id: "call-1".into(),
+        name: "read_file".into(),
+        arguments: "{\"path\": ".into(),
+    };
+    let history = vec![
+        Message::user("看下日志"),
+        Message::assistant("", vec![call.clone()]).with_reasoning(Some("先读文件".into())),
+        Message::tool(&call, "contents"),
+    ];
+    let result = provider
+        .complete_with_events(&history, &[], &Events::default())
+        .await;
+    task.abort();
+    assert_eq!(result.unwrap().content, "ok");
+    let requests = requests.lock().unwrap();
+    let assistant = &requests[0]["messages"][1];
+    assert_eq!(assistant["reasoning_content"], "先读文件");
+    let arguments = assistant["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("arguments stay a string");
+    let parsed: serde_json::Value =
+        serde_json::from_str(arguments).expect("outgoing arguments parse as JSON");
+    assert_eq!(parsed["_raw_arguments"], "{\"path\": ");
+    assert!(
+        requests[0]["messages"][0]
+            .get("reasoning_content")
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn real_chat_provider_requests_stream_and_emits_deltas_and_usage() {

@@ -143,6 +143,7 @@ impl crate::provider::Provider for ScopedWriter {
             assert!(messages[0].content.contains("Nested exception"));
         }
         Ok(crate::types::Completion {
+            reasoning: None,
             content: "done".to_owned(),
             tool_calls: if request < 2 {
                 vec![call("src/nested/new.rs")]
