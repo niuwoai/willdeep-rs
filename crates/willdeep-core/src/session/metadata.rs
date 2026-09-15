@@ -74,6 +74,21 @@ impl Metadata {
         proposed.profile = merged.profile;
         proposed.config = merged.config;
         proposed.goal = merged.goal;
+
+        // 视图状态与路由归属不进执行指纹（见 `execution_state::fingerprint`），
+        // 所以它们不会把两个写者判成冲突；但也不能让后写的那一方用自己的旧值
+        // 把对方盖掉——守护进程跑完一轮写回来时，手上那份游标还停在它加载会话
+        // 的那一刻，直接写回去就会把客户端刚记下的位置抹平，下次重开又从头重放。
+        //
+        // 三项各按自己的语义合：游标是单调书签取较大者，已读标记只增不减取并集，
+        // 托管标志一旦置位就保持。
+        proposed.runtime_event_cursor = proposed
+            .runtime_event_cursor
+            .max(latest.runtime_event_cursor);
+        proposed
+            .attention_read
+            .extend(latest.attention_read.iter().cloned());
+        proposed.runtime_managed |= latest.runtime_managed;
         Ok(())
     }
 }

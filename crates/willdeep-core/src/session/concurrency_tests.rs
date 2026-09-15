@@ -107,18 +107,12 @@ fn competing_execution_snapshots_are_rejected_without_mutating_disk() {
 
 /// 书签类字段（事件游标）要能写进一份别人刚改过的会话。
 ///
-/// 现场：升级 CLI 后第一次开 TUI。`runtime_event_head` 会停掉旧版守护进程、
-/// 起一个新的，新守护在恢复阶段重写会话；TUI 随后拿着换版**之前**捕获的基线
-/// 去写事件游标，`save` 判定执行状态冲突，错误一路抛到顶层，界面还没画出来
-/// 就退出——用户看到的是「一升级就闪退」。
-///
-/// 游标是个可以在任意新快照上无损重放的书签，所以这一步走 `update`：从磁盘
-/// 最新快照起改。这里同时钉住两件事——`save` 在这个场景下确实会冲突（所以
-/// 不能退回去用它），而 `update` 既写进了游标、又保住了对方的消息。
+/// 现场：升级 CLI 后第一次开 TUI，或守护进程正在跑这一轮。对方改的是对话本身，
+/// 我们改的只是「读到第几条事件」——这两件事不该互相判成执行冲突。
 #[test]
 fn a_bookmark_write_survives_a_concurrent_execution_rewrite() {
     let (root, store, mut stale) = fixture();
-    // 另一个写者（守护进程恢复）在我们捕获基线之后改了执行状态。
+    // 另一个写者（守护进程恢复 / 执行回合）改了执行状态。
     store
         .update(stale.id, |session| {
             session
@@ -127,19 +121,9 @@ fn a_bookmark_write_survives_a_concurrent_execution_rewrite() {
         })
         .unwrap();
 
-    // 老路子：基线已过期，整次保存失败。
-    let mut via_save = stale.clone();
-    via_save.runtime_event_cursor = 42;
-    assert!(matches!(
-        store.save(&mut via_save),
-        Err(SessionError::ConcurrentUpdate("execution"))
-    ));
-
-    // 现在的路子：书签写进去，对方的消息不丢。
-    stale = store
-        .update(stale.id, |latest| latest.runtime_event_cursor = 42)
-        .unwrap();
-    assert_eq!(stale.runtime_event_cursor, 42);
+    // 我们只动书签：直接存就该成功，并且自动接上对方写的那份对话。
+    stale.runtime_event_cursor = 42;
+    store.save(&mut stale).expect("书签写入不该被判成执行冲突");
     assert_eq!(stale.messages.last().unwrap().content, "daemon recovery");
 
     let reloaded = store.load(stale.id).unwrap();
@@ -148,43 +132,23 @@ fn a_bookmark_write_survives_a_concurrent_execution_rewrite() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// 一个纯标志位的写入，会被判成执行状态冲突。
-///
-/// `runtime_managed` 算在执行指纹里（见 `execution_state::fingerprint`），所以
-/// 会话被运行时接管时，守护进程只置了这一个位，握着执行所有权的前台进程再存
-/// 自己刚跑完的一轮，就会撞上 `ConcurrentUpdate("execution")`——TUI 因此在
-/// 「AI 结果刚要显示」的那一刻退出，整轮输出丢掉。
-///
-/// 这条测试钉住这个事实本身（它是真实存在的语义，不是 bug），以及前台该怎么
-/// 收场：`update` 从最新快照起改，标志位保住、本轮结果也保住。
+/// 会话被运行时接管（只置 `runtime_managed`）时，前台刚跑完的那一轮不能丢。
 #[test]
 fn a_finished_turn_is_not_lost_when_the_runtime_flips_an_ownership_flag() {
     let (root, store, mut stale) = fixture();
-    // 守护进程接管：只动 runtime_managed 这一个位。
     store
         .update(stale.id, |session| session.runtime_managed = true)
         .unwrap();
 
-    // 前台刚跑完一轮，把结果写回去——旧路子在这里整个失败。
-    let mut via_save = stale.clone();
-    via_save
+    stale
         .messages
         .push(Message::assistant("turn result", Vec::new()));
-    assert!(matches!(
-        store.save(&mut via_save),
-        Err(SessionError::ConcurrentUpdate("execution"))
-    ));
-
-    // 现在的路子：重载最新快照再放上本轮消息，两边都不丢。
-    let messages = via_save.messages.clone();
-    stale = store
-        .update(stale.id, |latest| latest.messages = messages)
-        .unwrap();
-    assert!(stale.runtime_managed, "运行时置的位必须保住");
-    assert_eq!(stale.messages.last().unwrap().content, "turn result");
+    store
+        .save(&mut stale)
+        .expect("一个路由标志位不该让整轮结果落不了盘");
 
     let reloaded = store.load(stale.id).unwrap();
-    assert!(reloaded.runtime_managed);
+    assert!(reloaded.runtime_managed, "运行时置的位必须保住");
     assert_eq!(reloaded.messages.last().unwrap().content, "turn result");
     std::fs::remove_dir_all(root).unwrap();
 }
