@@ -48,6 +48,7 @@ impl<'a, 'b> StreamEvents<'a, 'b> {
             return Err(AgentError::Checkpoint(error.clone()));
         }
         Ok(crate::types::Completion {
+            reasoning: None,
             content: state.text.clone(),
             tool_calls: Vec::new(),
             usage: state.usage.clone(),

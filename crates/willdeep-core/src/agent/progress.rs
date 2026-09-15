@@ -57,6 +57,7 @@ mod tests {
                 .request
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Completion {
+                reasoning: None,
                 content: "Work remains outstanding".into(),
                 tool_calls: if request.is_multiple_of(2) {
                     vec![ToolCall {

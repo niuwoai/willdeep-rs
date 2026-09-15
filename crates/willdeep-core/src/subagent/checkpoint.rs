@@ -154,6 +154,7 @@ mod tests {
                 return Err(crate::provider::ProviderError::DeadlineExceeded);
             }
             Ok(crate::types::Completion {
+                reasoning: None,
                 content: "report".into(),
                 usage: None,
                 finish_reason: Some("stop".into()),

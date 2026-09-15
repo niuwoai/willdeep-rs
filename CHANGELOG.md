@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.73.0-rc5] - 2026-09-15
+
+### Fixed
+- **思考型模型一旦用上工具就必挂**：DeepSeek（`deepseek-v4-flash` 等）在 thinking 模式下要求把上一轮的 `reasoning_content` 原样回传，而 chat-completions 分支从头到尾没有这个字段——历史里只要出现过一次工具调用，下一轮请求就是 400 `The reasoning_content in the thinking mode must be passed back to the API`，会话就此卡死。现在流式与非流式解码都收 `reasoning_content`（兼容把它平铺成 `reasoning` 的网关），随 assistant 消息回传；思维链只用于回放，不混进正文、不当作模型给用户的回答。桌面端会话导入同样带上。
+- **`function.arguments` 不是合法 JSON 对象时，整条历史被上游拒掉**：实测同一条截断的 `{"path": `，一批上游照收，另一批直接 400（`Assistant tool call function.arguments must be valid JSON.` / `Expecting value` / `Can only get item pairs from a mapping`），拒的是整条历史而不是那一个工具调用。流式解码器本来就拦这一手，但非流式解码与旧版桌面会话导入两条路没有。现在出站前统一兜底：空串补 `{}`，非对象的原文装进 `_raw_arguments` 保留证据；`sanitize_tool_history` 回放持久化历史时一并修。
+
 ## [0.73.0-rc4] - 2026-09-15
 
 ### Fixed

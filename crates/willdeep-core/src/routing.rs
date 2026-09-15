@@ -525,6 +525,7 @@ mod tests {
         ) -> Result<Completion, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Completion {
+                reasoning: None,
                 content: self.reply.to_owned(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),

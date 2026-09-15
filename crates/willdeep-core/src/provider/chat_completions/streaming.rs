@@ -74,6 +74,9 @@ pub(super) async fn complete(
 #[derive(Default)]
 struct State {
     text: String,
+    /// 思维链原文。只累积、不当作正文外发：它既不是模型给用户的回答，
+    /// 但下一轮请求又必须原样带回去。
+    reasoning: String,
     calls: BTreeMap<u64, ToolCall>,
     reason: Option<String>,
     usage: Option<Usage>,
@@ -114,6 +117,12 @@ impl State {
                 continue;
             }
             let delta = &choice["delta"];
+            for field in ["reasoning_content", "reasoning"] {
+                if let Some(text) = delta[field].as_str().filter(|text| !text.is_empty()) {
+                    self.reasoning.push_str(text);
+                    break;
+                }
+            }
             for field in ["content", "refusal"] {
                 if let Some(text) = delta[field].as_str().filter(|text| !text.is_empty()) {
                     if self.reason.is_some() {
@@ -173,9 +182,14 @@ impl State {
         Ok(())
     }
 
+    fn reasoning(&self) -> Option<String> {
+        (!self.reasoning.is_empty()).then(|| self.reasoning.clone())
+    }
+
     fn partial(&self) -> Completion {
         Completion {
             content: self.text.clone(),
+            reasoning: self.reasoning(),
             tool_calls: Vec::new(),
             finish_reason: Some("incomplete".to_owned()),
             usage: self.usage.clone(),
@@ -185,6 +199,7 @@ impl State {
     fn finish(&self) -> Result<Completion, ProviderError> {
         let mut completion = Completion {
             content: self.text.clone(),
+            reasoning: self.reasoning(),
             tool_calls: self.calls.values().cloned().collect(),
             finish_reason: self.reason.clone(),
             usage: self.usage.clone(),

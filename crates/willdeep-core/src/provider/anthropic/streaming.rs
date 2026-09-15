@@ -258,6 +258,7 @@ impl State {
 
     fn partial(&self) -> Completion {
         Completion {
+            reasoning: None,
             content: self
                 .blocks
                 .values()

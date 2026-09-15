@@ -46,6 +46,7 @@ impl Provider for AppendProvider {
             );
         }
         Ok(Completion {
+            reasoning: None,
             content: "Report the current state".into(),
             tool_calls: if first {
                 vec![append_call(if self.recovering {

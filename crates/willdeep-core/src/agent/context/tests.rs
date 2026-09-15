@@ -61,6 +61,7 @@ impl Provider for CaptureProvider {
     ) -> Result<crate::types::Completion, ProviderError> {
         self.requests.lock().unwrap().push(messages.to_vec());
         Ok(crate::types::Completion {
+            reasoning: None,
             content: "OBJECTIVE: repair bug. USER CONSTRAINTS: preserve dirty files. COMPLETED: inspected. REMAINING: validate.".to_owned(),
             tool_calls: Vec::new(), finish_reason: Some("stop".to_owned()), usage: None,
         })

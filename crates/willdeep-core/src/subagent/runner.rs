@@ -647,6 +647,7 @@ mod tests {
                 _: &[ToolDefinition],
             ) -> Result<Completion, ProviderError> {
                 Ok(Completion {
+                    reasoning: None,
                     content: "partial implementation".into(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("length".into()),
@@ -726,6 +727,7 @@ mod tests {
                     .expect("prompts")
                     .push(messages[0].content.clone());
                 Ok(Completion {
+                    reasoning: None,
                     content: "report".to_owned(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),
@@ -799,6 +801,7 @@ mod tests {
                     std::fs::write(&self.marker, "fixed").expect("marker");
                 }
                 Ok(Completion {
+                    reasoning: None,
                     content: "all done, everything passes".to_owned(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),

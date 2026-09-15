@@ -91,6 +91,10 @@ struct ChatRequest<'a> {
 struct WireMessage<'a> {
     role: &'static str,
     content: serde_json::Value,
+    /// DeepSeek 等 thinking 模型要求上一轮的思维链原样回传，少了这一条，
+    /// 只要历史里出现过工具调用，整条请求就是 400。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -107,6 +111,7 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 Role::Tool => "tool",
             },
             content: chat_content(message),
+            reasoning_content: &message.reasoning,
             tool_call_id: &message.tool_call_id,
             tool_calls: message
                 .tool_calls
@@ -116,7 +121,9 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                     kind: "function",
                     function: WireOutgoingFunction {
                         name: &call.name,
-                        arguments: &call.arguments,
+                        // 最后一道闸：历史可能来自非流式解码或旧会话导入，
+                        // 那些路径没经过流式解码器的 JSON 对象校验。
+                        arguments: call.normalized_arguments(),
                     },
                 })
                 .collect(),
@@ -149,7 +156,7 @@ struct WireOutgoingToolCall<'a> {
 #[derive(Serialize)]
 struct WireOutgoingFunction<'a> {
     name: &'a str,
-    arguments: &'a str,
+    arguments: std::borrow::Cow<'a, str>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +201,12 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatAssistantMessage {
     content: Option<String>,
+    /// 各家字段名不统一：DeepSeek/GLM/vLLM 用 `reasoning_content`，
+    /// 另有网关平铺成 `reasoning`。两个都收，回传时统一成前者。
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<WireIncomingToolCall>,
 }
@@ -317,14 +330,24 @@ fn decode_completion(bytes: &[u8]) -> Result<Completion, ProviderError> {
         .ok_or(ProviderError::EmptyResponse)?;
     Ok(Completion {
         content: choice.message.content.unwrap_or_default(),
+        reasoning: choice
+            .message
+            .reasoning_content
+            .or(choice.message.reasoning)
+            .filter(|value| !value.is_empty()),
         tool_calls: choice
             .message
             .tool_calls
             .into_iter()
-            .map(|call| ToolCall {
-                id: call.id,
-                name: call.function.name,
-                arguments: call.function.arguments,
+            .map(|call| {
+                let mut call = ToolCall {
+                    id: call.id,
+                    name: call.function.name,
+                    arguments: call.function.arguments,
+                };
+                // 非流式分支没有流式解码器那道校验，这里补上。
+                call.normalize_arguments();
+                call
             })
             .collect(),
         finish_reason: choice.finish_reason,

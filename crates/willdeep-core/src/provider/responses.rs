@@ -283,6 +283,7 @@ fn decode_completion(bytes: &[u8]) -> Result<Completion, ProviderError> {
         return Err(ProviderError::EmptyResponse);
     }
     Ok(Completion {
+        reasoning: None,
         content: text.join(""),
         tool_calls,
         finish_reason: response.status,

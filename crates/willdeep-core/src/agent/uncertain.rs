@@ -113,6 +113,7 @@ mod tests {
                 );
             }
             Ok(Completion {
+                reasoning: None,
                 content: "reported".into(),
                 tool_calls: if first { vec![call("new")] } else { Vec::new() },
                 usage: None,

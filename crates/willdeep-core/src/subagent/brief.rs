@@ -252,6 +252,7 @@ mod tests {
                     .unwrap()
                     .push(messages.last().unwrap().content.clone());
                 Ok(Completion {
+                    reasoning: None,
                     content: "report".to_owned(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),
@@ -324,6 +325,7 @@ mod tests {
                 let content = messages.last().unwrap().content.clone();
                 self.0.lock().unwrap().push(content.clone());
                 Ok(Completion {
+                    reasoning: None,
                     content: if content.contains("Summarize this chunk") {
                         "digest: the assertion `left == 42` fails".to_owned()
                     } else {

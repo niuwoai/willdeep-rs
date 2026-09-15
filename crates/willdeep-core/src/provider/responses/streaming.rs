@@ -274,6 +274,7 @@ impl State {
         }
         self.completed = Some(Completion {
             content,
+            reasoning: None,
             tool_calls: calls,
             finish_reason: Some(status.to_owned()),
             usage: self.usage.clone(),
@@ -283,6 +284,7 @@ impl State {
 
     fn partial(&self) -> Completion {
         Completion {
+            reasoning: None,
             content: self.text.values().cloned().collect(),
             tool_calls: Vec::new(),
             finish_reason: Some("incomplete".to_owned()),

@@ -93,6 +93,7 @@ impl Provider for BilledProvider {
     ) -> Result<Completion, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let completion = Completion {
+            reasoning: None,
             content: self.content.into(),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".into()),

@@ -1596,6 +1596,7 @@ mod tests {
             ) -> Result<Completion, ProviderError> {
                 self.0.lock().unwrap().push(messages[0].content.clone());
                 Ok(Completion {
+                    reasoning: None,
                     content: "report".to_owned(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),
