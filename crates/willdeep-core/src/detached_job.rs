@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod contract;
+pub use contract::{DEFAULT_TAIL_LINES, RETENTION_JOBS, RETENTION_SECONDS};
+
 const DIRECTORY: &str = "background-jobs";
 /// 一次读回多少输出。作业日志可能很长，回灌给模型的永远是尾部。
 pub const MAX_JOB_OUTPUT_BYTES: usize = 16 * 1024;
@@ -275,8 +278,8 @@ impl DetachedJobStore {
     /// 因为失败原因几乎总在末尾。
     pub fn output(&self, id: &str, limit: usize) -> String {
         let dir = self.directory.join(id);
-        let mut text = read_tail(&dir.join("stdout.log"), limit);
-        let errors = read_tail(&dir.join("stderr.log"), limit);
+        let mut text = read_stream_tail(&dir.join("stdout.log"), limit);
+        let errors = read_stream_tail(&dir.join("stderr.log"), limit);
         if !errors.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
@@ -461,6 +464,7 @@ pub(crate) fn record_result(
         &directory.join("result.json"),
         &serde_json::to_vec(&serde_json::json!({
             "status": result.status, "exit_code": result.exit_code,
+            "finished_at": now_seconds(),
         }))?,
     )?;
     // The final marker is published only after output and detailed status.
@@ -469,6 +473,15 @@ pub(crate) fn record_result(
         exit_code.to_string().as_bytes(),
     )?;
     std::fs::rename(directory.join("exit.pending"), directory.join("exit"))
+}
+
+/// 一条日志流的真实末尾：日志被单文件上限截断过时，末尾在 `.tail` 旁挂文件里。
+fn read_stream_tail(path: &Path, limit: usize) -> String {
+    let tail = crate::execution::sidecar(path, "tail");
+    if tail.exists() {
+        return read_tail(&tail, limit);
+    }
+    read_tail(path, limit)
 }
 
 fn read_tail(path: &Path, limit: usize) -> String {

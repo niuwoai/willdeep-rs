@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.75.0-rc1] - 2026-09-17
+
+### Added
+- **后台任务合同 v1（与 macOS 共用，canonical 在 Xedit `docs/BACKGROUND_TASK_CONTRACT.md`）。** 对标的是 Claude Code 那种体验：命令丢后台立刻拿句柄，输出随时读尾巴，结束后在下一个边界被告知，核实完接着干原来的活。本期是 CLI 这一半：
+  - **日志完整落盘。** `run_in_background` 作业的 `stdout.log` / `stderr.log` 从「每来一块就把尾部 128KB 整份原子重写」改为追加写，单条流上限 256MB；撞上限后停写，真实末尾另存 `stdout.log.tail`，丢弃字节数记在 `.dropped`。此前日志里只剩尾巴，模型拿到路径也 grep 不到前面的东西；长输出下每块都是一次 O(n) 重写。
+  - **完成通知统一成 v1 格式**：`id / kind / label / status / exit_code / duration / output_path / stderr_path / omitted_bytes` 逐行，再跟一段脱敏过的尾巴——失败 40 行 / 4000 字符，成功 10 行 / 1000 字符（子 Agent 报告成功也给长的）。`status` 用 snake_case（`timed_out`、`vanished` 等），`exit_code` 取不到写 `unknown`，时长写 `1m5s`。此前进程内任务是 `status=Completed, exit=Some(0), elapsed=12345ms`，脱离作业又是一套中文标题加 4KB 字节尾巴，同一个模型两种读法。三份金样放在 `docs/contracts/background-task-notification.v1.txt`，渲染测试逐字比对。
+  - **内核不再把通知框架转义成 `&lt;background-task-notification>`。** 工具输出与 Worker 报告仍是 `tool` / `model` 来源；v1 渲染器已在字段级脱敏、中和标签，事件带 `notice_contract` 元数据时内核让开这一层。外部入站（`network` 来源）冒充同名元数据照样转义。
+  - **`get_job_output` 统一语义**：默认 200 行、上限 2000，脱离作业此前**忽略** `tail_lines` 固定回 16KB；返回头部带状态、退出码、时长、日志路径。
+  - **系统提示词加一段后台用法**（两端逐字一致）：≥30 秒的构建/测试/发布/dev server 放后台、会自动通知所以不许 sleep 或轮询、等待时干不冲突的活、通知到了先核实再回原任务、没收到通知前不许宣称成功。
+  - **保留策略**：启动时清理结束超过 7 天、或超出最近 200 个的已结束作业；还在跑的一律不动。
+
+### Fixed
+- 进程内后台 Shell 任务输出超过 64KB 时留的是**开头**，结论所在的末尾被丢掉；现在 Shell 留尾、子 Agent 报告仍留头。
+
+### Known issues
+- `cargo clippy -D warnings` 在 develop 上本就有两处存量报错（`conversation/tests.rs:141` 的 `cloned_ref_to_slice_refs`、`tui/runtime_ui.rs:661` 的 `unused_assignments`），与本版本无关，未在本次修改。
+
 ## [0.74.0-rc2] - 2026-09-17
 
 ### Fixed

@@ -6,9 +6,6 @@
 
 use willdeep_core::{DetachedJobStore, EventKernel, JobState};
 
-/// 回灌给模型的输出尾部上限。完整日志留在作业目录，模型要看可以再读。
-const NOTICE_OUTPUT_BYTES: usize = 4 * 1024;
-
 /// 把会话名下已结束、尚未投递的作业发布成内核事件，返回这次新发布了几条。
 ///
 /// 「不知道」不当成失败上报：失败是有退出码的，进程没留下退出码只说明我们
@@ -21,17 +18,20 @@ pub(crate) fn publish_finished_jobs(
     let mut published = 0;
     for job in jobs.owned_by(&session_id.to_string()) {
         let state = jobs.state(&job);
-        let (kind, title) = match state {
+        let kind = match state {
             JobState::Running => continue,
-            JobState::Finished { exit_code: 0 } => ("job.completed", "后台作业完成"),
-            JobState::Finished { .. } => ("job.failed", "后台作业失败"),
-            JobState::Vanished => ("job.vanished", "后台作业没有留下结论"),
+            JobState::Finished { exit_code: 0 } => "job.completed",
+            JobState::Finished { .. } => "job.failed",
+            JobState::Vanished => "job.vanished",
         };
         // 领取失败（磁盘错误）宁可这一秒不投，下一次轮询再试；绝不在拿不准
         // 的时候投，否则两个前端会各讲一遍。
         if !jobs.claim_delivery(&job).unwrap_or(false) {
             continue;
         }
+        let Some(notice) = jobs.notice(&job) else {
+            continue;
+        };
         let mut event = willdeep_core::host_event(
             session_id,
             willdeep_runtime_protocol::EventSource::Task,
@@ -42,13 +42,18 @@ pub(crate) fn publish_finished_jobs(
                 willdeep_runtime_protocol::EventPriority::Urgent
             },
             willdeep_core::kernel::InterruptPolicy::YieldAtBoundary,
-            format!("{title} · {}", job.label.lines().next().unwrap_or(&job.id)),
-            Some(jobs.output(&job.id, NOTICE_OUTPUT_BYTES)),
+            job.label.lines().next().unwrap_or(&job.id).to_owned(),
+            Some(notice),
             Some(format!("job:{}", job.id)),
             false,
         );
-        // 命令输出是工具产出，不因为宿主转发就变成可信正文。
+        // 命令输出是工具产出，不因为宿主转发就变成可信正文。正文是合同 v1
+        // 的通知，渲染器已就地净化，标记之后内核不再整段转义框架。
         event.content_provenance = willdeep_runtime_protocol::ContentProvenance::Tool;
+        event.metadata.insert(
+            willdeep_core::kernel::NOTICE_CONTRACT_KEY.to_owned(),
+            willdeep_core::kernel::NOTICE_CONTRACT_V1.to_owned(),
+        );
         if !matches!(
             kernel.publish(event, willdeep_core::DedupPolicy::Once),
             willdeep_core::PublishOutcome::Duplicate(_)

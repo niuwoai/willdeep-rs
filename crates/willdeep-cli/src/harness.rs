@@ -762,6 +762,9 @@ pub(crate) async fn build(
     // 作业记在本会话名下：结束通知只投给起它的会话。
     let detached_jobs =
         Arc::new(willdeep_core::DetachedJobStore::new(home).with_owner(session_id.to_string()));
+    // 日志现在是完整落盘的，不清理会一直涨。只动已结束的作业，扫描成本是一次
+    // 目录遍历，放在启动时做一次足够。
+    detached_jobs.prune();
     let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
     let hooks = build_hooks(&loaded.file.hooks).context("read [[hooks]]")?;
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?

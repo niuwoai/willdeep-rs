@@ -140,13 +140,14 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
+    /// 后台任务合同 v1：日志完整落盘（上限 256MB），不再只留尾巴。
     #[test]
-    fn detached_output_is_bounded_on_disk() {
+    fn detached_output_is_fully_retained_on_disk() {
         use std::os::unix::fs::PermissionsExt;
         let (store, home) = store();
         let job = store
             .spawn(
-                "i=0; while [ $i -lt 30000 ]; do printf abcdefgh; i=$((i+1)); done",
+                "i=0; while [ $i -lt 30000 ]; do printf abcdefgh; i=$((i+1)); done; printf RESULT=42",
                 "output",
                 &home,
             )
@@ -155,12 +156,19 @@ mod tests {
             wait_for_finish(&store, &job),
             JobState::Finished { exit_code: 0 }
         );
-        assert!(
+        assert_eq!(
             std::fs::metadata(store.directory().join(&job.id).join("stdout.log"))
                 .unwrap()
-                .len()
-                <= 128 * 1024
+                .len(),
+            30_000 * 8 + "RESULT=42".len() as u64
         );
+        let notice = store.notice(&job).expect("finished job has a notice");
+        assert!(notice.contains("status: completed\nexit_code: 0\n"));
+        assert!(notice.contains("RESULT=42\n```"));
+        assert!(notice.contains(&format!(
+            "output_path: {}",
+            store.directory().join(&job.id).join("stdout.log").display()
+        )));
         let directory = store.directory().join(&job.id);
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
@@ -374,6 +382,53 @@ mod tests {
         assert!(store.claim_delivery(&mine).unwrap());
         // 换一个实例等价于另一个前端或重启之后：领过的不再领。
         assert!(!DetachedJobStore::new(&home).claim_delivery(&mine).unwrap());
+    }
+
+    /// `get_job_output` 对脱离作业同样尊重 `tail_lines`，默认 200 行。
+    #[test]
+    fn rendered_output_honors_tail_lines() {
+        let (store, home) = store();
+        let job = store
+            .spawn("i=1; while [ $i -le 300 ]; do echo line$i; i=$((i+1)); done; echo oops >&2; exit 2", "lines", &home)
+            .unwrap();
+        wait_for_finish(&store, &job);
+        let five = store.render_output(&job, Some(5));
+        assert!(five.contains("status: failed\nexit_code: 2\n"));
+        assert!(five.contains("--- stdout (last 5 lines) ---\nline296\n"));
+        assert!(!five.contains("line295\n"));
+        assert!(five.contains("--- stderr (last 5 lines) ---\noops"));
+        let default = store.render_output(&job, None);
+        assert!(default.contains("line101\n") && !default.contains("line100\n"));
+        assert!(store.notice(&job).unwrap().contains("stderr_path: "));
+    }
+
+    /// 只清理已结束且过期的作业；还在跑的哪怕很老也不动。
+    #[test]
+    fn prune_removes_expired_finished_jobs_but_never_running_ones() {
+        let (store, home) = store();
+        let old = store.spawn("true", "old", &home).unwrap();
+        let fresh = store.spawn("true", "fresh", &home).unwrap();
+        let running = store.spawn("sleep 30", "running", &home).unwrap();
+        wait_for_finish(&store, &old);
+        wait_for_finish(&store, &fresh);
+        // 把 old 的结束时刻改到保留期之前；running 的创建时刻也改老。
+        let result = store.directory().join(&old.id).join("result.json");
+        let expired = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - willdeep_core::detached_job::RETENTION_SECONDS
+            - 60;
+        std::fs::write(
+            &result,
+            format!(r#"{{"status":"completed","exit_code":0,"finished_at":{expired}}}"#),
+        )
+        .unwrap();
+        assert_eq!(store.prune(), 1);
+        let remaining: Vec<_> = store.list().into_iter().map(|job| job.id).collect();
+        assert!(!remaining.contains(&old.id));
+        assert!(remaining.contains(&fresh.id) && remaining.contains(&running.id));
+        let _ = store.kill(&running.id);
     }
 
     /// 还没结束的作业不能被领走，否则结论出来时已经没人投递了。

@@ -64,6 +64,16 @@ fn local_run_waits_for_a_detached_job_and_wakes_the_model_with_its_result() {
         "作业结论必须在退出前交给模型；共 {} 次请求",
         requests.len()
     );
+    // 合同 v1：模型看到的是原样框架，不是被内核整段转义过的 `&lt;…`。
+    // `<runtime-events>` 给每条事件正文统一缩进两格，那是外层的排版。
+    let woke = requests
+        .iter()
+        .map(|request| request.to_string())
+        .find(|request| request.contains(JOB_OUTPUT))
+        .unwrap();
+    assert!(woke.contains("<background-task-notification>\\n  id: job_"));
+    assert!(woke.contains("\\n  status: completed\\n  exit_code: 0\\n"));
+    assert!(!woke.contains("&lt;background-task-notification"));
 
     // 已投递的作业留下领取标记，下一次续跑不会再讲一遍。
     let jobs = willdeep_core::DetachedJobStore::new(&home).list();

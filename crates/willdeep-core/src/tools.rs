@@ -713,8 +713,8 @@ impl ToolRegistry {
             ),
             definition(
                 "get_job_output",
-                "Read the captured output of a background shell job or subagent.",
-                json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000}},"required":["job_id"],"additionalProperties":false}),
+                "Read the status and recent output of a background shell job or subagent. Returns the last 200 lines by default; the full log stays at output_path for grep.",
+                json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000,"description":"Lines from the end of each stream. Defaults to 200."}},"required":["job_id"],"additionalProperties":false}),
             ),
             definition(
                 "kill_job",
@@ -789,7 +789,7 @@ impl ToolRegistry {
                         "command": {"type": "string", "description": "Shell command line."},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
                         "label": {"type": "string", "description": "Optional concise action label; never include secrets."},
-                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately. Completion is delivered back to the main harness."}
+                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately and keep working. A completion notice is delivered automatically; do not poll or sleep."}
                     },
                     "required": ["command"], "additionalProperties": false
                 }),
@@ -2166,29 +2166,20 @@ impl ToolRegistry {
     }
 
     fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
-        if let Some(output) = self
-            .background
-            .output(&args.job_id, args.tail_lines.unwrap_or(200).clamp(1, 2_000))
-        {
+        if let Some(output) = self.background.output(
+            &args.job_id,
+            args.tail_lines
+                .unwrap_or(crate::detached_job::DEFAULT_TAIL_LINES)
+                .clamp(1, 2_000),
+        ) {
             return Ok(output);
         }
         // 进程内那份找不到就问落盘的那份：脱离作业活得比 Harness 久，重启之后
-        // 它只存在于磁盘上。
+        // 它只存在于磁盘上。格式见后台任务合同 v1。
         if let Some(jobs) = &self.detached_jobs
             && let Some(job) = jobs.get(&args.job_id)
         {
-            let report = jobs.report(&job);
-            let status = match report.state {
-                crate::detached_job::JobState::Running => format!("running (pid {})", job.pid),
-                crate::detached_job::JobState::Finished { exit_code } => {
-                    format!("finished with exit code {exit_code}")
-                }
-                // 「不知道」和「失败」不是一回事：失败有退出码。
-                crate::detached_job::JobState::Vanished => {
-                    "process is gone and left no exit code".to_owned()
-                }
-            };
-            return Ok(format!("{}: {status}\n{}", job.id, report.output));
+            return Ok(jobs.render_output(&job, args.tail_lines));
         }
         Err(ToolError::Network(format!(
             "background task not found: {}",

@@ -19,6 +19,14 @@
 
 任务完成、失败、超时或被取消后，CLI 会把带输出尾部的 `<background-task-notification>` 自动送回主 Harness：主 Agent 空闲时立即续跑，忙碌时在当前回复结束后续跑。
 
+通知与 `get_job_output` 的格式遵循**后台任务合同 v1**（canonical 在 Xedit `docs/BACKGROUND_TASK_CONTRACT.md`，金样副本 `docs/contracts/background-task-notification.v1.txt`，两端逐字一致）：
+
+- 日志完整追加写入 `stdout.log` / `stderr.log`，单条流上限 256MB；撞上限后真实末尾存 `.tail`、丢弃字节数存 `.dropped`，通知里的 `omitted_bytes` 就是后者。
+- 通知尾巴：失败 40 行 / 4000 字符，成功 10 行 / 1000 字符，子 Agent 报告一律 40 / 4000；凭据按行脱敏。
+- `get_job_output` 默认每条流最后 200 行（上限 2000），头部带状态、退出码、时长和日志路径。
+- 已结束作业保留 7 天或最近 200 个，启动时清理；还在跑的不动。
+- 改格式要同时改两端与金样；`ruby scripts/check_background_contract.rb` 在本机找得到 Xedit 时比对两边。
+
 相关工具：
 
 - `get_job_output` — 查看捕获输出；

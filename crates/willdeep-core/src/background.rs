@@ -371,7 +371,11 @@ impl BackgroundTaskRegistry {
         let event = {
             let mut state = self.inner.lock().expect("background registry");
             let task = state.tasks.iter_mut().find(|task| task.snapshot.id == id)?;
-            task.output = truncate(result.output);
+            // Shell 输出留尾（结论在末尾），子 Agent 报告留头（结论写在开头）。
+            task.output = truncate(
+                result.output,
+                task.snapshot.kind == BackgroundTaskKind::Shell,
+            );
             task.snapshot.status = result.status;
             task.snapshot.exit_code = result.exit_code;
             task.snapshot.elapsed_millis = task.started.elapsed().as_millis() as u64;
@@ -400,39 +404,46 @@ pub(crate) struct TaskResult {
     pub output: String,
 }
 
+/// 按后台任务合同 v1 渲染（见 [`crate::background_notice`]）。进程内任务不落盘，
+/// 所以没有日志路径。
 fn completion_notice(task: &BackgroundTaskSnapshot, output: &str) -> String {
-    let tag = if task.kind == BackgroundTaskKind::Subagent {
-        "subagent-report"
-    } else {
-        "background-task-notification"
+    use crate::background_notice::{Notice, NoticeKind, NoticeStatus};
+    let status = match task.status {
+        BackgroundTaskStatus::Completed => NoticeStatus::Completed,
+        BackgroundTaskStatus::Killed => NoticeStatus::Killed,
+        BackgroundTaskStatus::TimedOut => NoticeStatus::TimedOut,
+        BackgroundTaskStatus::LaunchFailed => NoticeStatus::LaunchFailed,
+        BackgroundTaskStatus::Partial => NoticeStatus::Partial,
+        BackgroundTaskStatus::Blocked => NoticeStatus::Blocked,
+        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Running => NoticeStatus::Failed,
     };
-    let tail = output
-        .lines()
-        .rev()
-        .take(40)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "<{tag}>\n{} `{}` finished: status={:?}, exit={:?}, elapsed={}ms.\n{}\n</{tag}>",
-        if task.kind == BackgroundTaskKind::Subagent {
-            "Subagent"
-        } else {
-            "Background task"
+    crate::background_notice::render(&Notice {
+        id: &task.id,
+        kind: match task.kind {
+            BackgroundTaskKind::Shell => NoticeKind::Shell,
+            BackgroundTaskKind::Subagent => NoticeKind::Subagent,
         },
-        task.id,
-        task.status,
-        task.exit_code,
-        task.elapsed_millis,
-        tail
-    )
+        label: &task.label,
+        status,
+        exit_code: task.exit_code,
+        duration_seconds: Some(task.elapsed_millis / 1_000),
+        output_path: None,
+        stderr_path: None,
+        omitted_bytes: 0,
+        output,
+    })
 }
 
-fn truncate(value: String) -> String {
+fn truncate(value: String, keep_tail: bool) -> String {
     if value.len() <= MAX_OUTPUT_BYTES {
         return value;
+    }
+    if keep_tail {
+        let mut boundary = value.len() - MAX_OUTPUT_BYTES;
+        while !value.is_char_boundary(boundary) {
+            boundary += 1;
+        }
+        return format!("[output truncated]\n{}", &value[boundary..]);
     }
     let mut boundary = MAX_OUTPUT_BYTES;
     while !value.is_char_boundary(boundary) {
