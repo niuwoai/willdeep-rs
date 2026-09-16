@@ -38,6 +38,21 @@ pub struct DetachedJob {
     /// 退回单看 PID——聊胜于无，但要知道它可能认错人。
     pub started_marker: Option<String>,
     pub created_at: u64,
+    /// 起这个作业的会话。结束通知只投递给它：作业目录是全局的，不认主的话
+    /// 一个会话会收到别的会话、甚至几周前的作业结论。旧记录没有这个字段，
+    /// 按「无主」处理，不再补投。
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// [`DetachedJobStore::kill`] 的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillOutcome {
+    /// 已向 supervisor 发出终止信号；结论（退出码 137）稍后落盘。
+    Signalled,
+    /// 作业已经有结论或进程已不在，没有可停的东西。
+    NotRunning,
+    NotFound,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +77,7 @@ pub struct JobReport {
 pub struct DetachedJobStore {
     directory: PathBuf,
     supervisor_executable: Option<PathBuf>,
+    owner: Option<String>,
 }
 
 impl DetachedJobStore {
@@ -69,7 +85,14 @@ impl DetachedJobStore {
         Self {
             directory: home.as_ref().join(DIRECTORY),
             supervisor_executable: None,
+            owner: None,
         }
+    }
+
+    /// 之后由这个 store 起的作业都记在 `owner` 名下。
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self
     }
 
     pub fn directory(&self) -> &Path {
@@ -166,6 +189,7 @@ impl DetachedJobStore {
             pid,
             started_marker: process_start_marker(pid),
             created_at: now_seconds(),
+            owner: self.owner.clone(),
         };
         // Journal before sending the command: a metadata failure cannot leave
         // an unrecorded side effect running in the background.
@@ -204,6 +228,13 @@ impl DetachedJobStore {
             })
             .collect();
         jobs.sort_by_key(|job| job.created_at);
+        jobs
+    }
+
+    /// 某个会话名下的作业。
+    pub fn owned_by(&self, owner: &str) -> Vec<DetachedJob> {
+        let mut jobs = self.list();
+        jobs.retain(|job| job.owner.as_deref() == Some(owner));
         jobs
     }
 
@@ -258,6 +289,46 @@ impl DetachedJobStore {
             text.push_str(&status);
         }
         text
+    }
+
+    /// 停掉一个还在跑的作业。
+    ///
+    /// 信号发给 supervisor 而不是命令本身：supervisor 收到 SIGTERM 会连同命令
+    /// 所在的进程组一起收掉，并照常落下退出码——直接杀命令的话，supervisor
+    /// 记下的是「命令失败」，分不出是被人叫停的。发信号前先按启动时刻核对
+    /// PID，防止把复用了这个 PID 的无关进程杀掉。
+    pub fn kill(&self, id: &str) -> std::io::Result<KillOutcome> {
+        let Some(job) = self.get(id) else {
+            return Ok(KillOutcome::NotFound);
+        };
+        if self.state(&job) != JobState::Running {
+            return Ok(KillOutcome::NotRunning);
+        }
+        terminate(job.pid)?;
+        Ok(KillOutcome::Signalled)
+    }
+
+    /// 领取一个已结束作业的投递权。只有第一个调用者拿到 `true`。
+    ///
+    /// TUI、无头运行、守护进程可能同时看着同一个作业目录；进程内的去重跨不了
+    /// 进程也跨不了重启，所以用 `create_new` 在作业目录里落一个标记——同一次
+    /// 结束只向模型讲一遍。还在跑的作业不许领取。
+    pub fn claim_delivery(&self, job: &DetachedJob) -> std::io::Result<bool> {
+        if self.state(job) == JobState::Running {
+            return Ok(false);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(self.directory.join(&job.id).join("delivered")) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// 删掉一个作业的记录。**只删已经有结论的**：还在跑的删了就再也找不回来，
@@ -326,6 +397,30 @@ fn process_start_marker(pid: u32) -> Option<String> {
     {
         let _ = pid;
         None
+    }
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) -> std::io::Result<()> {
+    // SAFETY: 只向一个刚核对过启动时刻的 PID 投递 SIGTERM。
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate(pid: u32) -> std::io::Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "taskkill exited with {status}"
+        )))
     }
 }
 

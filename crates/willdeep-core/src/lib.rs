@@ -44,7 +44,7 @@ pub use background::{
     BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskRegistry, BackgroundTaskSnapshot,
     BackgroundTaskStatus,
 };
-pub use detached_job::{DetachedJob, DetachedJobStore, JobReport, JobState};
+pub use detached_job::{DetachedJob, DetachedJobStore, JobReport, JobState, KillOutcome};
 pub use goal::{
     ContinuationDecision, ContinuationRung, GOAL_COMPLETE_MARKER, GoalBudget, GoalContinuation,
     RoundObservation, SoftStopReason,

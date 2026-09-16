@@ -2200,12 +2200,25 @@ impl ToolRegistry {
         self.require_approval(&format!("cancel background task: {}", args.job_id), false)
             .await?;
         if self.background.kill(&args.job_id) {
-            Ok(format!("kill requested for {}", args.job_id))
-        } else {
-            Err(ToolError::Network(format!(
+            return Ok(format!("kill requested for {}", args.job_id));
+        }
+        // run_in_background 的命令落在脱离作业里，进程内注册表查不到它。
+        let detached = match &self.detached_jobs {
+            Some(jobs) => jobs.kill(&args.job_id).map_err(ToolError::Io)?,
+            None => crate::detached_job::KillOutcome::NotFound,
+        };
+        match detached {
+            crate::detached_job::KillOutcome::Signalled => {
+                Ok(format!("kill requested for {}", args.job_id))
+            }
+            crate::detached_job::KillOutcome::NotRunning => Err(ToolError::Network(format!(
+                "background job already finished: {}; read it with get_job_output",
+                args.job_id
+            ))),
+            crate::detached_job::KillOutcome::NotFound => Err(ToolError::Network(format!(
                 "running background task not found: {}",
                 args.job_id
-            )))
+            ))),
         }
     }
 

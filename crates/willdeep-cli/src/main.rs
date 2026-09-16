@@ -15,6 +15,7 @@ use willdeep_core::{
 
 mod config;
 mod daemon;
+mod detached_delivery;
 mod doctor;
 mod editor;
 mod event_cmd;
