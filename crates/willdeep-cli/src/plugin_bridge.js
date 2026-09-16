@@ -226,12 +226,15 @@
   //   if ((window.willdeep.capabilities || []).indexOf('fs.search') >= 0) { … }
   // 与 macOS 宿主 AgentPluginPageBridgeVersion 同名同序——同一份插件包
   // 在两端做同样的特性判断，判出来必须是同一个答案。
-  window.willdeep.version = '2.5.0';
+  window.willdeep.version = '2.6.0';
   window.willdeep.capabilities = [
     'context',
     'commands',
     'conversation.open',
     'ai.complete',
+    // 2.6.0：user 消息可带 imagePaths（插件媒体目录内的本地路径）。
+    // 'ai.videos' 不在这里：本宿主没有视频解码器抽帧，带 videoPaths 会被拒。
+    'ai.images',
     'ai.tools',
     'ai.cancel',
     // 'ai.reasoning' 不在这里：那一条是流式思考增量，本宿主的 ai.complete

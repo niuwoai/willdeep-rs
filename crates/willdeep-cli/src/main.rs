@@ -26,6 +26,7 @@ mod mobile;
 mod model_routing;
 mod notify;
 mod onboarding;
+mod plugin_ai_media;
 mod plugin_capabilities;
 mod plugin_cmd;
 mod plugin_web;

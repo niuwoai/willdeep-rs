@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.74.0-rc1] - 2026-09-16
+
+### Added
+- **插件页面问模型时可以附图片（桥 2.6.0，能力 `ai.images`）。** 与 macOS 宿主 1.377.0-rc1 对齐：`ai.complete` 的 user 消息新增 `imagePaths`，填本插件媒体目录里的本地路径，宿主解码、长边限到 1568 像素、转 JPEG 后作为图片附件送进模型。起因是短剧工坊要对定妆图和首尾帧做多模态内容审核，此前消息只收字符串，选了识图模型也递不进图。
+  - 路径钳制：必须是绝对路径、普通文件、非符号链接，规范化后父目录恰好是本插件的媒体目录（`plugin-media/<plugin>`），否则报 `mediaOutsidePluginData`。刻意比参照图那条路（插件媒体总目录 + 工作区）更严：这里是把文件内容发给第三方模型。
+  - 上限与拒绝理由：一次最多 12 张图（`tooManyImages`）；附件挂在 system / assistant 上整条拒（`mediaOnNonUserMessage`）；解不出来的文件报 `unreadableMedia`。全部在调用模型之前判定。
+  - **不声明 `ai.videos`**：本宿主没有视频解码器抽帧，带 `videoPaths` 的请求报 `videosUnsupported`，不静默丢掉——丢掉的话模型会在没看到画面的情况下给出审核结论。macOS 宿主声明了这一项，由它抽帧。
+
 ## [0.73.0-rc7] - 2026-09-15
 
 ### Fixed

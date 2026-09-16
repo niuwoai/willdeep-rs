@@ -1,4 +1,4 @@
-//! 插件页面宿主能力 v2.5.0：`window.willdeep.*` 里除「问模型」之外的那些。
+//! 插件页面宿主能力 v2.6.0：`window.willdeep.*` 里除「问模型」之外的那些。
 //!
 //! 与 macOS 宿主（Xedit `AgentPluginPageHost` + `AppStateAgentPluginWorkspace`）
 //! 逐项对齐，插件包因此不需要为 Web 改一行。能力清单见
