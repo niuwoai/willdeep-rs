@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.77.0-rc2] - 2026-09-17
+
+### Fixed
+- **thinking 模型（`deepseek-v4-flash` 等）跑长任务时，中途整条请求 400：`The reasoning_content in the thinking mode must be passed back to the API`。** 0.73.0-rc5 只回传了有思维链的 assistant 消息；但 DeepSeek 在带 tools 的 thinking 模式下要求**每一条** assistant 消息都带 `reasoning_content`，而模型对 `git commit`、`git switch` 这类直给的步骤常常不吐思维链（线上会话 67 条工具调用里有 10 条为空），压缩器插入的归档引用 / 上下文摘要也没有。chat-completions 出站时，只要历史里出现过思维链，就给缺的 assistant 消息补 `reasoning_content: ""`；从没见过思维链的端点不发这个字段，严格校验的上游不受影响。Anthropic / Responses 分支没有开 thinking、不回传思维链，不涉及。
+
+### Known issues
+- 补空串是否被 DeepSeek 接受只由文档与单测推定，本版本未对线上 some.im 重放那条 400 会话。
+- 首次工具调用前历史里一条思维链都没有、而上游又是 thinking 模式时，仍不会补字段。
+
 ## [0.77.0-rc1] - 2026-09-17
 
 ### Added

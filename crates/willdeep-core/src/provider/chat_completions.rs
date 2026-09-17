@@ -45,7 +45,7 @@ impl Provider for ChatCompletionsProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Completion, ProviderError> {
-        let wire_messages = messages.iter().map(WireMessage::from).collect::<Vec<_>>();
+        let wire_messages = wire_messages(messages);
         let wire_tools = tools.iter().map(WireTool::from).collect::<Vec<_>>();
         let body = ChatRequest {
             model: &self.config.model,
@@ -94,7 +94,7 @@ struct WireMessage<'a> {
     /// DeepSeek 等 thinking 模型要求上一轮的思维链原样回传，少了这一条，
     /// 只要历史里出现过工具调用，整条请求就是 400。
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: &'a Option<String>,
+    reasoning_content: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -111,7 +111,7 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 Role::Tool => "tool",
             },
             content: chat_content(message),
-            reasoning_content: &message.reasoning,
+            reasoning_content: message.reasoning.as_deref(),
             tool_call_id: &message.tool_call_id,
             tool_calls: message
                 .tool_calls
@@ -129,6 +129,25 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 .collect(),
         }
     }
+}
+
+/// 带 tools 的 thinking 模式下，上游要求**每一条** assistant 消息都带
+/// `reasoning_content`：模型某一步没吐思维链（常见于 `git commit` 这类直给的
+/// 工具调用），或是压缩器插入的归档引用/摘要，缺了这个字段整条请求照样 400。
+/// 只有历史里真出现过思维链，才能确认对端认这个字段，这时给缺的补空串；
+/// 没有证据的端点保持不发，免得严格校验的上游拒绝未知字段。
+fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
+    let backfill = messages.iter().any(|message| message.reasoning.is_some());
+    messages
+        .iter()
+        .map(|message| {
+            let mut wire = WireMessage::from(message);
+            if backfill && message.role == Role::Assistant && wire.reasoning_content.is_none() {
+                wire.reasoning_content = Some("");
+            }
+            wire
+        })
+        .collect()
 }
 
 fn chat_content(message: &Message) -> serde_json::Value {
