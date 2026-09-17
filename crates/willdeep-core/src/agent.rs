@@ -564,7 +564,7 @@ impl Agent {
         self.tools.set_task_context(&user_message.content);
         messages.push(user_message);
         let definitions = self.tools.definitions();
-        let mut compressed: Option<(usize, String)> = None;
+        let mut compressed: Option<context::SummaryCache> = None;
         let mut used_tokens = 0_u64;
         // 分别累计输入/输出，供 AgentOutcome 上报——`used_tokens` 是预算判定用的
         // 合计值，两者语义不同，不能互相顶替。

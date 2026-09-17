@@ -321,3 +321,82 @@ async fn hosted_compressor_receives_structured_transcript_without_duplicate_prom
             .any(|message| !message.tool_calls.is_empty())
     );
 }
+
+fn push_batch(messages: &mut Vec<Message>, index: usize) {
+    let call = ToolCall {
+        id: format!("step-{index}"),
+        name: "read_file".to_owned(),
+        arguments: format!(r#"{{"path":"src/step-{index}.rs"}}"#),
+    };
+    messages.push(Message::assistant("inspect", vec![call.clone()]));
+    messages.push(Message::tool(
+        &call,
+        format!("step-{index}: {}", "y".repeat(1_900)),
+    ));
+}
+
+#[tokio::test]
+async fn consecutive_steps_above_the_watermark_summarize_incrementally() {
+    const STEPS: usize = 30;
+    let (agent, provider) = agent(8_192);
+    let capacity =
+        message_capacity(agent.config.context_window, &agent.tools.definitions()).unwrap();
+    let mut messages = history();
+    let mut cache = None;
+    for step in 0..STEPS {
+        push_batch(&mut messages, step);
+        assert!(
+            estimate_tokens(&messages) >= capacity * COMPRESSION_TRIGGER_PERCENT / 100,
+            "every step must be above the raw watermark"
+        );
+        let result = agent.request_messages(&messages, &mut cache).await.unwrap();
+        assert_pairs(&result);
+        assert!(estimate_tokens(&result) <= capacity);
+        assert!(
+            result
+                .iter()
+                .any(|m| m.content.contains("<context-summary"))
+        );
+    }
+    let requests = provider.requests.lock().unwrap();
+    // The old split-keyed cache re-summarized the whole prefix on every step.
+    assert!(
+        requests.len() <= 1 + STEPS / 4,
+        "{} summarizer calls for {STEPS} steps",
+        requests.len()
+    );
+    assert!(
+        requests.len() >= 2,
+        "growth must eventually refresh the summary"
+    );
+    assert!(requests[0][0].content.contains("src/file-0.rs"));
+    for incremental in &requests[1..] {
+        let source = &incremental[0].content;
+        assert!(
+            source.contains("<context-summary"),
+            "must carry the prior summary"
+        );
+        assert!(
+            !source.contains("src/file-0.rs"),
+            "must not resend the summarized prefix"
+        );
+        assert!(source.len() < requests[0][0].content.len());
+    }
+}
+
+#[tokio::test]
+async fn rewritten_prefix_invalidates_the_request_summary_cache() {
+    let (agent, provider) = agent(8_192);
+    let mut messages = history();
+    let mut cache = None;
+    agent.request_messages(&messages, &mut cache).await.unwrap();
+    // Refreshed system prompts must not invalidate the summary.
+    messages[0].content.push_str("\nrules refreshed");
+    agent.request_messages(&messages, &mut cache).await.unwrap();
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    messages[3].content = "rewritten tool result".to_owned();
+    agent.request_messages(&messages, &mut cache).await.unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1][0].content.contains("src/file-0.rs"));
+}

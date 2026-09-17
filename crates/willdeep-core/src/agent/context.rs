@@ -55,7 +55,7 @@ impl Agent {
     pub(super) async fn request_messages(
         &self,
         messages: &[Message],
-        cache: &mut Option<(usize, String)>,
+        cache: &mut Option<SummaryCache>,
     ) -> Result<Vec<Message>, AgentError> {
         self.request_messages_accounted(messages, cache, &mut |_| Ok(()))
             .await
@@ -64,18 +64,34 @@ impl Agent {
     pub(super) async fn request_messages_accounted(
         &self,
         messages: &[Message],
-        cache: &mut Option<(usize, String)>,
+        cache: &mut Option<SummaryCache>,
         record_usage: &mut (dyn FnMut(&Usage) -> Result<(), AgentError> + Send),
     ) -> Result<Vec<Message>, AgentError> {
         let definitions = self.tools.definitions();
         let capacity = message_capacity(self.config.context_window, &definitions)?;
         let mut result = self.page_tool_outputs(messages, capacity)?;
-        if estimate_tokens(&result) < capacity.saturating_mul(COMPRESSION_TRIGGER_PERCENT) / 100 {
+        let watermark = capacity.saturating_mul(COMPRESSION_TRIGGER_PERCENT) / 100;
+        let raw_estimate = estimate_tokens(&result);
+        if raw_estimate < watermark {
             return Ok(result);
+        }
+        // Durable history is never rewritten here, so the raw estimate stays above
+        // the watermark for the rest of the run. Hysteresis is judged on the
+        // compacted projection instead: an existing summary is reused until the
+        // projection built from it crosses the watermark again.
+        let cached = cache
+            .take()
+            .filter(|entry| entry.through <= result.len() && entry.matches(&result));
+        if let Some(entry) = &cached {
+            let reused = compact_prefix(&result, entry.through, &entry.summary);
+            if estimate_tokens(&reused) < watermark {
+                *cache = cached;
+                return Ok(reused);
+            }
         }
         self.sink
             .emit(AgentEvent::CompressionStarted {
-                estimated_tokens: estimate_tokens(&result),
+                estimated_tokens: raw_estimate,
             })
             .await;
         // Preserve every original user/system message verbatim, including pasted text.
@@ -84,18 +100,43 @@ impl Agent {
         if split == 0 {
             split = batch_boundary(&result, result.len().saturating_sub(1));
         }
-        if split > 0
-            && result[..split]
+        let replaceable = |range: &[Message]| {
+            range
                 .iter()
                 .any(|message| matches!(message.role, Role::Tool | Role::Assistant))
-        {
-            if cache.as_ref().is_none_or(|(through, _)| *through != split) {
+        };
+        match cached {
+            Some(entry) if entry.through >= split => {
+                // Nothing new is old enough to fold in; keep the summary and let
+                // batch archiving handle the recent tail.
+                result = compact_prefix(&result, entry.through, &entry.summary);
+                *cache = Some(entry);
+            }
+            Some(entry) if !replaceable(&result[entry.through..split]) => {
+                let entry = SummaryCache::new(&result, split, entry.summary);
+                result = compact_prefix(&result, split, &entry.summary);
+                *cache = Some(entry);
+            }
+            Some(entry) => {
+                // Incremental: previous summary plus only the messages it does not cover.
+                let mut source = vec![summary_message(&entry.summary)];
+                source.extend_from_slice(&result[entry.through..split]);
+                let summary = self
+                    .summarize_history(summary_source(&source)?, record_usage)
+                    .await?;
+                let entry = SummaryCache::new(&result, split, summary);
+                result = compact_prefix(&result, split, &entry.summary);
+                *cache = Some(entry);
+            }
+            None if split > 0 && replaceable(&result[..split]) => {
                 let summary = self
                     .summarize_history(summary_source(&result[..split])?, record_usage)
                     .await?;
-                *cache = Some((split, summary));
+                let entry = SummaryCache::new(&result, split, summary);
+                result = compact_prefix(&result, split, &entry.summary);
+                *cache = Some(entry);
             }
-            result = compact_prefix(&result, split, &cache.as_ref().expect("summary cache").1);
+            None => {}
         }
         // If the recent tail remains too large, replace complete tool batches with
         // archived references. Never remove individual protocol messages.
@@ -235,14 +276,55 @@ fn compact_prefix(messages: &[Message], split: usize, summary: &str) -> Vec<Mess
         }
         index = end;
     }
-    result.push(Message::assistant(
+    result.push(summary_message(summary));
+    result.extend_from_slice(&messages[split..]);
+    result
+}
+
+fn summary_message(summary: &str) -> Message {
+    Message::assistant(
         format!(
             "<context-summary source=\"derived-untrusted-history\">\n{summary}\n</context-summary>"
         ),
         Vec::new(),
-    ));
-    result.extend_from_slice(&messages[split..]);
-    result
+    )
+}
+
+/// Request-time summary of `messages[..through]`, valid only while that prefix
+/// is unchanged. System messages are excluded from the fingerprint: they are
+/// refreshed every turn and always kept verbatim outside the summary.
+pub(super) struct SummaryCache {
+    through: usize,
+    fingerprint: u64,
+    summary: String,
+}
+
+impl SummaryCache {
+    fn new(messages: &[Message], through: usize, summary: String) -> Self {
+        Self {
+            through,
+            fingerprint: prefix_fingerprint(&messages[..through]),
+            summary,
+        }
+    }
+
+    fn matches(&self, messages: &[Message]) -> bool {
+        prefix_fingerprint(&messages[..self.through]) == self.fingerprint
+    }
+}
+
+fn prefix_fingerprint(messages: &[Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for message in messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+    {
+        serde_json::to_string(message)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Advance over a whole tool-result group so no split starts with a tool result.
