@@ -66,6 +66,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | 你输入的 | 行为 |
 |---|---|
 | `/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` | **立即执行**。这些只改本地显示，不碰会话、模型或 Runtime |
+| `/permissions`、Shift+Tab | **立即执行**，而且对正在跑的这一轮生效——切档就是为了处理「跑着跑着一直弹审批」 |
 | 普通提示词、`/local <任务>`、`/runtime <任务>` | **排队**。状态行显示「待发 N」，本轮结束（或被中断）后按顺序自动发出；附件跟着一起排队 |
 | 其余命令（`/model`、`/compress`、`/daemon`、`/diff`、`/session switch` 等） | **说明原因并拒绝**。它们会改会话或 Runtime 状态，延迟几分钟再执行只会更意外 |
 
@@ -141,6 +142,17 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 - 只输入 `/model` 会从当前 Provider 的 `/v1/models` 获取完整模型列表。直接键入文字即可模糊筛选，使用 `↑` / `↓` / `Tab`、`PageUp` / `PageDown` 或鼠标滚轮浏览，按 `Enter` 或点击模型完成切换，`Esc` 关闭。
 - 模型选择按 Session 持久保存，并同步到 Runtime 与进程内 `/local` Agent；正在执行的轮次不会被中途换模，切换作用于下一轮对话。
 - 若 Provider 不支持模型列表接口或接口暂时不可用，仍可使用 `/model <模型名>` 直接指定。
+
+### 切换审批模式
+
+输入框标题右侧常驻当前档位（例如 `智能审核 (Shift+Tab)`，完全访问显示为红色）。
+
+- `/permissions`（别名 `/permission-mode`）打开面板：`↑` / `↓` 浏览，`1`–`4` 或 `Enter` 选择，`Esc` 关闭。
+- `/permissions strict|smart|workspace-write|full-access` 直接切换。
+- **Shift+Tab** 在严格 → 智能审核 → 工作区可写之间循环，不会切到完全访问。
+- 选「完全访问」一定会进确认页，按 `y` 才生效，`n` / `Esc` 返回。
+- 切换只对当前 TUI 有效，退出后回到配置里的默认档；`/permissions default <档位>` 写回配置文件。
+- 每次切换写一行 `approvals.jsonl`（来源 `mode-change`）。各档的判定细节见 [审批与自动化](APPROVALS.md)。
 
 ### 配置模型路由
 
@@ -281,6 +293,7 @@ tmux set -g mouse on
 | `/goal <目标>` | 为后续消息持续注入目标约束；`/goal off` 关闭。目标按 Core Session 持久保存，重启及切换会话/工作区后恢复 |
 | `/compress` | 立即用压缩模型（some.im 默认 `someim-32b-compressor`，其它 Provider 为会话模型）总结较旧历史，保留最近六条消息并保存会话。历史不足八条时不消耗模型请求 |
 | `/model [模型名]` | 查看或切换当前 Session 模型 |
+| `/permissions [档位]` | 切换审批模式（严格 / 智能审核 / 工作区可写 / 完全访问）；`default <档位>` 写入配置；Shift+Tab 快速循环前三档 |
 | `/routing` | 持久配置 Root、Worker、Deep 的 Provider、模型、上下文窗口和路由预算 |
 | `/mobile` | 管理手机中继，详见 [手机中继](MOBILE.md) |
 | `/webapp` | `start`（缺省）/ `stop` / `status` / `127.0.0.1:PORT`，启停或查看本地 Web App |

@@ -1201,6 +1201,7 @@ fn session_stop_targets_only_its_declared_active_turn() {
         workspace: None,
         profile: None,
         model: None,
+        approval_mode: None,
         status: willdeep_runtime_protocol::SessionStatus::Running,
         active_turn_id: Some(active_turn_id),
         created_at: 1,

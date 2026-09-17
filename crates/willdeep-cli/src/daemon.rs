@@ -29,6 +29,7 @@ const CONTROL_SERVER_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 
 mod agent_control;
 mod agent_store;
+mod approval_modes;
 mod control_api;
 pub(crate) mod diff_review;
 mod event_stream;
@@ -57,7 +58,7 @@ pub(crate) use tui_bridge::{
     resolve_remote_approval, retry_remote_agent, retry_remote_agent_with_model, runtime_event_head,
     runtime_events, runtime_snapshot, search_remote_session_results, set_remote_session_archived,
     spawn_remote_agent, start_runtime_event_follower, stop_remote_agent, stop_remote_turn,
-    submit_runtime_turn, update_remote_session_model,
+    submit_runtime_turn, update_remote_session_approval_mode, update_remote_session_model,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
 pub(crate) use workspace_store::{
@@ -634,6 +635,10 @@ pub(crate) struct SubmitTask {
     pub(crate) workspace: PathBuf,
     #[serde(skip)]
     pub(crate) workspace_access: Option<WorkspaceAccess>,
+    /// 这一轮的审批档位句柄，由任务管理器持有另一半：会话中途切档时，正在跑
+    /// 的这一轮下一次工具调用就按新档位判。
+    #[serde(skip)]
+    pub(crate) approval_handle: Option<willdeep_core::SharedApprovalMode>,
     #[serde(skip)]
     pub(crate) workspace_skills: Option<Vec<String>>,
     #[serde(skip)]
@@ -735,6 +740,7 @@ struct TaskManager {
     tasks: RwLock<HashMap<uuid::Uuid, RuntimeTask>>,
     persistence: AsyncMutex<()>,
     cancellations: Mutex<HashMap<uuid::Uuid, Arc<Notify>>>,
+    approval_modes: approval_modes::LiveApprovalModes,
     interactions_path: PathBuf,
     interactions: RwLock<HashMap<uuid::Uuid, RuntimeInteraction>>,
     interaction_waiters:
@@ -1104,6 +1110,7 @@ pub(crate) async fn submit_runtime_prompt(
                     attachments,
                     workspace: options.workspace.canonicalize()?,
                     workspace_access: None,
+                    approval_handle: None,
                     workspace_skills: None,
                     workspace_mcp_servers: None,
                     profile: options.profile.clone(),

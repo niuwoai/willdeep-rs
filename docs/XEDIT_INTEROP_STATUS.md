@@ -80,6 +80,15 @@ Provider 库 + Keychain，不读明文 TOML）。两项的收敛契约现已定�
   （daemon 端点、hooks、本机定时任务），因此 `collab-relay.v2` 不是双端共享面。
 - 指标与纪律双向回流：Xedit 的 Citation Audit、实弹靶场自 rs 回流；rs 的
   安全分类器、审批语义自 Xedit 移植。
+- **审批档位逐档对齐（rs 0.78.0-rc1 + Xedit 1.387.0-rc1）**：rs 协议拼写
+  `strict` / `smart` / `workspace_write` / `full_access` 分别对应 Xedit
+  `.requestEveryTime` / `.smart` / `.workspaceAccess` / `.fullAccess`
+  （raw `silent`）；rs 独有 `read_only` 工作区策略，Xedit 映射为 `nil`。对照
+  表在 Xedit `WillDeepRuntimeApprovalMode`，共享 fixture 的会话示例带
+  `approval_mode`。rs 侧 `workspace_write` 不请 AI 判官、依赖内核写入围栏；
+  Xedit 同档依赖 `AgentSandboxPolicy` 的工作区判定，二者机制不同但承诺相同
+  （工作区内免审、出工作区问人）。Xedit 目前只读该字段，不调用
+  `session.update_approval_mode`。
 
 ## 运行时层：阶段一（只读观察）已打通
 

@@ -38,7 +38,7 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 21] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
@@ -47,6 +47,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
             "/plan",
             "/compress",
             "/model [模型名]",
+            "/permissions [档位]",
             "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:端口]",
@@ -69,6 +70,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
             "/plan",
             "/compress",
             "/model [model]",
+            "/permissions [mode]",
             "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:PORT]",
@@ -91,6 +93,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
             "/plan",
             "/compress",
             "/model [モデル名]",
+            "/permissions [モード]",
             "/routing",
             "/mobile [show|hide|off]",
             "/webapp [status|start|stop|127.0.0.1:ポート]",
@@ -122,7 +125,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 20] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 20] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 21] {
     [
         (
             "/help",
@@ -154,6 +157,15 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "列出、筛选或切换当前模型",
                 "List, filter, or switch the current model",
                 "現在のモデルを一覧・絞り込み・切替",
+            ),
+        ),
+        (
+            "/permissions",
+            language.text(
+                "切换审批模式：严格、智能审核、工作区可写、完全访问",
+                // 别写 “workspace”：补全按说明也会匹配，会把 `/works` 抢走。
+                "Switch approval mode: strict, smart review, write, or full access",
+                "承認モードを切替：厳格・スマート審査・ワークスペース書き込み・フルアクセス",
             ),
         ),
         (

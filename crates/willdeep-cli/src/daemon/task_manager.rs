@@ -140,6 +140,7 @@ impl TaskManager {
             tasks: RwLock::new(tasks),
             persistence: AsyncMutex::new(()),
             cancellations: Mutex::new(HashMap::new()),
+            approval_modes: approval_modes::LiveApprovalModes::default(),
             interactions_path,
             interactions: RwLock::new(interactions),
             interaction_waiters: Mutex::new(HashMap::new()),
@@ -436,6 +437,24 @@ impl TaskManager {
             diff_baselines: AsyncMutex::new(HashMap::new()),
             child_workspaces: AsyncMutex::new(HashMap::new()),
         });
+        // 会话里用户选过的档位压过工作区默认档（只读工作区除外），并登记句柄，
+        // 让这一轮跑到一半时切档也能生效。
+        let session_mode = match request.session_id {
+            Some(session_id) => self
+                .sessions
+                .get(session_id)?
+                .and_then(|session| session.approval_mode),
+            None => None,
+        };
+        let workspace_access = request.workspace_access.unwrap_or_default();
+        let effective_access = workspace_access.with_session_override(session_mode);
+        request.workspace_access = Some(effective_access);
+        request.approval_handle = Some(self.approval_modes.register(
+            id,
+            request.session_id,
+            workspace_access,
+            effective_access,
+        ));
         tokio::spawn(async move {
             let execution =
                 crate::harness::execute_runtime(&home, request, connection, sink, |core| {
@@ -450,6 +469,7 @@ impl TaskManager {
             if let Ok(mut cancellations) = manager.cancellations.lock() {
                 cancellations.remove(&id);
             }
+            manager.approval_modes.remove(id);
             let result = result.map(|result| {
                 result.and_then(|outcome| {
                     manager.sessions.record_execution_end(

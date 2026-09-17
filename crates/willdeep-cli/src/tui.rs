@@ -51,6 +51,7 @@ mod dispatch;
 mod media_ui;
 mod model_commands;
 mod overlay_dismiss;
+mod permission_commands;
 mod plan_ui;
 mod rendering;
 mod routing_settings;
@@ -71,6 +72,9 @@ use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
+};
+use permission_commands::{
+    PermissionCommand, PermissionPickerAction, PermissionPickerState, render_permission_picker,
 };
 use plan_ui::*;
 use rendering::*;
@@ -316,6 +320,12 @@ struct App {
     model_picker: Option<ModelPickerState>,
     model_picker_rect: Rect,
     model_picker_hits: Vec<(u16, usize)>,
+    permission_picker: Option<PermissionPickerState>,
+    /// 当前审批档位，显示在输入框标题上。真正生效的是 Agent 与 Runtime 会话
+    /// 手里的句柄，这里只是界面上的镜像。
+    approval_mode: willdeep_core::ApprovalMode,
+    /// 已经把当前档位同步过去的 Runtime 会话。
+    approval_synced_session: Option<uuid::Uuid>,
     routing_settings: Option<RoutingSettingsState>,
     routing_settings_rect: Rect,
     pending_session_switch: Option<PendingSessionSwitch>,
@@ -422,7 +432,9 @@ fn busy_input(prompt: &str) -> BusyInput {
     }
     let command = value.split_whitespace().next().unwrap_or_default();
     match command {
-        "/help" | "/clear" | "/sidebar" | "/skills" | "/history" => BusyInput::RunNow,
+        // 切档正是为了处理「这一轮在跑、又不停地弹审批」，必须当场生效。
+        "/help" | "/clear" | "/sidebar" | "/skills" | "/history" | "/permissions"
+        | "/permission-mode" => BusyInput::RunNow,
         "/session" => match value.split_whitespace().nth(1) {
             Some("search") => BusyInput::RunNow,
             _ => BusyInput::Refuse,
@@ -1523,23 +1535,37 @@ fn draw(
             Paragraph::new(wrapped_input)
                 .block(
                     Block::default()
-                        .title(if app.focus == FocusPane::Prompt {
-                            if app.composer_expanded {
-                                app.language.text(
-                                    "输入 [大空间] · F2 恢复 · Shift/Alt+Enter 换行",
-                                    "Prompt [expanded] · F2 restore · Shift/Alt+Enter newline",
-                                    "入力 [拡大] · F2 で戻す · Shift/Alt+Enter で改行",
-                                )
+                        .title(Line::from(vec![
+                            Span::raw(if app.focus == FocusPane::Prompt {
+                                if app.composer_expanded {
+                                    app.language.text(
+                                        "输入 [大空间] · F2 恢复 · Shift/Alt+Enter 换行",
+                                        "Prompt [expanded] · F2 restore · Shift/Alt+Enter newline",
+                                        "入力 [拡大] · F2 で戻す · Shift/Alt+Enter で改行",
+                                    )
+                                } else {
+                                    app.language.text(
+                                        "输入 [焦点] · F2 展开 · Shift/Alt+Enter 换行",
+                                        "Prompt [focused] · F2 expand · Shift/Alt+Enter newline",
+                                        "入力 [フォーカス] · F2 で拡大 · Shift/Alt+Enter で改行",
+                                    )
+                                }
                             } else {
-                                app.language.text(
-                                    "输入 [焦点] · F2 展开 · Shift/Alt+Enter 换行",
-                                    "Prompt [focused] · F2 expand · Shift/Alt+Enter newline",
-                                    "入力 [フォーカス] · F2 で拡大 · Shift/Alt+Enter で改行",
-                                )
-                            }
-                        } else {
-                            app.language.text("输入", "Prompt", "入力")
-                        })
+                                app.language.text("输入", "Prompt", "入力")
+                            }),
+                            Span::raw(" · "),
+                            // 档位常驻在输入框上：用户在按 Enter 之前就该知道这一轮
+                            // 会不会弹审批。完全访问用红色，免得忘了自己开着它。
+                            Span::styled(
+                                format!(
+                                    "{} (Shift+Tab)",
+                                    permission_commands::label(app.approval_mode, app.language)
+                                ),
+                                Style::default()
+                                    .fg(permission_commands::mode_color(app.approval_mode))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(if app.focus == FocusPane::Prompt {
                             Color::Cyan
@@ -1716,6 +1742,7 @@ fn draw(
         }
         render_session_picker(f, app);
         render_model_picker(f, app);
+        render_permission_picker(f, app);
         render_routing_settings(f, app);
         app.search_rect = Rect::default();
         if let Some(search) = &app.search {

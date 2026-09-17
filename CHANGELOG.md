@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.78.0-rc1] - 2026-09-17
+
+### Added
+- **终端里也能切审批模式：`/permissions`（别名 `/permission-mode`）与 Shift+Tab。** 档位与 macOS 版逐档对齐——严格 / 智能审核 / 工作区可写 / 完全访问。
+  - `/permissions` 打开面板（↑/↓、1-4、Enter）；`/permissions <档位>` 直接切；**Shift+Tab 只在严格 → 智能 → 工作区可写之间循环，永远不会落到完全访问**；选完全访问必须在确认页按 `y`。
+  - 输入框标题常驻当前档位，完全访问为红色。
+  - 本轮在跑时也能切，而且**对这一轮立即生效**：进程内 Agent 与 Runtime 任务共享原子档位句柄（`SharedApprovalMode`），Runtime 侧登记活跃任务句柄，新控制面操作 `session.update_approval_mode` 先持久化会话档位、再改写正在跑的任务。
+  - 切档只对当前 TUI 有效；`/permissions default <档位>` 写回 `[agent] approval`（保留注释、原子写）。每次切换在 `approvals.jsonl` 记来源 `mode-change`。
+- **新档位 `full-access`**：静态分类器判为破坏性的命令仍然问人，其余 Shell、MCP、网络 POST、Worktree 免审，并摘掉写入围栏；审计来源 `full-access`。配置 `approval = "full-access"` 亦可。
+- 协议：`WorkspaceAccess` 增加 `strict`、`full_access`；`RuntimeSession` 增加可选 `approval_mode`；共享 fixture 已更新，Xedit 1.387.0-rc1 同步解码与对照表。Web App 工作区下拉显示五种策略。
+
+### Changed
+- **`workspace-write` 与 `smart` 不再是同一套判定。** 此前两档在核心层完全相同。现在 `workspace-write` 不请 AI 判官：静态安全命令直接跑；未分类命令只有在**内核写入围栏生效**且**看不出要出工作区**（`curl`/`ssh`/`docker`/`sudo`、`git push/pull/fetch/clone`、`cargo publish`、全局安装、heredoc / `$(…)` 等）时才放行，审计来源 `workspace-access`，否则问人。该档在 `agent.sandbox` 未配置时默认套围栏。
+- 为保持升级前后行为不变：Runtime 工作区注册表里旧的 `workspace_write`（与 `smart` 同判定、多为自动登记默认值）首次启动时一次性迁移为 `smart`（`access_semantics = 2`，`schema` 不变，可回滚）；新自动登记的工作区默认 `smart`；`--full-auto` 映射为 `smart`。
+- Runtime 合成本轮档位：会话档位优先于工作区策略，`read_only` 工作区是硬上限。
+- 审批闸门从 `tools.rs` 拆到 `tools/approval.rs`（`tools.rs` 由 2977 行降到约 2700 行）。
+
+### Known issues
+- `full-access` 下 `create_file` / `edit_file` 仍按工作区路径解析，工作区外文件只能经 Shell 访问（macOS 版文件工具可直接写工作区外）。
+- `workspace-write` 的「出工作区」判断是保守的命令形态启发式，解释器脚本（`python x.py`）内部联网看不出来；写入由围栏兜底，网络不拦。
+- 没有围栏后端（未装 `bwrap` 的 Linux）或显式 `sandbox = false` 时，`workspace-write` 对未分类命令会比 `smart` 问得更多；切档时 TUI 会提示。
+- Xedit 目前只读会话档位，不调用 `session.update_approval_mode`。
+- `headless_runtime` 的中断恢复用例在非 UTF-8 locale 下因 Ruby 解析 JSON 报编码错误失败，与本版本无关（UTF-8 下全部通过）。
+
 ## [0.77.0-rc3] - 2026-09-17
 
 ### Fixed

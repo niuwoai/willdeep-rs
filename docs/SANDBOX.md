@@ -32,8 +32,12 @@
 | 工作区策略 | 围栏档位 | 内核允许的写入 | 网络 |
 |---|---|---|---|
 | `read_only` | ReadOnly | 无 | 断 |
-| `smart` / `workspace_write` | WorkspaceWrite | 工作区 + 临时目录 + 显式放行的根 | 通 |
+| `strict` / `smart`（需 `agent.sandbox = true`） | WorkspaceWrite | 工作区 + 临时目录 + 显式放行的根 | 通 |
+| `workspace_write` | WorkspaceWrite（`agent.sandbox` 未配置时也默认开） | 同上 | 通 |
+| `full_access` | Off | 不加围栏（用户已允许工作区外写入） | 通 |
 | 配置里关掉 | Off | 不加围栏 | 通 |
+
+`workspace_write` 不请 AI 判官，「命令留在工作区里」只能靠内核保证，所以它在 `agent.sandbox` 未配置时也套围栏；显式 `sandbox = false` 或机器上没有后端时，这一档对未分类命令改为问人。围栏按**当前**档位选取，会话中途切档后的下一条命令即生效。
 
 ## 两个后端，同一套语义
 

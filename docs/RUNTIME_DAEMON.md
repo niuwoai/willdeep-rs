@@ -50,7 +50,7 @@ willdeep daemon upgrade --timeout 600
 ```bash
 willdeep daemon register-workspace . \
   --name "项目" \
-  --access workspace-write \
+  --access smart \
   --provider-profile some-im \
   --skill reader \
   --mcp-server docs
@@ -69,11 +69,17 @@ willdeep daemon remove-workspace <workspace-id> --yes
 
 | 策略 | 语义 |
 |---|---|
-| `workspace-write` | Coding Agent 的默认语义：Workspace 内 `create_file` / `edit_file` 免审；Shell、MCP、网络和越界访问仍走原审批 |
-| `smart` | 同上安全边界，另精确放行 `cargo test` 及其只读输出过滤管道 |
-| `read-only` | 仅在用户显式选择时启用 |
+| `smart` | 默认。Workspace 内创建、编辑免审；Shell 走静态规则 + AI 判官；MCP、网络 POST 审批 |
+| `strict` | 写入、Shell、MCP、网络逐次审批 |
+| `workspace-write` | Workspace 内写入与写入围栏内、不出工作区的命令免审，不请 AI 判官；其余问人 |
+| `full-access` | 除破坏性命令黑名单外全部免审，摘掉写入围栏 |
+| `read-only` | 仅在用户显式选择时启用；是会话档位越不过的硬上限 |
 
-Workspace 策略由 Runtime 在任务入队时**覆盖客户端输入**，客户端无法自报可写。`read-only` 下 Shell、文件写入、Worktree 创建、MCP 和 `editor` 子 Agent 会在审批前被直接拒绝。
+各档的完整判定见 [审批与自动化](APPROVALS.md)。
+
+Workspace 策略由 Runtime 在任务入队时**覆盖客户端输入**。会话用 `session.update_approval_mode`（TUI 的 `/permissions`）选过档位时，以会话档位为准，且立即作用于这个会话正在跑的任务；`read-only` 工作区除外。`read-only` 下 Shell、文件写入、Worktree 创建、MCP 和 `editor` 子 Agent 会在审批前被直接拒绝。
+
+0.78.0 起档位拆开之前，注册表里的 `workspace_write` 与 `smart` 判定相同；首次启动时一次性迁移为 `smart`（注册表记 `access_semantics = 2`，`schema` 不变，旧版本仍能读取）。
 
 非空的 Skill / MCP 列表作为允许列表生效；空列表保持全局配置的兼容行为。
 

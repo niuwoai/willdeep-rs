@@ -236,6 +236,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         "session.create" => session_create(state, &request),
         "session.rename" => session_rename(state, &request),
         "session.update_model" => session_update_model(state, &request),
+        "session.update_approval_mode" => session_update_approval_mode(state, &request),
         "session.fork" => session_fork(state, &request),
         "session.archive" => session_archive(state, &request),
         "session.delete" => session_delete(state, &request),
@@ -653,6 +654,7 @@ const MUTATING_OPERATIONS: &[&str] = &[
     "session.create",
     "session.rename",
     "session.update_model",
+    "session.update_approval_mode",
     "session.fork",
     "session.archive",
     "session.delete",
@@ -697,6 +699,7 @@ fn public_session(
         workspace: Some(session.workspace.to_string_lossy().into_owned()),
         profile: session.profile,
         model: session.model,
+        approval_mode: session.approval_mode.map(workspace_store::public_access),
         status: public_session_status(session.status),
         active_turn_id: session.active_turn_id,
         created_at: session.created_at,
@@ -1032,13 +1035,7 @@ fn public_workspace(
         id: workspace.id,
         name: workspace.name,
         root: Some(workspace.root.to_string_lossy().into_owned()),
-        access: match workspace.access {
-            WorkspaceAccess::ReadOnly => willdeep_runtime_protocol::WorkspaceAccess::ReadOnly,
-            WorkspaceAccess::Smart => willdeep_runtime_protocol::WorkspaceAccess::Smart,
-            WorkspaceAccess::WorkspaceWrite => {
-                willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite
-            }
-        },
+        access: workspace_store::public_access(workspace.access),
         provider_profile: workspace.provider_profile,
         skills: workspace.skills,
         mcp_servers: workspace.mcp_servers,
@@ -1050,13 +1047,7 @@ fn public_workspace(
 
 fn workspace_register(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<willdeep_runtime_protocol::RegisterWorkspaceParams>(request)?;
-    let access = match params.access {
-        willdeep_runtime_protocol::WorkspaceAccess::ReadOnly => WorkspaceAccess::ReadOnly,
-        willdeep_runtime_protocol::WorkspaceAccess::Smart => WorkspaceAccess::Smart,
-        willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite => {
-            WorkspaceAccess::WorkspaceWrite
-        }
-    };
+    let access = workspace_store::local_access(params.access);
     let (workspace, created) = state
         .workspaces
         .register(workspace_store::RegisterWorkspace {
@@ -1184,6 +1175,32 @@ fn session_update_model(state: &ServerState, request: &ApiRequest) -> ApiResult 
     state
         .events
         .append("session.model_updated", format!("session_id={}", params.id))
+        .map_err(ApiFailure::internal)?;
+    json(public_session(session))
+}
+
+/// 先落盘再改正在跑的任务：落盘失败时不能出现「这一轮已经放开、重启后又
+/// 收回」的半截状态。
+fn session_update_approval_mode(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::UpdateSessionApprovalModeParams>(request)?;
+    let mode = workspace_store::local_access(params.approval_mode);
+    let session = state
+        .sessions
+        .update_approval_mode(params.id, mode)
+        .map_err(|error| {
+            ApiFailure::invalid(format!("cannot update Session approval mode: {error}"))
+        })?;
+    let running = state.tasks.approval_modes.update_session(params.id, mode);
+    state
+        .events
+        .append(
+            "session.approval_mode_updated",
+            format!(
+                "session_id={} approval_mode={} running_tasks={running}",
+                params.id,
+                mode.wire_name()
+            ),
+        )
         .map_err(ApiFailure::internal)?;
     json(public_session(session))
 }

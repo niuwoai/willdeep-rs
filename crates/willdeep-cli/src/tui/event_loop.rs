@@ -75,6 +75,7 @@ pub(super) async fn event_loop(
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
     let mut app = App::new(initial_transcript, language);
+    app.approval_mode = agent.approval_mode_handle().get();
     let (media_resize_tx, mut media_resize_rx) =
         mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
     app.media = MediaState::detect(media_resize_tx);
@@ -670,6 +671,20 @@ pub(super) async fn event_loop(
                         }
                         continue;
                     }
+                    if app.permission_picker.is_some(){
+                        match app.handle_permission_picker_key(key) {
+                            PermissionPickerAction::None=>{},
+                            PermissionPickerAction::Close=>app.permission_picker=None,
+                            PermissionPickerAction::Apply(mode)=>{
+                                app.permission_picker=None;
+                                match permission_commands::apply(mode,&mut app,session,runtime,&agent).await {
+                                    Ok(message)=>app.append_transcript(message),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error:#}",language.text("切换审批模式失败","Approval mode switch failed","承認モードの切替に失敗"))),
+                                }
+                            },
+                        }
+                        continue;
+                    }
                     if app.model_picker.is_some(){
                         match app.handle_model_picker_key(key) {
                             ModelPickerAction::None=>{},
@@ -830,6 +845,16 @@ pub(super) async fn event_loop(
                         }
                         continue;
                     }
+                    // Shift+Tab 只在「严格 → 智能 → 工作区可写」间循环；完全访问必须走
+                    // /permissions 的确认页。
+                    if key.code==KeyCode::BackTab||(key.code==KeyCode::Tab&&key.modifiers.contains(KeyModifiers::SHIFT)) {
+                        let next=app.approval_mode.next_in_cycle();
+                        match permission_commands::apply(next,&mut app,session,runtime,&agent).await {
+                            Ok(_)=>app.notice=Some(format!("{}：{} · Shift+Tab",language.text("审批模式","Approval mode","承認モード"),permission_commands::label(next,language))),
+                            Err(error)=>app.notice=Some(format!("{}: {error:#}",language.text("切换审批模式失败","Approval mode switch failed","承認モードの切替に失敗"))),
+                        }
+                        continue;
+                    }
                     if let Some(action) = prompt_line_navigation_for_key(key) {
                         match action {
                             PromptLineNavigation::Start => app.edit_input(|input| input.home()),
@@ -884,6 +909,22 @@ pub(super) async fn event_loop(
                                 }
                             }
                             let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
+                            if let Some(command)=permission_commands::parse(&prompt) {
+                                match command {
+                                    PermissionCommand::Open=>app.open_permission_picker(false),
+                                    PermissionCommand::Switch(willdeep_core::ApprovalMode::FullAccess)=>app.open_permission_picker(true),
+                                    PermissionCommand::Switch(mode)=>match permission_commands::apply(mode,&mut app,session,runtime,&agent).await {
+                                        Ok(message)=>app.append_transcript(message),
+                                        Err(error)=>app.append_transcript(format!("Error: {}: {error:#}",language.text("切换审批模式失败","Approval mode switch failed","承認モードの切替に失敗"))),
+                                    },
+                                    PermissionCommand::SaveDefault(mode)=>match permission_commands::save_default(mode,runtime) {
+                                        Ok(path)=>app.append_transcript(format!("System: {}：{} · {path}",language.text("默认审批模式已写入配置，下次启动生效","Default approval mode saved; applies on next start","既定の承認モードを保存しました（次回起動から有効）"),permission_commands::label(mode,language))),
+                                        Err(error)=>app.append_transcript(format!("Error: {}: {error:#}",language.text("写入默认审批模式失败","Save default approval mode failed","既定の承認モードの保存に失敗"))),
+                                    },
+                                    PermissionCommand::Usage=>app.append_transcript(permission_commands::usage(language)),
+                                }
+                                continue;
+                            }
                             if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
                             match handle_agent_command(&prompt,&mut app,runtime,session.id).await {
                                 Ok(true)=>continue,
