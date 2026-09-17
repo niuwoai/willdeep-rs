@@ -57,6 +57,7 @@ impl UncertainCalls {
         matches!(
             call.name.as_str(),
             "run_command"
+                | "monitor"
                 | "create_file"
                 | "edit_file"
                 | "create_worktree"

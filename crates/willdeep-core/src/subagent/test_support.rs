@@ -41,7 +41,10 @@ impl Provider for ReportProvider {
         tools: &[ToolDefinition],
     ) -> Result<Completion, ProviderError> {
         assert!(messages[0].content.contains("cannot spawn another agent"));
-        assert!(tools.iter().all(|tool| tool.name != "spawn_agent"));
+        // 子 Agent 拿不到派工与指挥别的 Worker 的工具。
+        for parent_only in ["spawn_agent", "send_agent_message", "stop_agent"] {
+            assert!(tools.iter().all(|tool| tool.name != parent_only));
+        }
         Ok(Completion {
             reasoning: None,
             content: "subagent report".to_owned(),

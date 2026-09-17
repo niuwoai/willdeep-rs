@@ -74,6 +74,8 @@ pub enum ApprovalSource {
     AlwaysAllowList,
     /// The user was asked.
     User,
+    /// No approval is required by design; the trace is the audit record.
+    NotRequired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +230,7 @@ pub struct ToolRegistry {
     /// OS 级写入围栏。默认 `Off`：审批闸门判的是「模型请求做什么」，这一层
     /// 判的是「进程实际能做什么」，两者互补而不互替。
     sandbox: SandboxSpec,
+    monitors: Option<monitor::MonitorEventSink>,
     /// 生命周期挂钩。默认空：没配 hook 的用户不该为此付任何成本。
     hooks: HookRegistry,
     /// 只用于 hook 事件的溯源字段，不参与任何判定。
@@ -279,6 +282,7 @@ impl ToolRegistry {
             sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
             hooks: HookRegistry::default(),
             session_id: None,
+            monitors: None,
         }
         // Completion evidence belongs to the executor, even when its caller
         // does not subscribe to external verification reports.
@@ -713,8 +717,8 @@ impl ToolRegistry {
             ),
             definition(
                 "get_job_output",
-                "Read the captured output of a background shell job or subagent.",
-                json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000}},"required":["job_id"],"additionalProperties":false}),
+                "Read the status and recent output of a background shell job or subagent. Returns the last 200 lines by default; the full log stays at output_path for grep.",
+                json!({"type":"object","properties":{"job_id":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000,"description":"Lines from the end of each stream. Defaults to 200."}},"required":["job_id"],"additionalProperties":false}),
             ),
             definition(
                 "kill_job",
@@ -789,7 +793,7 @@ impl ToolRegistry {
                         "command": {"type": "string", "description": "Shell command line."},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
                         "label": {"type": "string", "description": "Optional concise action label; never include secrets."},
-                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately. Completion is delivered back to the main harness."}
+                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately and keep working. A completion notice is delivered automatically; do not poll or sleep."}
                     },
                     "required": ["command"], "additionalProperties": false
                 }),
@@ -821,6 +825,8 @@ impl ToolRegistry {
                 }),
             ),
         ];
+        tools.extend(self.monitors.as_ref().map(|_| monitor::definition()));
+        tools.extend(agent_control::definitions());
         if !self.mcp.is_empty() {
             tools.extend([
                 definition(
@@ -845,7 +851,12 @@ impl ToolRegistry {
         if self.approval_mode == ApprovalMode::ReadOnly
             && (matches!(
                 call.name.as_str(),
-                "run_command" | "create_file" | "edit_file" | "create_worktree" | "call_mcp_tool"
+                "run_command"
+                    | "monitor"
+                    | "create_file"
+                    | "edit_file"
+                    | "create_worktree"
+                    | "call_mcp_tool"
             ) || self.mcp.handles(&call.name))
         {
             return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
@@ -917,6 +928,7 @@ impl ToolRegistry {
             "create_worktree" => self.create_worktree(parse(call)?).await,
             "get_job_output" => self.get_job_output(parse(call)?),
             "kill_job" => self.kill_job(parse(call)?).await,
+            "monitor" => self.monitor(parse(call)?).await,
             "ask_user" => self.ask_user(parse(call)?).await,
             "web_search" => self.web_search(parse(call)?).await,
             "web_fetch" => self.web_fetch(parse(call)?).await,
@@ -2166,29 +2178,23 @@ impl ToolRegistry {
     }
 
     fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
-        if let Some(output) = self
-            .background
-            .output(&args.job_id, args.tail_lines.unwrap_or(200).clamp(1, 2_000))
-        {
+        if let Some(output) = self.monitor_output(&args.job_id, args.tail_lines) {
+            return Ok(output);
+        }
+        if let Some(output) = self.background.output(
+            &args.job_id,
+            args.tail_lines
+                .unwrap_or(crate::detached_job::DEFAULT_TAIL_LINES)
+                .clamp(1, 2_000),
+        ) {
             return Ok(output);
         }
         // 进程内那份找不到就问落盘的那份：脱离作业活得比 Harness 久，重启之后
-        // 它只存在于磁盘上。
+        // 它只存在于磁盘上。格式见后台任务合同 v1。
         if let Some(jobs) = &self.detached_jobs
             && let Some(job) = jobs.get(&args.job_id)
         {
-            let report = jobs.report(&job);
-            let status = match report.state {
-                crate::detached_job::JobState::Running => format!("running (pid {})", job.pid),
-                crate::detached_job::JobState::Finished { exit_code } => {
-                    format!("finished with exit code {exit_code}")
-                }
-                // 「不知道」和「失败」不是一回事：失败有退出码。
-                crate::detached_job::JobState::Vanished => {
-                    "process is gone and left no exit code".to_owned()
-                }
-            };
-            return Ok(format!("{}: {status}\n{}", job.id, report.output));
+            return Ok(jobs.render_output(&job, args.tail_lines));
         }
         Err(ToolError::Network(format!(
             "background task not found: {}",
@@ -2200,12 +2206,25 @@ impl ToolRegistry {
         self.require_approval(&format!("cancel background task: {}", args.job_id), false)
             .await?;
         if self.background.kill(&args.job_id) {
-            Ok(format!("kill requested for {}", args.job_id))
-        } else {
-            Err(ToolError::Network(format!(
+            return Ok(format!("kill requested for {}", args.job_id));
+        }
+        // run_in_background 的命令落在脱离作业里，进程内注册表查不到它。
+        let detached = match &self.detached_jobs {
+            Some(jobs) => jobs.kill(&args.job_id).map_err(ToolError::Io)?,
+            None => crate::detached_job::KillOutcome::NotFound,
+        };
+        match detached {
+            crate::detached_job::KillOutcome::Signalled => {
+                Ok(format!("kill requested for {}", args.job_id))
+            }
+            crate::detached_job::KillOutcome::NotRunning => Err(ToolError::Network(format!(
+                "background job already finished: {}; read it with get_job_output",
+                args.job_id
+            ))),
+            crate::detached_job::KillOutcome::NotFound => Err(ToolError::Network(format!(
                 "running background task not found: {}",
                 args.job_id
-            )))
+            ))),
         }
     }
 
@@ -2243,8 +2262,12 @@ impl ToolRegistry {
     }
 }
 
+mod agent_control;
 mod background_shell;
+mod monitor;
 mod verification;
+pub use agent_control::MAX_AGENT_MESSAGE_CHARS;
+pub(crate) use agent_control::PARENT_ONLY_TOOLS;
 use background_shell::run_background_shell;
 pub use background_shell::run_background_supervisor;
 use verification::{capture_verification_snapshot, report_verification, verification_status};

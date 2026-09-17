@@ -11,10 +11,14 @@ use futures_util::StreamExt;
 
 #[path = "headless_runtime/automatic_compression.rs"]
 mod automatic_compression;
+#[path = "headless_runtime/detached_background.rs"]
+mod detached_background;
 #[path = "headless_runtime/foreground_recovery.rs"]
 mod foreground_recovery;
 #[path = "headless_runtime/local_partial.rs"]
 mod local_partial;
+#[path = "headless_runtime/monitor_events.rs"]
+mod monitor_events;
 
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -2673,6 +2677,10 @@ enum MockMode {
     DelayedSuccess(Duration),
     /// 第一轮请求一个注定失败的工具（读不存在的文件），之后正常收尾。
     FailingToolThenSuccess,
+    /// 第一轮起一条 `run_in_background` 命令，之后正常收尾。
+    BackgroundJobThenSuccess,
+    /// 第一轮起一个 `monitor`，之后正常收尾。
+    MonitorThenSuccess,
 }
 
 impl Drop for MockProvider {
@@ -2771,7 +2779,9 @@ async fn mock_provider_response(
         | MockMode::StreamingUntilReleased
         | MockMode::IncompleteThenSuccess
         | MockMode::DelayedSuccess(_)
-        | MockMode::FailingToolThenSuccess => 200,
+        | MockMode::FailingToolThenSuccess
+        | MockMode::BackgroundJobThenSuccess
+        | MockMode::MonitorThenSuccess => 200,
     };
     let body = if matches!(state.mode, MockMode::CheckpointThenWait) && request_index == 0 {
         let command = r#"ruby -e 'File.open("progress.log", "a") { |file| file.write("checkpoint-once\n") }'"#;
@@ -2782,6 +2792,10 @@ async fn mock_provider_response(
         serde_json::json!({"choices":[{"message":{"content":null,"tool_calls":[{"id":"delegate-diagnosis","type":"function","function":{"name":"spawn_agent","arguments":serde_json::json!({"profile":"scout","prompt":"Inspect the task without editing files and report your diagnosis","run_in_background":false}).to_string()}}]},"finish_reason":"tool_calls"}]}).to_string()
     } else if matches!(state.mode, MockMode::FailingToolThenSuccess) && request_index == 0 {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"read_missing","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"definitely-missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
+    } else if matches!(state.mode, MockMode::BackgroundJobThenSuccess) {
+        detached_background::response(&body, request_index)
+    } else if matches!(state.mode, MockMode::MonitorThenSuccess) {
+        monitor_events::response(&body, request_index)
     } else if mode_is_waiting_root(state.mode, request_index) {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"ask_root","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"keep the root active?\",\"options\":[\"yes\"]}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
     } else if matches!(state.mode, MockMode::IncompleteThenSuccess) && request_index < 3 {

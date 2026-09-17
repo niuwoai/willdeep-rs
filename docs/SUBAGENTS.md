@@ -19,12 +19,36 @@
 
 任务完成、失败、超时或被取消后，CLI 会把带输出尾部的 `<background-task-notification>` 自动送回主 Harness：主 Agent 空闲时立即续跑，忙碌时在当前回复结束后续跑。
 
+通知与 `get_job_output` 的格式遵循**后台任务合同 v1**（canonical 在 Xedit `docs/BACKGROUND_TASK_CONTRACT.md`，金样副本 `docs/contracts/background-task-notification.v1.txt`，两端逐字一致）：
+
+- 日志完整追加写入 `stdout.log` / `stderr.log`，单条流上限 256MB；撞上限后真实末尾存 `.tail`、丢弃字节数存 `.dropped`，通知里的 `omitted_bytes` 就是后者。
+- 通知尾巴：失败 40 行 / 4000 字符，成功 10 行 / 1000 字符，子 Agent 报告一律 40 / 4000；凭据按行脱敏。
+- `get_job_output` 默认每条流最后 200 行（上限 2000），头部带状态、退出码、时长和日志路径。
+- 已结束作业保留 7 天或最近 200 个，启动时清理；还在跑的不动。
+- 改格式要同时改两端与金样；`ruby scripts/check_background_contract.rb` 在本机找得到 Xedit 时比对两边。
+
 相关工具：
 
 - `get_job_output` — 查看捕获输出；
-- `kill_job` — 请求取消。
+- `kill_job` — 请求取消；脱离作业由 supervisor 连同进程组收掉，退出码记为 137。
 
-非 TUI 模式会保持进程存活，直到相关后台任务完成并处理完回流结果。
+非 TUI 模式会保持进程存活，直到相关后台任务（含本会话名下的脱离作业与运行中的 monitor）完成并处理完回流结果。
+
+## Monitor
+
+`monitor(command, label, timeout_seconds?)` 盯着一条命令的**进行中**输出：stdout 每批新行作为一条 `<monitor-event>` 交给模型，进程退出、超时、刷屏或被 `kill_job` 停掉时发 `<monitor-ended>`。只关心最终结果时用 `run_command` 的 `run_in_background`。句柄形如 `mon_xxxxxx`。格式遵循后台任务合同「第三批 · C·一」，金样 `docs/contracts/monitor-event.v1.txt`（两端逐字一致，漂移脚本同样比对）。
+
+- **审批**与 `run_command` 同一道闸（同一命令同一判定）；只读审批模式直接拒绝。
+- **事件源只有 stdout**，stderr 只进日志；每行截到 2000 字符（超出保留前 1999 个字符再加 `…`），只含空白的行不算事件。
+- **合批**：第一行到达后 200ms 内的行合成一个事件，最多 50 行；正文逼近内核 24000 字符上限（约 20000 字符）时也提前收口，多出的并入下一批。
+- **防刷屏**：任意 60 秒内超过 30 个事件即停进程组，结束事件 `reason: flooded`、`exit_code: unknown`，触发那一批不再投递。
+- **唤醒节流**：每个监视器 30 秒内只有第一条事件会唤醒空闲会话（`yield_at_boundary`），其余以 `enqueue` 入队，在下一个回合边界随其他事件一起交给模型；结束事件不受限。
+- **超时**默认 300 秒、上限 1800 秒，到点杀进程组，`reason: timed_out`。
+- **生命周期**：随宿主进程存活（不脱离），在进程内后台注册表里可见，`kill_job` 可停（`reason: killed`）；无头模式等它结束并把事件和结束通知交给模型后才退出。
+- **日志**：`~/.willdeep/monitors/<mon_id>/stdout.log` / `stderr.log`，追加写、256MB 上限规则同后台作业；结束事件的 `output_path` 指向 `stdout.log`。运行中 `get_job_output(mon_id)` 返回状态与日志末尾。
+- 用法写在工具描述里：命令里先用 `grep --line-buffered` 过滤到值得反应的行，并覆盖失败形态（Error / FAILED / Traceback），别只盯成功标记。
+
+脱离作业的结束通知只投给起它的会话（记录里的 `owner`），并用作业目录里的 `delivered` 标记领取投递权：TUI、无头运行、重启之后，同一次结束只向模型讲一遍。0.74.0-rc2 之前的无主旧记录不补投。
 
 ### 进程与安全边界
 
@@ -229,6 +253,15 @@ willdeep daemon quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_
 只有**终态且干净**，或已按精确 Child 快照完成合并的 Worktree 才能执行 quarantine。该操作**不会删除目录、文件或分支**，而是通过 `git worktree move` 把完整 Worktree 移入 `~/.willdeep/recovery/worktrees/`。状态持久化失败时会尝试原路回滚。
 
 ## 观察与控制
+
+### 模型工具
+
+主 Agent 可以直接指挥**本会话起的**后台子 Agent（合同「第三批 · C·二」）：
+
+- `send_agent_message(agent_id, message)` — 投递到子 Agent 的指令收件箱，**下一个回合边界**生效，不打断当前步骤；`message` ≤ 4000 字符，超出直接报错，不截断。
+- `stop_agent(agent_id)` — 停止运行中的后台子 Agent，报告照常以 `status: killed` 投回。
+
+`agent_id` 是 `spawn_agent` 返回的 UUID（也接受 `agent_xxxxxx` 后台句柄）。归属按父会话的派工名单校验：别的会话的、编造的 id 一律报「找不到」；目标已结束时报「已结束，报告已投递或即将投递」。两个工具都不弹审批，但每次调用都写一行 `~/.willdeep/approvals.jsonl`（`source: not-required`，只记动作、目标与结果，不记消息正文）。子 Agent 的工具面在构建时剔除这两个工具（连同 `spawn_agent` 与恢复工具）。
 
 ### CLI
 

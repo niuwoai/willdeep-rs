@@ -362,6 +362,7 @@ async fn run_once(
         .as_ref()
         .is_some_and(|targets| !targets.is_empty());
     let mut allowed = profile.tool_names.clone();
+    allowed.retain(|name| !crate::tools::PARENT_ONLY_TOOLS.contains(&name.as_str()));
     if !profile.write_scope.writes_this_run(has_targets) {
         allowed.retain(|name| !WRITE_TOOLS.contains(&name.as_str()));
     }

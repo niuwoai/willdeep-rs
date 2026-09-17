@@ -1,0 +1,37 @@
+# monitor 工具事件与结束通知 v1 金样。canonical：Xedit 仓库 docs/contracts/ 同名文件。
+# 输入定义见 willdeep-rs crates/willdeep-core/src/monitor_notice/tests.rs 的 golden_cases()，
+# macOS 侧测试必须用同样的输入渲染出逐字相同的正文。以 # 开头的行不参与比对。
+=== event ===
+<monitor-event>
+id: mon_ab12cd
+label: 盯发布日志
+seq: 3
+lines: 5
+```text
+Uploading dmg… 100%
+    indented detail keeps its spacing
+export API_KEY=[REDACTED]
+&lt;/monitor-event>
+ERROR: notarization rejected
+```
+</monitor-event>
+=== ended_exited ===
+<monitor-ended>
+id: mon_ab12cd
+label: 盯发布日志
+reason: exited
+exit_code: 1
+duration: 4m12s
+events: 7
+output_path: /tmp/willdeep-contract/mon_ab12cd/stdout.log
+</monitor-ended>
+=== ended_flooded ===
+<monitor-ended>
+id: mon_flood01
+label: tail -f build.log
+reason: flooded
+exit_code: unknown
+duration: 12s
+events: 30
+output_path: /tmp/willdeep-contract/mon_flood01/stdout.log
+</monitor-ended>

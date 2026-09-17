@@ -7,8 +7,11 @@ use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::sandbox::SandboxSpec;
 
+mod line_stream;
 #[cfg(windows)]
 mod windows_job;
+
+pub(crate) use line_stream::{LineStreamEnd, run_line_stream};
 
 pub(crate) fn shell(command: &str, sandbox: &SandboxSpec) -> io::Result<Command> {
     match sandbox.command_line(crate::tools::SHELL_PROGRAM, command) {
@@ -25,11 +28,23 @@ pub(crate) fn shell(command: &str, sandbox: &SandboxSpec) -> io::Result<Command>
     }
 }
 
+/// 一个后台作业单条日志流最多落多少字节（后台任务合同 v1）。
+///
+/// 超过之后不再追加，但内存里的尾部照常滚动，结束时另存成 `.tail`——
+/// 「末尾永远可读」不能被上限破坏，失败原因几乎总在最后几行。
+pub(crate) const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
+
 struct CaptureState {
     bytes: std::collections::VecDeque<u8>,
     limit: usize,
     omitted: u64,
     path: Option<std::path::PathBuf>,
+    /// 追加写的完整日志。第一次 `push` 时创建。
+    log: Option<std::fs::File>,
+    logged: u64,
+    /// 因为 [`MAX_LOG_BYTES`] 没能写进日志的字节数。
+    dropped: u64,
+    log_cap: u64,
 }
 
 impl CaptureState {
@@ -39,6 +54,10 @@ impl CaptureState {
             limit,
             omitted: 0,
             path,
+            log: None,
+            logged: 0,
+            dropped: 0,
+            log_cap: MAX_LOG_BYTES,
         }
     }
 
@@ -54,13 +73,49 @@ impl CaptureState {
             .saturating_add((discard + input.len() - chunk.len()) as u64);
         self.bytes.drain(..discard);
         self.bytes.extend(chunk);
-        if let Some(path) = &self.path {
-            crate::detached_job::write_private_atomic(
-                path,
-                &self.bytes.iter().copied().collect::<Vec<_>>(),
-            )?;
+        self.append_log(input)
+    }
+
+    /// 完整输出追加进日志。此前是每来一块就把尾部整份原子重写一次：日志只剩
+    /// 尾巴，而且长输出下每块都是 O(n) 的无用功。
+    fn append_log(&mut self, input: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if self.log.is_none() {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            self.log = Some(options.open(path)?);
         }
+        let room = self.log_cap.saturating_sub(self.logged);
+        let written = (input.len() as u64).min(room) as usize;
+        if written > 0 {
+            self.log
+                .as_mut()
+                .expect("log opened above")
+                .write_all(&input[..written])?;
+            self.logged += written as u64;
+        }
+        self.dropped += (input.len() - written) as u64;
         Ok(())
+    }
+
+    /// 流结束时收尾：日志被上限截断过，就把真实末尾和丢弃字节数另存。
+    fn finish(&self) -> io::Result<()> {
+        let (Some(path), true) = (&self.path, self.dropped > 0) else {
+            return Ok(());
+        };
+        crate::detached_job::write_private_atomic(&sidecar(path, "tail"), &self.snapshot())?;
+        crate::detached_job::write_private_atomic(
+            &sidecar(path, "dropped"),
+            self.dropped.to_string().as_bytes(),
+        )
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -75,6 +130,14 @@ impl CaptureState {
         };
         format!("{prefix}{}", String::from_utf8_lossy(&self.snapshot()))
     }
+}
+
+/// `stdout.log` → `stdout.log.tail` 这类旁挂文件。
+pub(crate) fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// Drains the entire stream while retaining only a bounded tail.
@@ -218,7 +281,11 @@ pub(crate) async fn run_capture_logged(
             stderr: stderr_state.describe().into_bytes(),
         })
     };
-    match tokio::time::timeout(timeout, operation).await {
+    let result = tokio::time::timeout(timeout, operation).await;
+    // 超时也要收尾：被截断的日志正是最需要真实末尾的那一种。
+    stdout_state.finish()?;
+    stderr_state.finish()?;
+    match result {
         Ok(Ok(output)) => Ok(output),
         result => {
             let error = match result {
@@ -257,6 +324,33 @@ mod tests {
         let mut empty = CaptureState::new(0, None);
         capture(data.as_slice(), &mut empty).await.unwrap();
         assert!(empty.snapshot().is_empty());
+    }
+
+    /// 日志是完整追加的；撞上单文件上限就停写，但真实末尾另存进 `.tail`。
+    #[tokio::test]
+    async fn capped_log_keeps_its_real_end_in_a_sidecar() {
+        let dir = std::env::temp_dir().join(format!("willdeep-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stdout.log");
+        let mut state = CaptureState::new(8, Some(path.clone()));
+        state.log_cap = 20;
+        let data = b"0123456789abcdefghijklmnopqrstuvwxyzEND".to_vec();
+        capture(data.as_slice(), &mut state).await.unwrap();
+        state.finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), &data[..20]);
+        assert_eq!(std::fs::read(sidecar(&path, "tail")).unwrap(), b"vwxyzEND");
+        assert_eq!(
+            std::fs::read_to_string(sidecar(&path, "dropped")).unwrap(),
+            (data.len() - 20).to_string()
+        );
+
+        let uncapped = dir.join("stderr.log");
+        let mut state = CaptureState::new(4, Some(uncapped.clone()));
+        capture(data.as_slice(), &mut state).await.unwrap();
+        state.finish().unwrap();
+        assert_eq!(std::fs::read(&uncapped).unwrap(), data);
+        assert!(!sidecar(&uncapped, "tail").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

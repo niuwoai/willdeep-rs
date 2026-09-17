@@ -153,7 +153,9 @@ impl AttentionItem {
 
     pub fn from_background(task: &BackgroundTaskSnapshot) -> Self {
         let source = match task.kind {
-            BackgroundTaskKind::Shell => AttentionSource::BackgroundShell,
+            BackgroundTaskKind::Shell | BackgroundTaskKind::Monitor => {
+                AttentionSource::BackgroundShell
+            }
             BackgroundTaskKind::Subagent => AttentionSource::Subagent,
         };
         let status = match task.status {

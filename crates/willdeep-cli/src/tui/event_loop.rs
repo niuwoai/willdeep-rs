@@ -242,8 +242,21 @@ pub(super) async fn event_loop(
                 // 的通知通道。落盘也在这里收口——状态每变一次就写一次盘，
                 // 打字的时候会卡在磁盘上。
                 app.kernel_attention=runtime.kernel.pending_for_user().iter().map(AttentionItem::from_kernel_event).collect();
-                publish_finished_jobs(runtime,session.id);
+                // 脱离作业没有完成回调，只能在这里按秒看记录。发布之后要像进程内
+                // 任务那样唤醒空闲会话，否则结论会一直躺在队列里等用户开口。
+                let finished_jobs=crate::detached_delivery::publish_finished_jobs(&runtime.kernel,&runtime.detached_jobs,session.id);
                 willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
+                if finished_jobs>0 {
+                    app.notice=Some(format!("{finished_jobs} background job(s) finished · queued as runtime events"));
+                    execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
+                    wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;
+                }
+                // 监视器事件已经直接进了内核。唤醒是否放行由内核判：被节流的事件只
+                // 入队（Enqueue），不会把空闲会话拉起来。忙的时候回合收尾会再看一次。
+                if runtime.background_tasks.take_monitor_signals()>0 {
+                    willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
+                    wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;
+                }
                 // 上一份快照还没回来就不再叠加一份：几份并行在途的快照回来的
                 // 顺序没有保证，越多越容易把一份旧的排到新的后面。
                 if !snapshot_in_flight.swap(true,std::sync::atomic::Ordering::AcqRel) {

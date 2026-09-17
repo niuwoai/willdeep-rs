@@ -14,7 +14,7 @@ pub(super) async fn complete(
     tools: &[ToolDefinition],
     events: &dyn ProviderEventSink,
 ) -> Result<Completion, ProviderError> {
-    let wire_messages = messages.iter().map(WireMessage::from).collect::<Vec<_>>();
+    let wire_messages = wire_messages(messages);
     let wire_tools = tools.iter().map(WireTool::from).collect::<Vec<_>>();
     let body = ChatRequest {
         model: &provider.config.model,

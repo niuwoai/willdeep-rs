@@ -107,7 +107,7 @@ Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。
 
 ### 后台任务回流与子 Agent
 
-`BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
+`BackgroundTaskRegistry` 统一跟踪 Shell Job 与后台 Subagent，保存有界输出、状态、耗时、退出码和取消通道。启动 Shell 的入口保持 crate 私有，且只能在 `run_command` 完成既有逐次审批后注册。任务终态会同时发布事件并形成 `<background-task-notification>` 或 `<subagent-report>`（格式由 `background_notice` 按后台任务合同 v1 渲染，脱离作业同一个渲染器）；TUI 把事件排队，主 Agent 空闲时立即续跑，繁忙时在当前 turn 结束后续跑。非交互 CLI 等待所有关联任务完成并逐个处理通知。
 
 `SubagentCatalog` 面向用户公开 reader、implementer、tester、ops_runner、judge、deep 六个工种；scout、editor、test_fixer、build_fixer、log_inspector、git_detective 等旧专门 ID 继续保留给自动路由、托管链和历史兼容。每个工种绑定 Provider、模型、工具白名单、上下文窗口、工具输出字节上限和最大轮数；子 Agent 创建的 `Agent` 不装载 Subagent Catalog，因此不能递归派生。
 

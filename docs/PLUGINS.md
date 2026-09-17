@@ -1,6 +1,6 @@
 # 插件系统（Web 宿主）
 
-> 状态：v1 已实现，首发 0.50.0-rc1；宿主能力补齐到桥 2.5.0 于 0.73.0-rc1。
+> 状态：v1 已实现，首发 0.50.0-rc1；宿主能力补齐到桥 2.5.0 于 0.73.0-rc1，桥 2.6.0（图片附件）于 0.74.0-rc1。
 > Schema：`.willdeep-plugin/plugin.json` schemaVersion 1，与 macOS 版（Xedit）**同一份契约**。
 > 上游设计：Xedit `docs/WILLDEEP_PLUGIN_SYSTEM_DESIGN.md`；宿主能力：`docs/PLUGIN_HOST_CAPABILITIES_DESIGN.md`。
 > 两端联动全景见 [XEDIT_INTEROP_STATUS.md](XEDIT_INTEROP_STATUS.md)。
@@ -105,11 +105,11 @@ ID 唯一、命令引用必须存在、progress 必须落在 0…1。
 
 页面侧（宿主注入，见 `crates/willdeep-cli/src/plugin_bridge.js`）：
 
-桥版本 **2.5.0**，与 macOS 宿主 `AgentPluginPageBridgeVersion` 对齐。页面按
+桥版本 **2.6.0**，与 macOS 宿主 `AgentPluginPageBridgeVersion` 对齐。页面按
 `window.willdeep.capabilities` 降级，而不是猜宿主有什么：
 
 ```js
-window.willdeep.version                            // "2.5.0"
+window.willdeep.version                            // "2.6.0"
 window.willdeep.capabilities                       // 字符串数组，见下表
 
 window.willdeep.getContext()                       // 目的地上下文
@@ -165,6 +165,14 @@ provider id 与模型名，递上来的 baseURL 一律不认）、能力必须�
 拒绝的理由原样回到页面（`permissionDenied` / `tooManyMessages` / `unknownModel` …），
 好让插件决定是换模型还是回落到自己的本地规则。
 
+**附图片（0.74.0-rc1，能力 `ai.images`）**：`messages[]` 里的 user 消息可带
+`imagePaths`，填本插件媒体目录 `~/.willdeep/plugin-media/<id>/` 里的绝对路径。
+宿主钳制路径（非符号链接的普通文件，规范化后父目录恰好是该目录，否则
+`mediaOutsidePluginData`）、解码、长边限 1568 像素、转 JPEG 后作为图片附件送进模型。
+一次最多 12 张（`tooManyImages`），挂在 system / assistant 上整条拒
+（`mediaOnNonUserMessage`），解不出来报 `unreadableMedia`。`videoPaths` 在本宿主报
+`videosUnsupported`：没有视频解码器抽帧，所以不声明 `ai.videos`，也不静默丢掉。
+
 MCP Apps 页面直接 `parent.postMessage` 标准 JSON-RPC：`ui/initialize` →
 `ui/notifications/initialized` → `tools/call` / `resources/read`。宿主在 initialized
 之前对后两者回 `-32002`。
@@ -210,9 +218,10 @@ SecurityError，而插件在原生宿主里本来是有存储可用的（经典�
 
 ## 能力探测
 
-桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`。0.73.0-rc1 起
-这边报的是桥 **2.5.0** 的 22 项（见上面的 Bridge 契约），与 macOS 宿主的差集只剩
-`ai.reasoning`——那是流式思考增量，本宿主的 `ai.complete` 一次性返回，所以不报。
+桥注入 `window.willdeep.capabilities` 与 `window.willdeep.version`。0.74.0-rc1 起
+这边报的是桥 **2.6.0** 的 23 项（见上面的 Bridge 契约），与 macOS 宿主的差集是
+`ai.reasoning`（流式思考增量，本宿主的 `ai.complete` 一次性返回）与 `ai.videos`
+（视频附件要抽帧，本宿主没有解码器），这两项都不报。
 插件先问再用：
 
 ```js
@@ -240,6 +249,7 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | 项 | macOS | Web |
 |---|---|---|
 | `ai.reasoning` | 有，流式思考增量 | **没有**。本宿主的 `ai.complete` 一次性返回，所以这一项不出现在 `capabilities` 里——声明一个自己不发的事件，插件会白等 |
+| `ai.videos` | 有，宿主用 AVFoundation 抽 8 帧当图片送审 | **没有**。带 `videoPaths` 报 `videosUnsupported`；图片附件（`ai.images`）两端都有 |
 | `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**。另有一条 macOS 没有的硬地板（见上） |
 | 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见上） |
 | `defaultPinned` | `bundled` 来源可占住入口，用户不能取消 | 只影响排序建议。rs 没有 bundled 来源，插件一律来自共享目录 |
@@ -247,7 +257,7 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |
 | 图标 | SF Symbols | `web/src/sfSymbols.tsx` 的等价线性图标；认不出的名字回落成圆点 |
 | 安装来源 | 目录 / ZIP / Git / Codex 缓存 / AI 草案 | 目录（`install`）、批量导入（`import`）；ZIP 与 Git 尚未接 |
-| 页面桥能力 | 桥 2.5.0，23 项 | 桥 2.5.0，22 项（0.73.0-rc1 起）。差集只有 `ai.reasoning`：本宿主的 `ai.complete` 一次性返回，不发思考增量 |
+| 页面桥能力 | 桥 2.6.0，25 项 | 桥 2.6.0，23 项（0.74.0-rc1 起）。差集是 `ai.reasoning`（本宿主的 `ai.complete` 一次性返回，不发思考增量）与 `ai.videos`（没有视频解码器抽帧） |
 | `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**；另有一层 macOS 没有的硬地板（外泄 / 接管 / 持久化 / 反取证，确认也不放行） |
 | 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见下） |
 | 调度 (`schedules`) | 设计中，未实现 | 同 |

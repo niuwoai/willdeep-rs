@@ -1191,48 +1191,6 @@ fn progress_spinner(elapsed: Duration) -> &'static str {
 /// 选中项必须落在可视窗口里，否则用户按着 ↓ 却看不到光标去了哪——那正是让人
 /// 以为「后面没有了」的原因。窗口贴着底走：只有选中项越过下沿才滚，向上回来
 /// 时同样跟着走。
-/// 把已经有结论的脱离作业交给事件内核。
-///
-/// 这些作业没有可等的句柄——进程早就脱离了，父进程甚至可能是重启之后的新
-/// 进程。所以只能按记录轮询，靠去重键保证同一个作业只讲一遍：`Once` 那档正是
-/// 为「同一个资源的同一次结束」准备的。
-///
-/// 「不知道」不当成失败上报：失败是有退出码的，进程没留下退出码只说明我们
-/// 不知道它怎么结束的，把它说成失败会让人去查一个并不存在的错误。
-fn publish_finished_jobs(runtime: &TuiRuntime, session_id: uuid::Uuid) {
-    use willdeep_core::JobState;
-    for job in runtime.detached_jobs.list() {
-        let state = runtime.detached_jobs.state(&job);
-        let (kind, title) = match state {
-            JobState::Running => continue,
-            JobState::Finished { exit_code: 0 } => ("job.completed", "后台作业完成"),
-            JobState::Finished { .. } => ("job.failed", "后台作业失败"),
-            JobState::Vanished => ("job.vanished", "后台作业没有留下结论"),
-        };
-        let detail = runtime.detached_jobs.output(&job.id, 4 * 1024);
-        let mut event = willdeep_core::host_event(
-            session_id,
-            willdeep_runtime_protocol::EventSource::Task,
-            kind,
-            if matches!(state, JobState::Finished { exit_code: 0 }) {
-                willdeep_runtime_protocol::EventPriority::Normal
-            } else {
-                willdeep_runtime_protocol::EventPriority::Urgent
-            },
-            willdeep_core::kernel::InterruptPolicy::YieldAtBoundary,
-            format!("{title} · {}", job.label.lines().next().unwrap_or(&job.id)),
-            Some(detail),
-            Some(format!("job:{}", job.id)),
-            false,
-        );
-        // 命令输出是工具产出，不因为宿主转发就变成可信正文。
-        event.content_provenance = willdeep_runtime_protocol::ContentProvenance::Tool;
-        runtime
-            .kernel
-            .publish(event, willdeep_core::DedupPolicy::Once);
-    }
-}
-
 fn command_window_offset(selected: usize, total: usize, visible: usize) -> usize {
     if visible == 0 || total <= visible {
         return 0;

@@ -15,6 +15,7 @@ use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage, sanitize_tool_history};
 
 mod context;
+mod messaging;
 mod parallel;
 mod progress;
 mod recovery;
@@ -49,7 +50,7 @@ impl AgentInstructionInbox {
         true
     }
 
-    fn drain(&self) -> Vec<String> {
+    pub(crate) fn drain(&self) -> Vec<String> {
         self.pending
             .lock()
             .map(|mut pending| pending.drain(..).collect())
@@ -563,7 +564,7 @@ impl Agent {
         self.tools.set_task_context(&user_message.content);
         messages.push(user_message);
         let definitions = self.tools.definitions();
-        let mut compressed: Option<(usize, String)> = None;
+        let mut compressed: Option<context::SummaryCache> = None;
         let mut used_tokens = 0_u64;
         // 分别累计输入/输出，供 AgentOutcome 上报——`used_tokens` 是预算判定用的
         // 合计值，两者语义不同，不能互相顶替。
@@ -1021,6 +1022,9 @@ impl Agent {
     {
         Box::pin(async move {
             if let Some(result) = self.execute_recovery_tool(call).await {
+                return result;
+            }
+            if let Some(result) = self.execute_agent_control_tool(call) {
                 return result;
             }
             if call.name != "spawn_agent" {

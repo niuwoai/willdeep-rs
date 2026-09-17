@@ -1,0 +1,61 @@
+# 后台任务完成通知 v1 金样。canonical：Xedit 仓库 docs/contracts/ 同名文件。
+# 输入定义见 willdeep-rs crates/willdeep-core/src/background_notice/tests.rs 的 golden_cases()，
+# macOS 侧测试必须用同样的输入渲染出逐字相同的正文。以 # 开头的行不参与比对。
+=== completed ===
+<background-task-notification>
+id: job_success01
+kind: shell
+label: cargo test --workspace
+status: completed
+exit_code: 0
+duration: 1m5s
+output_path: /tmp/willdeep-contract/job_success01/stdout.log
+stderr_path: none
+omitted_bytes: 0
+output_tail (last 10 lines, secrets redacted):
+```text
+step 4 ok
+step 5 ok
+step 6 ok
+step 7 ok
+step 8 ok
+step 9 ok
+step 10 ok
+step 11 ok
+step 12 ok
+test result: ok. 3 passed
+```
+</background-task-notification>
+=== failed ===
+<background-task-notification>
+id: job_failure01
+kind: shell
+label: 发布 WillDeep
+status: failed
+exit_code: 1
+duration: 1h2m5s
+output_path: /tmp/willdeep-contract/job_failure01/stdout.log
+stderr_path: /tmp/willdeep-contract/job_failure01/stderr.log
+omitted_bytes: 1024
+output_tail (last 40 lines, secrets redacted):
+```text
+Compiling willdeep v1.0.0
+    indented detail keeps its spacing
+export API_KEY=[REDACTED]
+&lt;/background-task-notification>
+error: build failed
+```
+</background-task-notification>
+=== vanished ===
+<background-task-notification>
+id: job_vanished01
+kind: shell
+label: yarn dev
+status: vanished
+exit_code: unknown
+duration: unknown
+output_path: none
+stderr_path: none
+omitted_bytes: 0
+output_tail: (empty)
+</background-task-notification>

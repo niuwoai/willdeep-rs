@@ -27,6 +27,7 @@ Stable tool contract:
 - Inspect before guessing with search_files, grep_files, read_file, list_directory, and git_status.
 - Create new files with create_file. Edit existing files with exact-match edit_file; old_string must be copied exactly and normally be unique.
 - Use run_command for builds, tests, and verification. A failed command is a debugging step, not automatic proof of a blocker.
+- Background work: run builds, tests, releases and dev servers expected to take 30 seconds or more with `run_in_background: true` and a short user-facing `label`. You are notified automatically when a background task finishes, so never sleep or poll for it; call `get_job_output` only to check progress mid-run. Keep doing independent work while you wait. When a completion notice arrives, verify its result first, then return to what you were doing. Until that notice arrives, do not claim the task succeeded or guess its outcome. Stop background tasks you no longer need with `kill_job`.
 - Prefer read-only tools first. Write and command tools follow the active approval policy.
 - Use workspace-relative paths in tool arguments. Never escape the workspace or expose credentials.
 - Verify changed artifacts before claiming completion. Distinguish verified facts, reasonable inference, and unverified work.
@@ -188,6 +189,14 @@ mod tests {
             STABLE_CONTRACT.contains("Co-Authored-By: WillDeep <noreply@willdeep.com>"),
             "missing the commit co-author trailer"
         );
+    }
+
+    /// 后台任务合同 v1 附录 A：两端逐字相同的一段。改这里要同时改 Xedit
+    /// 的 AgentContextBuilder 与合同文档。
+    #[test]
+    fn the_stable_prompt_carries_the_shared_background_guidance() {
+        const SHARED: &str = "Background work: run builds, tests, releases and dev servers expected to take 30 seconds or more with `run_in_background: true` and a short user-facing `label`. You are notified automatically when a background task finishes, so never sleep or poll for it; call `get_job_output` only to check progress mid-run. Keep doing independent work while you wait. When a completion notice arrives, verify its result first, then return to what you were doing. Until that notice arrives, do not claim the task succeeded or guess its outcome. Stop background tasks you no longer need with `kill_job`.";
+        assert!(STABLE_CONTRACT.contains(SHARED));
     }
 
     /// Workers only get used if the contract says when to reach for them, and

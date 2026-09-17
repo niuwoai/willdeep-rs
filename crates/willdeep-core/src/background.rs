@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -21,6 +22,9 @@ type TaskLifecycleHook = Arc<dyn Fn(BackgroundTaskSnapshot) -> TaskLifecycleFutu
 pub enum BackgroundTaskKind {
     Shell,
     Subagent,
+    /// `monitor` 工具盯着的命令。它的事件与结束通知由监视器自己发给事件内核
+    /// （合同见 [`crate::monitor_notice`]），注册表只负责列出、停止与无头等待。
+    Monitor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +86,9 @@ struct LaunchSpec {
     retry: Option<TaskLauncher>,
     lifecycle: Option<TaskLifecycleHook>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
+    /// 任务自己盯着取消信号并自行收尾（发结束事件、落盘），注册表不能在取消
+    /// 时直接丢掉它的 future。
+    cancel_aware: Option<(String, watch::Sender<bool>, watch::Receiver<bool>)>,
 }
 
 #[derive(Clone)]
@@ -89,6 +96,9 @@ pub struct BackgroundTaskRegistry {
     inner: Arc<Mutex<RegistryState>>,
     events: broadcast::Sender<BackgroundTaskEvent>,
     lifecycle: Option<TaskLifecycleHook>,
+    /// 监视器往事件内核发过几条事件、还没被前端看过。前端据此决定要不要唤醒
+    /// 空闲会话；这样 TUI 与无头运行不必各自再接一条通道。
+    monitor_signals: Arc<AtomicUsize>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -101,6 +111,7 @@ impl Default for BackgroundTaskRegistry {
             })),
             events,
             lifecycle: None,
+            monitor_signals: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -209,6 +220,7 @@ impl BackgroundTaskRegistry {
             retry: Some(launcher),
             lifecycle,
             instruction_inbox,
+            cancel_aware: None,
         }))
     }
 
@@ -225,6 +237,38 @@ impl BackgroundTaskRegistry {
             .id
             .clone();
         self.retry(&id)
+    }
+
+    /// 取走「监视器发过事件」的计数并清零。
+    pub fn take_monitor_signals(&self) -> usize {
+        self.monitor_signals.swap(0, Ordering::SeqCst)
+    }
+
+    pub(crate) fn signal_monitor_event(&self) {
+        self.monitor_signals.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 这个子 Agent 最近一次运行的状态。
+    pub fn agent_status(&self, agent_id: uuid::Uuid) -> Option<BackgroundTaskStatus> {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.snapshot.agent_id == Some(agent_id))
+            .map(|task| task.snapshot.status.clone())
+    }
+
+    /// 后台任务句柄（`agent_xxxxxx`）对应的子 Agent id。
+    pub fn agent_for_task(&self, id: &str) -> Option<uuid::Uuid> {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .find(|task| task.snapshot.id == id)
+            .and_then(|task| task.snapshot.agent_id)
     }
 
     pub fn instruct_agent(&self, agent_id: uuid::Uuid, instruction: String) -> bool {
@@ -264,6 +308,29 @@ impl BackgroundTaskRegistry {
             retry: Some(launcher),
             lifecycle: None,
             instruction_inbox: None,
+            cancel_aware: None,
+        })
+    }
+
+    /// 起一个监视器。`run` 拿到分配好的 `mon_xxxxxx` 句柄和取消信号，**自己**
+    /// 负责在取消、超时、刷屏时停进程并发结束事件；不可重试。
+    pub(crate) fn start_monitor<F, Fut>(&self, label: String, run: F) -> String
+    where
+        F: FnOnce(String, watch::Receiver<bool>) -> Fut,
+        Fut: Future<Output = TaskResult> + Send + 'static,
+    {
+        let id = new_task_id(&BackgroundTaskKind::Monitor);
+        let (cancel, cancelled) = watch::channel(false);
+        let future = Box::pin(run(id.clone(), cancelled.clone()));
+        self.launch(LaunchSpec {
+            agent_id: None,
+            kind: BackgroundTaskKind::Monitor,
+            label,
+            future,
+            retry: None,
+            lifecycle: None,
+            instruction_inbox: None,
+            cancel_aware: Some((id, cancel, cancelled)),
         })
     }
 
@@ -293,6 +360,7 @@ impl BackgroundTaskRegistry {
             retry: Some(launcher),
             lifecycle: Some(lifecycle),
             instruction_inbox: Some(instruction_inbox),
+            cancel_aware: None,
         })
     }
 
@@ -305,17 +373,16 @@ impl BackgroundTaskRegistry {
             retry,
             lifecycle,
             instruction_inbox,
+            cancel_aware,
         } = spec;
-        let prefix = if kind == BackgroundTaskKind::Shell {
-            "job"
-        } else {
-            "agent"
+        let self_cancelling = cancel_aware.is_some();
+        let (id, cancel, mut cancelled) = match cancel_aware {
+            Some(parts) => parts,
+            None => {
+                let (cancel, cancelled) = watch::channel(false);
+                (new_task_id(&kind), cancel, cancelled)
+            }
         };
-        let id = format!(
-            "{prefix}_{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..6]
-        );
-        let (cancel, mut cancelled) = watch::channel(false);
         let snapshot = BackgroundTaskSnapshot {
             id: id.clone(),
             agent_id,
@@ -351,9 +418,13 @@ impl BackgroundTaskRegistry {
             if let Some(lifecycle) = &lifecycle {
                 lifecycle(snapshot).await;
             }
-            let result = tokio::select! {
-                result = future => result,
-                _ = cancelled.changed() => TaskResult { status: BackgroundTaskStatus::Killed, exit_code: None, output: "task cancelled".to_owned() },
+            let result = if self_cancelling {
+                future.await
+            } else {
+                tokio::select! {
+                    result = future => result,
+                    _ = cancelled.changed() => TaskResult { status: BackgroundTaskStatus::Killed, exit_code: None, output: "task cancelled".to_owned() },
+                }
             };
             if let Some(event) = registry.finish(&task_id, result) {
                 if let Some(observer) = &observer {
@@ -371,7 +442,11 @@ impl BackgroundTaskRegistry {
         let event = {
             let mut state = self.inner.lock().expect("background registry");
             let task = state.tasks.iter_mut().find(|task| task.snapshot.id == id)?;
-            task.output = truncate(result.output);
+            // Shell 输出留尾（结论在末尾），子 Agent 报告留头（结论写在开头）。
+            task.output = truncate(
+                result.output,
+                task.snapshot.kind == BackgroundTaskKind::Shell,
+            );
             task.snapshot.status = result.status;
             task.snapshot.exit_code = result.exit_code;
             task.snapshot.elapsed_millis = task.started.elapsed().as_millis() as u64;
@@ -379,6 +454,14 @@ impl BackgroundTaskRegistry {
             task.snapshot.output_bytes = task.output.len();
             task.finished = Some(Instant::now());
             let snapshot = task.snapshot.clone();
+            // 监视器的结束通知已经由它自己按 monitor-ended.v1 发进内核，这里
+            // 再排一条 background-task-notification 就是同一件事讲两遍。
+            if snapshot.kind == BackgroundTaskKind::Monitor {
+                return Some(BackgroundTaskEvent {
+                    notice: task.output.clone(),
+                    snapshot,
+                });
+            }
             BackgroundTaskEvent {
                 notice: completion_notice(&snapshot, &task.output),
                 snapshot,
@@ -400,39 +483,58 @@ pub(crate) struct TaskResult {
     pub output: String,
 }
 
+/// 按后台任务合同 v1 渲染（见 [`crate::background_notice`]）。进程内任务不落盘，
+/// 所以没有日志路径。
 fn completion_notice(task: &BackgroundTaskSnapshot, output: &str) -> String {
-    let tag = if task.kind == BackgroundTaskKind::Subagent {
-        "subagent-report"
-    } else {
-        "background-task-notification"
+    use crate::background_notice::{Notice, NoticeKind, NoticeStatus};
+    let status = match task.status {
+        BackgroundTaskStatus::Completed => NoticeStatus::Completed,
+        BackgroundTaskStatus::Killed => NoticeStatus::Killed,
+        BackgroundTaskStatus::TimedOut => NoticeStatus::TimedOut,
+        BackgroundTaskStatus::LaunchFailed => NoticeStatus::LaunchFailed,
+        BackgroundTaskStatus::Partial => NoticeStatus::Partial,
+        BackgroundTaskStatus::Blocked => NoticeStatus::Blocked,
+        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Running => NoticeStatus::Failed,
     };
-    let tail = output
-        .lines()
-        .rev()
-        .take(40)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "<{tag}>\n{} `{}` finished: status={:?}, exit={:?}, elapsed={}ms.\n{}\n</{tag}>",
-        if task.kind == BackgroundTaskKind::Subagent {
-            "Subagent"
-        } else {
-            "Background task"
+    crate::background_notice::render(&Notice {
+        id: &task.id,
+        kind: match task.kind {
+            BackgroundTaskKind::Shell | BackgroundTaskKind::Monitor => NoticeKind::Shell,
+            BackgroundTaskKind::Subagent => NoticeKind::Subagent,
         },
-        task.id,
-        task.status,
-        task.exit_code,
-        task.elapsed_millis,
-        tail
+        label: &task.label,
+        status,
+        exit_code: task.exit_code,
+        duration_seconds: Some(task.elapsed_millis / 1_000),
+        output_path: None,
+        stderr_path: None,
+        omitted_bytes: 0,
+        output,
+    })
+}
+
+fn new_task_id(kind: &BackgroundTaskKind) -> String {
+    let prefix = match kind {
+        BackgroundTaskKind::Shell => "job",
+        BackgroundTaskKind::Subagent => "agent",
+        BackgroundTaskKind::Monitor => "mon",
+    };
+    format!(
+        "{prefix}_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..6]
     )
 }
 
-fn truncate(value: String) -> String {
+fn truncate(value: String, keep_tail: bool) -> String {
     if value.len() <= MAX_OUTPUT_BYTES {
         return value;
+    }
+    if keep_tail {
+        let mut boundary = value.len() - MAX_OUTPUT_BYTES;
+        while !value.is_char_boundary(boundary) {
+            boundary += 1;
+        }
+        return format!("[output truncated]\n{}", &value[boundary..]);
     }
     let mut boundary = MAX_OUTPUT_BYTES;
     while !value.is_char_boundary(boundary) {

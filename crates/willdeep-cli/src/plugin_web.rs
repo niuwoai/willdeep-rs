@@ -835,6 +835,38 @@ async fn ai_providers(
 struct AiMessage {
     role: String,
     content: String,
+    /// 插件媒体目录里的本地图片路径，只认 user 消息。见 `plugin_ai_media`。
+    #[serde(default, rename = "imagePaths")]
+    image_paths: Vec<String>,
+    /// 本宿主不支持视频（没有解码器抽帧），带了就拒，不静默丢。
+    #[serde(default, rename = "videoPaths")]
+    video_paths: Vec<String>,
+}
+
+/// 附件在起模型之前全部校验完：视频不支持、数量上限、只认 user 消息。
+/// 路径钳制与解码放在拼消息那一步，同样在请求发出之前。返回图片总数。
+fn media_attachment_count(messages: &[AiMessage]) -> Result<usize, &'static str> {
+    if messages
+        .iter()
+        .any(|message| !crate::plugin_ai_media::clean_paths(&message.video_paths).is_empty())
+    {
+        return Err("videosUnsupported");
+    }
+    let count: usize = messages
+        .iter()
+        .map(|message| crate::plugin_ai_media::clean_paths(&message.image_paths).len())
+        .sum();
+    if count > crate::plugin_ai_media::MAX_IMAGES {
+        return Err("tooManyImages");
+    }
+    // 与拼消息时的角色判定一致：只有 system / assistant 算非 user。
+    if messages.iter().any(|message| {
+        matches!(message.role.as_str(), "system" | "assistant")
+            && !crate::plugin_ai_media::clean_paths(&message.image_paths).is_empty()
+    }) {
+        return Err("mediaOnNonUserMessage");
+    }
+    Ok(count)
 }
 
 #[derive(Deserialize)]
@@ -931,6 +963,8 @@ async fn ai_complete(
     if total > MAX_AI_CHARS {
         return Err(PluginWebError::BadRequest("tooLong".to_owned()));
     }
+    let image_count = media_attachment_count(&request.messages)
+        .map_err(|code| PluginWebError::BadRequest(code.to_owned()))?;
 
     let config = crate::config::LoadedConfig::load(Some(&state.config_path))
         .map_err(|error| PluginWebError::Internal(error.to_string()))?;
@@ -1020,11 +1054,34 @@ async fn ai_complete(
     if !skill_text.trim().is_empty() {
         messages.push(Message::system(skill_text));
     }
+    let media_root = if image_count > 0 {
+        Some(crate::plugin_capabilities::plugin_media_directory(
+            &state.home,
+            &plugin,
+        )?)
+    } else {
+        None
+    };
     for message in request.messages {
+        let image_paths = crate::plugin_ai_media::clean_paths(&message.image_paths);
         messages.push(match message.role.as_str() {
             "system" => Message::system(message.content),
             "assistant" => Message::assistant(message.content, Vec::new()),
-            _ => Message::user(message.content),
+            _ => match (&media_root, image_paths.is_empty()) {
+                (Some(root), false) => {
+                    let mut attachments = Vec::with_capacity(image_paths.len());
+                    for raw in &image_paths {
+                        let path = crate::plugin_ai_media::clamp(raw, root)
+                            .map_err(|error| PluginWebError::BadRequest(error.code()))?;
+                        attachments.push(
+                            crate::plugin_ai_media::image_attachment(&path)
+                                .map_err(|error| PluginWebError::BadRequest(error.code()))?,
+                        );
+                    }
+                    Message::user_with_attachments(message.content, attachments)
+                }
+                _ => Message::user(message.content),
+            },
         });
     }
     // 注册可取消句柄。页面不传 streamID 就没有把手，这一轮跑到底为止。
@@ -1712,6 +1769,63 @@ mod tests {
 
         // 同源请求根本不带 Origin，也就不需要放行头。
         assert!(sandbox_cors(&HeaderMap::new()).is_none());
+    }
+
+    fn ai_message(role: &str, images: &[&str], videos: &[&str]) -> AiMessage {
+        AiMessage {
+            role: role.to_owned(),
+            content: "check".to_owned(),
+            image_paths: images.iter().map(|item| (*item).to_owned()).collect(),
+            video_paths: videos.iter().map(|item| (*item).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn media_attachments_are_counted_and_policed_before_any_model_call() {
+        assert_eq!(
+            media_attachment_count(&[ai_message("user", &[], &[])]),
+            Ok(0)
+        );
+        assert_eq!(
+            media_attachment_count(&[ai_message("user", &["/a.png", " /a.png ", ""], &[])]),
+            Ok(1),
+            "duplicates and blanks do not count"
+        );
+        // 本宿主没有视频解码器：带视频要拒，不能假装审过。
+        assert_eq!(
+            media_attachment_count(&[ai_message("user", &[], &["/clip.mp4"])]),
+            Err("videosUnsupported")
+        );
+        let many: Vec<String> = (0..=crate::plugin_ai_media::MAX_IMAGES)
+            .map(|index| format!("/{index}.png"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            media_attachment_count(&[ai_message("user", &many, &[])]),
+            Err("tooManyImages")
+        );
+        assert_eq!(
+            media_attachment_count(&[ai_message("assistant", &["/a.png"], &[])]),
+            Err("mediaOnNonUserMessage")
+        );
+        // 认不出的角色按 user 处理，和拼消息时一致。
+        assert_eq!(
+            media_attachment_count(&[ai_message("reviewer", &["/a.png"], &[])]),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn ai_messages_accept_camel_case_attachment_fields() {
+        let message: AiMessage = serde_json::from_value(json!({
+            "role": "user", "content": "x", "imagePaths": ["/a.png"], "videoPaths": ["/b.mp4"]
+        }))
+        .unwrap();
+        assert_eq!(message.image_paths, vec!["/a.png".to_owned()]);
+        assert_eq!(message.video_paths, vec!["/b.mp4".to_owned()]);
+        let plain: AiMessage =
+            serde_json::from_value(json!({"role": "user", "content": "x"})).unwrap();
+        assert!(plain.image_paths.is_empty() && plain.video_paths.is_empty());
     }
 
     #[test]

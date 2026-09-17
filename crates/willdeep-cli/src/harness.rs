@@ -136,6 +136,7 @@ fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
         ApprovalSource::Judge => "judge",
         ApprovalSource::AlwaysAllowList => "always-allow",
         ApprovalSource::User => "user",
+        ApprovalSource::NotRequired => "not-required",
     };
     let entry = serde_json::json!({
         "at": SystemTime::now()
@@ -187,12 +188,17 @@ pub(crate) enum HarnessFrontend {
 pub(crate) const KERNEL_WAKE_PROMPT: &str =
     "Runtime events arrived while you were away. Review them and continue.";
 
+/// 无头运行等后台结果时的轮询间隔。脱离作业要读磁盘，比进程内查询贵。
+const HEADLESS_BACKGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) struct BuiltHarness {
     pub session_id: uuid::Uuid,
     pub agent: Arc<Agent>,
     pub workspace: PathBuf,
     pub skills: Arc<willdeep_core::SkillCatalog>,
     pub background_tasks: Arc<BackgroundTaskRegistry>,
+    /// `run_in_background` 命令的落盘作业，已绑定本会话。
+    pub detached_jobs: Arc<willdeep_core::DetachedJobStore>,
     /// 宿主事件内核。前端把后台任务、入站通知交给它，主 Agent 在 turn 边界
     /// 收走——两条路只能留一条，否则同一个结果会向模型讲两遍。
     pub kernel: willdeep_core::EventKernel,
@@ -444,17 +450,32 @@ pub(crate) async fn execute_noninteractive(
     session.messages = outcome.messages.clone();
     store.save(session)?;
     loop {
+        // 「还在跑」必须在取结果**之前**看：任务先改状态、再投结果（监视器先发
+        // 结束事件、再改状态），反过来看会在两步之间读到「没在跑、也没结果」，
+        // 于是提前退出，最后那条结论永远到不了模型。
+        let running = built
+            .background_tasks
+            .snapshots()
+            .iter()
+            .any(|task| task.status == willdeep_core::BackgroundTaskStatus::Running)
+            || crate::detached_delivery::has_running_jobs(&built.detached_jobs, session.id);
         let events = built.background_tasks.drain_pending();
-        if events.is_empty() {
-            let running = built
-                .background_tasks
-                .snapshots()
-                .iter()
-                .any(|task| task.status == willdeep_core::BackgroundTaskStatus::Running);
+        // run_in_background 的命令是脱离作业，不在进程内注册表里：两边都要看，
+        // 否则无头运行会在命令还没跑完时就退出，模型永远见不到结论。
+        let finished_jobs = crate::detached_delivery::publish_finished_jobs(
+            &built.kernel,
+            &built.detached_jobs,
+            session.id,
+        );
+        // 监视器的事件已经在内核里了。被节流的那些只入队，不算唤醒理由；它们
+        // 随下一次唤醒（最迟是结束事件）一起交给模型。
+        let monitor_wake = built.background_tasks.take_monitor_signals() > 0
+            && built.kernel.pending_wake_authority(session.id).is_some();
+        if events.is_empty() && finished_jobs == 0 && !monitor_wake {
             if !running {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(HEADLESS_BACKGROUND_POLL).await;
             continue;
         }
         // 后台结果走事件内核，不再一条通知起一轮。
@@ -746,8 +767,15 @@ pub(crate) async fn build(
         None
     };
     let approval_log = home.join("approvals.jsonl");
+    // 作业记在本会话名下：结束通知只投给起它的会话。
+    let detached_jobs =
+        Arc::new(willdeep_core::DetachedJobStore::new(home).with_owner(session_id.to_string()));
+    // 日志现在是完整落盘的，不清理会一直涨。只动已结束的作业，扫描成本是一次
+    // 目录遍历，放在启动时做一次足够。
+    detached_jobs.prune();
     let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
     let hooks = build_hooks(&loaded.file.hooks).context("read [[hooks]]")?;
+    let kernel = willdeep_core::EventKernel::new();
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_output_store(&home.join("tool-outputs"))
         .with_sandbox(sandbox.clone())
@@ -761,7 +789,11 @@ pub(crate) async fn build(
         .with_background_tasks(background_tasks.clone())
         // 显式后台命令脱离父进程：Runtime 升级或重启之后，回来取结果就行，
         // 不必把一条跑了半小时的命令再跑一遍。
-        .with_detached_jobs(Arc::new(willdeep_core::DetachedJobStore::new(home)))
+        .with_detached_jobs(detached_jobs.clone())
+        // monitor 的事件直接进内核；TUI 与无头运行靠注册表里的信号计数决定
+        // 要不要唤醒。Runtime（daemon）前端暂时没有接唤醒，事件在下一个回合
+        // 边界照常交付。
+        .with_monitor_events(kernel.clone(), session_id, home.join("monitors"))
         .with_fallible_verification_snapshot(move || {
             verification::snapshot(&verification_snapshot_workspace)
         })
@@ -918,8 +950,7 @@ pub(crate) async fn build(
     )?;
     // 事件内核先于 Agent 建起来，并立刻把上一次运行没投递完的事件读回来。
     // 读不出来不挡启动：事件是通知不是账本，为一份坏日志让整个 Runtime 起不
-    // 来才是真的坏。
-    let kernel = willdeep_core::EventKernel::new();
+    // 来才是真的坏。（内核本身在工具注册表之前就建好了：monitor 要往里发事件。）
     let kernel_store = willdeep_core::kernel_store::KernelStore::new(home);
     let restored = willdeep_core::kernel_store::restore_into(&kernel, &kernel_store);
     for (path, reason) in &restored.quarantined {
@@ -1021,6 +1052,7 @@ pub(crate) async fn build(
         workspace,
         skills,
         background_tasks,
+        detached_jobs,
         kernel,
         kernel_store,
         context_window,
