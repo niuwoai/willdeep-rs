@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-15 | 当前版本：v0.73.0-rc7（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-17 | 当前版本：v0.73.0-rc8（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 

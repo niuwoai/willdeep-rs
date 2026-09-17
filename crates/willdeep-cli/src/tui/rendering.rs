@@ -29,6 +29,7 @@ pub(super) fn colored_transcript_at_width(
         }
         if let Some(content) = value.strip_prefix("WillDeep: ") {
             lines.extend(render_assistant_markdown(content, width));
+            lines.push(Line::default());
             continue;
         }
         // 「· 」开头的是本轮账目：它是给人瞥一眼的，不该跟对话正文抢注意力。
@@ -46,6 +47,10 @@ pub(super) fn colored_transcript_at_width(
                 .lines()
                 .map(|line| Line::styled(line.to_owned(), style)),
         );
+        // 一问一答之间留一行空白，否则整屏文字挤成一坨，读着累。
+        if value.starts_with("You:") {
+            lines.push(Line::default());
+        }
     }
     let mut text = Text::from(lines);
     if let Some(query) = search_query {

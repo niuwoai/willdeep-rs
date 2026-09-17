@@ -269,7 +269,8 @@ fn cjk_wraps() {
 fn transcript_height_uses_ratatui_word_wrapping() {
     let entries = vec!["WillDeep: 12345 12345 12345".to_owned()];
 
-    assert_eq!(rendered_transcript_height(&entries, 10), 4);
+    // 三行折行 + 前缀独占的一行 + 回复结束后留出的一行空白。
+    assert_eq!(rendered_transcript_height(&entries, 10), 5);
     assert_eq!(visual_lines(&entries.join("\n"), 10), 3);
 }
 #[test]
