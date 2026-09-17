@@ -233,3 +233,56 @@ async fn interrupted_chat_preserves_text_without_replaying_or_exposing_tools() {
     assert!(partial.usage.is_none());
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
+
+/// 线上会话里 67 条带工具调用的 assistant 有 10 条没吐思维链（`git commit`、
+/// `git switch` 这类直给的步骤），压缩器插入的归档引用/摘要也没有。thinking
+/// 模式带 tools 时每条 assistant 都得带 `reasoning_content`，缺一条就 400。
+#[test]
+fn thinking_history_backfills_empty_reasoning_on_every_assistant_message() {
+    let first = ToolCall {
+        id: "call-1".into(),
+        name: "run".into(),
+        arguments: "{\"cmd\":\"git status\"}".into(),
+    };
+    let second = ToolCall {
+        id: "call-2".into(),
+        name: "run".into(),
+        arguments: "{\"cmd\":\"git commit\"}".into(),
+    };
+    let history = vec![
+        Message::system("sys"),
+        Message::user("提交一下"),
+        Message::assistant("", vec![first.clone()]).with_reasoning(Some("先看状态".into())),
+        Message::tool(&first, "clean"),
+        Message::assistant("", vec![second.clone()]),
+        Message::tool(&second, "done"),
+        Message::assistant("<context-summary>…</context-summary>", Vec::new()),
+    ];
+    let wire = serde_json::to_value(wire_messages(&history)).unwrap();
+    assert_eq!(wire[2]["reasoning_content"], "先看状态");
+    assert_eq!(wire[4]["reasoning_content"], "");
+    assert_eq!(wire[6]["reasoning_content"], "");
+    for index in [0, 1, 3, 5] {
+        assert!(wire[index].get("reasoning_content").is_none(), "{index}");
+    }
+}
+
+/// 没见过思维链的端点不能凭空多出字段：严格校验的上游会拒未知字段。
+#[test]
+fn history_without_reasoning_sends_no_reasoning_field() {
+    let call = ToolCall {
+        id: "call-1".into(),
+        name: "run".into(),
+        arguments: "{}".into(),
+    };
+    let history = vec![
+        Message::user("hi"),
+        Message::assistant("", vec![call.clone()]),
+        Message::tool(&call, "ok"),
+        Message::assistant("done", Vec::new()),
+    ];
+    let wire = serde_json::to_value(wire_messages(&history)).unwrap();
+    for message in wire.as_array().unwrap() {
+        assert!(message.get("reasoning_content").is_none());
+    }
+}
