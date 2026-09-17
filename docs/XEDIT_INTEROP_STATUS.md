@@ -39,6 +39,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | 工种→模型映射（`someim-32b-<trade>`） | **已退役**（0.50.0-rc1 / 1.311.0-rc2）：七个别名在请求边界归一到 `someim-32b`，职责提示词由客户端持有 | `worker_tier.rs` 的 `normalize_hosted_model` + `hosted_worker_model` | `AgentSubagentModelCompatibility` |
 | Task Packet 字段 | 近乎字段级同构 | `subagent/types.rs:139-174` | `AgentSubagentTaskPacket.swift:19-66` |
 | 会话文件 | **单向**：rs 读 Swift + `pinnedAt` 就地回写；续聊写 rs 副本不覆盖原文件。0.43.0-rc1 起桥接会话进入 rs 历史面板并标 `[Xedit]` | `session.rs` 的 `swift_digest` / `swift_session`；`session_store.rs` 的 `extend_with_unmanaged` | Xedit 不读 `~/.willdeep/sessions` |
+| 跨机交接 `willdeep/handoff/*` 分支 | **Mac 发、rs 收**（Xedit 1.383.0-rc1 `/handoff` / rs 0.77.0-rc1 `willdeep handoff`）：分支头带 `.willdeep/handoff/<id>/session.json`（Session v1）与 `brief.md`；rs 只取对话、计划、目标、标题，接手方删掉传输目录即视为已接走 | `crates/willdeep-cli/src/handoff_cmd.rs`（含 Mac 形状样例测试） | `WillDeepCLIHandoff.swift`；`docs/SESSION_COLLABORATION_AND_HANDOFF.md` |
 | 会话标题两级生成 | 同一套语义，各自实现 | `session_title.rs`（占位符名单含 Xedit 的中英文默认名） | `AppStateAgentTitleSummarizer.swift`、`AgentSessionStore.isPlaceholderTitle` |
 | 本地辅助模型 | 语义对齐、配置存储暂不共享：复用单模型，本地优先后远端回退，低置信度才做模型路由 | `config.rs` `[local_model]`、`harness.rs`、`routing.rs` | `AgentLocalModelSupport.swift`、`AppStateAgentWorkerRouting.swift` |
 | `projects.json` | rs 读 Xedit | `crates/willdeep-cli/src/projects.rs` | Application Support |

@@ -19,6 +19,7 @@ mod detached_delivery;
 mod doctor;
 mod editor;
 mod event_cmd;
+mod handoff_cmd;
 mod harness;
 mod i18n;
 mod integrations;
@@ -223,6 +224,11 @@ enum CliCommand {
         #[command(subcommand)]
         action: job_cmd::JobAction,
     },
+    /// Receive sessions handed off from WillDeep for macOS through git branches.
+    Handoff {
+        #[command(subcommand)]
+        action: handoff_cmd::HandoffAction,
+    },
     /// Inspect the runtime event kernel: what arrived, what still needs you.
     Event {
         #[command(subcommand)]
@@ -357,6 +363,33 @@ impl std::fmt::Display for RunInputError {
 
 impl std::error::Error for RunInputError {}
 
+/// Global flags `handoff watch --accept` hands to each child `handoff accept`,
+/// so an unattended run uses the same profile, model and policy the operator
+/// started the watcher with. Secrets stay in the environment, never in argv.
+fn handoff_forwarded_args(cli: &Cli) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    if let Some(config) = &cli.config {
+        args.push("--config".into());
+        args.push(config.clone().into_os_string());
+    }
+    if let Some(profile) = &cli.profile {
+        args.push("--profile".into());
+        args.push(profile.into());
+    }
+    if let Some(model) = &cli.model {
+        args.push("--model".into());
+        args.push(model.into());
+    }
+    if cli.full_auto {
+        args.push("--full-auto".into());
+    }
+    if let Some(max_turns) = cli.max_turns {
+        args.push("--max-turns".into());
+        args.push(max_turns.to_string().into());
+    }
+    args
+}
+
 fn invalid_run_input(message: impl Into<String>) -> anyhow::Error {
     RunInputError(message.into()).into()
 }
@@ -452,6 +485,30 @@ async fn run() -> Result<()> {
             cli.json = args.output == RunOutput::Ndjson;
             Some(args)
         }
+        // Accepting a handoff imports the session, then continues it exactly
+        // like `run --session <id> --input <brief>` so the daemon/local choice,
+        // approvals and exit codes stay the ones `run` already has.
+        Some(CliCommand::Handoff {
+            action: handoff_cmd::HandoffAction::Accept(accept),
+        }) if !accept.no_run => {
+            let Some(prepared) =
+                handoff_cmd::accept(&accept, &willdeep_home()?, cli.workspace.as_deref())?
+            else {
+                return Ok(());
+            };
+            cli.no_tui = true;
+            cli.resume = Some(prepared.session_id.to_string());
+            cli.workspace = Some(prepared.workspace);
+            Some(RunArgs {
+                prompt: Vec::new(),
+                input: Some(prepared.brief_path),
+                attachment: Vec::new(),
+                session: Some(prepared.session_id.to_string()),
+                output: RunOutput::Text,
+                quiet: false,
+                local: false,
+            })
+        }
         command => {
             cli.command = command;
             None
@@ -480,6 +537,15 @@ async fn run() -> Result<()> {
             CliCommand::Integrations { action } => integrations::handle(action).await,
             CliCommand::Job { action } => job_cmd::run(action, &willdeep_home()?),
             CliCommand::Event { action } => event_cmd::run(action, &willdeep_home()?),
+            CliCommand::Handoff { action } => {
+                handoff_cmd::run(
+                    action,
+                    &willdeep_home()?,
+                    cli.workspace.as_deref(),
+                    handoff_forwarded_args(&cli),
+                )
+                .await
+            }
             CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
             CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {
@@ -1929,6 +1995,63 @@ mod tests {
         // The long form keeps working unchanged.
         let cli = Cli::try_parse_from(["willdeep", "--workspace", "/tmp"]).expect("long form");
         assert_eq!(cli.workspace.as_deref(), expected);
+    }
+
+    #[test]
+    fn handoff_subcommands_parse_and_forward_global_flags() {
+        let cli = Cli::try_parse_from([
+            "willdeep",
+            "-p",
+            "some-im",
+            "--full-auto",
+            "handoff",
+            "accept",
+            "20260917-x",
+            "--remote",
+            "upstream",
+            "--no-run",
+        ])
+        .expect("accept");
+        let Some(CliCommand::Handoff {
+            action: handoff_cmd::HandoffAction::Accept(ref accept),
+        }) = cli.command
+        else {
+            panic!("expected handoff accept");
+        };
+        assert_eq!(accept.branch.as_deref(), Some("20260917-x"));
+        assert_eq!(accept.remote, "upstream");
+        assert!(accept.no_run);
+        assert_eq!(
+            handoff_forwarded_args(&cli),
+            vec![
+                std::ffi::OsString::from("--profile"),
+                "some-im".into(),
+                "--full-auto".into()
+            ]
+        );
+
+        let watch = Cli::try_parse_from([
+            "willdeep",
+            "handoff",
+            "watch",
+            "--accept",
+            "--interval",
+            "5",
+        ])
+        .expect("watch");
+        let Some(CliCommand::Handoff {
+            action:
+                handoff_cmd::HandoffAction::Watch {
+                    interval,
+                    accept,
+                    ref remote,
+                },
+        }) = watch.command
+        else {
+            panic!("expected handoff watch");
+        };
+        assert_eq!((interval, accept, remote.as_str()), (5, true, "origin"));
+        assert!(Cli::try_parse_from(["willdeep", "handoff", "list", "--json"]).is_ok());
     }
 
     /// Short forms for the arguments typed most often. Each must resolve to

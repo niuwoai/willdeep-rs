@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.77.0-rc1] - 2026-09-17
+
+### Added
+- **`willdeep handoff`：接住 WillDeep for macOS 交接过来的会话（配套 Xedit 1.383.0-rc1 的 `/handoff`）。** 信道是 git 远端：Mac 端把代码与会话推到 `willdeep/handoff/*` 分支，Linux 上在同一仓库的克隆里接手。两边各用各的 git 凭据。
+  - `handoff list`：拉取交接分支，标出 `pending` / `imported` / `taken`（分支头没有传输文件即视为已被接走）。
+  - `handoff accept [分支]`：要求没有未提交的已跟踪改动；切到分支（已有本地分支只 fast-forward）、导入会话、按 `run --session <id> --input <brief>` 续跑，daemon / 本地、审批与退出码沿用 `run`。`--no-run` 只导入并提示 `willdeep -r <id>`。
+  - `handoff watch [--accept]`：轮询远端（默认 60 秒、最少 10 秒），新交接逐条接手、跑完再接下一条，并把 `--profile` / `--model` / `--config` / `--full-auto` / `--max-turns` 传给每次接手。
+  - **导入不信任文件里的配置**：新建本地会话，只取对话、计划、目标与标题；`config`、`profile`、`model`、路径一律忽略；孤立工具结果清洗掉；版本不是 1、id 与目录名不符、单个传输文件超过 16 MB 都拒绝。
+  - 测试用真实 git（裸远端 + 发送端 + 接收端）走完 列出 → 接手 → 已导入 → 删传输目录后变 taken，并覆盖脏工作区拒绝与 `--no-run`；样例 JSON 与 Mac 端 `WillDeepCLIHandoff.cliSessionJSON` 的输出同形。
+
+### Known issues
+- 只有 git 轮询，没有账号级推送：some.im 信道未实现，`watch` 发现新交接最多延迟一个轮询间隔。
+- `watch --accept` 接手后工作区若留有未提交改动，下一条交接会因脏工作区被拒，需要人处理。
+- 未在真实 Linux 机器上接过 Mac 实际推送的交接（两端都只有各自的测试覆盖）。
+- `cargo clippy -D warnings` 的两处存量报错（`cloned_ref_to_slice_refs`、`unused_assignments`）仍在，与本版本无关。
+
 ## [0.76.0-rc1] - 2026-09-17
 
 ### Added

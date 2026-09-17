@@ -19,6 +19,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
 | `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `job` | 查看脱离父进程的后台作业：跑完没有、退出码、输出 |
+| `handoff` | 接住 WillDeep for macOS 用 `/handoff` 推来的会话：列出、接手续跑、轮询等待 |
 | `integrations` | 查看和管理可选外部集成 |
 | `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
 | `doctor` | 不联系 Provider 的本地就绪诊断 |
@@ -234,6 +235,22 @@ willdeep event ignore <事件 ID>
 列表里的投递状态有两段，中间用 `/` 分开：前一段是**模型侧**（`queued` / `sending` / `seen`），后一段 `you` 表示**这条还等着人**。两者互不代劳，模型读过一封外部通知不等于替你回了。
 
 `ignore` 只结算你这一侧，事件本身留着：忽略是「我看过了」，不是「这件事没发生过」。**它不批准任何操作**——审批仍然要在它被提出的地方回答，终端、文件、浏览器与 MCP 各自的授权路径不受影响。
+
+## `willdeep handoff` — 接住 Mac 交接过来的会话
+
+```bash
+willdeep handoff list [--remote origin] [--json]
+willdeep handoff accept [分支] [--remote origin] [--no-run]
+willdeep handoff watch [--remote origin] [--interval 60] [--accept]
+```
+
+在同一仓库的克隆目录里执行（或用 `-w` 指定）。WillDeep for macOS 的 `/handoff` 会把代码（含未提交改动）连同会话推到 `willdeep/handoff/<时间>-<标题>` 分支，分支头带两份传输文件：`.willdeep/handoff/<会话 id>/session.json` 与 `brief.md`。信道就是 git 远端本身，两边机器各自需要该远端的 git 凭据，本命令不保存也不转发凭据。
+
+`list` 拉取 `willdeep/handoff/*` 并给每条标状态：`pending`（带传输文件、本机未导入）、`imported`（本机已导入过）、`taken`（分支头已经没有传输文件，说明有人接走了）。
+
+`accept` 不带分支名时接最新一条 `pending`；分支可以写完整名，也可以只写能唯一定位的一段（比如标题部分 `fix-login`），匹配到多条会列出来让你挑。它要求工作区没有未提交的已跟踪改动，然后切到该分支（本地已有同名分支时只做 fast-forward），把会话导入本机会话库，最后等价于 `willdeep run --session <id> --input <brief>` 续跑，daemon / 本地、审批、退出码都和 `run` 一致。`--no-run` 只导入和切分支，打印 `willdeep -r <id>` 供之后交互续跑。导入时只取对话、计划、目标与标题，文件里的路径、profile、模型、配置一律不认；孤立的工具结果按常规清洗掉。简报要求接手的 Agent 在第一个提交里删掉 `.willdeep/handoff/`。
+
+`watch` 每隔 `--interval` 秒（最少 10 秒）轮询一次，发现新的 `pending` 就打印；加 `--accept` 时按先到先接逐条执行 `handoff accept`，一条跑完再接下一条，`--profile`、`--model`、`--config`、`--full-auto`、`--max-turns` 会原样传给每次接手。适合放在 tmux 或 systemd 里常驻。Shell 命令在无人值守时仍按审批策略处理。
 
 ## `willdeep plugin`
 
