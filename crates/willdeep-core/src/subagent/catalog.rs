@@ -41,6 +41,8 @@ use super::types::{
     public_profile_id,
 };
 
+mod control;
+
 /// Hard ceiling on the attempt budget a task packet may ask for.
 const MAX_ATTEMPTS_CEILING: usize = 6;
 
@@ -78,6 +80,10 @@ pub struct SubagentCatalog {
     /// 谁也没指定的模型。
     tier_bindings: BTreeMap<crate::WorkerTier, TierBinding>,
     sandbox: crate::sandbox::SandboxSpec,
+    /// 这个目录（即这个父会话）起过的后台子 Agent。`send_agent_message` /
+    /// `stop_agent` 只认这份名单：注册表可能被别的入口共用，名单外的 id 一律
+    /// 当作找不到。
+    pub(super) owned_background_agents: Arc<Mutex<BTreeSet<uuid::Uuid>>>,
 }
 
 /// 一个档位兑现出来的模型。
@@ -125,6 +131,7 @@ impl SubagentCatalog {
             parent_session: None,
             tier_bindings: BTreeMap::new(),
             sandbox: crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::Off, []),
+            owned_background_agents: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -709,6 +716,10 @@ impl SubagentCatalog {
             let instruction_inbox = Arc::new(AgentInstructionInbox::default());
             let runner_instruction_inbox = instruction_inbox.clone();
             let runner_prepared = prepared.clone();
+            self.owned_background_agents
+                .lock()
+                .expect("owned background agents")
+                .insert(agent_id);
             let id = self.background.start_retriable_with_lifecycle(
                 agent_id,
                 BackgroundTaskKind::Subagent,

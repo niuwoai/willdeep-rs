@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-17 | 当前版本：v0.75.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-17 | 当前版本：v0.76.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -73,6 +73,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；
 - Daemon 重启后对“无工具活动且历史边界完全匹配”的活跃 Turn 自动重放；已写用户消息原样复用，存在副作用证据或歧义历史时完整保留并停止自动恢复；
 - Runtime Daemon 收到关停信号后为控制连接保留 5 秒收尾窗口，超时会强制关闭并释放活租约；过期租约删除失败会返回带路径的明确错误；
+- `monitor` 工具盯一条命令的 stdout，新行合批（200ms / 50 行）作为 `<monitor-event>` 在命令还在跑时交给模型，结束、超时、刷屏（60 秒超过 30 个事件）或 `kill_job` 后发 `<monitor-ended>`；审批与 `run_command` 同一道闸，每个监视器 30 秒最多唤醒一次空闲会话，日志完整落盘；格式遵循后台任务合同（金样 docs/contracts/monitor-event.v1.txt）；
+- 主 Agent 可用 `send_agent_message`（≤4000 字符，超长拒绝不截断，下一回合边界生效）与 `stop_agent` 指挥本会话起的后台子 Agent，不弹审批但写审批审计；子 Agent 拿不到这两个工具；
 - 后台 Shell 由同版本内部 Supervisor 通过匿名帧管道接收命令并监视父 Harness 存活；命令不进入进程参数或 Runtime 资源索引，Unix 在取消、超时或父端断开时终止独立进程组；
 - Daemon 重启将运行中的 Child Agent、Tool 与后台 Shell 明确收敛为 Interrupted，未应用 Agent 命令收敛为 Rejected，未真正启动的外部 Spawn Child 收敛为 Failed；后台 Shell 以 `background_shell:<job_id>` 精确绑定 Session、Turn、Task 与 Root Agent，恢复事件仅写一次且只含稳定归属 ID，专属 Worktree 原地保留供后续 Diff/合并/隔离；
 - Agent 树累计 input/output/total Token，跨 Session Turn、Child 重试与 Daemon 重启保持；

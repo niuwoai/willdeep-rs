@@ -281,13 +281,18 @@ impl EventKernel {
     ///
     /// 返回待投递事件里 authority 最高的那一档——最高档决定这次唤醒按谁记账，
     /// 因为真正把模型拉起来的是它。
+    ///
+    /// [`InterruptPolicy::Enqueue`] 的事件不算：它的语义就是「只入队，等别的原因
+    /// 启动下一轮」（例如被节流的监视器事件）。
     pub fn pending_wake_authority(&self, session_id: Uuid) -> Option<EventAuthority> {
         let state = self.state.lock().expect("kernel state");
         state
             .records
             .iter()
             .filter(|record| {
-                record.event.session_id == session_id && is_deliverable_to_model(record)
+                record.event.session_id == session_id
+                    && record.event.interrupt != InterruptPolicy::Enqueue
+                    && is_deliverable_to_model(record)
             })
             .map(|record| record.event.authority)
             .max()
@@ -794,7 +799,14 @@ fn renders_own_frame(event: &KernelEvent) -> bool {
     matches!(
         event.content_provenance,
         ContentProvenance::Tool | ContentProvenance::Model
-    ) && event.metadata.get(NOTICE_CONTRACT_KEY).map(String::as_str) == Some(NOTICE_CONTRACT_V1)
+    ) && matches!(
+        event.metadata.get(NOTICE_CONTRACT_KEY).map(String::as_str),
+        Some(
+            NOTICE_CONTRACT_V1
+                | crate::monitor_notice::MONITOR_EVENT_CONTRACT_V1
+                | crate::monitor_notice::MONITOR_ENDED_CONTRACT_V1
+        )
+    )
 }
 
 pub fn render_for_model(events: &[KernelEvent]) -> Option<String> {
@@ -1034,7 +1046,7 @@ pub fn background_task_event(
     let failed = !matches!(snapshot.status, BackgroundTaskStatus::Completed);
     let source = match snapshot.kind {
         BackgroundTaskKind::Subagent => EventSource::Worker,
-        BackgroundTaskKind::Shell => EventSource::Task,
+        BackgroundTaskKind::Shell | BackgroundTaskKind::Monitor => EventSource::Task,
     };
     let mut event = host_event(
         session_id,

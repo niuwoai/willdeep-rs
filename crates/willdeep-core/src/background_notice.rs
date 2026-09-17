@@ -138,7 +138,7 @@ pub fn format_duration(seconds: u64) -> String {
     }
 }
 
-fn label(value: &str) -> String {
+pub(crate) fn label(value: &str) -> String {
     let first = value.lines().next().unwrap_or_default().trim();
     let mut label = clean(first);
     if label.chars().count() > LABEL_CHARS {
@@ -147,7 +147,7 @@ fn label(value: &str) -> String {
     label
 }
 
-fn path(value: Option<&Path>) -> String {
+pub(crate) fn path(value: Option<&Path>) -> String {
     value.map_or_else(
         || "none".to_owned(),
         |path| clean(&path.display().to_string()),
@@ -173,7 +173,7 @@ fn tail(output: &str, lines: usize, chars: usize) -> String {
 
 /// 脱敏并中和标签：不可信文本里的 `</background-task-notification>` 不能
 /// 把框架提前关掉。
-fn clean(value: &str) -> String {
+pub(crate) fn clean(value: &str) -> String {
     let redacted = redact_lines(value);
     let mut out = String::with_capacity(redacted.len());
     let mut chars = redacted.chars().peekable();

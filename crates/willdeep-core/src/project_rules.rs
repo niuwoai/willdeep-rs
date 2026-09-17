@@ -51,7 +51,7 @@ impl ProjectRules {
     pub fn before_call(&mut self, call: &ToolCall) -> std::io::Result<bool> {
         if matches!(
             call.name.as_str(),
-            "run_command" | "spawn_agent" | "call_mcp_tool"
+            "run_command" | "monitor" | "spawn_agent" | "call_mcp_tool"
         ) || call.name.starts_with("mcp__")
         {
             // Shell and external tools have opaque path semantics. Discover the workspace's

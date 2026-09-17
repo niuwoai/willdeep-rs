@@ -15,6 +15,7 @@ use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage, sanitize_tool_history};
 
 mod context;
+mod messaging;
 mod parallel;
 mod progress;
 mod recovery;
@@ -49,7 +50,7 @@ impl AgentInstructionInbox {
         true
     }
 
-    fn drain(&self) -> Vec<String> {
+    pub(crate) fn drain(&self) -> Vec<String> {
         self.pending
             .lock()
             .map(|mut pending| pending.drain(..).collect())
@@ -1021,6 +1022,9 @@ impl Agent {
     {
         Box::pin(async move {
             if let Some(result) = self.execute_recovery_tool(call).await {
+                return result;
+            }
+            if let Some(result) = self.execute_agent_control_tool(call) {
                 return result;
             }
             if call.name != "spawn_agent" {

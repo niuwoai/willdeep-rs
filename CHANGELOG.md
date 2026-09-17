@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.76.0-rc1] - 2026-09-17
+
+### Added
+- **`monitor` 工具：命令还在跑的时候就把新输出交给模型（后台任务合同第三批 C1，canonical 在 Xedit `docs/BACKGROUND_TASK_CONTRACT.md`「C·一」）。** 对标 Claude Code 的 Monitor，替代「sleep + get_job_output」式轮询。`monitor(command, label, timeout_seconds?)` 立即返回 `mon_xxxxxx`，stdout 的新行作为 `<monitor-event>`（id / label / seq / lines + 脱敏过的代码块）推给模型，进程退出、超时、刷屏或被 `kill_job` 停掉时发 `<monitor-ended>`（reason / exit_code / duration / events / output_path）。
+  - **审批与 `run_command` 同一道闸**（`gate_command`），不开新口子；只读模式直接拒。
+  - **只有 stdout 是事件源**，stderr 只进日志；每行截到 2000 字符；200ms 合批、单个事件最多 50 行。
+  - **防刷屏与唤醒节流长在监视器自己身上**——宿主事件不走外部唤醒额度，没有别处可放：任意 60 秒超过 30 个事件即杀进程组并以 `reason: flooded` 结束；每个监视器 30 秒只唤醒一次空闲会话，其余事件以 `enqueue` 入队、在下一个回合边界随别的事件一起交给模型，结束事件不受限。为此内核的 `pending_wake_authority` 不再把 `enqueue` 事件算作唤醒理由（这本来就是它文档里写的语义）。
+  - **随宿主进程存活**，注册进进程内后台注册表：`kill_job` 可停，无头 `willdeep run` 等它结束、把事件与结束通知交给模型之后才退出；TUI 每秒刷新时按信号唤醒。日志完整落在 `~/.willdeep/monitors/<id>/stdout.log` / `stderr.log`（沿用 256MB 上限与 `.tail` / `.dropped`），运行中 `get_job_output(mon_id)` 返回状态与日志末尾。
+  - 新增按行流式读取的执行原语（`execution/line_stream.rs`），与一次性捕获共用 shell 构造、沙箱、进程组与日志落盘。
+  - 金样 `docs/contracts/monitor-event.v1.txt`（一条带凭据行与 `</monitor-event>` 注入行的事件、一条 exit 1 的正常结束、一条退出码未知的刷屏结束），渲染测试逐字比对；`scripts/check_background_contract.rb` 同时比对两份金样。内核对带 `notice_contract = monitor-event.v1 / monitor-ended.v1` 的工具来源事件不再整段转义框架，外部入站冒充照样转义。
+- **`send_agent_message` / `stop_agent`：主 Agent 指挥自己起的后台子 Agent（C·二）。** 此前 `instruct_agent` 只接到 TUI、daemon CLI 与 HTTP，模型自己改不了主意。`send_agent_message` 把消息投进子 Agent 的指令收件箱、下一个回合边界生效，上限 4000 字符、超长直接报错不截断；`stop_agent` 停掉它，报告照常以 `status: killed` 投回。
+  - **只认本会话起的子 Agent**：按父会话派工名单校验，别的会话的、编造的 id 一律报「找不到」；目标已结束时明确说「已结束，报告已投递或即将投递」。
+  - 不弹审批，但每次调用写一行 `approvals.jsonl`（新来源 `not-required`，只记动作、目标与结果，不记消息正文）。
+  - 子 Agent 的工具面在构建时剔除这两个工具（连同 `spawn_agent` 与恢复工具），不依赖工种白名单写对。
+
+### Fixed
+- 无头运行的后台等待循环先看「还在跑」再取结果：此前先取结果再看状态，任务在两步之间收尾时会读到「没在跑、也没结果」而提前退出，最后那条结论到不了模型。
+
+### Known issues
+- Runtime（daemon）托管的会话没有接 monitor 的唤醒：事件照常进内核、在下一个回合边界交给模型，但会话空闲时不会被拉起；daemon 路径同样没有脱离作业的发布与唤醒。
+- TUI 里切换到别的历史会话后，此前启动的 monitor 事件仍记在启动时的会话名下，不会唤醒新会话。
+- `~/.willdeep/monitors/` 暂无保留策略（后台作业有 7 天 / 200 个），需要手动清理。
+- `cargo clippy -D warnings` 的两处存量报错（`cloned_ref_to_slice_refs`、`unused_assignments`）仍在，与本版本无关。
+
 ## [0.75.0-rc1] - 2026-09-17
 
 ### Added

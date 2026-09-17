@@ -1,6 +1,6 @@
 # Xedit 工具能力对照
 
-> 最后更新：2026-08-10 | Rust CLI：v0.11.0-rc1
+> 最后更新：2026-09-17 | Rust CLI：v0.76.0-rc1
 
 ## 结论
 
@@ -10,8 +10,8 @@ Swift App 的工具注册表已经超过一百项，但它们并不都属于 Cod
 
 - 工作区：`search_files`、`grep_files`、`read_file`、`list_directory`、`create_file`、`edit_file`；
 - Git：`git_status`、`git_diff`、`list_worktrees`、`create_worktree`；
-- 执行：`run_command`、后台 Job、`get_job_output`、`kill_job`；
-- 协作：`ask_user`、`spawn_agent`、后台结果回流；
+- 执行：`run_command`、后台 Job、`get_job_output`、`kill_job`、`monitor`（按行把进行中的输出推给模型，合同与 Mac 共用，金样 `docs/contracts/monitor-event.v1.txt`；Mac 侧为 C2 期待做）；
+- 协作：`ask_user`、`spawn_agent`、`send_agent_message` / `stop_agent`（只动本会话起的后台子 Agent；Mac 侧为 C2 期待做）、后台结果回流；
 - 扩展：Skills、MCP stdio、`web_search`、`web_fetch`；
 - 会话：持久化、恢复、压缩，以及 Swift 历史会话兼容读取；
 - 多端：TUI、Mobile Gateway、内嵌 Web Server。

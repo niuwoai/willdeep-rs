@@ -74,6 +74,8 @@ pub enum ApprovalSource {
     AlwaysAllowList,
     /// The user was asked.
     User,
+    /// No approval is required by design; the trace is the audit record.
+    NotRequired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +230,7 @@ pub struct ToolRegistry {
     /// OS 级写入围栏。默认 `Off`：审批闸门判的是「模型请求做什么」，这一层
     /// 判的是「进程实际能做什么」，两者互补而不互替。
     sandbox: SandboxSpec,
+    monitors: Option<monitor::MonitorEventSink>,
     /// 生命周期挂钩。默认空：没配 hook 的用户不该为此付任何成本。
     hooks: HookRegistry,
     /// 只用于 hook 事件的溯源字段，不参与任何判定。
@@ -279,6 +282,7 @@ impl ToolRegistry {
             sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
             hooks: HookRegistry::default(),
             session_id: None,
+            monitors: None,
         }
         // Completion evidence belongs to the executor, even when its caller
         // does not subscribe to external verification reports.
@@ -821,6 +825,8 @@ impl ToolRegistry {
                 }),
             ),
         ];
+        tools.extend(self.monitors.as_ref().map(|_| monitor::definition()));
+        tools.extend(agent_control::definitions());
         if !self.mcp.is_empty() {
             tools.extend([
                 definition(
@@ -845,7 +851,12 @@ impl ToolRegistry {
         if self.approval_mode == ApprovalMode::ReadOnly
             && (matches!(
                 call.name.as_str(),
-                "run_command" | "create_file" | "edit_file" | "create_worktree" | "call_mcp_tool"
+                "run_command"
+                    | "monitor"
+                    | "create_file"
+                    | "edit_file"
+                    | "create_worktree"
+                    | "call_mcp_tool"
             ) || self.mcp.handles(&call.name))
         {
             return Err(ToolError::ReadOnlyPolicy(call.name.clone()));
@@ -917,6 +928,7 @@ impl ToolRegistry {
             "create_worktree" => self.create_worktree(parse(call)?).await,
             "get_job_output" => self.get_job_output(parse(call)?),
             "kill_job" => self.kill_job(parse(call)?).await,
+            "monitor" => self.monitor(parse(call)?).await,
             "ask_user" => self.ask_user(parse(call)?).await,
             "web_search" => self.web_search(parse(call)?).await,
             "web_fetch" => self.web_fetch(parse(call)?).await,
@@ -2166,6 +2178,9 @@ impl ToolRegistry {
     }
 
     fn get_job_output(&self, args: JobOutputArgs) -> Result<String, ToolError> {
+        if let Some(output) = self.monitor_output(&args.job_id, args.tail_lines) {
+            return Ok(output);
+        }
         if let Some(output) = self.background.output(
             &args.job_id,
             args.tail_lines
@@ -2247,8 +2262,12 @@ impl ToolRegistry {
     }
 }
 
+mod agent_control;
 mod background_shell;
+mod monitor;
 mod verification;
+pub use agent_control::MAX_AGENT_MESSAGE_CHARS;
+pub(crate) use agent_control::PARENT_ONLY_TOOLS;
 use background_shell::run_background_shell;
 pub use background_shell::run_background_supervisor;
 use verification::{capture_verification_snapshot, report_verification, verification_status};

@@ -16,6 +16,7 @@ pub mod kernel_store;
 #[cfg(test)]
 mod livefire;
 pub mod mcp;
+pub mod monitor_notice;
 pub mod plugin;
 mod project_rules;
 pub mod prompt;

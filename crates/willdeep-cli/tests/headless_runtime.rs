@@ -17,6 +17,8 @@ mod detached_background;
 mod foreground_recovery;
 #[path = "headless_runtime/local_partial.rs"]
 mod local_partial;
+#[path = "headless_runtime/monitor_events.rs"]
+mod monitor_events;
 
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -2677,6 +2679,8 @@ enum MockMode {
     FailingToolThenSuccess,
     /// 第一轮起一条 `run_in_background` 命令，之后正常收尾。
     BackgroundJobThenSuccess,
+    /// 第一轮起一个 `monitor`，之后正常收尾。
+    MonitorThenSuccess,
 }
 
 impl Drop for MockProvider {
@@ -2776,7 +2780,8 @@ async fn mock_provider_response(
         | MockMode::IncompleteThenSuccess
         | MockMode::DelayedSuccess(_)
         | MockMode::FailingToolThenSuccess
-        | MockMode::BackgroundJobThenSuccess => 200,
+        | MockMode::BackgroundJobThenSuccess
+        | MockMode::MonitorThenSuccess => 200,
     };
     let body = if matches!(state.mode, MockMode::CheckpointThenWait) && request_index == 0 {
         let command = r#"ruby -e 'File.open("progress.log", "a") { |file| file.write("checkpoint-once\n") }'"#;
@@ -2789,6 +2794,8 @@ async fn mock_provider_response(
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"read_missing","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"definitely-missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
     } else if matches!(state.mode, MockMode::BackgroundJobThenSuccess) {
         detached_background::response(&body, request_index)
+    } else if matches!(state.mode, MockMode::MonitorThenSuccess) {
+        monitor_events::response(&body, request_index)
     } else if mode_is_waiting_root(state.mode, request_index) {
         r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"ask_root","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"keep the root active?\",\"options\":[\"yes\"]}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned()
     } else if matches!(state.mode, MockMode::IncompleteThenSuccess) && request_index < 3 {

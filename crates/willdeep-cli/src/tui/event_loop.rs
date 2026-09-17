@@ -251,6 +251,12 @@ pub(super) async fn event_loop(
                     execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
                     wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;
                 }
+                // 监视器事件已经直接进了内核。唤醒是否放行由内核判：被节流的事件只
+                // 入队（Enqueue），不会把空闲会话拉起来。忙的时候回合收尾会再看一次。
+                if runtime.background_tasks.take_monitor_signals()>0 {
+                    willdeep_core::kernel_store::flush(&runtime.kernel,&runtime.kernel_store);
+                    wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;
+                }
                 // 上一份快照还没回来就不再叠加一份：几份并行在途的快照回来的
                 // 顺序没有保证，越多越容易把一份旧的排到新的后面。
                 if !snapshot_in_flight.swap(true,std::sync::atomic::Ordering::AcqRel) {

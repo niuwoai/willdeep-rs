@@ -7,8 +7,11 @@ use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::sandbox::SandboxSpec;
 
+mod line_stream;
 #[cfg(windows)]
 mod windows_job;
+
+pub(crate) use line_stream::{LineStreamEnd, run_line_stream};
 
 pub(crate) fn shell(command: &str, sandbox: &SandboxSpec) -> io::Result<Command> {
     match sandbox.command_line(crate::tools::SHELL_PROGRAM, command) {
