@@ -53,6 +53,7 @@ pub(super) async fn submit_turn(
         session.model.clone(),
     )
     .await?;
+    super::permission_commands::sync_session(app, session, runtime).await?;
     session.runtime_managed = true;
     if app.runtime_event_cursor == 0 {
         app.runtime_event_cursor = event_head;

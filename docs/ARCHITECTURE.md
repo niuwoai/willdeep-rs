@@ -63,7 +63,8 @@ Agent Loop 只理解：
 - 拒绝绝对路径和 `..`；
 - 已有文件 canonicalize 后再次检查工作区前缀，阻止符号链接逃逸；
 - 新文件检查最近存在的父目录，阻止通过符号链接写出工作区；
-- `strict` 对写入和命令逐次审批；默认 `smart` 放行已通过工作区边界校验的创建和编辑；
+- 审批档位 `strict` / `smart`（默认）/ `workspace-write` / `full-access` 与 Xedit 逐档对齐，判定集中在 `willdeep-core::tools::approval`；档位是 `SharedApprovalMode` 原子句柄，TUI（`/permissions`、Shift+Tab）、进程内 Agent 与 Runtime 任务共享同一份，切档对正在跑的一轮立即生效。Runtime 侧由 `daemon::approval_modes` 登记活跃任务句柄，会话档位经 `session.update_approval_mode` 持久化在 Runtime 会话上，`read_only` 工作区策略是硬上限；
+- `strict` 对写入和命令逐次审批；`smart` 放行已通过工作区边界校验的创建和编辑；
 - Shell 命令走两级审批：`willdeep-core::safety` 的静态分类器（按 Shell 语义分段，只读/受限即放行，破坏性形状直接交用户且**不送 AI**），中间地带交 `willdeep-core::judge` 的 AI 判官——判官只能免审，不能扩权，NO / 不可用一律回落用户；命令在出网前本地脱敏，裁决只认唯一一个完整 `<verdict>` 标签；
 - 非交互审批失败时拒绝，不自动升级；
 - HTTP 错误体限长并进行基础凭据脱敏。
@@ -74,7 +75,7 @@ Agent Loop 只理解：
 
 Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为 `SKILL.md`；附属资源 canonicalize 后必须仍位于 Skill 根目录，单次读取最多 48,000 字符。
 
-MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。所有 MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链；后两种模式只免审当前工作区内的 `create_file`、`edit_file`。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
+MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链（后两种只免审当前工作区内的 `create_file`、`edit_file`）；`full-access` 下免审并记审计。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
 
 ### Prompt 与附件
 

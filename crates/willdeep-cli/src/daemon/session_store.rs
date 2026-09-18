@@ -29,6 +29,9 @@ pub(crate) struct RuntimeSession {
     pub profile: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 用户在这个会话里选的审批档位。`None` 表示跟随工作区策略。
+    #[serde(default)]
+    pub approval_mode: Option<super::WorkspaceAccess>,
     pub config: Option<PathBuf>,
     pub status: RuntimeSessionStatus,
     pub active_turn_id: Option<uuid::Uuid>,
@@ -388,6 +391,7 @@ impl RuntimeSessionStore {
             workspace,
             profile: core.profile.clone(),
             model: core.model.clone(),
+            approval_mode: None,
             config: core.config.clone(),
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
@@ -438,6 +442,22 @@ impl RuntimeSessionStore {
             core.model = Some(model.clone());
         })?;
         session.model = Some(model);
+        session.updated_at = now();
+        let result = session.clone();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(result)
+    }
+
+    /// 只记在 Runtime 会话上，不写进核心会话文件：档位是这台机器上这个
+    /// Runtime 的执行偏好，不该跟着会话导出或被别的客户端导入。
+    pub fn update_approval_mode(
+        &self,
+        id: uuid::Uuid,
+        mode: super::WorkspaceAccess,
+    ) -> Result<RuntimeSession> {
+        let mut sessions = self.lock()?;
+        let session = sessions.get_mut(&id).context("Runtime Session not found")?;
+        session.approval_mode = Some(mode);
         session.updated_at = now();
         let result = session.clone();
         persist_sessions(&self.path, &sessions)?;
@@ -507,6 +527,8 @@ impl RuntimeSessionStore {
             workspace: source.workspace,
             profile: target_profile,
             model: core.model.clone(),
+            // 分叉出来的会话沿用原会话的档位：用户看到的是「同一个对话的另一支」。
+            approval_mode: source.approval_mode,
             config: source.config,
             status: RuntimeSessionStatus::Idle,
             active_turn_id: None,
@@ -1006,6 +1028,7 @@ impl RuntimeSessionStore {
                 attachments: turn.attachments.clone(),
                 workspace: session.workspace.clone(),
                 workspace_access: None,
+                approval_handle: None,
                 workspace_skills: None,
                 workspace_mcp_servers: None,
                 profile: session.profile.clone(),

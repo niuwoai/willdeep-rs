@@ -87,7 +87,7 @@ Runtime 控制 Token 不会传给 MCP 子进程。
 
 ### 审批
 
-**MCP 调用在所有审批模式下均逐次确认。** `smart`、`workspace-write` 和兼容参数 `--full-auto` 只免审当前工作区内的创建、编辑操作，不涉及 MCP。
+**除 `full-access` 外，MCP 调用在所有审批模式下均逐次确认。** `smart`、`workspace-write` 和兼容参数 `--full-auto` 只免审当前工作区内的创建、编辑操作，不涉及 MCP。
 
 Always Allow 对 MCP 的粒度仍是精确的 `server/tool` 组合，不是通用
 `call_mcp_tool`，更不是整个 server。

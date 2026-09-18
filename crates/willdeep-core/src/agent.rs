@@ -337,6 +337,11 @@ impl Agent {
         }
     }
 
+    /// 主 Agent 工具注册表的审批档位句柄。前端改它，下一次工具调用即生效。
+    pub fn approval_mode_handle(&self) -> crate::tools::SharedApprovalMode {
+        self.tools.approval_mode_handle()
+    }
+
     /// Switch future completions to another model without rebuilding the
     /// Agent's tools, approvals, subagents, or event sinks.
     pub fn set_model(&self, model: &str) -> Result<(), ProviderError> {

@@ -17,8 +17,8 @@ use willdeep_runtime_protocol::{
     RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTaskDiagnostics,
     RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
     RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SubmitTurnParams,
-    UpdateSessionModelParams, WorkspaceEnsureParams, WorktreeMergeParams, WorktreeQuarantineParams,
-    WorktreeReviewParams,
+    UpdateSessionApprovalModeParams, UpdateSessionModelParams, WorkspaceEnsureParams,
+    WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -236,6 +236,15 @@ impl RuntimeClient {
         request_id: uuid::Uuid,
     ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
         self.call("session.update_model", params, Some(request_id))
+            .await
+    }
+
+    pub async fn update_session_approval_mode(
+        &self,
+        params: &UpdateSessionApprovalModeParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
+        self.call("session.update_approval_mode", params, Some(request_id))
             .await
     }
 

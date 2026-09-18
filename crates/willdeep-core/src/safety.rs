@@ -1029,6 +1029,127 @@ fn basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
+/// Heads whose whole purpose is another host, a remote service, or state the
+/// OS write fence does not cover (a Docker daemon writes wherever it likes).
+static OUTSIDE_WORKSPACE_HEADS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "sftp",
+        "rsync",
+        "nc",
+        "ncat",
+        "telnet",
+        "ftp",
+        "mysql",
+        "mariadb",
+        "psql",
+        "mongo",
+        "mongosh",
+        "redis-cli",
+        "kubectl",
+        "helm",
+        "docker",
+        "podman",
+        "terraform",
+        "aws",
+        "gcloud",
+        "az",
+        "gh",
+        "open",
+        "osascript",
+        "sudo",
+        "su",
+        "doas",
+        "launchctl",
+        "systemctl",
+        "brew",
+        "apt",
+        "apt-get",
+        "dnf",
+        "yum",
+        "pacman",
+        "security",
+        "defaults",
+        "crontab",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// Subcommands that publish, talk to a remote, or install into a global
+/// location. Project-local dependency installs (`npm install`, `cargo build`)
+/// stay inside: the fence decides whether their cache writes are allowed.
+static OUTSIDE_WORKSPACE_SUBCOMMANDS: LazyLock<HashSet<(&'static str, &'static str)>> =
+    LazyLock::new(|| {
+        [
+            ("git", "push"),
+            ("git", "pull"),
+            ("git", "fetch"),
+            ("git", "clone"),
+            ("git", "ls-remote"),
+            ("git", "submodule"),
+            ("npm", "publish"),
+            ("npm", "login"),
+            ("yarn", "publish"),
+            ("yarn", "npm"),
+            ("pnpm", "publish"),
+            ("cargo", "publish"),
+            ("cargo", "login"),
+            ("cargo", "install"),
+            ("gem", "push"),
+            ("twine", "upload"),
+            ("go", "install"),
+            ("pip", "install"),
+            ("pip3", "install"),
+        ]
+        .into_iter()
+        .collect()
+    });
+
+/// Whether a command visibly reaches past the workspace: another host, a
+/// remote service, a privileged daemon, or a global install.
+///
+/// This is the workspace-write mode's second check, not a classifier. The OS
+/// write fence already confines file writes; what it cannot see is a request
+/// leaving the machine or a daemon acting on the command's behalf. Anything
+/// the parser cannot read counts as reaching outside — the mode then asks
+/// instead of guessing.
+pub fn reaches_outside_workspace(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.contains("<<") || trimmed.contains('`') || trimmed.contains("$(") {
+        return true;
+    }
+    let Some(segments) = split_segments(trimmed) else {
+        return true;
+    };
+    segments.iter().any(|segment| {
+        let tokens = strip_prefix_keywords(strip_env_assignments(tokenize(segment)));
+        let Some(head) = tokens.first() else {
+            return false;
+        };
+        let head = basename(&head.text).to_ascii_lowercase();
+        if OUTSIDE_WORKSPACE_HEADS.contains(head.as_str()) {
+            return true;
+        }
+        let global_install = tokens
+            .iter()
+            .any(|token| matches!(token.text.as_str(), "-g" | "--global"));
+        if global_install && matches!(head.as_str(), "npm" | "yarn" | "pnpm") {
+            return true;
+        }
+        tokens
+            .iter()
+            .skip(1)
+            .find(|token| !token.text.starts_with('-'))
+            .is_some_and(|subcommand| {
+                OUTSIDE_WORKSPACE_SUBCOMMANDS.contains(&(head.as_str(), subcommand.text.as_str()))
+            })
+    })
+}
+
 /// MCP tool names that read state. Used to skip the judge for obviously
 /// read-only MCP calls, mirroring the shell allowlist.
 pub fn mcp_tool_name_looks_read_only(tool: &str) -> bool {
@@ -1229,5 +1350,41 @@ mod tests {
         assert!(mcp_tool_name_looks_read_only("get_page_text"));
         assert!(!mcp_tool_name_looks_read_only("create_issue"));
         assert!(!mcp_tool_name_looks_read_only("get_and_delete_page"));
+    }
+
+    #[test]
+    fn outside_workspace_flags_remote_privileged_and_unparseable_commands() {
+        for command in [
+            "curl https://example.com",
+            "git push origin main",
+            "cd sub && git fetch",
+            "FOO=1 ssh host uptime",
+            "docker run --rm alpine",
+            "sudo make install",
+            "npm install -g typescript",
+            "cargo publish",
+            "pip install requests",
+            "echo $(whoami)",
+            "cat <<EOF\nx\nEOF",
+            "echo 'unterminated",
+        ] {
+            assert!(
+                reaches_outside_workspace(command),
+                "expected outside: {command}"
+            );
+        }
+        for command in [
+            "cargo test -p willdeep-core",
+            "npm install",
+            "make build && ./target/app --help",
+            "python3 scripts/gen.py > out.txt",
+            "git commit -m 'curl fix'",
+            "grep -rn 'git push' docs",
+        ] {
+            assert!(
+                !reaches_outside_workspace(command),
+                "expected inside: {command}"
+            );
+        }
     }
 }

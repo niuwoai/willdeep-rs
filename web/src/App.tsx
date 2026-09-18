@@ -16,7 +16,19 @@ import { PluginCommandPalette, PluginMenuPopup } from "./PluginMenus";
 import { menuEntries, useChatSelection, usePluginCommandRunner, type MenuEntry } from "./pluginMenuModel";
 import { SfIcon } from "./sfSymbols";
 
-type Workspace = { id: string; path: string; name: string; active: boolean; access: "read_only" | "smart" | "workspace_write" };
+type WorkspaceAccess = "read_only" | "strict" | "smart" | "workspace_write" | "full_access";
+type Workspace = { id: string; path: string; name: string; active: boolean; access: WorkspaceAccess };
+
+/** 工作区审批策略的展示名；与 Rust 端 `WorkspaceAccess::wire_name` 同一套拼写。 */
+function accessLabel(access: WorkspaceAccess, t: { accessReadOnly: string; accessStrict: string; accessSmart: string; accessWrite: string; accessFull: string }): string {
+  switch (access) {
+    case "read_only": return t.accessReadOnly;
+    case "strict": return t.accessStrict;
+    case "smart": return t.accessSmart;
+    case "workspace_write": return t.accessWrite;
+    case "full_access": return t.accessFull;
+  }
+}
 type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: ConversationItem[] };
 type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed"; startedAt: number; elapsedMs?: number };
@@ -818,7 +830,7 @@ export function App() {
       {/* 工作区收成一行：选择器占满，加号贴右。标签文字省掉——下拉里
           显示的就是工作区名和访问模式，再顶一行「工作区」是废话。 */}
       <Flex gap="1" align="center">
-        <NativeSelect.Root size="sm" flex="1" minW="0"><NativeSelect.Field aria-label={t.workspace} title={workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="var(--bg-raised)" borderColor="var(--border)" color="var(--text)">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {item.access === "read_only" ? t.accessReadOnly : item.access === "smart" ? t.accessSmart : t.accessWrite}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
+        <NativeSelect.Root size="sm" flex="1" minW="0"><NativeSelect.Field aria-label={t.workspace} title={workspace} value={workspace} onChange={(event) => setWorkspace(event.target.value)} bg="var(--bg-raised)" borderColor="var(--border)" color="var(--text)">{workspaces.map((item) => <option key={item.id} value={item.path}>{item.name} · {accessLabel(item.access, t)}{item.active ? ` · ${t.activeWorkspace}` : ""}</option>)}</NativeSelect.Field><NativeSelect.Indicator /></NativeSelect.Root>
         <button type="button" className={`workspace-add${addingWorkspace ? " active" : ""}`} title={addingWorkspace ? t.cancel : t.addWorkspace} aria-label={addingWorkspace ? t.cancel : t.addWorkspace} aria-expanded={addingWorkspace} onClick={() => { setAddingWorkspace((current) => !current); setWorkspaceError(""); }}>
           <SfIcon name={addingWorkspace ? "sf:x.mark" : "sf:plus.circle"} size={15} />
         </button>

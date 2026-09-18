@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use willdeep_core::hooks::HookRegistry;
 use willdeep_core::provider::{ApiDialect, ProviderConfig, ProviderKind};
-use willdeep_core::tools::{ApprovalSource, ApprovalTrace};
+use willdeep_core::tools::ApprovalTrace;
 use willdeep_core::{
     Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
     BackgroundTaskStatus, EventSink, ProviderSafetyJudge, RoutingGuard, RoutingPolicy, SafetyJudge,
@@ -127,17 +127,11 @@ const SOMEIM_CONTEXT_COMPRESSOR_MODEL: &str = "someim-32b-compressor";
 /// audit trail for "why did that command run without asking me" — and the
 /// raw material for tuning the static rules. Best-effort: a logging failure
 /// must never block a tool call.
-fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
+pub(crate) fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let source = match trace.source {
-        ApprovalSource::StaticAllowlist => "static",
-        ApprovalSource::Judge => "judge",
-        ApprovalSource::AlwaysAllowList => "always-allow",
-        ApprovalSource::User => "user",
-        ApprovalSource::NotRequired => "not-required",
-    };
+    let source = trace.source.as_str();
     let entry = serde_json::json!({
         "at": SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -176,6 +170,7 @@ pub(crate) enum HarnessFrontend {
         connection: RuntimeConnection,
         sink: Arc<dyn EventSink>,
         workspace_access: Option<crate::daemon::WorkspaceAccess>,
+        approval_handle: Option<willdeep_core::SharedApprovalMode>,
         allowed_skills: Vec<String>,
         allowed_mcp_servers: Vec<String>,
     },
@@ -298,6 +293,7 @@ pub(crate) async fn execute_runtime(
             connection,
             sink,
             workspace_access: request.workspace_access,
+            approval_handle: request.approval_handle.clone(),
             allowed_skills: request.workspace_skills.unwrap_or_default(),
             allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
         },
@@ -651,28 +647,22 @@ pub(crate) async fn build(
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
     let local_auxiliary_config = local_auxiliary_provider_config(&loaded.file.local_model);
-    let configured_approval = loaded.file.agent.approval.as_deref().unwrap_or("smart");
-    let runtime_access = match &frontend {
+    let (runtime_access, runtime_approval_handle) = match &frontend {
         HarnessFrontend::Runtime {
-            workspace_access, ..
-        } => *workspace_access,
-        _ => None,
+            workspace_access,
+            approval_handle,
+            ..
+        } => (*workspace_access, approval_handle.clone()),
+        _ => (None, None),
     };
     let approval_mode = if let Some(access) = runtime_access {
-        match access {
-            crate::daemon::WorkspaceAccess::ReadOnly => ApprovalMode::ReadOnly,
-            crate::daemon::WorkspaceAccess::Smart => ApprovalMode::Smart,
-            crate::daemon::WorkspaceAccess::WorkspaceWrite => ApprovalMode::WorkspaceAccess,
-        }
+        access.approval_mode()
     } else if cli.full_auto {
-        ApprovalMode::WorkspaceAccess
+        // `--full-auto` 发布时 workspace-write 与 smart 是同一套判定；档位拆开
+        // 之后，保留它原来的行为比悄悄换成另一档更重要。
+        ApprovalMode::Smart
     } else {
-        match configured_approval {
-            "strict" | "ask" | "request-every-time" => ApprovalMode::Strict,
-            "smart" | "auto-review" => ApprovalMode::Smart,
-            "workspace-write" | "workspace-access" => ApprovalMode::WorkspaceAccess,
-            _ => bail!("agent.approval must be `strict`, `smart`, or `workspace-write`"),
-        }
+        configured_approval_mode(&loaded.file.agent)?
     };
     let (allowed_skills, allowed_mcp_servers) = match &frontend {
         HarnessFrontend::Runtime {
@@ -776,9 +766,18 @@ pub(crate) async fn build(
     let sandbox = resolve_sandbox(&loaded.file.agent, approval_mode, &workspace);
     let hooks = build_hooks(&loaded.file.hooks).context("read [[hooks]]")?;
     let kernel = willdeep_core::EventKernel::new();
+    let approval_handle = runtime_approval_handle
+        .unwrap_or_else(|| willdeep_core::SharedApprovalMode::new(approval_mode));
+    approval_handle.set(approval_mode);
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
+        .with_shared_approval_mode(approval_handle)
         .with_output_store(&home.join("tool-outputs"))
         .with_sandbox(sandbox.clone())
+        .with_workspace_sandbox(resolve_workspace_sandbox(
+            &loaded.file.agent,
+            approval_mode,
+            &workspace,
+        ))
         .with_hooks(hooks)
         .with_approver(approver)
         .with_approval_reporter(move |trace| {
@@ -1167,6 +1166,46 @@ fn resolve_sandbox(
     let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
     roots.extend(agent.sandbox_writable_roots.iter().cloned());
     SandboxSpec::new(policy, roots)
+}
+
+/// `workspace-write` 档的围栏。
+///
+/// 这一档不请 AI 审核，「命令留在工作区里」只能靠内核来保证，所以没配
+/// `agent.sandbox` 时它也默认套上围栏；用户显式写了 `sandbox = false`，或
+/// 这台机器没有围栏实现时返回 `None`，该档对未分类的命令改为问人。
+/// 会话中途可以切到这一档，所以不论启动档位是什么都要算出来备用。
+fn resolve_workspace_sandbox(
+    agent: &crate::config::AgentSettings,
+    approval_mode: ApprovalMode,
+    workspace: &std::path::Path,
+) -> Option<willdeep_core::sandbox::SandboxSpec> {
+    use willdeep_core::sandbox::{SandboxPolicy, SandboxSpec};
+
+    if approval_mode == ApprovalMode::ReadOnly
+        || agent.sandbox == Some(false)
+        || !willdeep_core::sandbox::available()
+    {
+        return None;
+    }
+    let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
+    roots.extend(agent.sandbox_writable_roots.iter().cloned());
+    Some(SandboxSpec::new(SandboxPolicy::WorkspaceWrite, roots))
+}
+
+/// 配置里的 `agent.approval`，未配置时为 `smart`。`read-only` 是工作区策略，
+/// 不是会话默认档，这里不接受。
+pub(crate) fn configured_approval_mode(
+    agent: &crate::config::AgentSettings,
+) -> Result<ApprovalMode> {
+    let Some(value) = agent.approval.as_deref() else {
+        return Ok(ApprovalMode::Smart);
+    };
+    match ApprovalMode::parse(value) {
+        Some(mode) if mode != ApprovalMode::ReadOnly => Ok(mode),
+        _ => bail!(
+            "agent.approval must be `strict`, `smart`, `workspace-write`, or `full-access`, got `{value}`"
+        ),
+    }
 }
 
 #[cfg(test)]

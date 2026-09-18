@@ -113,7 +113,7 @@ impl ToolRegistry {
             command,
             label: label.clone(),
             workspace: self.workspace.clone(),
-            sandbox: self.sandbox.clone(),
+            sandbox: self.effective_sandbox(),
             timeout,
             sink,
             registry: self.background.clone(),

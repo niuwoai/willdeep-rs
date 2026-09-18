@@ -652,6 +652,23 @@ fn inline_comment(line: &str) -> Option<&str> {
     None
 }
 
+/// 把 `[agent] approval` 改成指定档位，其余内容（含注释）原样保留。与路由
+/// 设置共用同一套逐行补丁和原子写，免得两处各写一份配置写入逻辑。
+pub fn save_default_approval(path: &Path, mode: willdeep_core::ApprovalMode) -> Result<()> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read configuration file: {}", path.display()))?;
+    let patched = patch_key(
+        &contents,
+        Some("agent"),
+        "approval",
+        Some(toml_string(mode.as_str())),
+    );
+    let parsed: ConfigFile = toml::from_str(&patched)
+        .with_context(|| format!("validate updated configuration: {}", path.display()))?;
+    crate::config::validate(&parsed, path)?;
+    write_private_atomic(path, patched.as_bytes())
+}
+
 fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()

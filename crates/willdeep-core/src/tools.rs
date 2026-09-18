@@ -63,42 +63,9 @@ pub enum VerificationStatus {
 type VerificationReporter = Arc<dyn Fn(CommandVerification) + Send + Sync>;
 type VerificationSnapshot = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
 
-/// Why a command ran without an approval card — or why it needed one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalSource {
-    /// The static classifier proved the command read-only or bounded.
-    StaticAllowlist,
-    /// The AI judge returned YES for this exact action.
-    Judge,
-    /// A rule the operator previously chose to always allow.
-    AlwaysAllowList,
-    /// The user was asked.
-    User,
-    /// No approval is required by design; the trace is the audit record.
-    NotRequired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApprovalTrace {
-    pub command: String,
-    pub source: ApprovalSource,
-    /// Short, user-facing explanation ("static allowlist: read-only",
-    /// "judge unavailable: connection refused").
-    pub detail: String,
-}
-
-type ApprovalReporter = Arc<dyn Fn(ApprovalTrace) + Send + Sync>;
 const DEFAULT_WEB_MAX_CHARS: usize = 20_000;
 const MAX_WEB_MAX_CHARS: usize = 100_000;
 const MAX_WEB_REDIRECTS: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalMode {
-    ReadOnly,
-    Strict,
-    Smart,
-    WorkspaceAccess,
-}
 
 #[derive(Clone, Debug)]
 pub struct WebToolConfig {
@@ -183,7 +150,7 @@ pub enum ToolError {
 
 pub struct ToolRegistry {
     workspace: PathBuf,
-    approval_mode: ApprovalMode,
+    approval_mode: SharedApprovalMode,
     approver: Arc<dyn Approver>,
     skills: Arc<SkillCatalog>,
     mcp: Arc<McpRegistry>,
@@ -230,6 +197,8 @@ pub struct ToolRegistry {
     /// OS 级写入围栏。默认 `Off`：审批闸门判的是「模型请求做什么」，这一层
     /// 判的是「进程实际能做什么」，两者互补而不互替。
     sandbox: SandboxSpec,
+    /// `workspace-write` 档单独使用的围栏；见 [`ToolRegistry::effective_sandbox`]。
+    workspace_sandbox: Option<SandboxSpec>,
     monitors: Option<monitor::MonitorEventSink>,
     /// 生命周期挂钩。默认空：没配 hook 的用户不该为此付任何成本。
     hooks: HookRegistry,
@@ -256,7 +225,7 @@ impl ToolRegistry {
                 &workspace,
             ),
             workspace,
-            approval_mode,
+            approval_mode: SharedApprovalMode::new(approval_mode),
             approver: Arc::new(DenyApprover),
             skills: Arc::new(SkillCatalog::default()),
             mcp: Arc::new(McpRegistry::default()),
@@ -280,6 +249,7 @@ impl ToolRegistry {
             task_context: Arc::new(Mutex::new(String::new())),
             approval_reporter: None,
             sandbox: SandboxSpec::new(SandboxPolicy::Off, []),
+            workspace_sandbox: None,
             hooks: HookRegistry::default(),
             session_id: None,
             monitors: None,
@@ -529,7 +499,7 @@ impl ToolRegistry {
         &self,
         requested: &[String],
     ) -> Result<BTreeSet<PathBuf>, ToolError> {
-        if self.approval_mode == ApprovalMode::ReadOnly {
+        if self.approval_mode() == ApprovalMode::ReadOnly {
             return Err(ToolError::ReadOnlyPolicy("writing subagent".to_owned()));
         }
         if requested.is_empty() {
@@ -581,7 +551,7 @@ impl ToolRegistry {
     /// the child accepts only a byte-for-byte match after trimming the outer
     /// whitespace, and receives no remembered or wildcard authority.
     pub async fn approve_subagent_command(&self, command: &str) -> Result<String, ToolError> {
-        if self.approval_mode == ApprovalMode::ReadOnly {
+        if self.approval_mode() == ApprovalMode::ReadOnly {
             return Err(ToolError::ReadOnlyPolicy(
                 "subagent target_command".to_owned(),
             ));
@@ -597,11 +567,13 @@ impl ToolRegistry {
                 "target_command must contain 1 to 16384 bytes on one line".to_owned(),
             ));
         }
-        self.require_approval(
-            &format!("allow ops_runner subagent to run this exact command once:\n{command}"),
-            false,
-        )
-        .await?;
+        let action =
+            format!("allow ops_runner subagent to run this exact command once:\n{command}");
+        // 完全访问免的是审核，不是破坏性黑名单：`rm -rf` 形态照样问人。
+        let destructive = crate::safety::classify(command) == CommandSafety::AlwaysDangerous;
+        if destructive || !self.allowed_by_full_access(&action) {
+            self.require_approval(&action, false).await?;
+        }
         Ok(command.to_owned())
     }
 
@@ -848,7 +820,7 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
-        if self.approval_mode == ApprovalMode::ReadOnly
+        if self.approval_mode() == ApprovalMode::ReadOnly
             && (matches!(
                 call.name.as_str(),
                 "run_command"
@@ -909,11 +881,7 @@ impl ToolRegistry {
                 if !self.mcp.handles(&args.name) {
                     return Err(ToolError::UnknownTool(args.name));
                 }
-                self.require_rememberable_approval(
-                    &format!("call MCP tool: {}", args.name),
-                    format!("mcp:{}", args.name),
-                )
-                .await?;
+                self.require_mcp_approval(&args.name).await?;
                 Ok(self.mcp.call(&args.name, args.arguments).await?)
             }
             "search_files" => self.search_files(parse(call)?),
@@ -936,11 +904,7 @@ impl ToolRegistry {
             "create_file" => self.create_file(parse(call)?).await,
             "edit_file" => self.edit_file(parse(call)?).await,
             name if self.mcp.handles(name) => {
-                self.require_rememberable_approval(
-                    &format!("call MCP tool: {name}"),
-                    format!("mcp:{name}"),
-                )
-                .await?;
+                self.require_mcp_approval(name).await?;
                 let arguments =
                     call.parsed_arguments()
                         .map_err(|source| ToolError::InvalidArguments {
@@ -1333,11 +1297,10 @@ impl ToolRegistry {
 
     async fn create_worktree(&self, args: CreateWorktreeArgs) -> Result<String, ToolError> {
         let branch = sanitize_branch(&args.branch)?;
-        self.require_approval(
-            &format!("create Git worktree for new branch: {branch}"),
-            false,
-        )
-        .await?;
+        let action = format!("create Git worktree for new branch: {branch}");
+        if !self.allowed_by_full_access(&action) {
+            self.require_approval(&action, false).await?;
+        }
         let repository = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(&self.workspace)
@@ -1586,6 +1549,8 @@ impl ToolRegistry {
             .map(|label| format!("{label}\ncommand: {}", args.command))
             .unwrap_or_else(|| args.command.clone());
         self.gate_command(&args.command, &description).await?;
+        // 围栏跟着档位走：审批刚按哪一档放行，命令就套哪一档的围栏。
+        let sandbox = self.effective_sandbox();
         let timeout = args
             .timeout_seconds
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
@@ -1599,7 +1564,7 @@ impl ToolRegistry {
                         &args.command,
                         &description,
                         &self.workspace,
-                        &self.sandbox,
+                        &sandbox,
                         timeout,
                     )
                     .map_err(ToolError::Io)?;
@@ -1610,7 +1575,7 @@ impl ToolRegistry {
             }
             let command = args.command;
             let workspace = self.workspace.clone();
-            let sandbox = self.sandbox.clone();
+            let sandbox = sandbox.clone();
             let verification_reporter = self.verification_reporter.clone();
             let verification_snapshot = self.verification_snapshot.clone();
             let id = self.background.start_retriable(
@@ -1656,7 +1621,7 @@ impl ToolRegistry {
         let output = match crate::execution::run_capture(
             &args.command,
             &self.workspace,
-            &self.sandbox,
+            &sandbox,
             std::time::Duration::from_secs(timeout),
             self.command_output_limit(),
         )
@@ -1717,11 +1682,11 @@ impl ToolRegistry {
         let mut text = truncate_bytes(text, self.command_output_limit());
         // 把「命令自己错了」和「命令被围栏拦了」分开说。不分开的话，用户看到的
         // 是一句 `Operation not permitted`，然后花二十分钟怀疑自己的代码。
-        if self.sandbox.policy.is_enforcing()
+        if sandbox.policy.is_enforcing()
             && !output.status.success()
             && crate::sandbox::looks_like_denial(&text)
         {
-            text.push_str(&sandbox_denial_hint(&self.sandbox));
+            text.push_str(&sandbox_denial_hint(&sandbox));
         }
         if self.delegation_hints
             && !output.status.success()
@@ -1782,19 +1747,15 @@ impl ToolRegistry {
         Ok(format!("edited {} ({count} replacement(s))", args.path))
     }
 
-    /// Two-tier approval gate for shell commands.
+    /// Approval gate for shell commands.
     ///
-    /// `Strict` asks about everything, as advertised. `ReadOnly` never gets
-    /// here (write tools are refused earlier and commands are gated the same
-    /// as `Strict`). `Smart` and `WorkspaceAccess` run the static classifier
-    /// first — read-only and bounded commands just run — then consult the AI
-    /// judge for the ambiguous middle, and only escalate to the user when
-    /// both tiers decline.
+    /// Subagent narrowing (preapproved commands, read-only git, verifier
+    /// allowlists, reviewed child shells) runs first because no approval mode
+    /// may widen a worker. The main agent then goes through the per-mode gate
+    /// in [`approval`]: static rules, and depending on the mode the AI judge,
+    /// the OS write fence, or nothing but the destructive-shape denylist.
     async fn gate_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
         let trimmed = command.trim();
-        let escalate = |registry: &Self, detail: String| {
-            registry.report_approval(command, ApprovalSource::User, detail);
-        };
         if self.preapproved_commands.contains(trimmed) {
             self.report_approval(
                 command,
@@ -1893,241 +1854,7 @@ impl ToolRegistry {
                 )),
             };
         }
-        if matches!(
-            self.approval_mode,
-            ApprovalMode::Strict | ApprovalMode::ReadOnly
-        ) {
-            escalate(self, "strict approval mode".to_owned());
-            return self.ask_for_command(command, description).await;
-        }
-        if let Some(signature) = command_signature(command)
-            && self
-                .always_allowed
-                .lock()
-                .expect("always allow rules")
-                .contains(&signature)
-        {
-            self.report_approval(
-                command,
-                ApprovalSource::AlwaysAllowList,
-                "operator marked this exact command always-allowed".to_owned(),
-            );
-            return Ok(());
-        }
-
-        let allow_workspace_create = self.approval_mode != ApprovalMode::ReadOnly;
-        match crate::safety::classify_with_workspace_write(command, allow_workspace_create) {
-            CommandSafety::AlwaysSafe => {
-                self.report_approval(
-                    command,
-                    ApprovalSource::StaticAllowlist,
-                    "static rule: read-only or bounded workspace command".to_owned(),
-                );
-                return Ok(());
-            }
-            CommandSafety::AlwaysDangerous => {
-                // Destructive shapes never reach the judge — a model must not
-                // be able to talk its way into `rm -rf`.
-                escalate(
-                    self,
-                    "static rule: destructive shape, judge bypassed".to_owned(),
-                );
-                return self.ask_for_command(command, description).await;
-            }
-            CommandSafety::NeedsJudgment => {}
-        }
-
-        let Some(judge) = &self.safety_judge else {
-            escalate(self, "no AI judge configured".to_owned());
-            return self.ask_for_command(command, description).await;
-        };
-        let task_context = self.task_context.lock().expect("task context").clone();
-        let verdict = judge
-            .judge(JudgeRequest {
-                tool: "run_command".to_owned(),
-                command: command.to_owned(),
-                task_context,
-            })
-            .await;
-        // The judge model goes into every trace, not just the failures: an
-        // operator comparing "why does the CLI ask more than the app" needs to
-        // see which model answered, and a silent model swap is otherwise
-        // invisible in the audit trail.
-        let model = judge.model();
-        match verdict {
-            JudgeVerdict::Allow => {
-                self.report_approval(
-                    command,
-                    ApprovalSource::Judge,
-                    format!("AI review ({model}): bounded and consistent with the current task"),
-                );
-                Ok(())
-            }
-            JudgeVerdict::Deny => {
-                escalate(self, format!("AI review ({model}) declined"));
-                self.ask_for_command(command, description).await
-            }
-            JudgeVerdict::Unavailable(reason) => {
-                escalate(self, format!("AI review ({model}) unavailable: {reason}"));
-                self.ask_for_command(command, description).await
-            }
-        }
-    }
-
-    async fn ask_for_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
-        match command_signature(command) {
-            Some(signature) => {
-                self.require_rememberable_approval(
-                    &format!("run command: {description}"),
-                    signature,
-                )
-                .await
-            }
-            None => {
-                self.require_approval(&format!("run command: {description}"), false)
-                    .await
-            }
-        }
-    }
-
-    fn report_approval(&self, command: &str, source: ApprovalSource, detail: String) {
-        let Some(reporter) = &self.approval_reporter else {
-            return;
-        };
-        reporter(ApprovalTrace {
-            command: command.to_owned(),
-            source,
-            detail,
-        });
-    }
-
-    /// POST 是对外写操作，所有审批模式都要过一遍，`read-only` 策略直接拒。
-    ///
-    /// 「始终允许」按注册域名收敛，而不是像 shell 命令那样逐字记：POST 的 URL
-    /// 常带一次性 id、body 每次都不同，逐字规则下一次就对不上，等于没有。规则
-    /// 里只有域名，body 中的密钥不会被写进 always-allow.json。
-    async fn require_web_post_approval(
-        &self,
-        url: &reqwest::Url,
-        body_bytes: usize,
-        content_type: &str,
-    ) -> Result<(), ToolError> {
-        if self.approval_mode == ApprovalMode::ReadOnly {
-            return Err(ToolError::ReadOnlyPolicy(format!("POST to {url}")));
-        }
-        let domain = registrable_domain(url);
-        let description = format!(
-            "POST to {url}\nbody: {body_bytes} B ({content_type})\nAlways allow scope: every POST to {domain}"
-        );
-        self.require_rememberable_approval(
-            &description,
-            format!("{WEB_POST_SIGNATURE_PREFIX}{domain}"),
-        )
-        .await
-    }
-
-    /// 只读的公网抓取（web_fetch / web_search）不改动本地状态，SSRF 目标已被
-    /// `validate_public_url` 拦下，所以只有 Strict 模式才逐次询问。
-    async fn require_network_read_approval(&self, description: &str) -> Result<(), ToolError> {
-        if self.approval_mode != ApprovalMode::Strict {
-            return Ok(());
-        }
-        self.require_approval(description, false).await
-    }
-
-    async fn require_approval(
-        &self,
-        description: &str,
-        workspace_write: bool,
-    ) -> Result<(), ToolError> {
-        let workspace_write_allowed = workspace_write
-            && matches!(
-                self.approval_mode,
-                ApprovalMode::Smart | ApprovalMode::WorkspaceAccess
-            );
-        if workspace_write_allowed {
-            return Ok(());
-        }
-        match self.approver.approve(description, false).await {
-            ApprovalDecision::AllowOnce | ApprovalDecision::AlwaysAllow => Ok(()),
-            ApprovalDecision::Deny => Err(ToolError::ApprovalDenied(description.to_owned())),
-        }
-    }
-
-    pub(crate) async fn approve_uncertain_replay(&self, call: &ToolCall) -> Result<(), ToolError> {
-        let description = format!(
-            "Retry {} with the same arguments as an interrupted call whose effects are unknown? This may repeat an external or file side effect. Approval applies only to this attempt.",
-            call.name
-        );
-        match self.approver.approve(&description, false).await {
-            ApprovalDecision::AllowOnce => Ok(()),
-            _ => Err(ToolError::ApprovalDenied(
-                "uncertain replay requires one-time approval".into(),
-            )),
-        }
-    }
-
-    async fn require_rememberable_approval(
-        &self,
-        description: &str,
-        signature: String,
-    ) -> Result<(), ToolError> {
-        if self
-            .always_allowed
-            .lock()
-            .expect("always allow rules")
-            .contains(&signature)
-        {
-            return Ok(());
-        }
-        match self.approver.approve(description, true).await {
-            ApprovalDecision::AllowOnce => Ok(()),
-            ApprovalDecision::AlwaysAllow => {
-                self.always_allowed
-                    .lock()
-                    .expect("always allow rules")
-                    .insert(signature);
-                self.persist_always_allowed()?;
-                Ok(())
-            }
-            ApprovalDecision::Deny => Err(ToolError::ApprovalDenied(description.to_owned())),
-        }
-    }
-
-    fn persist_always_allowed(&self) -> Result<(), ToolError> {
-        let Some(path) = &self.always_allow_path else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut rules = self
-            .always_allowed
-            .lock()
-            .expect("always allow rules")
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        rules.sort();
-        let bytes = serde_json::to_vec_pretty(&rules)
-            .map_err(|error| ToolError::Network(error.to_string()))?;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        use std::io::Write;
-        let mut file = options.open(path)?;
-        file.write_all(&bytes)?;
-        file.flush()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        self.gate_main_command(command, description).await
     }
 
     async fn ask_user(&self, args: AskUserArgs) -> Result<String, ToolError> {
@@ -2263,6 +1990,9 @@ impl ToolRegistry {
 }
 
 mod agent_control;
+mod approval;
+use approval::ApprovalReporter;
+pub use approval::{ApprovalMode, ApprovalSource, ApprovalTrace, SharedApprovalMode};
 mod background_shell;
 mod monitor;
 mod verification;

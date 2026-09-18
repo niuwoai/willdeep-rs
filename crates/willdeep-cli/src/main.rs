@@ -727,6 +727,7 @@ async fn run() -> Result<()> {
                         .is_some_and(|args| args.quiet || args.output == RunOutput::Json),
                 }),
                 workspace_access: Some(daemon::WorkspaceAccess::ReadOnly),
+                approval_handle: None,
                 allowed_skills: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
             }

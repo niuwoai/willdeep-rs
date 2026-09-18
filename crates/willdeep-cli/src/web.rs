@@ -523,11 +523,7 @@ async fn workspaces(
             path: workspace.root.display().to_string(),
             name: workspace.name,
             active: workspace.active,
-            access: match workspace.access {
-                crate::daemon::WorkspaceAccess::ReadOnly => "read_only",
-                crate::daemon::WorkspaceAccess::Smart => "smart",
-                crate::daemon::WorkspaceAccess::WorkspaceWrite => "workspace_write",
-            },
+            access: workspace.access.wire_name(),
         })
         .collect();
     Ok(Json(values))
@@ -585,11 +581,7 @@ async fn add_workspace(
         path: workspace.root.display().to_string(),
         name: workspace.name,
         active: workspace.active,
-        access: match workspace.access {
-            crate::daemon::WorkspaceAccess::ReadOnly => "read_only",
-            crate::daemon::WorkspaceAccess::Smart => "smart",
-            crate::daemon::WorkspaceAccess::WorkspaceWrite => "workspace_write",
-        },
+        access: workspace.access.wire_name(),
     }))
 }
 

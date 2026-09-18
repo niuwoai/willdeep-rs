@@ -95,6 +95,7 @@
         "workspace": null,
         "profile": "default",
         "model": "example-model",
+        "approval_mode": "full_access",
         "status": "running",
         "active_turn_id": "00000000-0000-4000-8000-000000000004",
         "created_at": 120,

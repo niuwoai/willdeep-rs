@@ -316,6 +316,27 @@ pub(crate) async fn update_remote_session_model(
     Ok(())
 }
 
+pub(crate) async fn update_remote_session_approval_mode(
+    home: &Path,
+    id: uuid::Uuid,
+    mode: willdeep_core::ApprovalMode,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let access = super::workspace_store::public_access(WorkspaceAccess::from_approval_mode(mode));
+    api_data(
+        runtime_client(&state)?
+            .update_session_approval_mode(
+                &willdeep_runtime_protocol::UpdateSessionApprovalModeParams {
+                    id,
+                    approval_mode: access,
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .await?,
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn submit_runtime_turn(
     home: &Path,
     session_id: uuid::Uuid,

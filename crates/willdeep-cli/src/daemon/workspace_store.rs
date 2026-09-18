@@ -2,14 +2,64 @@ use super::*;
 
 const WORKSPACE_SCHEMA: u32 = 1;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
+/// 档位语义的版本。`1`（字段缺省）时 `workspace_write` 与 `smart` 是同一套
+/// 判定；`2` 起两者分开，见 `willdeep_core::tools::approval`。
+const ACCESS_SEMANTICS: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkspaceAccess {
     ReadOnly,
-    Smart,
+    Strict,
     #[default]
+    Smart,
     WorkspaceWrite,
+    FullAccess,
+}
+
+impl WorkspaceAccess {
+    pub(crate) fn approval_mode(self) -> willdeep_core::ApprovalMode {
+        use willdeep_core::ApprovalMode;
+        match self {
+            Self::ReadOnly => ApprovalMode::ReadOnly,
+            Self::Strict => ApprovalMode::Strict,
+            Self::Smart => ApprovalMode::Smart,
+            Self::WorkspaceWrite => ApprovalMode::WorkspaceAccess,
+            Self::FullAccess => ApprovalMode::FullAccess,
+        }
+    }
+
+    /// Web 接口与 Runtime 协议里的拼写（snake_case）。
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Strict => "strict",
+            Self::Smart => "smart",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    pub(crate) fn from_approval_mode(mode: willdeep_core::ApprovalMode) -> Self {
+        use willdeep_core::ApprovalMode;
+        match mode {
+            ApprovalMode::ReadOnly => Self::ReadOnly,
+            ApprovalMode::Strict => Self::Strict,
+            ApprovalMode::Smart => Self::Smart,
+            ApprovalMode::WorkspaceAccess => Self::WorkspaceWrite,
+            ApprovalMode::FullAccess => Self::FullAccess,
+        }
+    }
+
+    /// 会话档位与工作区策略合成这一轮实际生效的档位。`read_only` 工作区是
+    /// 硬上限：客户端不能替一个只读工作区自报可写。其余情况以会话里用户刚选
+    /// 的档位为准——它和工作区策略出自同一个本机用户，而且更晚。
+    pub(crate) fn with_session_override(self, session: Option<Self>) -> Self {
+        match (self, session) {
+            (Self::ReadOnly, _) | (_, None) => self,
+            (_, Some(session)) => session,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +100,10 @@ pub(crate) struct EnsureWorkspace {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistedWorkspaces {
     schema: u32,
+    /// 缺省即旧语义。不升 `schema`：升了之后旧版 Runtime 会拒绝整个注册表，
+    /// 回滚版本就起不来。
+    #[serde(default)]
+    access_semantics: u32,
     active_id: Option<uuid::Uuid>,
     items: Vec<RuntimeWorkspace>,
 }
@@ -64,15 +118,19 @@ impl WorkspaceStore {
         let state = if path.exists() {
             let content = std::fs::read(&path)
                 .with_context(|| format!("read Workspace registry {}", path.display()))?;
-            let state: PersistedWorkspaces = serde_json::from_slice(&content)
+            let mut state: PersistedWorkspaces = serde_json::from_slice(&content)
                 .with_context(|| format!("parse Workspace registry {}", path.display()))?;
             if state.schema != WORKSPACE_SCHEMA {
                 bail!("unsupported Workspace registry schema {}", state.schema);
+            }
+            if migrate_access_semantics(&mut state) {
+                persist(&path, &state)?;
             }
             state
         } else {
             PersistedWorkspaces {
                 schema: WORKSPACE_SCHEMA,
+                access_semantics: ACCESS_SEMANTICS,
                 ..PersistedWorkspaces::default()
             }
         };
@@ -167,7 +225,7 @@ impl WorkspaceStore {
             id,
             name: normalize_name(None, &root)?,
             root,
-            access: WorkspaceAccess::WorkspaceWrite,
+            access: WorkspaceAccess::default(),
             provider_profile: None,
             skills: Vec::new(),
             mcp_servers: Vec::new(),
@@ -440,13 +498,25 @@ pub(crate) async fn activate_remote_workspace(
     workspace_data(response).map(local_workspace)
 }
 
-fn public_access(access: WorkspaceAccess) -> willdeep_runtime_protocol::WorkspaceAccess {
+pub(crate) fn public_access(access: WorkspaceAccess) -> willdeep_runtime_protocol::WorkspaceAccess {
+    use willdeep_runtime_protocol::WorkspaceAccess as Public;
     match access {
-        WorkspaceAccess::ReadOnly => willdeep_runtime_protocol::WorkspaceAccess::ReadOnly,
-        WorkspaceAccess::Smart => willdeep_runtime_protocol::WorkspaceAccess::Smart,
-        WorkspaceAccess::WorkspaceWrite => {
-            willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite
-        }
+        WorkspaceAccess::ReadOnly => Public::ReadOnly,
+        WorkspaceAccess::Strict => Public::Strict,
+        WorkspaceAccess::Smart => Public::Smart,
+        WorkspaceAccess::WorkspaceWrite => Public::WorkspaceWrite,
+        WorkspaceAccess::FullAccess => Public::FullAccess,
+    }
+}
+
+pub(crate) fn local_access(access: willdeep_runtime_protocol::WorkspaceAccess) -> WorkspaceAccess {
+    use willdeep_runtime_protocol::WorkspaceAccess as Public;
+    match access {
+        Public::ReadOnly => WorkspaceAccess::ReadOnly,
+        Public::Strict => WorkspaceAccess::Strict,
+        Public::Smart => WorkspaceAccess::Smart,
+        Public::WorkspaceWrite => WorkspaceAccess::WorkspaceWrite,
+        Public::FullAccess => WorkspaceAccess::FullAccess,
     }
 }
 
@@ -465,13 +535,7 @@ fn local_workspace(workspace: willdeep_runtime_protocol::RuntimeWorkspace) -> Ru
         id: workspace.id,
         name: workspace.name,
         root: workspace.root.map(PathBuf::from).unwrap_or_default(),
-        access: match workspace.access {
-            willdeep_runtime_protocol::WorkspaceAccess::ReadOnly => WorkspaceAccess::ReadOnly,
-            willdeep_runtime_protocol::WorkspaceAccess::Smart => WorkspaceAccess::Smart,
-            willdeep_runtime_protocol::WorkspaceAccess::WorkspaceWrite => {
-                WorkspaceAccess::WorkspaceWrite
-            }
-        },
+        access: local_access(workspace.access),
         provider_profile: workspace.provider_profile,
         skills: workspace.skills,
         mcp_servers: workspace.mcp_servers,
@@ -572,6 +636,22 @@ fn mark_active(items: &mut [RuntimeWorkspace], active_id: Option<uuid::Uuid>) {
     }
 }
 
+/// 旧注册表里的 `workspace_write` 当年与 `smart` 判定完全相同，而且绝大多数
+/// 是自动登记时的默认值，不是用户选的。迁成 `smart` 才能让升级前后行为一致；
+/// 按字面保留反而会让它变成新的、不请 AI 审核的那一档。返回是否改动过。
+fn migrate_access_semantics(state: &mut PersistedWorkspaces) -> bool {
+    if state.access_semantics >= ACCESS_SEMANTICS {
+        return false;
+    }
+    for item in &mut state.items {
+        if item.access == WorkspaceAccess::WorkspaceWrite {
+            item.access = WorkspaceAccess::Smart;
+        }
+    }
+    state.access_semantics = ACCESS_SEMANTICS;
+    true
+}
+
 fn persist(path: &Path, state: &PersistedWorkspaces) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -625,7 +705,7 @@ mod tests {
             .unwrap();
         assert!(!second_item.active);
         let third_item = store.ensure_registered(&third).unwrap();
-        assert_eq!(third_item.access, WorkspaceAccess::WorkspaceWrite);
+        assert_eq!(third_item.access, WorkspaceAccess::Smart);
         assert!(store.activate(second_item.id).unwrap().unwrap().active);
         drop(store);
 
@@ -651,6 +731,70 @@ mod tests {
                 .unwrap()
                 .id,
             first_item.id
+        );
+    }
+
+    #[test]
+    fn legacy_workspace_write_migrates_to_smart_once() {
+        let home = temporary_root("workspace-migration");
+        let root = home.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = home.join("workspaces.json");
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "active_id": null,
+            "items": [{
+                "schema": 1,
+                "id": uuid::Uuid::new_v4(),
+                "name": "project",
+                "root": root.canonicalize().unwrap(),
+                "access": "workspace_write",
+                "provider_profile": null,
+                "skills": [],
+                "mcp_servers": [],
+                "created_at": 1,
+                "updated_at": 1,
+                "active": false
+            }]
+        });
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let store = WorkspaceStore::open(path.clone()).unwrap();
+        let item = store.ensure_registered(&root).unwrap();
+        assert_eq!(item.access, WorkspaceAccess::Smart);
+
+        // 迁移之后显式选的 workspace_write 是新语义，重开不能再被迁走。
+        store
+            .register(RegisterWorkspace {
+                root: root.clone(),
+                name: None,
+                access: WorkspaceAccess::WorkspaceWrite,
+                provider_profile: None,
+                skills: Vec::new(),
+                mcp_servers: Vec::new(),
+            })
+            .unwrap();
+        drop(store);
+        let reopened = WorkspaceStore::open(path).unwrap();
+        assert_eq!(
+            reopened.ensure_registered(&root).unwrap().access,
+            WorkspaceAccess::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn read_only_workspace_caps_the_session_override() {
+        assert_eq!(
+            WorkspaceAccess::ReadOnly.with_session_override(Some(WorkspaceAccess::FullAccess)),
+            WorkspaceAccess::ReadOnly
+        );
+        assert_eq!(
+            WorkspaceAccess::Smart.with_session_override(Some(WorkspaceAccess::Strict)),
+            WorkspaceAccess::Strict
+        );
+        assert_eq!(
+            WorkspaceAccess::WorkspaceWrite.with_session_override(None),
+            WorkspaceAccess::WorkspaceWrite
         );
     }
 }

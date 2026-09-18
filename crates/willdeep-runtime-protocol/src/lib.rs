@@ -131,6 +131,9 @@ pub struct RuntimeSession {
     pub workspace: Option<String>,
     pub profile: Option<String>,
     pub model: Option<String>,
+    /// 会话里选过的审批档位；`None` 跟随工作区策略。旧版 Runtime 不发这个字段。
+    #[serde(default)]
+    pub approval_mode: Option<WorkspaceAccess>,
     pub status: SessionStatus,
     pub active_turn_id: Option<uuid::Uuid>,
     pub created_at: u64,
@@ -305,6 +308,15 @@ pub struct RenameSessionParams {
 pub struct UpdateSessionModelParams {
     pub id: uuid::Uuid,
     pub model: String,
+}
+
+/// 切换会话的审批档位。对这个会话正在跑的一轮立即生效；工作区策略为
+/// `read_only` 时仍按只读执行。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSessionApprovalModeParams {
+    pub id: uuid::Uuid,
+    pub approval_mode: WorkspaceAccess,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -719,9 +731,14 @@ pub enum InteractionResultStatus {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceAccess {
     ReadOnly,
-    Smart,
+    /// 每次都问。与 Xedit 的 `requestEveryTime` 对应。
+    Strict,
     #[default]
+    Smart,
+    /// 工作区内的写入与围栏内的命令免审，不请 AI 审核；出工作区的动作问人。
     WorkspaceWrite,
+    /// 除破坏性命令黑名单外全部免审。与 Xedit 的 `fullAccess`（raw `silent`）对应。
+    FullAccess,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1164,6 +1181,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "session.get",
     "session.rename",
     "session.update_model",
+    "session.update_approval_mode",
     "session.fork",
     "session.archive",
     "session.delete",
@@ -1332,6 +1350,12 @@ mod tests {
         decode_fixture::<RuntimeCapabilities>(responses, "runtime");
         decode_fixture::<RuntimeWorkspace>(responses, "workspace");
         decode_fixture::<RuntimeSession>(responses, "session");
+        let session: ApiResponse<RuntimeSession> =
+            serde_json::from_value(responses["session"].clone()).unwrap();
+        let ApiResponse::Ok { data: session, .. } = session else {
+            panic!("session fixture must be ok");
+        };
+        assert_eq!(session.approval_mode, Some(WorkspaceAccess::FullAccess));
         decode_fixture::<RuntimeAgent>(responses, "agent");
         decode_fixture::<RuntimeTurn>(responses, "turn");
         decode_fixture::<RuntimeTool>(responses, "tool");
@@ -1570,6 +1594,7 @@ mod tests {
             workspace: Some("/workspace".to_owned()),
             profile: Some("coding".to_owned()),
             model: Some("model".to_owned()),
+            approval_mode: Some(WorkspaceAccess::WorkspaceWrite),
             status: SessionStatus::Idle,
             active_turn_id: None,
             created_at: 1,
@@ -1820,6 +1845,19 @@ mod tests {
             .unwrap(),
             update_model
         );
+        let approval = serde_json::json!({"id": id, "approval_mode": "full_access"});
+        assert_eq!(
+            serde_json::from_value::<UpdateSessionApprovalModeParams>(approval)
+                .unwrap()
+                .approval_mode,
+            WorkspaceAccess::FullAccess
+        );
+        assert!(
+            serde_json::from_value::<UpdateSessionApprovalModeParams>(
+                serde_json::json!({"id": id, "approval_mode": "yolo"})
+            )
+            .is_err()
+        );
         assert!(
             serde_json::from_value::<DeleteSessionParams>(serde_json::json!({
                 "id": id,
@@ -1832,6 +1870,7 @@ mod tests {
             "session.create",
             "session.rename",
             "session.update_model",
+            "session.update_approval_mode",
             "session.fork",
             "session.archive",
             "session.delete",

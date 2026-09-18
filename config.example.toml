@@ -6,9 +6,11 @@ default_provider = "some-im"
 # Each check must pass on the final Git snapshot. Does not grant execution permission.
 # verification_commands = ["cargo test --workspace"]
 max_turns = 64
+# strict | smart | workspace-write | full-access。TUI 里 /permissions 或 Shift+Tab 临时切换，
+# /permissions default <档位> 写回这里。详见 docs/APPROVALS.md。
 approval = "smart"
 language = "zh-CN" # zh-CN | en | ja; can be overridden by WILLDEEP_LANGUAGE/--language
-# smart / workspace-write 模式下的两级审批：本地静态规则先判，判不了的交给 AI 判官。
+# smart 模式下的两级审批：本地静态规则先判，判不了的交给 AI 判官。
 # 关掉判官，所有拿不准的命令都会直接弹审批卡。
 safety_judge = true
 # judge_model = "someim-security-guard" # some.im 默认走网关托管的安全策略；其它 provider 默认取会话模型
