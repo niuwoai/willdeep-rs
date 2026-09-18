@@ -1011,7 +1011,19 @@ fn gate_belongs_here(
     if let Some(origin) = origin_client.as_deref() {
         // 认得出发起端的任务只回发起端。看不出自己是谁的观察者（工作区级
         // 视图）也不该抢答：它连「这是不是我发起的」都回答不了。
-        return viewer_client == Some(origin);
+        if viewer_client == Some(origin) {
+            return true;
+        }
+        // 客户端身份是「界面:进程随机 id」，进程一退就再也匹配不上。发起这一轮
+        // 的 TUI 关掉之后，重开的 TUI 看着同一个会话，却永远弹不出那条审批，
+        // 任务就吊在那里（侧栏看得见、弹不出、也解不开）。所以同一种界面、同一
+        // 个会话也算自己人；跨界面（终端 vs 浏览器）仍然只回发起端。
+        return match (viewer, owner_session, viewer_client) {
+            (Some(viewer), Some(owner_session), Some(viewer_client)) => {
+                viewer == *owner_session && same_surface(origin, viewer_client)
+            }
+            _ => false,
+        };
     }
     match owner_session {
         // 工作区级视图（Web）：维持旧口径，工作区里的都归它管。
@@ -1019,6 +1031,15 @@ fn gate_belongs_here(
         // 没有会话归属的任务（headless 提交的）：谁都能解，否则没人解得开。
         None => true,
         Some(owner_session) => Some(*owner_session) == viewer,
+    }
+}
+
+/// 两个客户端身份（`tui:<id>` / `web:<id>`）是不是同一种界面。认不出前缀的
+/// 一律不算，宁可不弹也不替别的界面签字。
+fn same_surface(left: &str, right: &str) -> bool {
+    match (left.split_once(':'), right.split_once(':')) {
+        (Some((left, _)), Some((right, _))) => !left.is_empty() && left == right,
+        _ => false,
     }
 }
 
@@ -1196,6 +1217,42 @@ mod tests {
         assert!(gate_belongs_here(None, None, Some(&legacy(Some(theirs)))));
         // 不在本工作区的任务，连看都看不到。
         assert!(!gate_belongs_here(Some(mine), None, None));
+    }
+
+    /// 发起这一轮的 TUI 退出后，重开的 TUI 看着同一个会话，必须接得住那条审批。
+    /// 线上见过：审批挂了一整夜，侧栏看得见却弹不出来，任务一直吊着。
+    #[test]
+    fn a_reopened_tui_on_the_same_session_picks_up_an_orphaned_gate() {
+        let session = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let raised_by_old_tui = (Some(session), Some("tui:old-process".to_owned()));
+
+        assert!(gate_belongs_here(
+            Some(session),
+            Some("tui:new-process"),
+            Some(&raised_by_old_tui)
+        ));
+        assert!(
+            !gate_belongs_here(
+                Some(other),
+                Some("tui:new-process"),
+                Some(&raised_by_old_tui)
+            ),
+            "别的会话照样不弹"
+        );
+        assert!(
+            !gate_belongs_here(Some(session), Some("web:1"), Some(&raised_by_old_tui)),
+            "浏览器仍不替终端签字"
+        );
+        assert!(
+            !gate_belongs_here(Some(session), Some("tui"), Some(&raised_by_old_tui)),
+            "认不出的身份不算同一种界面"
+        );
+        assert!(!gate_belongs_here(
+            None,
+            Some("tui:new-process"),
+            Some(&raised_by_old_tui)
+        ));
     }
 
     /// 记了发起端的任务只弹回发起端，哪怕两端开着同一个会话。
