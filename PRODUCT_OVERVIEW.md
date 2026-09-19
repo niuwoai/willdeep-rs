@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-17 | 当前版本：v0.78.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-19 | 当前版本：v0.78.0-rc4（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -90,7 +90,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 多行 Prompt 编辑使用同一套 Unicode 单元格规则完成换行、滚动、鼠标定位与光标渲染；支持 F2 临时展开为终端大输入空间，并保留文本粘贴附件和可删除图片附件；图片可用 `Alt+V`、`Ctrl+V`、`Ctrl+Shift+V` 或终端可上报的 `Cmd+V` 从本机系统剪贴板附加；
 - TUI 聊天区内建 Unicode 可视列选择：可直接鼠标拖选并高亮，使用 Ctrl/Cmd+C 或 Y 复制到系统剪贴板，使用 Q 将选区以 Markdown 引用格式送入 Composer，不依赖终端软件的原生选择实现；
 - TUI 与 Web 的简体中文、英语、日语界面及持久语言偏好；
-- TUI 临时单行思考摘要，以及聊天标题、活动区和底部状态栏一致的动态运行指示、当前阶段、累计耗时、无新事件等待提示与 Runtime 重连恢复；Web 提供单行工作状态、逐轮工具轨迹与停止生成；
+- TUI 聊天区实时落下模型的中途文字与每次工具调用（`· … / ✓ / ✗ 工具 · 摘要`，完成后原地改标记），流式增量走临时单行预览；聊天标题、活动区和底部状态栏一致的动态运行指示、当前阶段、累计耗时、无新事件等待提示与 Runtime 重连恢复；Web 提供单行工作状态、逐轮工具轨迹与停止生成；
 - Web 聊天消息、工具轨迹和思考状态使用紧凑垂直节奏；Composer 聚焦只显示单一外框，内部 Textarea 不重复绘制 focus-visible 轮廓；
 - Rust CLI 构建显式跟踪 `web/dist`，前端产物变化会触发二进制重新嵌入，Debug 与 Release 不会静默沿用旧 Web UI；
 - Web/TUI 独立聊天历史滚动；TUI 支持常用 Markdown、HTML `<br>` 终端换行，以及按中文显示宽度对齐、窄屏单元格换行并带完整闭合细边框的 GFM 表格；
@@ -111,7 +111,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
 - TUI 在轮次运行中不再吞掉回车：`/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` 立即执行，提示词与 `/local`、`/runtime` 连同附件排队并在本轮结束后按序发出，会改会话或 Runtime 状态的命令给出明确原因；`Esc` 中断当前轮次（Runtime 轮次交给 Daemon 排空，`/local` 轮次掐进程内 Harness），中断后队列立即续上；手机中继与键盘共用同一条队列；
-- TUI 审批与提问对话框按会话归属弹出：同一工作区开多个 TUI 时，别的会话的审批不再在这里弹出、也无法被就地解掉；无会话归属的任务（headless 提交）仍对所有客户端可解，Web 工作区视图维持原口径；
+- TUI 审批与提问对话框按会话归属弹出：同一工作区开多个 TUI 时，别的会话的审批不再在这里弹出、也无法被就地解掉；无会话归属的任务（headless 提交）仍对所有客户端可解，Web 工作区视图维持原口径；记了发起端的审批弹回发起端，发起端退出后，同一种界面重开同一个会话也能接住，终端与浏览器之间互不代签；
 - Runtime 失败工具的原始参数与输出摘要经本机 `task.diagnostics` 提供，TUI Attention Inbox 详情直接显示退出码、失败域、失败原因、失败命令与输出；公共事件流（Web 桥接、手机中继）仍按原规则脱敏，写入日志前凭据打码且输出截断为有界首尾摘要；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
 - TUI Prompt、聊天区、活动区和状态栏四态焦点循环，以及候选、审批和 ask_user 的鼠标操作；

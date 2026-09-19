@@ -1644,7 +1644,7 @@ pub(crate) fn client_identity(surface: Surface) -> &'static str {
 ///   命令行。
 ///
 /// 认不出的工具返回 `None`：宁可不显示，也不要把一段不知道含什么的参数漏出去。
-fn tool_detail(name: &str, arguments: &str) -> Option<String> {
+pub(crate) fn tool_detail(name: &str, arguments: &str) -> Option<String> {
     const MAX_DETAIL_CHARS: usize = 60;
     let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
     let detail = match name {

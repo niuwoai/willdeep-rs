@@ -64,6 +64,7 @@ impl App {
             progress_log: VecDeque::new(),
             language,
             transient_thought: None,
+            turn_narration: None,
             selection_mode: false,
             native_selection_mode: false,
             chat_selection: None,
@@ -938,6 +939,7 @@ impl App {
         // 轮次结束，句柄就作废了；留着会让下一次 Esc 对着一个已完成的 Task 空掐。
         self.local_turn = None;
         self.transient_thought = None;
+        self.turn_narration = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
     }
 
@@ -952,6 +954,7 @@ impl App {
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
         self.turn_first_reply = None;
+        self.turn_narration = None;
         self.progress_log.clear();
         self.record_progress(initial_progress);
     }

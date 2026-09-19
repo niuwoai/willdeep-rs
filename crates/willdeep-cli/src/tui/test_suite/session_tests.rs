@@ -65,12 +65,6 @@ fn workspace_file_palette_is_bounded_and_skips_heavy_directories() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 #[test]
-fn transient_thought_is_single_line_and_bounded() {
-    let value = compact_thought(&format!("first\n{}", "x".repeat(300)));
-    assert!(!value.contains('\n'));
-    assert!(value.chars().count() <= 181);
-}
-#[test]
 fn renders_common_markdown_for_terminal() {
     let lines = render_assistant_markdown(
         "# Title\n- **bold** and `code`\n[Docs](https://example.com)",
@@ -387,6 +381,268 @@ fn runtime_events_resume_by_cursor_without_duplicate_chat_rows() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 线上复现：撞轮次上限的 Runtime 轮次以 `partial` 收尾，TUI 只认 `completed`，
+/// 于是整轮一个字不显示、「工作中」一直挂着，直到快照对账强行复位。
+#[test]
+fn runtime_partial_turn_shows_final_text_and_finishes() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-partial-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime partial");
+    let mut app = App::new(Vec::new(), Language::En);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = session.id;
+    let output = |sequence: u64, value: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id={task_id} {value}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+    let events = vec![
+        output(1, serde_json::json!({"type":"turn_started","turn":1})),
+        output(
+            2,
+            serde_json::json!({"type":"assistant_text","text":"Now remove the   unused\nimports"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert!(app.running);
+    assert!(app.transient_thought.is_none());
+    assert_eq!(
+        app.transcript,
+        vec!["WillDeep: Now remove the   unused\nimports"],
+        "mid-turn narration lands in the chat as soon as it is final"
+    );
+
+    let events = vec![
+        output(
+            3,
+            serde_json::json!({"type":"tool_requested","name":"edit_file"}),
+        ),
+        output(
+            4,
+            serde_json::json!({"type":"assistant_text_delta","text":"Now "}),
+        ),
+        output(
+            5,
+            serde_json::json!({"type":"assistant_text_delta","text":"update"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert_eq!(
+        app.transcript.get(1).map(String::as_str),
+        Some("· … edit_file"),
+        "the tool call gets its own chat row"
+    );
+    assert_eq!(app.transient_thought.as_deref(), Some("Now update"));
+
+    let events = vec![
+        output(
+            6,
+            serde_json::json!({"type":"partial","stop_reason":"max_turns","turns":64,"text":"turn limit reached"}),
+        ),
+        crate::daemon::RemoteRuntimeEvent {
+            sequence: 7,
+            kind: "task.partial".to_owned(),
+            message: format!("task_id={task_id} session_id={session_id}"),
+            visible: true,
+            session_id: Some(session_id),
+        },
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert!(!app.running);
+    assert!(app.transient_thought.is_none());
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| *line == "WillDeep: turn limit reached")
+            .count(),
+        1
+    );
+    assert_eq!(
+        transcript(&store.load(session.id).unwrap().messages),
+        vec![
+            "WillDeep: Now remove the   unused\nimports",
+            "WillDeep: turn limit reached"
+        ]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 工具调用直接进聊天区：发起时占一行，完成后原地改成 ✓/✗，不再只藏在活动区。
+#[test]
+fn runtime_tool_calls_land_in_chat_and_settle_in_place() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-tool-rows-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime tool rows");
+    let mut app = App::new(Vec::new(), Language::En);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = session.id;
+    let output = |sequence: u64, value: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id={task_id} {value}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+    let events = vec![
+        output(1, serde_json::json!({"type":"turn_started","turn":1})),
+        output(
+            2,
+            serde_json::json!({"type":"tool_requested","name":"run_command","detail":"cargo test -p"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert_eq!(app.transcript, vec!["· … run_command · cargo test -p"]);
+
+    let events = vec![
+        output(
+            3,
+            serde_json::json!({"type":"tool_completed","name":"run_command","is_error":true,"detail":"cargo test -p"}),
+        ),
+        output(
+            4,
+            serde_json::json!({"type":"tool_requested","name":"read_file"}),
+        ),
+        // 完成事件不带摘要也要能对上发起行。
+        output(
+            5,
+            serde_json::json!({"type":"tool_completed","name":"read_file","is_error":false}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert_eq!(
+        app.transcript,
+        vec!["· ✗ run_command · cargo test -p", "· ✓ read_file"]
+    );
+    assert!(app.running, "tool rows do not end the turn");
+    assert!(
+        session.messages.is_empty(),
+        "tool rows are display only, never model history"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 收尾只补聊天区还没见过的部分：撞轮次上限时守护进程把提示拼在最后一段前面，
+/// 只补那句提示；正常收尾与最后一段一模一样就不再落第二遍。会话镜像同样只补差量。
+#[test]
+fn runtime_reply_only_adds_what_narration_has_not_shown() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-reply-dedupe-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime reply dedupe");
+    let mut app = App::new(Vec::new(), Language::En);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = session.id;
+    let output = |sequence: u64, value: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id={task_id} {value}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+    let events = vec![
+        output(
+            1,
+            serde_json::json!({"type":"assistant_text","text":"Now update the log line"}),
+        ),
+        output(
+            2,
+            serde_json::json!({"type":"partial","stop_reason":"max_turns","turns":64,"text":"⚠ turn limit\n\nNow update the log line"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    let replies = |app: &App| {
+        app.transcript
+            .iter()
+            .filter(|line| line.starts_with("WillDeep: "))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        replies(&app),
+        vec![
+            "WillDeep: Now update the log line",
+            "WillDeep: ⚠ turn limit"
+        ]
+    );
+    assert_eq!(
+        transcript(&store.load(session.id).unwrap().messages),
+        vec![
+            "WillDeep: Now update the log line",
+            "WillDeep: ⚠ turn limit"
+        ]
+    );
+    assert!(!app.running);
+
+    let events = vec![
+        output(3, serde_json::json!({"type":"turn_started","turn":1})),
+        output(
+            4,
+            serde_json::json!({"type":"assistant_text","text":"All done."}),
+        ),
+        output(
+            5,
+            serde_json::json!({"type":"completed","stop_reason":"finished","turns":1,"text":"All done."}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert_eq!(
+        replies(&app),
+        vec![
+            "WillDeep: Now update the log line",
+            "WillDeep: ⚠ turn limit",
+            "WillDeep: All done."
+        ]
+    );
+    assert_eq!(
+        transcript(&store.load(session.id).unwrap().messages),
+        vec![
+            "WillDeep: Now update the log line",
+            "WillDeep: ⚠ turn limit",
+            "WillDeep: All done."
+        ]
+    );
+    assert!(!app.running);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_partial_terminal_event_alone_releases_busy_state() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-partial-terminal-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime partial terminal");
+    let mut app = App::new(Vec::new(), Language::En);
+    app.ensure_runtime_turn();
+    assert!(app.running);
+    let event = crate::daemon::RemoteRuntimeEvent {
+        sequence: 1,
+        kind: "turn.partial".to_owned(),
+        message: format!("session_id={} turn_id={}", session.id, uuid::Uuid::new_v4()),
+        visible: true,
+        session_id: Some(session.id),
+    };
+    runtime_ui::apply_runtime_events(&mut app, vec![event], &mut session, &store).unwrap();
+    assert!(!app.running);
+    assert!(!app.runtime_turn);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_chat_ignores_events_owned_by_another_session() {
     let root = std::env::temp_dir().join(format!(
@@ -551,8 +807,10 @@ fn runtime_events_render_child_agent_activity() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 聊天区里只有三种东西：工具行、回答、本轮账目。轮次号、task_id 这类运行时
+/// 标识仍只在活动区。
 #[test]
-fn runtime_chat_only_renders_the_assistant_answer() {
+fn runtime_chat_renders_tool_rows_then_the_assistant_answer() {
     let root = std::env::temp_dir().join(format!(
         "willdeep-tui-runtime-chat-content-{}",
         uuid::Uuid::new_v4()
@@ -588,12 +846,13 @@ fn runtime_chat_only_renders_the_assistant_answer() {
     )
     .unwrap();
 
-    // 回答之后跟一行本轮账目。这一轮没有用量事件，所以只报耗时——不印一个
-    // 像「真的用了 0 个 token」的 0。
-    assert_eq!(app.transcript.len(), 2, "{:?}", app.transcript);
-    assert_eq!(app.transcript[0], "WillDeep: 真实的 AI 回复");
-    assert!(app.transcript[1].starts_with("· total "));
-    assert!(!app.transcript[1].contains("in 0"));
+    // 工具行在前，回答之后跟一行本轮账目。这一轮没有用量事件，所以只报耗时——
+    // 不印一个像「真的用了 0 个 token」的 0。
+    assert_eq!(app.transcript.len(), 3, "{:?}", app.transcript);
+    assert_eq!(app.transcript[0], "· … read_file");
+    assert_eq!(app.transcript[1], "WillDeep: 真实的 AI 回复");
+    assert!(app.transcript[2].starts_with("· total "));
+    assert!(!app.transcript[2].contains("in 0"));
     assert!(
         !app.running,
         "the completed Runtime output must end the busy state"
