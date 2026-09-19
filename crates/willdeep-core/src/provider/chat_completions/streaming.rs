@@ -71,12 +71,19 @@ pub(super) async fn complete(
         })
 }
 
+/// 思维链攒到这么多字就冲刷一条 `ReasoningDelta`。思考型模型一步能吐几千字，
+/// 逐块外发会把守护进程的事件日志刷爆；界面只要「它此刻在想什么」，按段够用。
+const REASONING_DELTA_CHARS: usize = 120;
+
 #[derive(Default)]
 struct State {
     text: String,
     /// 思维链原文。只累积、不当作正文外发：它既不是模型给用户的回答，
     /// 但下一轮请求又必须原样带回去。
     reasoning: String,
+    /// 还没外发的那截思维链；攒够 [`REASONING_DELTA_CHARS`]、遇到换行、正文或
+    /// 工具调用开始、收尾时冲刷。
+    pending_reasoning: String,
     calls: BTreeMap<u64, ToolCall>,
     reason: Option<String>,
     usage: Option<Usage>,
@@ -88,7 +95,7 @@ impl State {
             if self.reason.is_none() {
                 return Err(invalid("stream completion lacks finish_reason"));
             }
-            return Ok((true, Vec::new()));
+            return Ok((true, self.flush_reasoning()));
         }
         let value: serde_json::Value =
             serde_json::from_str(&event.data).map_err(|error| invalid(error.to_string()))?;
@@ -120,6 +127,12 @@ impl State {
             for field in ["reasoning_content", "reasoning"] {
                 if let Some(text) = delta[field].as_str().filter(|text| !text.is_empty()) {
                     self.reasoning.push_str(text);
+                    self.pending_reasoning.push_str(text);
+                    if text.contains('\n')
+                        || self.pending_reasoning.chars().count() >= REASONING_DELTA_CHARS
+                    {
+                        updates.extend(self.flush_reasoning());
+                    }
                     break;
                 }
             }
@@ -128,6 +141,8 @@ impl State {
                     if self.reason.is_some() {
                         return Err(invalid("text delta after finish_reason"));
                     }
+                    // 正文一开始，思维链就结束了：先把攒着的那截发掉，保持先后顺序。
+                    updates.extend(self.flush_reasoning());
                     self.text.push_str(text);
                     updates.push(ProviderEvent::TextDelta(text.to_owned()));
                 }
@@ -136,6 +151,7 @@ impl State {
                 if self.reason.is_some() {
                     return Err(invalid("tool delta after finish_reason"));
                 }
+                updates.extend(self.flush_reasoning());
                 for call in calls {
                     self.merge_call(call)?;
                 }
@@ -152,9 +168,20 @@ impl State {
                     return Err(invalid("conflicting finish reasons"));
                 }
                 self.reason = Some(reason.to_owned());
+                updates.extend(self.flush_reasoning());
             }
         }
         Ok((false, updates))
+    }
+
+    /// 把还没外发的思维链作一条 `ReasoningDelta` 交出去；没有就什么都不发。
+    fn flush_reasoning(&mut self) -> Vec<ProviderEvent> {
+        if self.pending_reasoning.is_empty() {
+            return Vec::new();
+        }
+        vec![ProviderEvent::ReasoningDelta(std::mem::take(
+            &mut self.pending_reasoning,
+        ))]
     }
 
     fn merge_call(&mut self, value: &serde_json::Value) -> Result<(), ProviderError> {

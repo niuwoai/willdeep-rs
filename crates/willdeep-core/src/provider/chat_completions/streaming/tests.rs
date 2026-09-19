@@ -122,6 +122,101 @@ fn reasoning_deltas_are_kept_for_replay_without_leaking_into_the_answer() {
     assert_eq!(result.reasoning.as_deref(), Some("先看日志"));
 }
 
+fn reasoning_updates(updates: &[ProviderEvent]) -> Vec<&str> {
+    updates
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ReasoningDelta(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 思维链按段外发：攒够字数或遇到换行才冲刷，正文、工具调用、收尾前把剩下的
+/// 一截先发掉，顺序不乱；逐块外发会把事件日志刷爆。
+#[test]
+fn reasoning_deltas_are_flushed_in_batches_and_before_text_or_tools() {
+    let mut state = State::default();
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"先看"}}]}),
+    )
+    .unwrap();
+    assert!(updates.is_empty(), "too short to flush: {updates:?}");
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"日志\n"}}]}),
+    )
+    .unwrap();
+    assert_eq!(reasoning_updates(&updates), vec!["先看日志\n"]);
+
+    let half = "想".repeat(REASONING_DELTA_CHARS / 2);
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":half}}]}),
+    )
+    .unwrap();
+    assert!(updates.is_empty());
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":half}}]}),
+    )
+    .unwrap();
+    assert_eq!(
+        reasoning_updates(&updates)[0].chars().count(),
+        REASONING_DELTA_CHARS
+    );
+
+    // 正文一开始，攒着的思维链先发、正文后发。
+    push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"尾巴"}}]}),
+    )
+    .unwrap();
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"content":"好的"},"finish_reason":"stop"}]}),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            updates.as_slice(),
+            [ProviderEvent::ReasoningDelta(reasoning), ProviderEvent::TextDelta(text)]
+                if reasoning == "尾巴" && text == "好的"
+        ),
+        "{updates:?}"
+    );
+    let (done, updates) = state
+        .push(SseEvent {
+            kind: "message".into(),
+            data: "[DONE]".into(),
+        })
+        .unwrap();
+    assert!(done);
+    assert!(updates.is_empty(), "nothing left to flush: {updates:?}");
+    assert_eq!(
+        state.finish().unwrap().reasoning.as_deref().map(str::len),
+        Some("先看日志\n".len() + half.len() * 2 + "尾巴".len()),
+        "the replayed reasoning still carries every chunk"
+    );
+
+    // 工具调用开始同样先冲刷。
+    let mut state = State::default();
+    push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"reasoning_content":"想调工具"}}]}),
+    )
+    .unwrap();
+    let (_, updates) = push(
+        &mut state,
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":0,"id":"a","function":{"name":"read_file","arguments":"{}"}}
+        ]}}]}),
+    )
+    .unwrap();
+    assert_eq!(reasoning_updates(&updates), vec!["想调工具"]);
+}
+
 use crate::provider::stream_test_support::{Events, frame, server};
 
 /// DeepSeek 一类 thinking 模型要求上一轮的思维链原样回传，少了这条，只要历史里

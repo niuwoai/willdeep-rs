@@ -38,13 +38,14 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 21] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 22] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
             "/help",
             "/goal <文本>|off",
             "/plan",
+            "/tools",
             "/compress",
             "/model [模型名]",
             "/permissions [档位]",
@@ -68,6 +69,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 21] {
             "/help",
             "/goal <text>|off",
             "/plan",
+            "/tools",
             "/compress",
             "/model [model]",
             "/permissions [mode]",
@@ -91,6 +93,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 21] {
             "/help",
             "/goal <テキスト>|off",
             "/plan",
+            "/tools",
             "/compress",
             "/model [モデル名]",
             "/permissions [モード]",
@@ -125,7 +128,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 21] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 21] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 22] {
     [
         (
             "/help",
@@ -141,6 +144,14 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
                 "展开或收起最新计划原始记录",
                 "Toggle latest plan records",
                 "最新計画の記録を展開・折りたたむ",
+            ),
+        ),
+        (
+            "/tools",
+            language.text(
+                "展开或收起聊天区里收起的工具调用行",
+                "Toggle folded tool-call rows in the chat",
+                "チャットで畳まれたツール行を展開・折りたたむ",
             ),
         ),
         (

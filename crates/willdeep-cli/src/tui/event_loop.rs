@@ -178,6 +178,9 @@ pub(super) async fn event_loop(
         {
             app.attachments = queued.attachments;
             app.selected_attachment = 0;
+            if !queued.from_phone {
+                app.mark_queued_prompt_sent(&queued.text);
+            }
             if queued.from_phone {
                 app.append_transcript(format!("Phone: {}", queued.text));
                 dispatch_prompt(
@@ -231,6 +234,10 @@ pub(super) async fn event_loop(
                 }
             }
             continue;
+        }
+        // 本轮刚结束：响一声铃，盯着别处的用户也知道轮到自己了。
+        if std::mem::take(&mut app.bell_pending) {
+            execute!(term.backend_mut(), crossterm::style::Print("\x07"))?;
         }
         draw(term, &mut app, &runtime.skills)?;
         tokio::select! {
@@ -883,7 +890,8 @@ pub(super) async fn event_loop(
                                     BusyInput::RunNow=>{},
                                     BusyInput::Queue=>{
                                         let text=app.input.take();
-                                        app.append_transcript(format!("You: {text}"));
+                                        let row=app.queued_prompt_row(&text);
+                                        app.append_transcript(row);
                                         app.queued_prompts.push_back(QueuedPrompt{
                                             text,
                                             attachments:std::mem::take(&mut app.attachments),
@@ -1060,13 +1068,8 @@ pub(super) async fn event_loop(
             Some(message)=runtime.rx.recv()=>match message {
                 UiMessage::Agent(AgentEvent::ProviderProgress(event))=>match event {
                     willdeep_core::provider::ProviderEvent::RetryStarted{attempt}=>app.record_progress(format!("{} · {attempt}",language.text("正在重试","Retrying","再試行中"))),
-                    willdeep_core::provider::ProviderEvent::TextDelta(text)=>{
-                        app.activity_line=language.text("正在接收回复","Receiving reply","応答を受信中").to_owned();
-                        let mut preview=app.transient_thought.take().unwrap_or_default();
-                        preview.push_str(&text);
-                        let skip=preview.chars().count().saturating_sub(THOUGHT_PREVIEW_CHARS);
-                        app.transient_thought=Some(preview.chars().skip(skip).collect());
-                    },
+                    willdeep_core::provider::ProviderEvent::TextDelta(text)=>app.stream_transient(StreamKind::Reply,&text),
+                    willdeep_core::provider::ProviderEvent::ReasoningDelta(text)=>app.stream_transient(StreamKind::Reasoning,&text),
                     willdeep_core::provider::ProviderEvent::Usage(usage)=>{app.context_tokens=usage.input_tokens.unwrap_or(app.context_tokens);app.latest_usage=usage;},
                     willdeep_core::provider::ProviderEvent::RetryWait{attempt,delay}=>app.record_progress(format!("{} · {attempt} · {}s",language.text("服务端要求等待后重试","Waiting before provider retry","再試行を待機中"),delay.as_secs_f64())),
                 },

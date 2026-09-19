@@ -33,7 +33,7 @@ pub(super) fn colored_transcript_at_width(
             continue;
         }
         // 「· 」开头的是本轮账目：它是给人瞥一眼的，不该跟对话正文抢注意力。
-        let style = if value.starts_with("· ") {
+        let style = if value.starts_with("· ") || value.starts_with(TURN_DIVIDER_PREFIX) {
             Style::default().fg(Color::DarkGray)
         } else if value.starts_with("You:") {
             Style::default().fg(Color::Cyan)
@@ -47,8 +47,8 @@ pub(super) fn colored_transcript_at_width(
                 .lines()
                 .map(|line| Line::styled(line.to_owned(), style)),
         );
-        // 一问一答之间留一行空白，否则整屏文字挤成一坨，读着累。
-        if value.starts_with("You:") {
+        // 一问一答之间、一轮结束之后各留一行空白，否则整屏文字挤成一坨，读着累。
+        if value.starts_with("You:") || value.starts_with(TURN_DIVIDER_PREFIX) {
             lines.push(Line::default());
         }
     }
@@ -696,6 +696,9 @@ fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
 
 /// 流式回复预览只留最后这么多字符，进程内与 Runtime 轮次共用。
 pub(super) const THOUGHT_PREVIEW_CHARS: usize = 1200;
+
+/// 「本轮结束」分隔线的前缀。按账目行的灰色画，后面留一行空白，一眼看出轮到谁。
+pub(super) const TURN_DIVIDER_PREFIX: &str = "── ";
 
 pub(super) fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);

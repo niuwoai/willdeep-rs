@@ -65,6 +65,9 @@ impl App {
             language,
             transient_thought: None,
             turn_narration: None,
+            tool_rows_expanded: false,
+            transient_kind: StreamKind::Reply,
+            bell_pending: false,
             selection_mode: false,
             native_selection_mode: false,
             chat_selection: None,
@@ -702,9 +705,14 @@ impl App {
         let Some(entry) = search.matches.get(search.selected).copied() else {
             return;
         };
-        let total = rendered_transcript_height(&self.transcript, self.transcript_width);
-        let through_match =
-            rendered_transcript_height(&self.transcript[..=entry], self.transcript_width);
+        // 高度按折叠视图算；命中被收起的工具行时，落在替它说话的汇总行上。
+        let folded = self.display_transcript();
+        let total = rendered_transcript_height(&folded.rows, self.transcript_width);
+        let through_match = folded
+            .index_of
+            .get(entry)
+            .map(|&row| rendered_transcript_height(&folded.rows[..=row], self.transcript_width))
+            .unwrap_or(total);
         self.follow_bottom = false;
         self.scroll_from_bottom = total
             .saturating_sub(through_match)
@@ -885,11 +893,13 @@ impl App {
             .map(Duration::from_millis)
             .or(self.turn_first_reply);
         let turns = outcome.map(|value| value.turns);
-        // 一个数都没有就别占一行。
-        if total.is_none() && input == 0 && output == 0 {
-            return;
-        }
-        let mut parts = Vec::new();
+        // 这行现在是「本轮结束」的分隔线：一个数都没有也要占一行，用户得知道
+        // 轮到自己了。
+        let mut parts = vec![
+            self.language
+                .text("本轮结束", "turn finished", "ターン終了")
+                .to_owned(),
+        ];
         if let Some(first) = first_reply {
             parts.push(format!(
                 "{} {}",
@@ -925,7 +935,19 @@ impl App {
                 turns
             ));
         }
-        self.append_transcript(format!("· {}", parts.join(" · ")));
+        if self.tools.requested > 0 {
+            parts.push(format!(
+                "{} {}",
+                self.language.text("工具", "tools", "ツール"),
+                self.tools.requested
+            ));
+        }
+        parts.push(
+            self.language
+                .text("轮到你", "your turn", "あなたの番")
+                .to_owned(),
+        );
+        self.append_transcript(format!("{TURN_DIVIDER_PREFIX}{} ──", parts.join(" · ")));
     }
 
     pub(super) fn finish_turn(&mut self) {
@@ -941,6 +963,8 @@ impl App {
         self.transient_thought = None;
         self.turn_narration = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
+        // 铃声只给审批、提问和后台任务的话，盯着别处的用户不知道轮到自己了。
+        self.bell_pending = true;
     }
 
     pub(super) fn begin_turn(&mut self, runtime_turn: bool, initial_progress: String) {
@@ -1348,15 +1372,15 @@ impl App {
         self.scroll_from_bottom = 0;
     }
     pub(super) fn append_transcript(&mut self, v: String) {
-        let previous_height = rendered_transcript_height(&self.transcript, self.transcript_width);
+        let previous_height =
+            rendered_transcript_height(&self.display_transcript().rows, self.transcript_width);
         if !v
             .strip_prefix("WillDeep: ")
             .is_some_and(|reply| append_plan_reply(&mut self.transcript, reply))
         {
             self.transcript.push(v);
         }
-        self.transcript_height =
-            rendered_transcript_height(&self.transcript, self.transcript_width);
+        self.refresh_transcript_height();
         if !self.follow_bottom {
             self.scroll_from_bottom = self
                 .scroll_from_bottom
@@ -1724,9 +1748,12 @@ impl App {
             "/help" => self.append_transcript(help_text(self.language)),
             "/plan" => {
                 toggle_plan_details(&mut self.transcript);
-                self.transcript_height =
-                    rendered_transcript_height(&self.transcript, self.transcript_width);
+                self.refresh_transcript_height();
                 self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
+            }
+            "/tools" => {
+                let message = self.toggle_tool_rows();
+                self.append_transcript(message);
             }
             "/exit" => {
                 self.quit_requested = true;

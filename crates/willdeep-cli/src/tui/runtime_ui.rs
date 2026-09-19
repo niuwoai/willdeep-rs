@@ -186,8 +186,7 @@ pub(super) fn apply_runtime_events(
             }
             if let Some(plan) = &session.current_plan {
                 sync_persisted_plan(&mut app.transcript, plan);
-                app.transcript_height =
-                    rendered_transcript_height(&app.transcript, app.transcript_width);
+                app.refresh_transcript_height();
                 app.scroll_from_bottom = app.scroll_from_bottom.min(app.max_scroll());
             }
         } else {
@@ -346,17 +345,13 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         }
         Some("assistant_text_delta") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
-                app.activity_line = app
-                    .language
-                    .text("正在接收回复", "Receiving reply", "応答を受信中")
-                    .to_owned();
-                let mut preview = app.transient_thought.take().unwrap_or_default();
-                preview.push_str(text);
-                let skip = preview
-                    .chars()
-                    .count()
-                    .saturating_sub(THOUGHT_PREVIEW_CHARS);
-                app.transient_thought = Some(preview.chars().skip(skip).collect());
+                app.stream_transient(StreamKind::Reply, text);
+            }
+        }
+        // 思考型模型的思维链：正文往往为空，这行是用户唯一能看到的「它在干嘛」。
+        Some("reasoning_delta") => {
+            if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
+                app.stream_transient(StreamKind::Reasoning, text);
             }
         }
         Some("turn_started") => {

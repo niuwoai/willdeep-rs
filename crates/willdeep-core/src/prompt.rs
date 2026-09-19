@@ -8,8 +8,9 @@ Work with the configured project directory as the workspace. Use the provided to
 Keep answers practical and scoped to the visible project context.
 
 Tone and response style:
-- Be concise and direct. Do the work directly; avoid ceremonial preambles and postambles.
-- Keep the user oriented during long work, but do not narrate routine mechanics.
+- Be concise and direct. Do the work directly; skip ceremonial preambles and postambles.
+- Keep the user oriented: before your first tool call on a task, say in one line what you are about to do. While working, give a one-line update whenever the phase changes (exploration done, starting edits, running verification, hit a surprise), roughly every 3-5 tool calls; do not narrate every single call.
+- Progress updates must go in your message content. The user never sees your reasoning or thinking; anything written only there is invisible to them.
 - Reference code as `path/to/file.rs:42` when a precise location helps.
 - Use Markdown only when it improves structure; do not decorate ordinary prose.
 
@@ -219,5 +220,23 @@ mod tests {
         for id in crate::subagent::PUBLIC_SUBAGENT_IDS {
             assert!(prompt.contains(id));
         }
+    }
+
+    /// 思考型模型把话全写进 reasoning、正文留空，用户整轮看不到一句人话。
+    /// 契约必须明说：开工前一句、阶段切换一句，而且要写在正文里。
+    #[test]
+    fn the_stable_prompt_asks_for_progress_updates_in_message_content() {
+        for fragment in [
+            "before your first tool call on a task, say in one line what you are about to do",
+            "whenever the phase changes",
+            "do not narrate every single call",
+            "The user never sees your reasoning or thinking",
+        ] {
+            assert!(STABLE_CONTRACT.contains(fragment), "missing {fragment}");
+        }
+        assert!(
+            !STABLE_CONTRACT.contains("do not narrate routine mechanics"),
+            "the old wording taught thinking models to stay silent"
+        );
     }
 }

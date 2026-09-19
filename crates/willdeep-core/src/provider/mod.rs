@@ -165,6 +165,10 @@ pub trait ProviderEventSink: Send + Sync {
 #[derive(Clone, Debug)]
 pub enum ProviderEvent {
     TextDelta(String),
+    /// 思维链增量（DeepSeek / GLM 的 `reasoning_content`）。只给界面做「思考中」
+    /// 提示：不进正文、不进检查点、不进会话记录。解析器按段冲刷，不是每个
+    /// SSE 块一条，免得事件流被刷爆。
+    ReasoningDelta(String),
     Usage(crate::types::Usage),
     RetryWait {
         attempt: u32,

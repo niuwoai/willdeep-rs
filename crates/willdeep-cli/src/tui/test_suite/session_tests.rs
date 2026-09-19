@@ -618,6 +618,58 @@ fn runtime_reply_only_adds_what_narration_has_not_shown() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 思考型模型正文常为空：Runtime 发来的思维链增量落在临时行，工具一调就清掉，
+/// 既不进记录也不进会话镜像。
+#[test]
+fn runtime_reasoning_delta_shows_as_transient_thought_only() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-reasoning-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime reasoning");
+    let mut app = App::new(Vec::new(), Language::En);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = session.id;
+    let output = |sequence: u64, value: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id={task_id} {value}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+    let events = vec![
+        output(1, serde_json::json!({"type":"turn_started","turn":1})),
+        output(
+            2,
+            serde_json::json!({"type":"reasoning_delta","text":"先看日志"}),
+        ),
+        output(
+            3,
+            serde_json::json!({"type":"reasoning_delta","text":"，再改"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert!(app.running);
+    assert_eq!(app.transient_thought.as_deref(), Some("先看日志，再改"));
+    assert_eq!(app.transient_label(), "thinking");
+    assert!(
+        app.transcript.is_empty(),
+        "reasoning never lands in the chat"
+    );
+    assert!(session.messages.is_empty());
+
+    let events = vec![output(
+        4,
+        serde_json::json!({"type":"tool_requested","name":"read_file"}),
+    )];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert!(app.transient_thought.is_none());
+    assert_eq!(app.transcript, vec!["· … read_file"]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_partial_terminal_event_alone_releases_busy_state() {
     let root = std::env::temp_dir().join(format!(
@@ -851,15 +903,22 @@ fn runtime_chat_renders_tool_rows_then_the_assistant_answer() {
     assert_eq!(app.transcript.len(), 3, "{:?}", app.transcript);
     assert_eq!(app.transcript[0], "· … read_file");
     assert_eq!(app.transcript[1], "WillDeep: 真实的 AI 回复");
-    assert!(app.transcript[2].starts_with("· total "));
+    assert!(
+        app.transcript[2].starts_with("── turn finished · total "),
+        "{}",
+        app.transcript[2]
+    );
+    assert!(app.transcript[2].ends_with("your turn ──"));
     assert!(!app.transcript[2].contains("in 0"));
     assert!(
         !app.running,
         "the completed Runtime output must end the busy state"
     );
     assert!(app.last_elapsed.is_some());
+    // 轮次号、task_id 这类运行时标识仍只在活动区；分隔线里的「turn finished /
+    // your turn」是给人看的话，不算泄漏。
     assert!(app.transcript.iter().all(|line| {
-        !line.contains("turn") && !line.contains("task_id") && !line.contains(&task.to_string())
+        !line.contains("turn 9") && !line.contains("task_id") && !line.contains(&task.to_string())
     }));
     std::fs::remove_dir_all(root).unwrap();
 }

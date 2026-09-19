@@ -1475,6 +1475,7 @@ impl EventSink for TerminalSink {
             AgentEvent::ToolRequested(call) => eprintln!("[tool] {}", call.name),
             AgentEvent::ProviderProgress(event) => match event {
                 willdeep_core::provider::ProviderEvent::TextDelta(text) => eprint!("{text}"),
+                willdeep_core::provider::ProviderEvent::ReasoningDelta(_) => {}
                 willdeep_core::provider::ProviderEvent::RetryWait { attempt, delay } => {
                     eprintln!("[retry {attempt}] waiting {} seconds", delay.as_secs_f64())
                 }
@@ -1729,6 +1730,9 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             }
             willdeep_core::provider::ProviderEvent::TextDelta(text) => {
                 serde_json::json!({"type":"assistant_text_delta","text":text})
+            }
+            willdeep_core::provider::ProviderEvent::ReasoningDelta(text) => {
+                serde_json::json!({"type":"reasoning_delta","text":text})
             }
             willdeep_core::provider::ProviderEvent::Usage(usage) => {
                 serde_json::json!({"type":"usage_snapshot","usage":usage})

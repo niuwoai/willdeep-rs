@@ -24,7 +24,7 @@ mod command_tests {
         }
     }
 
-    /// 本轮账目跟在回答后面，浅色前缀，四个数都在。
+    /// 本轮账目跟在回答后面，作「本轮结束」分隔线，浅色，四个数都在。
     #[test]
     fn a_finished_turn_appends_its_own_bill() {
         let mut app = App::new(Vec::new(), Language::En);
@@ -32,7 +32,11 @@ mod command_tests {
         app.append_turn_stats(Some(&outcome(Some(1_500))));
 
         let line = app.transcript.last().expect("stats line");
-        assert!(line.starts_with("· "), "浅色前缀决定它不跟正文抢注意力");
+        assert!(
+            line.starts_with(TURN_DIVIDER_PREFIX),
+            "分隔线前缀决定它按浅色画、不跟正文抢注意力: {line}"
+        );
+        assert!(line.ends_with("your turn ──"), "{line}");
         assert!(line.contains("first reply"));
         assert!(line.contains("total"));
         // 输入含系统提示词与整段历史，所以它本来就该比用户那句话大得多。
@@ -114,7 +118,7 @@ mod command_tests {
             .into_iter()
             .map(|(command, _)| command)
             .collect();
-        assert_eq!(commands.len(), 21);
+        assert_eq!(commands.len(), 22);
         // 面板一屏只画得下 8 条，后面这些此前完全看不到。
         for command in [
             "/daemon",
@@ -164,16 +168,17 @@ mod command_tests {
         );
     }
 
-    /// 一个数都没有的轮次不占一行。
+    /// 一个数都没有的轮次也要落分隔线：它现在是「轮到你了」的信号，不只是账目。
+    /// 但没有的数一个都不印，尤其不印 0。
     #[test]
-    fn an_empty_turn_prints_no_bill() {
+    fn an_empty_turn_still_marks_its_end_without_faking_numbers() {
         let mut app = App::new(Vec::new(), Language::En);
         let mut empty = outcome(None);
         empty.input_tokens = 0;
         empty.output_tokens = 0;
         empty.turns = 1;
         app.append_turn_stats(Some(&empty));
-        assert!(app.transcript.is_empty());
+        assert_eq!(app.transcript, vec!["── turn finished · your turn ──"]);
     }
 
     #[test]
