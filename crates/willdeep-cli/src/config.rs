@@ -293,6 +293,12 @@ pub struct ProviderProfile {
     pub vision_model: Option<String>,
 }
 
+/// `[agent] max_turns` 的缺省值与可配置上限。64 轮曾被线上一个 46 次工具调用、
+/// 九分多钟的任务用完，只能靠用户说「继续」再开一轮。触顶不判失败、交出部分
+/// 结果，所以放得开；跑偏靠 Esc 中止和审批档位兜底。
+pub(crate) const DEFAULT_MAX_TURNS: usize = 200;
+pub(crate) const MAX_TURNS_CEILING: usize = 1000;
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentProfileSettings {
@@ -400,9 +406,9 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     willdeep_core::ToolRegistry::validate_required_verifications(&file.agent.verification_commands)
         .map_err(anyhow::Error::msg)?;
     if let Some(max_turns) = file.agent.max_turns
-        && !(1..=100).contains(&max_turns)
+        && !(1..=MAX_TURNS_CEILING).contains(&max_turns)
     {
-        bail!("agent.max_turns must be between 1 and 100");
+        bail!("agent.max_turns must be between 1 and {MAX_TURNS_CEILING}");
     }
     if file
         .agent
