@@ -603,15 +603,16 @@ pub(crate) async fn build(
         .map(parse_api)
         .transpose()?;
     let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
-    // 24 轮对「先问一句、再改十个文件、再查一下」这种正常任务已经不够：
-    // 一次触顶就把整轮判失败，写好的东西一句都不给看。
-    const DEFAULT_MAX_TURNS: usize = 64;
+    // 缺省值与上限见 config.rs：命令行、配置、缺省三级取值，同一把尺子校验。
     let max_turns = cli
         .max_turns
         .or(loaded.file.agent.max_turns)
-        .unwrap_or(DEFAULT_MAX_TURNS);
-    if !(1..=100).contains(&max_turns) {
-        bail!("--max-turns must be between 1 and 100");
+        .unwrap_or(crate::config::DEFAULT_MAX_TURNS);
+    if !(1..=crate::config::MAX_TURNS_CEILING).contains(&max_turns) {
+        bail!(
+            "--max-turns must be between 1 and {}",
+            crate::config::MAX_TURNS_CEILING
+        );
     }
     let workspace = resolve_workspace(cli, resumed)?;
     let api_key = resolve_api_key(cli, profile, kind)?;

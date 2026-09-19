@@ -5,7 +5,8 @@ default_provider = "some-im"
 # Optional per-task acceptance checks; use a task-specific --config when needed.
 # Each check must pass on the final Git snapshot. Does not grant execution permission.
 # verification_commands = ["cargo test --workspace"]
-max_turns = 64
+# 模型/工具轮次上限，1–1000，不写时 200。触顶只交出部分结果，不判失败；跑偏用 Esc 中止。
+max_turns = 200
 # strict | smart | workspace-write | full-access。TUI 里 /permissions 或 Shift+Tab 临时切换，
 # /permissions default <档位> 写回这里。详见 docs/APPROVALS.md。
 approval = "smart"
