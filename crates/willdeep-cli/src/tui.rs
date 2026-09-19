@@ -50,6 +50,7 @@ mod diff_review_ui;
 mod dispatch;
 mod media_ui;
 mod model_commands;
+mod narration;
 mod overlay_dismiss;
 mod permission_commands;
 mod plan_ui;
@@ -276,6 +277,8 @@ struct App {
     progress_log: VecDeque<String>,
     language: Language,
     transient_thought: Option<String>,
+    /// 本轮最近一段已落进聊天区的中途文字；收尾文字据此去重，不重复最后一段。
+    turn_narration: Option<String>,
     selection_mode: bool,
     native_selection_mode: bool,
     chat_selection: Option<ChatSelection>,

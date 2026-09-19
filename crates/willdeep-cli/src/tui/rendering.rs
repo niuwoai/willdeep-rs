@@ -694,14 +694,8 @@ fn render_inline_markdown(value: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
-pub(super) fn compact_thought(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut compact = normalized.chars().take(180).collect::<String>();
-    if normalized.chars().count() > 180 {
-        compact.push('…');
-    }
-    compact
-}
+/// 流式回复预览只留最后这么多字符，进程内与 Runtime 轮次共用。
+pub(super) const THOUGHT_PREVIEW_CHARS: usize = 1200;
 
 pub(super) fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);

@@ -254,7 +254,9 @@ fn apply_runtime_event(
                     .to_owned(),
             );
         }
-        "task.completed" | "turn.completed" => app.finish_turn(),
+        // 撞轮次上限、预算耗尽这类「没收敛」的收尾走 partial，不是 completed。
+        // 漏了它界面就一直挂着「工作中」，直到快照对账强行复位。
+        "task.completed" | "turn.completed" | "task.partial" | "turn.partial" => app.finish_turn(),
         "task.failed" => {
             // 事件里带着 `exit_code=…` 这类活下来的线索，此前被整条丢掉，
             // 只打印一句固定文案。完整命令与错误在侧栏详情里（`task.diagnostics`）。
@@ -325,11 +327,40 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         return None;
     };
     let output_type = value.get("type").and_then(|value| value.as_str());
-    if output_type != Some("completed") {
+    if !matches!(output_type, Some("completed" | "partial")) {
         app.ensure_runtime_turn();
     }
     match output_type {
+        // 与进程内轮次一致：定稿的一段话直接落进聊天区，流式增量仍走下面的
+        // 临时预览行。非托管会话的镜像也同步记一条。
+        Some("assistant_text") => {
+            if let Some(text) = value
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                app.note_narration(text);
+                return Some(Message::assistant(text, Vec::new()));
+            }
+        }
+        Some("assistant_text_delta") => {
+            if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
+                app.activity_line = app
+                    .language
+                    .text("正在接收回复", "Receiving reply", "応答を受信中")
+                    .to_owned();
+                let mut preview = app.transient_thought.take().unwrap_or_default();
+                preview.push_str(text);
+                let skip = preview
+                    .chars()
+                    .count()
+                    .saturating_sub(THOUGHT_PREVIEW_CHARS);
+                app.transient_thought = Some(preview.chars().skip(skip).collect());
+            }
+        }
         Some("turn_started") => {
+            app.transient_thought = None;
             if let Some(turn) = value.get("turn").and_then(|value| value.as_u64()) {
                 app.record_progress(format!(
                     "Runtime · {} {turn}",
@@ -338,12 +369,14 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             }
         }
         Some("tool_requested") => {
+            app.transient_thought = None;
             if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
                 app.tools.requested(name);
                 app.record_progress(format!(
                     "Runtime · {} {name}",
                     app.language.text("正在使用", "using", "使用中")
                 ));
+                app.note_tool_requested(name, value.get("detail").and_then(|value| value.as_str()));
             }
         }
         Some("tool_completed") => {
@@ -361,6 +394,11 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                         app.language.text("已完成", "finished", "完了")
                     }
                 ));
+                app.note_tool_completed(
+                    name,
+                    value.get("detail").and_then(|value| value.as_str()),
+                    is_error,
+                );
             }
         }
         Some("usage") => {
@@ -468,13 +506,16 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
                     .text("子 Agent 结束", "subagent finished", "サブエージェント完了")
             ));
         }
-        Some("completed") => {
+        // partial 的 text 里带着「轮次上限已用尽」这类提示，和 completed 一样要落进记录。
+        Some("completed" | "partial") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
-                app.append_transcript(format!("WillDeep: {text}"));
+                // 最后一段多半已经作中途文字显示过，只补没见过的部分（比如轮次
+                // 上限提示）；镜像持久化也只补这一部分。
+                let remainder = app.note_reply(text);
                 // Runtime 轮次没有 `AgentOutcome`，账目走本轮累计。
                 app.append_turn_stats(None);
                 app.finish_turn();
-                return Some(Message::assistant(text, Vec::new()));
+                return remainder.map(|text| Message::assistant(&text, Vec::new()));
             }
             app.finish_turn();
         }
@@ -659,7 +700,7 @@ mod tests {
         store.save(&mut session).unwrap();
 
         // 前台此刻手上的快照（基线已定格）。
-        let mut visible = store.load(session.id).unwrap();
+        let stale = store.load(session.id).unwrap();
 
         // 守护进程在这中间写入了这一轮的输出。
         store
@@ -673,7 +714,7 @@ mod tests {
         // 游标已经不算执行状态（见 session/execution_state.rs），所以单写书签
         // 本身不会再被判冲突。这里仍走 `update`：在会话锁内一次读改写，不给
         // 守护进程的写入留下「读到的和写回去的不是同一版」的窗口。
-        visible = store
+        let visible = store
             .update(session.id, |latest| {
                 latest.runtime_managed = true;
                 latest.runtime_event_cursor = 6385;
@@ -685,6 +726,10 @@ mod tests {
             visible.messages.last().unwrap().content,
             "模型输出",
             "守护进程刚写的输出必须保住"
+        );
+        assert!(
+            stale.messages.len() < visible.messages.len(),
+            "前台那份旧快照没有把守护进程的写入盖掉"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
