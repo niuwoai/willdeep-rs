@@ -105,7 +105,10 @@ impl<'a, 'b> StreamEvents<'a, 'b> {
                 state.text.push_str(text);
             }
             ProviderEvent::Usage(usage) => state.usage = Some(usage.clone()),
-            ProviderEvent::RetryWait { .. } | ProviderEvent::RetryStarted { .. } => return,
+            // 思维链不进检查点：它不是回答，恢复时也不该被当成已生成的正文。
+            ProviderEvent::RetryWait { .. }
+            | ProviderEvent::RetryStarted { .. }
+            | ProviderEvent::ReasoningDelta(_) => return,
         }
         if state.failure.is_some() {
             return;

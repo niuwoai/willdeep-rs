@@ -74,6 +74,7 @@ use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
     switch_model,
 };
+use narration::StreamKind;
 use permission_commands::{
     PermissionCommand, PermissionPickerAction, PermissionPickerState, render_permission_picker,
 };
@@ -279,6 +280,12 @@ struct App {
     transient_thought: Option<String>,
     /// 本轮最近一段已落进聊天区的中途文字；收尾文字据此去重，不重复最后一段。
     turn_narration: Option<String>,
+    /// `/tools`：临时展开聊天区里收起的工具行。只影响显示，记录不动。
+    tool_rows_expanded: bool,
+    /// 临时行此刻流的是思维链还是正文，决定标签与何时清缓冲。
+    transient_kind: StreamKind,
+    /// 本轮刚结束：下一帧画之前响一声铃，响过就清。
+    bell_pending: bool,
     selection_mode: bool,
     native_selection_mode: bool,
     chat_selection: Option<ChatSelection>,
@@ -1322,11 +1329,11 @@ fn draw(
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(canvas);
-        let mut visible_transcript = app.transcript.clone();
+        let mut visible_transcript = app.display_transcript().rows;
         if let Some(thought) = &app.transient_thought {
             visible_transcript.push(format!(
                 "WillDeep · {}: {thought}",
-                app.language.text("思考中", "thinking", "思考中")
+                app.transient_label()
             ));
         }
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
@@ -1556,6 +1563,12 @@ fn draw(
                             } else {
                                 app.language.text("输入", "Prompt", "入力")
                             }),
+                            Span::raw(" · "),
+                            // 轮到谁了必须一眼看出来：跑的时候回车只是排队，空闲时才轮到用户。
+                            {
+                                let (state, color) = app.composer_state();
+                                Span::styled(state, Style::default().fg(color))
+                            },
                             Span::raw(" · "),
                             // 档位常驻在输入框上：用户在按 Enter 之前就该知道这一轮
                             // 会不会弹审批。完全访问用红色，免得忘了自己开着它。

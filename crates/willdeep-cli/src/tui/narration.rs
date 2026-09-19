@@ -6,7 +6,8 @@
 //!
 //! - 每段定稿的中途文字都作 `WillDeep:` 行落进记录，流式增量仍走临时行预览；
 //! - 每次工具调用先落一行 `· … 名字 · 摘要`，完成后原地改成 `✓` / `✗`；
-//! - 收尾文字只追加还没显示过的部分（比如轮次上限提示），不重复最后一段。
+//! - 收尾文字只追加还没显示过的部分（比如轮次上限提示），不重复最后一段；
+//! - 连续太多工具行时，显示层把前面的收成一行汇总，只留最新几条，`/tools` 展开。
 //!
 //! 进程内轮次与 Runtime 轮次共用这一套，行为一致。
 use super::*;
@@ -16,6 +17,13 @@ const TOOL_PENDING: &str = "…";
 const TOOL_DONE: &str = "✓";
 const TOOL_FAILED: &str = "✗";
 
+/// 连续工具行只露最新这么多条，前面的收成一行汇总。
+const TOOL_ROWS_VISIBLE: usize = 4;
+/// 至少要省下两行才值得收：只藏一行还得配一行汇总，等于没省。
+const TOOL_ROWS_FOLD_AT: usize = TOOL_ROWS_VISIBLE + 2;
+/// 汇总行的标记，与三种工具行标记都不同；渲染层照样按 `· ` 账目行的灰色画。
+const TOOL_FOLD_MARKER: &str = "⋯";
+
 /// 一行工具记录。`· ` 前缀让渲染层按账目行的灰色画，不与正文抢注意力。
 fn tool_line(marker: &str, name: &str, detail: Option<&str>) -> String {
     match detail.map(str::trim).filter(|detail| !detail.is_empty()) {
@@ -24,30 +32,225 @@ fn tool_line(marker: &str, name: &str, detail: Option<&str>) -> String {
     }
 }
 
-/// 收尾文字里还没在聊天区出现过的部分。
-///
-/// 进程内 `final_text` 就是最后一段中途文字；撞轮次上限时守护进程会在前面
-/// 拼一段提示（`{提示}\n\n{最后一段}`）。两种情况都只追加新增的那部分，
-/// 否则最后一段会在聊天区出现两遍。
-fn unshown_reply(final_text: &str, narrated: Option<&str>) -> Option<String> {
-    let final_text = final_text.trim();
-    if final_text.is_empty() {
-        return None;
-    }
-    let Some(narrated) = narrated.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Some(final_text.to_owned());
-    };
-    if final_text == narrated {
-        return None;
-    }
-    match final_text.strip_suffix(narrated).map(str::trim_end) {
-        Some("") => None,
-        Some(head) => Some(head.to_owned()),
-        None => Some(final_text.to_owned()),
-    }
+/// 这行是不是工具行；是的话给出它的状态标记。
+fn tool_row_marker(line: &str) -> Option<&'static str> {
+    let rest = line.strip_prefix("· ")?;
+    [TOOL_PENDING, TOOL_DONE, TOOL_FAILED]
+        .into_iter()
+        .find(|marker| {
+            rest.strip_prefix(marker)
+                .is_some_and(|tail| tail.starts_with(' '))
+        })
+}
+
+fn tool_row_name(line: &str) -> Option<&str> {
+    let marker = tool_row_marker(line)?;
+    let rest = line.strip_prefix("· ")?.strip_prefix(marker)?.trim_start();
+    Some(rest.split(" · ").next().unwrap_or(rest))
+}
+
+/// 临时行里此刻流的是什么：思维链还是正文。换源时清缓冲，两种文字不拼在一起。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StreamKind {
+    Reasoning,
+    Reply,
 }
 
 impl App {
+    /// 流式增量进临时行：只留最后 [`THOUGHT_PREVIEW_CHARS`] 字，进程内轮次与
+    /// Runtime 轮次共用。思考型模型正文常为空，思维链那行是用户唯一能看到的
+    /// 「它此刻在干嘛」。
+    pub(super) fn stream_transient(&mut self, kind: StreamKind, text: &str) {
+        if self.transient_kind != kind {
+            self.transient_thought = None;
+            self.transient_kind = kind;
+        }
+        self.activity_line = match kind {
+            StreamKind::Reasoning => self.language.text("正在思考", "Thinking", "思考中"),
+            StreamKind::Reply => {
+                self.language
+                    .text("正在接收回复", "Receiving reply", "応答を受信中")
+            }
+        }
+        .to_owned();
+        let mut preview = self.transient_thought.take().unwrap_or_default();
+        preview.push_str(text);
+        let skip = preview
+            .chars()
+            .count()
+            .saturating_sub(THOUGHT_PREVIEW_CHARS);
+        self.transient_thought = Some(preview.chars().skip(skip).collect());
+    }
+
+    /// 临时行前面的标签，随来源变。
+    pub(super) fn transient_label(&self) -> &'static str {
+        match self.transient_kind {
+            StreamKind::Reasoning => self.language.text("思考中", "thinking", "思考中"),
+            StreamKind::Reply => self.language.text("回复中", "replying", "応答中"),
+        }
+    }
+
+    /// 输入框标题上的状态词：跑的时候回车只是排队，空闲时才轮到用户。
+    pub(super) fn composer_state(&self) -> (&'static str, Color) {
+        if self.running {
+            (
+                self.language.text(
+                    "本轮进行中 · 回车排队 · Esc 中止",
+                    "Turn running · Enter queues · Esc stops",
+                    "ターン実行中 · Enter でキュー · Esc で中断",
+                ),
+                Color::Yellow,
+            )
+        } else {
+            (
+                self.language.text("轮到你", "Your turn", "あなたの番"),
+                Color::Green,
+            )
+        }
+    }
+
+    /// 本轮在跑时排队的提示词先带「待发」标记回显；此前它和真正发出去的长得
+    /// 一模一样，用户分不清哪句还没发。
+    pub(super) fn queued_prompt_row(&self, text: &str) -> String {
+        format!(
+            "You: {}{text}",
+            self.language
+                .text("［待发］ ", "[queued] ", "［送信待ち］ ")
+        )
+    }
+
+    /// 排队的提示词真正发出时，把那行「待发」标记去掉。
+    pub(super) fn mark_queued_prompt_sent(&mut self, text: &str) {
+        let queued = self.queued_prompt_row(text);
+        if let Some(line) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|line| **line == queued)
+        {
+            *line = format!("You: {text}");
+            self.refresh_transcript_height();
+        }
+    }
+}
+
+/// 折叠后的聊天区视图：只给显示层用，记录本身一行不动。
+pub(super) struct FoldedTranscript {
+    pub(super) rows: Vec<String>,
+    /// 每条原始记录在折叠视图里的位置；被收起的工具行指向替它们说话的汇总行，
+    /// 搜索跳转命中它们时就落在汇总上。
+    pub(super) index_of: Vec<usize>,
+}
+
+/// 同一段连续的工具行超过 [`TOOL_ROWS_FOLD_AT`] 条时，前面的收成一行汇总，
+/// 只留最新 [`TOOL_ROWS_VISIBLE`] 条；模型说一句话、轮次收尾都会重新计数。
+/// `expanded` 为真时原样返回（`/tools`）。
+pub(super) fn fold_tool_rows(
+    entries: &[String],
+    expanded: bool,
+    language: Language,
+) -> FoldedTranscript {
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut index_of = Vec::with_capacity(entries.len());
+    let mut cursor = 0;
+    while cursor < entries.len() {
+        if tool_row_marker(&entries[cursor]).is_none() {
+            index_of.push(rows.len());
+            rows.push(entries[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < entries.len() && tool_row_marker(&entries[cursor]).is_some() {
+            cursor += 1;
+        }
+        let run = &entries[start..cursor];
+        let hidden = if expanded || run.len() < TOOL_ROWS_FOLD_AT {
+            0
+        } else {
+            run.len() - TOOL_ROWS_VISIBLE
+        };
+        if hidden > 0 {
+            let summary_index = rows.len();
+            rows.push(fold_summary(&run[..hidden], language));
+            index_of.extend(std::iter::repeat_n(summary_index, hidden));
+        }
+        for line in &run[hidden..] {
+            index_of.push(rows.len());
+            rows.push(line.clone());
+        }
+    }
+    FoldedTranscript { rows, index_of }
+}
+
+/// `· ⋯ 已收起 12 条工具调用 · read_file×3 · run_command×9 · 2 失败 · /tools 展开`
+fn fold_summary(hidden: &[String], language: Language) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut failed = 0;
+    for line in hidden {
+        if let Some(name) = tool_row_name(line) {
+            *counts.entry(name).or_default() += 1;
+        }
+        if tool_row_marker(line) == Some(TOOL_FAILED) {
+            failed += 1;
+        }
+    }
+    let mut summary = language
+        .text(
+            "已收起 {n} 条工具调用",
+            "{n} earlier tool calls folded",
+            "ツール呼び出し {n} 件を折りたたみ",
+        )
+        .replace("{n}", &hidden.len().to_string());
+    for (name, count) in counts {
+        summary.push_str(&format!(" · {name}×{count}"));
+    }
+    if failed > 0 {
+        summary.push_str(
+            &language
+                .text(" · {k} 失败", " · {k} failed", " · {k} 失敗")
+                .replace("{k}", &failed.to_string()),
+        );
+    }
+    summary.push_str(language.text(" · /tools 展开", " · /tools to expand", " · /tools で展開"));
+    format!("· {TOOL_FOLD_MARKER} {summary}")
+}
+
+impl App {
+    /// 聊天区实际画出来的记录：工具行按规则收起，其余原样。
+    pub(super) fn display_transcript(&self) -> FoldedTranscript {
+        fold_tool_rows(&self.transcript, self.tool_rows_expanded, self.language)
+    }
+
+    /// 记录变了之后按折叠视图重算总高度；滚动、跟随底部全靠它。
+    pub(super) fn refresh_transcript_height(&mut self) {
+        self.transcript_height =
+            rendered_transcript_height(&self.display_transcript().rows, self.transcript_width);
+    }
+
+    /// `/tools`：临时展开或收起全部工具行。返回给用户看的一句反馈。
+    pub(super) fn toggle_tool_rows(&mut self) -> String {
+        self.tool_rows_expanded = !self.tool_rows_expanded;
+        self.refresh_transcript_height();
+        self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
+        format!(
+            "System: {}",
+            if self.tool_rows_expanded {
+                self.language.text(
+                    "工具调用行已全部展开 · 再输入 /tools 收起",
+                    "All tool-call rows expanded · /tools again to fold",
+                    "ツール行をすべて展開 · もう一度 /tools で折りたたみ",
+                )
+            } else {
+                self.language.text(
+                    "工具调用行已收起，只留最新几条 · 再输入 /tools 展开",
+                    "Tool-call rows folded to the latest few · /tools again to expand",
+                    "ツール行を最新数件に折りたたみ · もう一度 /tools で展開",
+                )
+            }
+        )
+    }
+
     /// 模型这一轮定稿的一段话：落进记录，并记住它，收尾时据此去重。
     pub(super) fn note_narration(&mut self, text: &str) {
         let text = text.trim();
@@ -84,8 +287,7 @@ impl App {
             .map(|line| *line = line.replacen(TOOL_PENDING, marker, 1))
             .is_some();
         if settled {
-            self.transcript_height =
-                rendered_transcript_height(&self.transcript, self.transcript_width);
+            self.refresh_transcript_height();
         } else {
             self.append_transcript(tool_line(marker, name, detail));
         }
@@ -102,9 +304,53 @@ impl App {
     }
 }
 
+/// 收尾文字里还没在聊天区出现过的部分。
+///
+/// 进程内 `final_text` 就是最后一段中途文字；撞轮次上限时守护进程会在前面
+/// 拼一段提示（`{提示}\n\n{最后一段}`）。两种情况都只追加新增的那部分，
+/// 否则最后一段会在聊天区出现两遍。
+fn unshown_reply(final_text: &str, narrated: Option<&str>) -> Option<String> {
+    let final_text = final_text.trim();
+    if final_text.is_empty() {
+        return None;
+    }
+    let Some(narrated) = narrated.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(final_text.to_owned());
+    };
+    if final_text == narrated {
+        return None;
+    }
+    match final_text.strip_suffix(narrated).map(str::trim_end) {
+        Some("") => None,
+        Some(head) => Some(head.to_owned()),
+        None => Some(final_text.to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 交替的 run_command / read_file，每第三条失败。
+    fn tool_rows(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                tool_line(
+                    if index % 3 == 2 {
+                        TOOL_FAILED
+                    } else {
+                        TOOL_DONE
+                    },
+                    if index % 2 == 0 {
+                        "run_command"
+                    } else {
+                        "read_file"
+                    },
+                    None,
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn tool_line_keeps_detail_only_when_present() {
@@ -117,6 +363,162 @@ mod tests {
             "· ✓ read_file"
         );
         assert_eq!(tool_line(TOOL_FAILED, "edit_file", None), "· ✗ edit_file");
+    }
+
+    #[test]
+    fn tool_rows_are_recognised_by_marker_and_name() {
+        assert_eq!(
+            tool_row_marker("· … run_command · cargo test"),
+            Some(TOOL_PENDING)
+        );
+        assert_eq!(
+            tool_row_name("· ✗ run_command · cargo test -p"),
+            Some("run_command")
+        );
+        assert_eq!(tool_row_name("· ✓ read_file"), Some("read_file"));
+        // 账目行、汇总行、正文都不是工具行。
+        assert_eq!(tool_row_marker("· total 3.2s"), None);
+        assert_eq!(tool_row_marker("· ⋯ 4 earlier tool calls folded"), None);
+        assert_eq!(tool_row_marker("WillDeep: ✓ done"), None);
+    }
+
+    #[test]
+    fn short_tool_runs_stay_as_they_are() {
+        let entries = tool_rows(TOOL_ROWS_FOLD_AT - 1);
+        let folded = fold_tool_rows(&entries, false, Language::En);
+        assert_eq!(folded.rows, entries);
+        assert_eq!(folded.index_of, (0..entries.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn long_tool_runs_fold_older_rows_into_one_summary() {
+        let mut entries = vec!["You: go".to_owned()];
+        entries.extend(tool_rows(8));
+        entries.push("WillDeep: done".to_owned());
+        let folded = fold_tool_rows(&entries, false, Language::En);
+        assert_eq!(
+            folded.rows.len(),
+            1 + 1 + TOOL_ROWS_VISIBLE + 1,
+            "{:?}",
+            folded.rows
+        );
+        assert_eq!(folded.rows[0], "You: go");
+        let summary = &folded.rows[1];
+        assert!(
+            summary.starts_with("· ⋯ 4 earlier tool calls folded"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(" · read_file×2 · run_command×2"),
+            "{summary}"
+        );
+        assert!(summary.contains(" · 1 failed"), "{summary}");
+        assert!(summary.ends_with(" · /tools to expand"), "{summary}");
+        assert_eq!(
+            &folded.rows[2..6],
+            &entries[5..9],
+            "the latest rows stay visible"
+        );
+        assert_eq!(folded.rows[6], "WillDeep: done");
+        assert_eq!(folded.index_of, vec![0, 1, 1, 1, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn folding_restarts_after_any_non_tool_row_and_expanded_view_shows_all() {
+        let mut entries = tool_rows(5);
+        entries.push("WillDeep: half way".to_owned());
+        entries.extend(tool_rows(5));
+        let folded = fold_tool_rows(&entries, false, Language::ZhCn);
+        assert_eq!(folded.rows, entries, "two short runs never fold");
+
+        let mut long = tool_rows(9);
+        long.push("WillDeep: x".to_owned());
+        assert_eq!(fold_tool_rows(&long, true, Language::ZhCn).rows, long);
+        let folded = fold_tool_rows(&long, false, Language::ZhCn);
+        assert!(
+            folded.rows[0].starts_with("· ⋯ 已收起 5 条工具调用"),
+            "{}",
+            folded.rows[0]
+        );
+        assert_eq!(folded.rows.len(), 1 + TOOL_ROWS_VISIBLE + 1);
+    }
+
+    #[test]
+    fn tools_command_toggles_folding_and_reports() {
+        let mut app = App::new(Vec::new(), Language::En);
+        for line in tool_rows(9) {
+            app.append_transcript(line);
+        }
+        assert_eq!(app.display_transcript().rows.len(), 1 + TOOL_ROWS_VISIBLE);
+
+        assert!(app.handle_slash_command("/tools", &SkillCatalog::default()));
+        assert!(app.tool_rows_expanded);
+        assert!(app.transcript.last().unwrap().starts_with("System: "));
+        assert_eq!(app.display_transcript().rows.len(), 9 + 1);
+
+        assert!(app.handle_slash_command("/tools", &SkillCatalog::default()));
+        assert!(!app.tool_rows_expanded);
+        assert_eq!(
+            app.display_transcript().rows.len(),
+            1 + TOOL_ROWS_VISIBLE + 2
+        );
+    }
+
+    #[test]
+    fn transient_line_switches_source_and_keeps_only_the_tail() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.stream_transient(StreamKind::Reasoning, "先看日志");
+        app.stream_transient(StreamKind::Reasoning, "，再改");
+        assert_eq!(app.transient_thought.as_deref(), Some("先看日志，再改"));
+        assert_eq!(app.transient_label(), "thinking");
+        assert_eq!(app.activity_line, "Thinking");
+
+        // 正文一来，思维链缓冲清掉，标签跟着换，两种文字不拼在一起。
+        app.stream_transient(StreamKind::Reply, "好的");
+        assert_eq!(app.transient_thought.as_deref(), Some("好的"));
+        assert_eq!(app.transient_label(), "replying");
+        assert_eq!(app.activity_line, "Receiving reply");
+
+        app.stream_transient(StreamKind::Reply, &"x".repeat(THOUGHT_PREVIEW_CHARS * 2));
+        assert_eq!(
+            app.transient_thought
+                .as_deref()
+                .map(|value| value.chars().count()),
+            Some(THOUGHT_PREVIEW_CHARS)
+        );
+    }
+
+    #[test]
+    fn queued_prompts_are_marked_until_they_are_sent() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let row = app.queued_prompt_row("fix it");
+        app.append_transcript(row);
+        assert_eq!(app.transcript, vec!["You: [queued] fix it"]);
+        app.mark_queued_prompt_sent("fix it");
+        assert_eq!(app.transcript, vec!["You: fix it"]);
+        // 找不到对应的待发行时什么都不动。
+        app.mark_queued_prompt_sent("other");
+        assert_eq!(app.transcript, vec!["You: fix it"]);
+    }
+
+    #[test]
+    fn turn_end_leaves_a_divider_rings_the_bell_and_flips_the_composer_state() {
+        let mut app = App::new(Vec::new(), Language::En);
+        assert_eq!(app.composer_state().0, "Your turn");
+        app.begin_turn(false, "working".to_owned());
+        assert!(app.composer_state().0.contains("Enter queues"));
+        assert!(!app.bell_pending);
+
+        app.note_tool_requested("read_file", None);
+        app.append_turn_stats(None);
+        let divider = app.transcript.last().cloned().unwrap();
+        assert!(divider.starts_with(TURN_DIVIDER_PREFIX), "{divider}");
+        assert!(divider.contains("turn finished"), "{divider}");
+        assert!(divider.ends_with("your turn ──"), "{divider}");
+
+        app.finish_turn();
+        assert!(std::mem::take(&mut app.bell_pending));
+        assert_eq!(app.composer_state().0, "Your turn");
     }
 
     #[test]

@@ -1661,6 +1661,11 @@ fn client_event(value: serde_json::Value, language: Language) -> Option<serde_js
     if kind == "assistant_text_delta" {
         return Some(serde_json::json!({"type":kind,"text":value.get("text")?.as_str()?}));
     }
+    // 思维链增量目前只给终端做「思考中」行；网页端还没有对应的显示位，先不下发，
+    // 否则会落到下面的兜底分支，变成一行行 `reasoning_delta` 标签。
+    if kind == "reasoning_delta" {
+        return None;
+    }
     if kind == "subagent_retry_wait" {
         let id = value.get("id")?.as_str()?.parse::<uuid::Uuid>().ok()?;
         let attempt = value.get("attempt")?.as_u64()?;
