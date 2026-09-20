@@ -137,9 +137,9 @@ impl App {
         if self.running {
             (
                 self.language.text(
-                    "本轮进行中 · 回车排队 · Esc 中止",
-                    "Turn running · Enter queues · Esc stops",
-                    "ターン実行中 · Enter でキュー · Esc で中断",
+                    "本轮进行中 · 回车即送达 · Esc 中止",
+                    "Turn running · Enter steers now · Esc stops",
+                    "ターン実行中 · Enter で即時送達 · Esc で中断",
                 ),
                 Color::Yellow,
             )
@@ -160,6 +160,24 @@ impl App {
                 .text("［待发］ ", "[queued] ", "［送信待ち］ "),
             terminal_safe_text(text)
         )
+    }
+
+    /// 送进正在跑的那一轮却没赶上（任务在下一次调模型前就结束了）的插话：
+    /// 说一声，然后排队，本轮结束后照常发出，一句话都不丢。
+    pub(super) fn requeue_steering(&mut self, text: String) {
+        self.append_transcript(format!(
+            "System: {}",
+            self.language.text(
+                "上一条插话没赶上本轮，已排队，本轮结束后发送",
+                "The last message missed this turn; queued to send when it finishes",
+                "直前のメッセージはこのターンに間に合わず、終了後に送信するためキューに入れました",
+            )
+        ));
+        self.queued_prompts.push_back(QueuedPrompt {
+            text,
+            attachments: Vec::new(),
+            from_phone: false,
+        });
     }
 
     /// 排队的提示词真正发出时，把那行「待发」标记去掉。
@@ -618,6 +636,15 @@ mod tests {
     }
 
     #[test]
+    fn undelivered_steering_is_requeued_with_a_notice() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.requeue_steering("先别删".to_owned());
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert_eq!(app.queued_prompts[0].text, "先别删");
+        assert!(app.transcript[0].starts_with("System: The last message missed this turn"));
+    }
+
+    #[test]
     fn queued_prompts_are_marked_until_they_are_sent() {
         let mut app = App::new(Vec::new(), Language::En);
         let row = app.queued_prompt_row("fix it");
@@ -635,7 +662,7 @@ mod tests {
         let mut app = App::new(Vec::new(), Language::En);
         assert_eq!(app.composer_state().0, "Your turn");
         app.begin_turn(false, "working".to_owned());
-        assert!(app.composer_state().0.contains("Enter queues"));
+        assert!(app.composer_state().0.contains("Enter steers now"));
         assert!(!app.bell_pending);
 
         app.note_tool_requested("read_file", None);

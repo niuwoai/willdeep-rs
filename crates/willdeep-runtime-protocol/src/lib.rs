@@ -182,6 +182,22 @@ pub struct AgentPromptParams {
     pub message: String,
 }
 
+/// `turn.steer`：把用户在本轮进行中说的话送进该会话正在跑的任务，下一次调模型前
+/// 以用户身份注入，不打断手上的活。没有在途任务时 `delivered` 为假，客户端自行排队。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SteerTurnParams {
+    pub session_id: uuid::Uuid,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SteerTurnOutcome {
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<uuid::Uuid>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryAgentParams {
@@ -1198,6 +1214,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "task.diagnostics",
     "task.cancel",
     "turn.submit",
+    "turn.steer",
     "turn.list",
     "turn.get",
     "turn.stop",

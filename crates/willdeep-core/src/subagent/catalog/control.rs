@@ -139,7 +139,14 @@ mod tests {
             catalog.send_agent_message(&handle, "and the changelog"),
             Ok(agent_id)
         );
-        assert_eq!(inbox.drain(), vec!["also check docs/", "and the changelog"]);
+        assert_eq!(
+            inbox
+                .drain()
+                .iter()
+                .map(crate::AgentInstruction::text)
+                .collect::<Vec<_>>(),
+            vec!["also check docs/", "and the changelog"]
+        );
 
         // 别的会话起的子 Agent：同一个注册表里跑着，但不在本目录名单上。
         let (foreign, foreign_inbox, _) = hang_agent(&catalog, &background, false);
@@ -171,7 +178,7 @@ mod tests {
             .send_agent_message(&agent_id.to_string(), &format!("{exact}!"))
             .unwrap_err();
         assert!(error.contains("4001 characters") && error.contains("never truncated"));
-        assert_eq!(inbox.drain(), vec![exact]);
+        assert_eq!(inbox.drain(), vec![crate::AgentInstruction::Parent(exact)]);
     }
 
     #[tokio::test]

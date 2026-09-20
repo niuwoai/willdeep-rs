@@ -34,23 +34,69 @@ pub struct AgentConfig {
 
 #[derive(Default)]
 pub struct AgentInstructionInbox {
-    pending: Mutex<VecDeque<String>>,
+    pending: Mutex<VecDeque<AgentInstruction>>,
 }
 
+impl std::fmt::Debug for AgentInstructionInbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 只报条数：插话原文是用户的话，不该跟着请求结构一起进日志。
+        let pending = self
+            .pending
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or(0);
+        f.debug_struct("AgentInstructionInbox")
+            .field("pending", &pending)
+            .finish()
+    }
+}
+
+/// 送进正在跑的 Agent 的插话，主循环每一小轮开始前排空——也就是「当前工具跑完、
+/// 下一次调模型之前」，不打断手上的活。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentInstruction {
+    /// 父 Agent 给子 Agent 的补充指令，以宿主口吻合并成一条注入。
+    Parent(String),
+    /// 用户在本轮进行中说的话，以用户身份逐条注入，回放时显示为 `You:`。
+    Operator(String),
+}
+
+impl AgentInstruction {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Parent(text) | Self::Operator(text) => text,
+        }
+    }
+}
+
+/// 单条插话的上限；再长就不是插话而是新任务了。
+const MAX_INSTRUCTION_BYTES: usize = 16 * 1024;
+
 impl AgentInstructionInbox {
+    /// 父 Agent 的补充指令。
     pub fn push(&self, instruction: String) -> bool {
-        let instruction = instruction.trim();
-        if instruction.is_empty() || instruction.len() > 16 * 1024 {
+        self.enqueue(AgentInstruction::Parent, instruction)
+    }
+
+    /// 用户在本轮进行中的插话。
+    pub fn push_operator(&self, text: String) -> bool {
+        self.enqueue(AgentInstruction::Operator, text)
+    }
+
+    fn enqueue(&self, wrap: fn(String) -> AgentInstruction, text: String) -> bool {
+        let text = text.trim();
+        if text.is_empty() || text.len() > MAX_INSTRUCTION_BYTES {
             return false;
         }
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
-        pending.push_back(instruction.to_owned());
+        pending.push_back(wrap(text.to_owned()));
         true
     }
 
-    pub(crate) fn drain(&self) -> Vec<String> {
+    /// 取走全部待送的插话。任务结束后还剩下的，就是没赶上这一轮的。
+    pub fn drain(&self) -> Vec<AgentInstruction> {
         self.pending
             .lock()
             .map(|mut pending| pending.drain(..).collect())
@@ -329,7 +375,8 @@ impl Agent {
             compressors: Vec::new(),
             titlers: Vec::new(),
             subagents: None,
-            instruction_inbox: None,
+            // 根 Agent 也带收件箱：用户在本轮进行中说的话由此送达，不必等轮次结束。
+            instruction_inbox: Some(Arc::new(AgentInstructionInbox::default())),
             goal_continuation: None,
             background_tasks: None,
             routing: None,
@@ -432,6 +479,11 @@ impl Agent {
     pub fn with_instruction_inbox(mut self, inbox: Arc<AgentInstructionInbox>) -> Self {
         self.instruction_inbox = Some(inbox);
         self
+    }
+
+    /// 正在跑的这一轮的收件箱；进程内的界面直接往里塞用户插话。
+    pub fn instruction_inbox(&self) -> Option<Arc<AgentInstructionInbox>> {
+        self.instruction_inbox.clone()
     }
 
     /// 挂上宿主事件内核。
@@ -1013,10 +1065,20 @@ impl Agent {
         if instructions.is_empty() {
             return false;
         }
-        messages.push(Message::host_instruction(format!(
-            "Additional instructions from the parent Agent:\n\n{}",
-            instructions.join("\n\n")
-        )));
+        let mut parent = Vec::new();
+        for instruction in instructions {
+            match instruction {
+                AgentInstruction::Parent(text) => parent.push(text),
+                // 用户插话以用户身份进对话：模型按用户说的办，回放时也是 `You:`。
+                AgentInstruction::Operator(text) => messages.push(Message::user(text)),
+            }
+        }
+        if !parent.is_empty() {
+            messages.push(Message::host_instruction(format!(
+                "Additional instructions from the parent Agent:\n\n{}",
+                parent.join("\n\n")
+            )));
+        }
         true
     }
 

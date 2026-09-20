@@ -30,6 +30,40 @@ fn persist_turn_result(session: &mut Session, store: &SessionStore) -> Result<()
     }
 }
 
+/// 本轮在跑时把用户的话直接送进正在跑的那一轮：Runtime 轮次走 `turn.steer`，
+/// 进程内轮次直接进 Agent 收件箱，都是在下一次调模型前注入，不打断手上的活。
+/// 送不进去（没有在途任务、Runtime 不可达）返回 false，由调用方排队。
+async fn steer_running_turn(
+    app: &App,
+    session: &Session,
+    runtime: &TuiRuntime,
+    agent: &Arc<Agent>,
+    text: &str,
+) -> bool {
+    if app.runtime_turn {
+        matches!(
+            crate::daemon::steer_remote_turn(&runtime.home, session.id, text.to_owned()).await,
+            Ok(true)
+        )
+    } else {
+        agent
+            .instruction_inbox()
+            .is_some_and(|inbox| inbox.push_operator(text.to_owned()))
+    }
+}
+
+/// 进程内轮次结束时，收件箱里还没送出的插话交回队列，本轮结束后照常发出。
+fn requeue_undelivered_steering(app: &mut App, agent: &Arc<Agent>) {
+    let Some(inbox) = agent.instruction_inbox() else {
+        return;
+    };
+    for instruction in inbox.drain() {
+        if let willdeep_core::AgentInstruction::Operator(text) = instruction {
+            app.requeue_steering(text);
+        }
+    }
+}
+
 pub(super) async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -890,6 +924,12 @@ pub(super) async fn event_loop(
                                     BusyInput::RunNow=>{},
                                     BusyInput::Queue=>{
                                         let text=app.input.take();
+                                        // 先试着直接送进正在跑的这一轮；带附件的插话走不了收件箱，照旧排队。
+                                        if app.attachments.is_empty() && steer_running_turn(&app,session,runtime,&agent,&text).await {
+                                            app.append_transcript(format!("You: {text}"));
+                                            app.notice=Some(language.text("已送达 · 模型下一步就会看到","Delivered · the model sees it at its next step","送達済み · 次のステップでモデルが読みます").to_owned());
+                                            continue;
+                                        }
                                         let row=app.queued_prompt_row(&text);
                                         app.append_transcript(row);
                                         app.queued_prompts.push_back(QueuedPrompt{
@@ -1097,7 +1137,7 @@ pub(super) async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);runtime.notifier.task_stopped(&outcome);app.note_reply(&outcome.final_text);app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;persist_turn_result(session,store)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
+                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);runtime.notifier.task_stopped(&outcome);app.note_reply(&outcome.final_text);app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;persist_turn_result(session,store)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();requeue_undelivered_steering(&mut app,&agent);wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
                 UiMessage::Finished(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);persist_turn_result(session,store)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},

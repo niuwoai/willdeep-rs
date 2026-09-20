@@ -1,6 +1,12 @@
 use super::*;
 
 impl TaskManager {
+    /// 用户在本轮进行中的插话：送进该会话正在跑的任务，返回收下它的任务；
+    /// 没有在途任务返回 None，由客户端排队等本轮结束。
+    pub(super) fn steer(&self, session_id: uuid::Uuid, message: String) -> Option<uuid::Uuid> {
+        self.steering.steer(session_id, message)
+    }
+
     pub(super) fn open(options: TaskManagerOptions) -> Result<Self> {
         let TaskManagerOptions {
             path,
@@ -141,6 +147,7 @@ impl TaskManager {
             persistence: AsyncMutex::new(()),
             cancellations: Mutex::new(HashMap::new()),
             approval_modes: approval_modes::LiveApprovalModes::default(),
+            steering: steering::SteeringInboxes::default(),
             interactions_path,
             interactions: RwLock::new(interactions),
             interaction_waiters: Mutex::new(HashMap::new()),
@@ -455,6 +462,8 @@ impl TaskManager {
             workspace_access,
             effective_access,
         ));
+        // 用户在本轮进行中的插话由此送达：turn.steer 按会话找到这个收件箱。
+        request.instruction_inbox = Some(self.steering.register(id, request.session_id));
         tokio::spawn(async move {
             let execution =
                 crate::harness::execute_runtime(&home, request, connection, sink, |core| {
@@ -470,6 +479,14 @@ impl TaskManager {
                 cancellations.remove(&id);
             }
             manager.approval_modes.remove(id);
+            // 没赶上这一轮的插话交回客户端重新排队，先于收尾事件发出，界面收到
+            // 收尾时队列已经排好。
+            for text in manager.steering.remove(id) {
+                let undelivered = serde_json::json!({"type":"steer_undelivered","text":text});
+                let _ = manager
+                    .events
+                    .append("task.output", format!("task_id={id} {undelivered}"));
+            }
             let result = result.map(|result| {
                 result.and_then(|outcome| {
                     manager.sessions.record_execution_end(

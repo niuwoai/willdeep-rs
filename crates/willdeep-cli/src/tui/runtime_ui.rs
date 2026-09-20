@@ -502,6 +502,12 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             ));
         }
         // partial 的 text 里带着「轮次上限已用尽」这类提示，和 completed 一样要落进记录。
+        // 用户插话送进了任务却没赶上下一次调模型：Runtime 交回来，排队等本轮结束。
+        Some("steer_undelivered") => {
+            if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
+                app.requeue_steering(text.to_owned());
+            }
+        }
         Some("completed" | "partial") => {
             if let Some(text) = value.get("text").and_then(|value| value.as_str()) {
                 // 最后一段多半已经作中途文字显示过，只补没见过的部分（比如轮次

@@ -728,6 +728,7 @@ async fn run() -> Result<()> {
                 }),
                 workspace_access: Some(daemon::WorkspaceAccess::ReadOnly),
                 approval_handle: None,
+                instruction_inbox: None,
                 allowed_skills: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
             }

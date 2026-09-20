@@ -38,6 +38,7 @@ mod herdr;
 mod internal_transport;
 mod local_transport;
 mod session_store;
+mod steering;
 mod tool_store;
 pub(crate) mod tui_bridge;
 mod workspace_store;
@@ -57,8 +58,9 @@ pub(crate) use tui_bridge::{
     remote_session_states, remote_task_diagnostics, remote_turn_session, rename_remote_session,
     resolve_remote_approval, retry_remote_agent, retry_remote_agent_with_model, runtime_event_head,
     runtime_events, runtime_snapshot, search_remote_session_results, set_remote_session_archived,
-    spawn_remote_agent, start_runtime_event_follower, stop_remote_agent, stop_remote_turn,
-    submit_runtime_turn, update_remote_session_approval_mode, update_remote_session_model,
+    spawn_remote_agent, start_runtime_event_follower, steer_remote_turn, stop_remote_agent,
+    stop_remote_turn, submit_runtime_turn, update_remote_session_approval_mode,
+    update_remote_session_model,
 };
 pub(crate) use workspace_store::WorkspaceAccess;
 pub(crate) use workspace_store::{
@@ -639,6 +641,10 @@ pub(crate) struct SubmitTask {
     /// 的这一轮下一次工具调用就按新档位判。
     #[serde(skip)]
     pub(crate) approval_handle: Option<willdeep_core::SharedApprovalMode>,
+    /// 这一轮的插话收件箱，另一半同样由任务管理器持有：用户在本轮进行中说的话
+    /// 经 `turn.steer` 送进来，下一次调模型前注入。
+    #[serde(skip)]
+    pub(crate) instruction_inbox: Option<std::sync::Arc<willdeep_core::AgentInstructionInbox>>,
     #[serde(skip)]
     pub(crate) workspace_skills: Option<Vec<String>>,
     #[serde(skip)]
@@ -741,6 +747,8 @@ struct TaskManager {
     persistence: AsyncMutex<()>,
     cancellations: Mutex<HashMap<uuid::Uuid, Arc<Notify>>>,
     approval_modes: approval_modes::LiveApprovalModes,
+    /// 正在跑的任务各自的插话收件箱，`turn.steer` 按会话送达。
+    steering: steering::SteeringInboxes,
     interactions_path: PathBuf,
     interactions: RwLock<HashMap<uuid::Uuid, RuntimeInteraction>>,
     interaction_waiters:
@@ -1111,6 +1119,7 @@ pub(crate) async fn submit_runtime_prompt(
                     workspace: options.workspace.canonicalize()?,
                     workspace_access: None,
                     approval_handle: None,
+                    instruction_inbox: None,
                     workspace_skills: None,
                     workspace_mcp_servers: None,
                     profile: options.profile.clone(),

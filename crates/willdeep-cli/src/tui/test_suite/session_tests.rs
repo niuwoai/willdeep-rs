@@ -670,6 +670,52 @@ fn runtime_reasoning_delta_shows_as_transient_thought_only() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 插话送进了任务却没赶上下一次调模型：Runtime 以 `steer_undelivered` 交回，
+/// TUI 说一声并排队，本轮结束后照常发出，一句话都不丢。
+#[test]
+fn runtime_hands_back_undelivered_steering_and_the_tui_requeues_it() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-steer-undelivered-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "runtime steer");
+    let mut app = App::new(Vec::new(), Language::En);
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = session.id;
+    let output = |sequence: u64, value: serde_json::Value| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id={task_id} {value}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+    let events = vec![
+        output(1, serde_json::json!({"type":"turn_started","turn":1})),
+        output(
+            2,
+            serde_json::json!({"type":"steer_undelivered","text":"先别删，只改 handler"}),
+        ),
+        output(
+            3,
+            serde_json::json!({"type":"completed","stop_reason":"finished","turns":1,"text":"done"}),
+        ),
+    ];
+    runtime_ui::apply_runtime_events(&mut app, events, &mut session, &store).unwrap();
+    assert!(!app.running);
+    assert_eq!(app.queued_prompts.len(), 1);
+    assert_eq!(app.queued_prompts[0].text, "先别删，只改 handler");
+    assert!(
+        app.transcript
+            .iter()
+            .any(|line| line.starts_with("System: The last message missed this turn")),
+        "{:?}",
+        app.transcript
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_partial_terminal_event_alone_releases_busy_state() {
     let root = std::env::temp_dir().join(format!(

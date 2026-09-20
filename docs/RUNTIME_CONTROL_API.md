@@ -86,6 +86,7 @@ kernel.list
 kernel.get
 kernel.ignore
 turn.submit
+turn.steer
 turn.list
 turn.stop
 task.diagnostics
@@ -141,6 +142,8 @@ diff.revert
 `kernel.list` / `kernel.get` 返回 `PublicKernelEvent`：**事件正文不在里面**。body 可能是外部消息、工具输出或 Worker 报告全文，与 Prompt 同级私有；公共 DTO 只带一个按命令审批同规则打码、截断到 120 字符的标题摘要，够回答「这是哪一条」，不够替代读原文。字段是白名单，新增字段不会自动顺流到浏览器。
 
 `turn.submit` 的可选 `origin_client` 记下**是哪一端提交的这一轮**,`RuntimeTask` 原样带出来。审批与提问据此弹回发起端:同一个会话可能同时开在终端和浏览器里,按会话判定的话两处都会弹,谁先答谁算数,另一边只看到问题凭空消失。标识按**界面**分而不是按进程分——终端里用 `/webapp` 起的 Web 与终端同进程,共用一个 ID 就等于没分。旧 Daemon 不产出该字段(读回来是 `null`),此时回落到按会话判定,老任务不至于没人管。
+
+`turn.steer` 把用户在本轮进行中说的话送进该会话正在跑的任务：参数 `session_id` 与 `message`（1 到 16384 字节），Runtime 按会话找到在途任务，塞进它的收件箱，Agent 主循环在下一次调模型前以用户消息注入，不打断手上的活。返回 `{ "delivered": bool, "task_id": <uuid|null> }`；没有在途任务不算错，`delivered` 为假，客户端自行排队等本轮结束。任务结束时收件箱里没赶上的插话以 `task.output` `{"type":"steer_undelivered","text":…}` 交回客户端。属于变更类操作，不算产出新工作。
 
 `runtime.status` 返回类型化健康状态、版本、PID、运行时间和事件头；安全升级排空期间状态为 `draining`。`workspace.remove` 与 `session.delete` 返回 `{ id, status }` 结构化结果，其中状态分别为 `removed` 与 `deleted`，客户端无需解析任意 JSON 文本。
 
