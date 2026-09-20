@@ -219,7 +219,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 决策记录：`docs/decisions/2026-09-20-experience-baseline-and-model-eval.md`。
 
 - [x] TUI 手感对齐：中途汇报、工具行折叠、思维链显示、结束信号、插话送达（v0.78.0-rc4 → rc12）。
-- [ ] Web 端对齐同一清单（`docs/EXPERIENCE_BASELINE.md` 第 6、7 项；第 8 项插话送达 v0.78.0-rc15、第 5 项思维链 v0.78.0-rc16、第 4 项折叠 v0.78.0-rc17 已到位）。
+- [x] Web 端对齐同一清单（`docs/EXPERIENCE_BASELINE.md` 第 4 至 8 项，v0.78.0-rc15 → rc18）。
 - [x] 离线指标脚本 `scripts/session_metrics.rb`：人话率、工具调用与失败、思维链占比、平均轮次，JSON + Markdown。
 - [ ] 固定任务集每晚对 DeepSeek V4 / GLM / Claude 各跑一遍，指标做成趋势。
 - [x] 主 Agent `token_budget` 闸门。
