@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc25（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-21 | 当前版本：v0.78.0-rc26（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -214,7 +214,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Task Packet 结构化派工（目标 / 已知事实 / 约束 / `read_files` 上下文 / `write_files` 精确权限 / 验证命令）与 Verifier 闭环：验证命令由 Runtime 亲自执行，退出码是唯一裁决，失败输出消化后回灌重试，尝试打满即判失败并要求升档；
 - 写入型工种的文件集写通道：最多声明 16 个现有或待创建文件，`smart/workspace-write` 继承主 Agent 工作区写权限，`strict` 一次审批整个集合，越界拒绝并给出扩权路径，运行中文件集互斥；
 - 测试/构建命令失败时在工具结果尾部追加确定性派工提示（仅主 Agent 可见）；
-- 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Worker/Standard/Deep 实际运行数、Deep Share、Skill Coverage、Worker Verified Success 与 Escalation Rate，「未验证」是独立于通过与失败的第三种答案；
+- 子 Agent 判定遥测：每次运行落盘验证结果、尝试次数与起始 commit 锚点，`willdeep daemon agent-metrics` 给出 Worker/Standard/Deep 实际运行数、Deep Share、Skill Coverage、Worker Verified Success 与 Escalation Rate，「未验证」是独立于通过与失败的第三种答案；`--json` / `--since` 供每周快照脚本取数，快照归档到 `bench/agent-metrics/`，趋势写回 README 与 `docs/AGENT_METRICS.md`；
 - TUI 右栏实时后台任务状态、耗时及输出查询/取消工具；
 - Core `ask_user` 候选单选/多选与自由输入交互；
 - Allow once、Disallow、窄作用域持久 Always Allow 审批状态机及规则管理命令；
@@ -263,6 +263,7 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] LSP 诊断、Hooks/插件、自动记忆与 OS 级 Shell 沙箱；当前已有结构化工具门禁、工作区边界和小模型路由，但这些仍是与 Claude Code 完整能力面的主要差距；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [x] 平台沙箱：写入围栏默认开、网络围栏按档位断通（v0.78.0-rc25）；更强的命令风险分类仍待做；
+- [x] 小模型路线做成数据：`agent-metrics --json --since` + 每周快照发布 Deep Share / Worker Verified Success（v0.78.0-rc26，`docs/AGENT_METRICS.md`）；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。

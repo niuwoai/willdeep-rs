@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  模板：把 __REPO__ 换成仓库绝对路径再装。安装步骤见同目录 README.md。
+  默认每周一 04:00 本地时间拍一张线上派工指标快照。它不花钱，只读本机 Runtime。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.willdeep.agent-metrics</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>__REPO__/scripts/agent_metrics_weekly.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- 趋势看的窗口；与拍照周期对齐，改周期时一起改。 -->
+        <key>WILLDEEP_METRICS_WINDOW</key>
+        <string>7d</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 错过的场次不补拍：窗口是按天数算的，晚一天拍就是晚一天的窗口，下周照常。 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/target/agent-metrics/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/target/agent-metrics/launchd.log</string>
+</dict>
+</plist>

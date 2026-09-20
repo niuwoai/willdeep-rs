@@ -17,7 +17,7 @@
 3. **审计做成能演示的东西**：`willdeep audit export`，把 `approvals.jsonl`、hooks 拦截、verifier 裁决、diff 归属汇成一份报告。企业客户看的是这个。（v0.78.0-rc22 落地，见 `docs/AUDIT_EXPORT.md`；`approvals.jsonl` 同时补上 `session_id`。）
 4. **Runtime 作为平台对外**：控制面 60 个操作已稳定，`willdeep-runtime-client` 作为 SDK 发布；`willdeep run` 进 CI 流水线的文档与样例。（v0.78.0-rc23 落地：两个 crate 发布就绪并通过 `cargo publish --dry-run`，README 与示例见 `crates/willdeep-runtime-client/`；CI 文档 `docs/CI_INTEGRATION.md`，样例 `examples/ci/`。实际发布到 crates.io 需要 token，由维护者执行。）
 5. **MCP Streamable HTTP + OAuth**；写入围栏默认开并补网络围栏。（前半段 v0.78.0-rc24 落地：`url` 服务、会话与协议版本头、`willdeep mcp login` 的授权码 + PKCE 登录与自动刷新，见 `docs/SKILLS_AND_MCP.md`。后半段 v0.78.0-rc25 落地：围栏有后端就默认开、工具链缓存默认放行，网络围栏按档位断通并带 `network: true` 逃生口，见 `docs/SANDBOX.md`。）
-6. **小模型路线做成数据**：`agent-metrics` 的 Deep Share、Worker Verified Success 定期对外发布。
+6. **小模型路线做成数据**：`agent-metrics` 的 Deep Share、Worker Verified Success 定期对外发布。（v0.78.0-rc26 落地：`agent-metrics --json --since`，`scripts/agent_metrics_publish.rb` 每周快照进 `bench/agent-metrics/history.jsonl`，趋势由 `scripts/agent_metrics_trend.rb --inject` 写回 README 与 `docs/AGENT_METRICS.md`，对设计目标报警。）
 
 主 Agent 的 token 预算闸门（`[agent] token_budget`）作为第 1 项的附带项一起补：轮次上限放到 200 之后，它是唯一的自动闸门。
 

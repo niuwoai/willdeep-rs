@@ -95,6 +95,22 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 </details>
 <!-- range:end -->
 
+### 线上派工，每周一张快照
+
+靶场是实验室，这里是线上：日常使用中 Runtime 真实派出去的子 Agent，每周一拍一张，只有计数和比率，没有 prompt、路径、agent id。口径、目标与发布流程见 [线上派工指标](docs/AGENT_METRICS.md)，历次快照在 [`bench/agent-metrics/`](bench/agent-metrics/)。
+
+下面这段由 `ruby scripts/agent_metrics_trend.rb --inject` 生成，别手改。
+
+<!-- agent-metrics:begin -->
+还没有拍过快照（`bench/agent-metrics/history.jsonl` 为空）。
+
+```bash
+ruby scripts/agent_metrics_publish.rb
+```
+
+它只读本机 Runtime 的 agent 记录，不花钱，拍完自动归档并在这里长出趋势。
+<!-- agent-metrics:end -->
+
 ---
 
 ## 30 秒上手
@@ -167,6 +183,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [Runtime Daemon 与工作区](docs/RUNTIME_DAEMON.md) — 常驻控制面
 - [子 Agent 与后台任务](docs/SUBAGENTS.md) — 六个公开工种、内部兼容路由、命令审核与 Worktree
 - [小上下文 Skill Worker](docs/SKILL_WORKERS.md) — 派工纪律、Verifier 闭环、实弹靶场
+- [线上派工指标](docs/AGENT_METRICS.md) — Deep Share、Worker Verified Success 每周快照与目标
 - [插件系统](docs/PLUGINS.md) — 与 macOS 版共享插件包，沙箱边界与审批为何各管各的
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [OS 级写入围栏](docs/SANDBOX.md) — Seatbelt / bubblewrap，预览态

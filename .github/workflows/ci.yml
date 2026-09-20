@@ -44,6 +44,9 @@ jobs:
       - name: Model eval task set self-check
         if: runner.os == 'Linux'
         run: ruby scripts/test/model_eval_test.rb && ruby scripts/model_eval.rb --check-tasks
+      - name: Agent metrics publish self-check
+        if: runner.os == 'Linux'
+        run: ruby scripts/test/agent_metrics_test.rb
       - name: CI samples parse
         if: runner.os == 'Linux'
         run: bash -n examples/ci/run-task.sh && ruby -ryaml -e 'ARGV.each { |path| YAML.safe_load_file(path, aliases: true); puts "ok #{path}" }' examples/ci/github-actions.yml examples/ci/gitlab-ci.yml

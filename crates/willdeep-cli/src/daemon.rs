@@ -270,7 +270,15 @@ pub enum DaemonAction {
     /// Show one Runtime-owned agent.
     Agent { id: uuid::Uuid },
     /// Report delegation metrics over the agents the Runtime still holds.
-    AgentMetrics,
+    AgentMetrics {
+        /// Print one JSON object instead of the tab-separated report.
+        #[arg(long)]
+        json: bool,
+        /// Only count child runs created inside this window: `7d`, `24h`,
+        /// `2w`, a UTC date (`2026-09-14`) or a UTC timestamp.
+        #[arg(long, value_name = "WINDOW")]
+        since: Option<String>,
+    },
     /// Preview an exact Diff and conflict check for a child Agent worktree.
     AgentWorktreeReview { id: uuid::Uuid },
     /// Apply an exact reviewed child Agent patch to its root Workspace.
@@ -787,7 +795,9 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Task { id } => show_task(&home, id).await,
         DaemonAction::Agents => list_agents(&home).await,
         DaemonAction::Agent { id } => show_agent(&home, id).await,
-        DaemonAction::AgentMetrics => report_agent_metrics(&home).await,
+        DaemonAction::AgentMetrics { json, since } => {
+            report_agent_metrics(&home, json, since.as_deref()).await
+        }
         DaemonAction::AgentWorktreeReview { id } => worktree_review::review_cli(&home, id).await,
         DaemonAction::MergeAgentWorktree { id, review, yes } => {
             worktree_review::merge_cli(&home, id, review, yes).await
@@ -1206,125 +1216,23 @@ async fn show_agent(home: &Path, id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Profiles that exist to take work off the parent model. `deep` is not one
-/// of them: it runs the parent model by design, so counting it as delegation
-/// would make the coverage number flatter itself.
-const WORKER_PROFILES: &[&str] = &[
-    "scout",
-    "reader",
-    "log_inspector",
-    "git_detective",
-    "editor",
-    "test_fixer",
-    "build_fixer",
-];
-
 /// Delegation and model-tier numbers computed from the agent records the
 /// Runtime still holds — no separate counters to drift out of sync with
-/// reality.
-///
-/// Every rate is printed with its denominator, and a rate with no denominator
-/// prints `-` rather than a reassuring 0%: "nothing was verified" and "nothing
-/// passed" are different facts, and a metric that cannot tell them apart is
-/// worse than no metric.
-async fn report_agent_metrics(home: &Path) -> Result<()> {
+/// reality. The arithmetic lives in [`crate::agent_metrics`] so the text
+/// report, `--json` and the publish script cannot disagree.
+async fn report_agent_metrics(home: &Path, json: bool, since: Option<&str>) -> Result<()> {
+    let since = since
+        .map(|window| crate::agent_metrics::parse_since(window, now()))
+        .transpose()?;
     let state = ensure_running(home).await?;
     let agents = runtime_client(&state)?.agents().await?.into_result()?;
-    let children = agents
-        .iter()
-        .filter(|agent| agent.parent_id.is_some())
-        .collect::<Vec<_>>();
-    let workers = children
-        .iter()
-        .filter(|agent| {
-            agent
-                .profile
-                .as_deref()
-                .is_some_and(|profile| WORKER_PROFILES.contains(&profile))
-        })
-        .count();
-    let standard = children
-        .iter()
-        .filter(|agent| agent.profile.as_deref() == Some("implementer"))
-        .count();
-    let deep = children
-        .iter()
-        .filter(|agent| agent.profile.as_deref() == Some("deep"))
-        .count();
-    let verified = children
-        .iter()
-        .filter(|agent| agent.verifier_passed.is_some())
-        .collect::<Vec<_>>();
-    let passed = verified
-        .iter()
-        .filter(|agent| agent.verifier_passed == Some(true))
-        .count();
-    let attempts = verified
-        .iter()
-        .filter_map(|agent| agent.attempts)
-        .sum::<u64>();
-
-    println!("agents\tchildren={}\tworkers={workers}", children.len());
-    println!("model_tiers\tworker={workers}\tstandard={standard}\tdeep={deep}");
-    println!(
-        "deep_share\t{}\t(actual deep child runs / all child runs; target <= 5%)",
-        rate(deep, children.len())
-    );
-    println!(
-        "skill_coverage\t{}\t(narrow worker runs / all child runs; target >= 50%)",
-        rate(workers, children.len())
-    );
-    println!(
-        "worker_verified_success\t{}\t(verifier passes / runs with a verifier: {}/{}; target >= 85%)",
-        rate(passed, verified.len()),
-        passed,
-        verified.len()
-    );
-    println!(
-        "escalation_rate\t{}\t(verified runs that exhausted their attempts and need a bigger model; target <= 15%)",
-        rate(verified.len() - passed, verified.len())
-    );
-    // Report-only trades never earn a verifier verdict, so without this line
-    // they are permanently invisible in the numbers — and "invisible" reads
-    // as "fine". A citation either resolves or it does not.
-    let audited = children
-        .iter()
-        .filter(|agent| agent.claims_checked.is_some_and(|checked| checked > 0))
-        .collect::<Vec<_>>();
-    let claims = audited
-        .iter()
-        .filter_map(|agent| agent.claims_checked)
-        .sum::<u64>();
-    let bad_claims = audited
-        .iter()
-        .filter_map(|agent| agent.claims_unverifiable)
-        .sum::<u64>();
-    println!(
-        "citation_accuracy\t{}\t(cited locations that exist / cited locations checked in report-only runs: {}/{})",
-        rate((claims - bad_claims).min(claims) as usize, claims as usize),
-        claims - bad_claims,
-        claims
-    );
-    println!(
-        "attempts_per_verified_run\t{}",
-        if verified.is_empty() {
-            "-".to_owned()
-        } else {
-            format!("{:.2}", attempts as f64 / verified.len() as f64)
-        }
-    );
-    let unverified = children.len() - verified.len();
-    println!(
-        "unverified_runs\t{unverified}\t(no verifier was given, so nothing was proved either way)"
-    );
-    Ok(())
-}
-
-fn rate(part: usize, whole: usize) -> String {
-    if whole == 0 {
-        return "-".to_owned();
+    let metrics = crate::agent_metrics::AgentMetrics::compute(&agents, since);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&metrics)?);
+    } else {
+        print!("{}", metrics.render_text());
     }
-    format!("{:.1}%", part as f64 * 100.0 / whole as f64)
+    Ok(())
 }
 
 async fn cancel_task(home: &Path, id: uuid::Uuid) -> Result<()> {

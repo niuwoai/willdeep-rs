@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.78.0-rc26] - 2026-09-21
+
+### Added
+- **线上派工指标定期发布（ADR 第 6 项）。** `willdeep daemon agent-metrics` 新增 `--json`（同一份数的 JSON，分母为 0 的比率是 `null`）与 `--since 7d | 24h | 2w | 2026-09-14 | 2026-09-14T08:00:00Z`（只算窗口内新建的子 Agent；光秃秃的数字拒收，`--since 7` 是七个什么没人知道）。`scripts/agent_metrics_publish.rb` 拍快照（近 7 天 + 累计）追加进 `bench/agent-metrics/history.jsonl`，`scripts/agent_metrics_trend.rb --inject` 把 Deep Share、Skill Coverage、Worker Verified Success、Escalation Rate、引用准确率的趋势写回 README 与新页 `docs/AGENT_METRICS.md`，`--alarm` 对设计目标（Deep Share ≤ 5%、Skill Coverage ≥ 50%、Worker Verified Success ≥ 85%、Escalation Rate ≤ 15%）报警而不是对上一次；`scripts/agent_metrics_weekly.sh` + `com.willdeep.agent-metrics.plist` 每周一拍，不花钱、不联网、不自动提交，没达标退出码 2。快照只有计数与比率，没有 prompt、路径、命令、agent id。
+- 测试：`crates/willdeep-cli/src/agent_metrics.rs` 钉住分母为 0 出 `None`、根 Agent 不计入、`deep` 不算窄工种、窗口过滤、`--since` 解析；`scripts/test/agent_metrics_test.rb` 钉住归档形状（没 review 的字段不进历史）、目标判定（分母为 0 是「没得比」）、`null` 渲染成 `-` / `·`、注入幂等与两个脚本的离线命令行，进 CI。
+
+### Changed
+- `agent-metrics` 的算法从 `daemon.rs` 搬到 `agent_metrics.rs`：文本、JSON 与发布脚本只有一条算路。文本报告里 `deep_share` / `skill_coverage` / `escalation_rate` 三行现在也打分子分母，与另外两行一致。
+
 ## [0.78.0-rc25] - 2026-09-20
 
 ### Changed
