@@ -1329,16 +1329,15 @@ fn draw(
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(canvas);
-        let mut visible_transcript = app.display_transcript().rows;
-        if let Some(thought) = &app.transient_thought {
-            visible_transcript.push(format!(
-                "WillDeep · {}: {thought}",
-                app.transient_label()
-            ));
-        }
         app.transcript_width = areas[0].width.saturating_sub(2).max(1) as usize;
         app.transcript_rect = areas[0];
         app.viewport_height = areas[0].height.saturating_sub(2).max(1) as usize;
+        let mut visible_transcript = app.display_transcript().rows;
+        // 思维链只占最后几行、灰色；正文一开始这行就换成回复预览。宽度要先算好，
+        // 截取才知道几行是几行。
+        if let Some(row) = app.transient_row() {
+            visible_transcript.push(row);
+        }
         app.transcript_height =
             rendered_transcript_height(&visible_transcript, app.transcript_width);
         let max = app.max_scroll();

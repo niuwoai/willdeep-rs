@@ -700,6 +700,41 @@ pub(super) const THOUGHT_PREVIEW_CHARS: usize = 1200;
 /// 「本轮结束」分隔线的前缀。按账目行的灰色画，后面留一行空白，一眼看出轮到谁。
 pub(super) const TURN_DIVIDER_PREFIX: &str = "── ";
 
+/// 进聊天区之前把终端会「吃掉」的字符处理掉：制表符按 4 列展开，换行保留，
+/// `\r` 丢弃，其余控制字符转成可见转义。模型思维链和代码里的原始 `\t` 直接写到
+/// 终端时光标跳到制表位，而 Ratatui 只当它是一格，两边失步后旧字符盖不掉，
+/// 屏幕上留下一堆残影，看起来像「thinking 反复从头显示」。
+pub(super) fn terminal_safe_text(value: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+    let mut output = String::with_capacity(value.len());
+    let mut column = 0;
+    for character in value.chars() {
+        match character {
+            '\n' => {
+                output.push('\n');
+                column = 0;
+            }
+            '\t' => {
+                let spaces = TAB_WIDTH - column % TAB_WIDTH;
+                output.push_str(&" ".repeat(spaces));
+                column += spaces;
+            }
+            '\r' => {}
+            character if character.is_control() => {
+                for escaped in character.escape_default() {
+                    output.push(escaped);
+                    column += UnicodeWidthChar::width(escaped).unwrap_or(0);
+                }
+            }
+            character => {
+                output.push(character);
+                column += UnicodeWidthChar::width(character).unwrap_or(0);
+            }
+        }
+    }
+    output
+}
+
 pub(super) fn visual_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);
     text.split('\n')

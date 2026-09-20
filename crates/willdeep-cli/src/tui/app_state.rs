@@ -1372,6 +1372,8 @@ impl App {
         self.scroll_from_bottom = 0;
     }
     pub(super) fn append_transcript(&mut self, v: String) {
+        // 所有进记录的文字先过终端安全处理，制表符和控制字符不许碰终端光标。
+        let v = terminal_safe_text(&v);
         let previous_height =
             rendered_transcript_height(&self.display_transcript().rows, self.transcript_width);
         if !v
