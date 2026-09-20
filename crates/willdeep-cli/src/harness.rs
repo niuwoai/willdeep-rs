@@ -1170,7 +1170,93 @@ fn build_hooks(settings: &[crate::config::HookSettings]) -> Result<HookRegistry>
     Ok(HookRegistry::new(hooks))
 }
 
-/// 把审批档位翻译成 OS 侧的围栏档位，并算出可写根。
+/// 围栏开着时默认放行的工具链缓存。它们都在工作区外，但不放行的话 `cargo fetch`、
+/// `npm install`、`pip install`、`go build` 第一天就撞墙，然后所有人把围栏关掉——
+/// 一个被关掉的围栏防不住任何东西。不存在的目录会在建 spec 时被丢掉，不必逐台机器裁剪。
+/// `agent.sandbox_toolchain_caches = false` 可以整组去掉。
+pub(crate) const DEFAULT_SANDBOX_TOOLCHAIN_ROOTS: &[&str] = &[
+    "~/.cargo/registry",
+    "~/.cargo/git",
+    "~/.npm",
+    "~/.yarn",
+    "~/.cache",
+    "~/Library/Caches",
+    "~/Library/pnpm",
+    "~/.local/share/pnpm",
+    "~/go/pkg/mod",
+];
+
+/// `~` 与 `~/…` 展开成家目录；别的路径原样返回。配置里写 `~/.cargo/registry`
+/// 是人的自然写法，以前不展开就被静默丢掉，等于文档教了一条不生效的配置。
+pub(crate) fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix('~') else {
+        return path.to_path_buf();
+    };
+    if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\')) {
+        return path.to_path_buf();
+    }
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return path.to_path_buf();
+    };
+    let mut expanded = std::path::PathBuf::from(home);
+    let rest = rest.trim_start_matches(['/', '\\']);
+    if !rest.is_empty() {
+        expanded.push(rest);
+    }
+    expanded
+}
+
+fn sandbox_roots(
+    agent: &crate::config::AgentSettings,
+    workspace: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
+    if agent.sandbox_toolchain_caches.unwrap_or(true) {
+        roots.extend(
+            DEFAULT_SANDBOX_TOOLCHAIN_ROOTS
+                .iter()
+                .map(|root| expand_home(std::path::Path::new(root))),
+        );
+    }
+    roots.extend(
+        agent
+            .sandbox_writable_roots
+            .iter()
+            .map(|root| expand_home(root)),
+    );
+    roots
+}
+
+/// 各档位的网络围栏。`read-only` 永远断；`workspace-write` 不请判官，「命令留在
+/// 工作区里」的承诺里包含不往外发，所以缺省断，需要联网的命令走 `network: true`
+/// 由人放行；`strict` / `smart` 缺省通——那两档联网命令本来就要过判官或问人。
+/// `agent.sandbox_network` 可以整体收紧或放开。
+fn sandbox_network(
+    agent: &crate::config::AgentSettings,
+    approval_mode: ApprovalMode,
+) -> willdeep_core::sandbox::NetworkPolicy {
+    use willdeep_core::sandbox::NetworkPolicy;
+
+    match agent.sandbox_network {
+        Some(crate::config::SandboxNetwork::Allow) => NetworkPolicy::Allow,
+        Some(crate::config::SandboxNetwork::Deny) => NetworkPolicy::Deny,
+        None => match approval_mode {
+            ApprovalMode::ReadOnly | ApprovalMode::WorkspaceAccess => NetworkPolicy::Deny,
+            _ => NetworkPolicy::Allow,
+        },
+    }
+}
+
+/// 围栏开不开：`agent.sandbox` 没写就看这台机器有没有后端——有就开。
+/// 显式 `true` 在没后端的机器上会让命令拒绝启动（fail closed），那是用户的选择。
+pub(crate) fn sandbox_enabled(agent: &crate::config::AgentSettings) -> bool {
+    agent
+        .sandbox
+        .unwrap_or_else(willdeep_core::sandbox::available)
+}
+
+/// 把审批档位翻译成 OS 侧的围栏档位，并算出可写根与网络策略。
 ///
 /// 不新造一个轴：围栏档位是工作区策略的投影，用户已经选过一次的东西不该再选
 /// 第二次。临时目录默认可写——不给的话 `cargo`、`rustc`、`git` 全都写不了中间
@@ -1182,16 +1268,15 @@ fn resolve_sandbox(
 ) -> willdeep_core::sandbox::SandboxSpec {
     use willdeep_core::sandbox::{SandboxPolicy, SandboxSpec};
 
-    if !agent.sandbox.unwrap_or(false) {
+    if !sandbox_enabled(agent) {
         return SandboxSpec::new(SandboxPolicy::Off, []);
     }
     let policy = match approval_mode {
         ApprovalMode::ReadOnly => SandboxPolicy::ReadOnly,
         _ => SandboxPolicy::WorkspaceWrite,
     };
-    let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
-    roots.extend(agent.sandbox_writable_roots.iter().cloned());
-    SandboxSpec::new(policy, roots)
+    SandboxSpec::new(policy, sandbox_roots(agent, workspace))
+        .with_network(sandbox_network(agent, approval_mode))
 }
 
 /// `workspace-write` 档的围栏。
@@ -1213,9 +1298,13 @@ fn resolve_workspace_sandbox(
     {
         return None;
     }
-    let mut roots = vec![workspace.to_path_buf(), std::env::temp_dir()];
-    roots.extend(agent.sandbox_writable_roots.iter().cloned());
-    Some(SandboxSpec::new(SandboxPolicy::WorkspaceWrite, roots))
+    Some(
+        SandboxSpec::new(
+            SandboxPolicy::WorkspaceWrite,
+            sandbox_roots(agent, workspace),
+        )
+        .with_network(sandbox_network(agent, ApprovalMode::WorkspaceAccess)),
+    )
 }
 
 /// 配置里的 `agent.approval`，未配置时为 `smart`。`read-only` 是工作区策略，
@@ -1237,6 +1326,131 @@ pub(crate) fn configured_approval_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod fence {
+        use super::*;
+        use willdeep_core::sandbox::{NetworkPolicy, SandboxPolicy};
+
+        fn home() -> std::path::PathBuf {
+            std::path::PathBuf::from(
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .expect("home directory"),
+            )
+        }
+
+        #[test]
+        fn tilde_expands_to_the_home_directory_and_nothing_else() {
+            assert_eq!(
+                expand_home(std::path::Path::new("~/.cargo/registry")),
+                home().join(".cargo/registry")
+            );
+            assert_eq!(expand_home(std::path::Path::new("~")), home());
+            assert_eq!(
+                expand_home(std::path::Path::new("/opt/x")),
+                std::path::PathBuf::from("/opt/x")
+            );
+            // `~user` 不是家目录写法，不猜。
+            assert_eq!(
+                expand_home(std::path::Path::new("~rocky/x")),
+                std::path::PathBuf::from("~rocky/x")
+            );
+        }
+
+        #[test]
+        fn toolchain_caches_are_granted_by_default_and_removable() {
+            let workspace = std::env::temp_dir();
+            let agent = crate::config::AgentSettings::default();
+            let roots = sandbox_roots(&agent, &workspace);
+            assert!(roots.contains(&home().join(".cargo/registry")));
+            assert!(roots.contains(&workspace));
+
+            let trimmed = crate::config::AgentSettings {
+                sandbox_toolchain_caches: Some(false),
+                sandbox_writable_roots: vec![std::path::PathBuf::from("~/.pyenv")],
+                ..Default::default()
+            };
+            let roots = sandbox_roots(&trimmed, &workspace);
+            assert!(!roots.iter().any(|root| root.ends_with(".cargo/registry")));
+            assert!(roots.contains(&home().join(".pyenv")));
+        }
+
+        #[test]
+        fn network_follows_the_tier_unless_configured() {
+            let agent = crate::config::AgentSettings::default();
+            assert_eq!(
+                sandbox_network(&agent, ApprovalMode::Smart),
+                NetworkPolicy::Allow
+            );
+            assert_eq!(
+                sandbox_network(&agent, ApprovalMode::Strict),
+                NetworkPolicy::Allow
+            );
+            assert_eq!(
+                sandbox_network(&agent, ApprovalMode::WorkspaceAccess),
+                NetworkPolicy::Deny
+            );
+            assert_eq!(
+                sandbox_network(&agent, ApprovalMode::ReadOnly),
+                NetworkPolicy::Deny
+            );
+            let deny = crate::config::AgentSettings {
+                sandbox_network: Some(crate::config::SandboxNetwork::Deny),
+                ..Default::default()
+            };
+            assert_eq!(
+                sandbox_network(&deny, ApprovalMode::Smart),
+                NetworkPolicy::Deny
+            );
+            let allow = crate::config::AgentSettings {
+                sandbox_network: Some(crate::config::SandboxNetwork::Allow),
+                ..Default::default()
+            };
+            assert_eq!(
+                sandbox_network(&allow, ApprovalMode::WorkspaceAccess),
+                NetworkPolicy::Allow
+            );
+        }
+
+        #[test]
+        fn unset_sandbox_follows_backend_availability_and_explicit_false_turns_it_off() {
+            let workspace = std::env::temp_dir();
+            let agent = crate::config::AgentSettings::default();
+            let spec = resolve_sandbox(&agent, ApprovalMode::Smart, &workspace);
+            assert_eq!(
+                spec.policy.is_enforcing(),
+                willdeep_core::sandbox::available()
+            );
+            assert!(spec.allows_network());
+
+            let off = crate::config::AgentSettings {
+                sandbox: Some(false),
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_sandbox(&off, ApprovalMode::Smart, &workspace).policy,
+                SandboxPolicy::Off
+            );
+            assert!(resolve_workspace_sandbox(&off, ApprovalMode::Smart, &workspace).is_none());
+
+            let on = crate::config::AgentSettings {
+                sandbox: Some(true),
+                ..Default::default()
+            };
+            let read_only = resolve_sandbox(&on, ApprovalMode::ReadOnly, &workspace);
+            assert_eq!(read_only.policy, SandboxPolicy::ReadOnly);
+            assert!(!read_only.allows_network());
+            if willdeep_core::sandbox::available() {
+                let fence = resolve_workspace_sandbox(&on, ApprovalMode::Smart, &workspace)
+                    .expect("workspace-write fence");
+                assert_eq!(fence.policy, SandboxPolicy::WorkspaceWrite);
+                assert!(
+                    !fence.allows_network(),
+                    "workspace-write cuts the network by default"
+                );
+            }
+        }
+    }
 
     fn parent_config(kind: ProviderKind, model: &str) -> ProviderConfig {
         ProviderConfig::new(

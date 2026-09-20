@@ -32,7 +32,7 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 
 "始终允许"只记住**规范化后的完整命令**，不是命令前缀。给自己留前缀后门，等于没有闸门。
 
-上面三道闸门都在**进程内**——它们判的是"模型请求做什么"，不是"进程实际能做什么"。一条被判成安全的命令自己 fork 出去写 `~/.ssh/authorized_keys`，三道闸门一道都不会响。所以还有第四道：OS 级写入围栏（macOS Seatbelt / Linux bubblewrap），把写入范围交给内核裁决。目前是预览、默认关，细节与边界见 [OS 级写入围栏](docs/SANDBOX.md)。
+上面三道闸门都在**进程内**——它们判的是"模型请求做什么"，不是"进程实际能做什么"。一条被判成安全的命令自己 fork 出去写 `~/.ssh/authorized_keys`，三道闸门一道都不会响。所以还有第四道：OS 级围栏（macOS Seatbelt / Linux bubblewrap），把写入范围和网络交给内核裁决。有后端的机器默认开；`workspace-write` 档断网，需要联网的命令由人放行。细节与边界见 [OS 级围栏](docs/SANDBOX.md)。
 
 第五道留给你自己的规矩：[生命周期挂钩](docs/HOOKS.md)。工具执行前把事件 JSON 喂给你配的命令，**非零退出就拦下来**，stderr 成为拒绝理由。审计 hook 往日志里追加一行，门禁 hook 去问公司的变更单系统——这跟通知 webhook 不是一回事：webhook 是事后的礼貌通知、可以丢，hook 跑在关键路径上、丢不了。阻塞式 hook 超时默认**拦**而不是放，因为一个坏掉就自动放行的门禁，恰好会在出事的时候失效。
 
@@ -133,7 +133,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **扩展** | `SKILL.md` 技能 · MCP（stdio 与 Streamable HTTP，远程服务 OAuth 登录） · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
 | **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
-| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 门禁 Hooks · `willdeep audit export` 一份审计报告（审批放行、人工裁决、hook 拦截、验证证据、改动归属） |
+| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级围栏（写入 + 网络，默认开） · 门禁 Hooks · `willdeep audit export` 一份审计报告（审批放行、人工裁决、hook 拦截、验证证据、改动归属） |
 | **遥测** | 子 Agent 判定落盘 · Skill Coverage / Verified Success / Escalation Rate · 实弹靶场 |
 | **语言** | 简体中文 · English · 日本語 |
 
@@ -143,7 +143,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 
 同一份诚实：这些是**现在没有**的，别在评审会上被它们绊倒。
 
-- **OS 级写入围栏是预览，默认关。** macOS（Seatbelt）与 Linux（bubblewrap）两个后端都在，语义一致：能读能跑，只能往工作区和临时目录里写，只读档另外断网。默认关是因为它会改变已在跑的命令的行为——`cargo fetch` 写不了工作区外的 `~/.cargo/registry`，除非显式放行。目前只罩住 Shell 工具这一条路径，后台任务与子 Agent 的 verifier 还没接。`agent.sandbox = true` 打开。
+- **OS 级围栏不限制读取，网络没有中间档。** 写入围栏与网络围栏两个后端语义一致，但进程读什么不管（`~/.aws/credentials` 读得到），网络只有通 / 断两档，不能只放某个域名。`[[hooks]]` 命令、MCP stdio 子进程和宿主自己的 `git` / `rg` 调用不在围栏里；没装 bubblewrap 的 Linux 机器没有围栏。
 - **Hooks 只有三个触发点。** `pre_tool` / `post_tool` / `approval_resolved`，其中 `approval_resolved` 还没接线；没有 `session_start`、`turn_end`、`pre_write`，hook 也改不了参数（只能放行或拦截）。
 - **MCP 不接服务端主动请求。** stdio 与 Streamable HTTP（含 OAuth 登录）都有了，但 `sampling/*`、`roots/*` 这类服务端发起的请求和 GET 事件流一律不处理：宿主没有替远端代发模型请求的授权。
 - **无 checkpoint / rewind。** 回退靠 Diff 审查 + 安全撤销，是合格替代，但长任务的可观测性弱于逐轮快照。

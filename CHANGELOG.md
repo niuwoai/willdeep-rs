@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.78.0-rc25] - 2026-09-20
+
+### Changed
+- **OS 级写入围栏默认开（ADR 第 5 项后半段）。** `agent.sandbox` 不写时，这台机器有后端（macOS `sandbox-exec` / Linux `bwrap`）就套围栏；没后端的机器命令照常跑，TUI 开屏和新的 `willdeep doctor` `sandbox` 项会说明。显式 `true` 在没后端的机器上仍拒绝启动命令。为了默认开不把人逼回关闭，常见工具链缓存默认放行（`~/.cargo/registry`、`~/.cargo/git`、`~/.npm`、`~/.yarn`、`~/.cache`、`~/Library/Caches`、`~/Library/pnpm`、`~/.local/share/pnpm`、`~/go/pkg/mod`，不存在的自动略过；`agent.sandbox_toolchain_caches = false` 整组去掉）；`sandbox_writable_roots` 现在展开 `~/`，此前文档教的 `~/.cargo/registry` 写法会被静默丢掉，现在生效，相对路径在 `config check` 里拒收。
+
+### Added
+- **网络围栏。** `SandboxSpec` 带网络策略：`read-only` 永远断；`workspace-write` 缺省断（这一档不请判官，「命令留在工作区里」包含不往外发）；`strict` / `smart` 缺省通（联网命令本来就过判官或问人）；`agent.sandbox_network = "deny" | "allow"` 整体收紧或放开。Seatbelt 用 `(deny network*)`、bubblewrap 用 `--unshare-net`，断网连回环也断，两边语义一致并由同一条实弹测试（bash `/dev/tcp` 敲本机监听）在两个平台各验一遍。
+- **断网逃生口。** 围栏断网的命令失败时，工具结果贴 `<sandbox-denied>` 说明是网络被拦而不是命令写错；模型用 `run_command` 的新参数 `network: true` 重试，那一次**由人放行**（判官不判、档位不管），可「始终允许」，记的是带 `network:` 前缀的规范化命令，审计留 `user` 来源。`full-access` 没有围栏，不问。
+- `willdeep doctor` 新增 `sandbox` 检查：后端、开关来源、网络策略、配置里解析不出来的放行根。
+- 文档修正：后台任务、监视器、子 Agent 的命令与 verifier 早已在围栏里，README 与 `docs/SANDBOX.md` 之前写反了；真正没罩的是 `[[hooks]]` 命令、MCP stdio 子进程和宿主内部的 `git` / `rg`。
+
 ## [0.78.0-rc24] - 2026-09-20
 
 ### Added

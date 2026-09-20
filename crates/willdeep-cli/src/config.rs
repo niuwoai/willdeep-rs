@@ -225,17 +225,31 @@ pub struct AgentSettings {
     pub auto_dispatch_read_only: Option<bool>,
     /// Admission budget for the scarce deep profile in one harness.
     pub max_deep_calls_per_harness: Option<usize>,
-    /// OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。默认关。
+    /// OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。
     ///
-    /// 默认关不是因为它不重要，是因为它会**改变已经在跑的命令的行为**：
-    /// 围栏开着时 `cargo fetch` 写不了工作区外的 `~/.cargo/registry`，除非把
-    /// 那条路径列进 `sandbox_writable_roots`。这种破坏该由用户在知情时打开，
-    /// 而不是升级一次二进制就突然撞上。
+    /// 不写：这台机器有后端就开，没有就不开（并在开屏与 `doctor` 里说明）。
+    /// 显式 `true`：没后端时命令拒绝启动（fail closed）。显式 `false`：关。
+    /// 默认开之所以敢开，是因为常见工具链缓存默认放行（见 `sandbox_toolchain_caches`），
+    /// `cargo fetch` / `npm install` 不会第一天就撞墙。
     pub sandbox: Option<bool>,
-    /// 围栏开着时，除工作区与临时目录之外还允许写入的根。
-    /// 典型用途是工具链缓存：`~/.cargo/registry`、`~/.npm`。
+    /// 围栏开着时，除工作区、临时目录与默认放行的工具链缓存之外还允许写入的根。
+    /// 支持 `~/…`。
     #[serde(default)]
     pub sandbox_writable_roots: Vec<PathBuf>,
+    /// 是否默认放行常见工具链缓存（`~/.cargo/registry`、`~/.npm`、`~/.cache` …）。
+    /// 不写按放行；关掉后只剩工作区、临时目录与 `sandbox_writable_roots`。
+    pub sandbox_toolchain_caches: Option<bool>,
+    /// 网络围栏。不写按档位：`read-only` 与 `workspace-write` 断，`strict` / `smart` 通。
+    /// `"deny"` 让所有套围栏的命令都断网（需要联网的命令走 `network: true` 由人放行），
+    /// `"allow"` 让 `workspace-write` 也通网。`read-only` 永远断。
+    pub sandbox_network: Option<SandboxNetwork>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxNetwork {
+    Allow,
+    Deny,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -621,6 +635,16 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
             .validate(name)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    for root in &file.agent.sandbox_writable_roots {
+        // 相对路径相对谁？工作区、家目录、当前目录都说得通，所以谁都不算——
+        // 一条被猜错基准的放行等于放行了别的目录。
+        if !crate::harness::expand_home(root).is_absolute() {
+            bail!(
+                "agent.sandbox_writable_roots entry {} must be absolute (or start with ~/)",
+                root.display()
+            );
+        }
+    }
     enforce_secret_file_permissions(file, path)
 }
 
@@ -880,6 +904,26 @@ context_window = 400000
                 "should reject: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn sandbox_settings_parse_and_relative_roots_are_rejected() {
+        let parsed: ConfigFile = toml::from_str(
+            "[agent]\nsandbox_network = \"deny\"\nsandbox_toolchain_caches = false\nsandbox_writable_roots = [\"~/.pyenv\", \"/opt/cache\"]\n",
+        )
+        .expect("parse sandbox keys");
+        assert_eq!(parsed.agent.sandbox_network, Some(SandboxNetwork::Deny));
+        assert_eq!(parsed.agent.sandbox_toolchain_caches, Some(false));
+        assert!(parsed.agent.sandbox.is_none());
+        validate(&parsed, Path::new("config.toml")).expect("tilde and absolute roots are fine");
+
+        let relative: ConfigFile =
+            toml::from_str("[agent]\nsandbox_writable_roots = [\"cache\"]\n").expect("parse");
+        let error = validate(&relative, Path::new("config.toml"))
+            .expect_err("relative roots are ambiguous")
+            .to_string();
+        assert!(error.contains("must be absolute"), "{error}");
+        assert!(toml::from_str::<ConfigFile>("[agent]\nsandbox_network = \"maybe\"\n").is_err());
     }
 
     #[test]

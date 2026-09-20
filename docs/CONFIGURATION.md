@@ -79,6 +79,10 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 |---|---|
 | `max_turns` | 模型/工具轮次上限，1–1000，不写时 200；`--max-turns` 优先。触顶交出部分结果，不判失败 |
 | `token_budget` | 主 Agent 一轮的 token 预算（输入 + 输出累计），1000–10000000；用尽时交出部分结果与交接信息，不判失败。不写不限 |
+| `sandbox` | OS 级围栏（macOS Seatbelt / Linux bubblewrap）。不写：有后端就开；`true`：没后端时命令拒绝启动；`false`：关。见 [OS 级围栏](SANDBOX.md) |
+| `sandbox_writable_roots` | 围栏开着时额外放行的写入根，支持 `~/…`，必须是绝对路径 |
+| `sandbox_toolchain_caches` | 是否默认放行 `~/.cargo/registry`、`~/.npm`、`~/.cache` 等工具链缓存，不写按放行 |
+| `sandbox_network` | 网络围栏：不写按档位（`read-only` 与 `workspace-write` 断，`strict` / `smart` 通）；`"deny"` 全断（需要联网的命令由模型用 `network: true` 重试、由你放行），`"allow"` 全通 |
 | `approval` | `strict` / `smart`（默认）/ `workspace-write` / `full-access`；TUI 中 `/permissions default <档位>` 可写回，见 [审批与自动化](APPROVALS.md) |
 | `language` | 界面语言 `zh-CN` / `en` / `ja` |
 | `small_model_routing` | Runtime 小模型优先路由；默认 `true` |

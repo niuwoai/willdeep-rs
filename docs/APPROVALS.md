@@ -10,7 +10,7 @@
 |---|---|---|---|
 | `strict` | 逐次审批 | 逐次审批 | 逐次审批 |
 | `smart`（默认） | 免审 | 静态规则 → AI 判官 → 拿不准才问 | 审批 |
-| `workspace-write` | 免审 | 静态规则 → **写入围栏内且不出工作区**则放行 → 其余问人；**不请 AI 判官** | 审批 |
+| `workspace-write` | 免审 | 静态规则 → **写入围栏内且不出工作区**则放行（围栏断网，要联网的命令用 `network: true` 问人）→ 其余问人；**不请 AI 判官** | 审批 |
 | `full-access` | 免审 | 放行；**破坏性形态（`rm -rf`、`sudo`、`git push --force`…）照样问** | 放行 |
 
 另有 `read-only`，它是 Runtime 工作区策略而不是会话档位：写入、Shell、MCP、Worktree 在审批前直接拒绝，会话切档无法越过它。
@@ -21,7 +21,7 @@
 
 这一档的承诺是「工作区里的事不打扰你」，所以它只在两件事都**确定**时放行一条未分类命令：
 
-1. **内核写入围栏在起作用**（macOS `sandbox-exec` / Linux `bwrap`，见 [沙箱](SANDBOX.md)）。没配 `agent.sandbox` 时这一档默认就套上围栏；显式 `sandbox = false` 或机器上没有围栏实现时，未分类命令一律问人；
+1. **内核围栏在起作用**（macOS `sandbox-exec` / Linux `bwrap`，见 [围栏](SANDBOX.md)）。没配 `agent.sandbox` 时这一档默认就套上围栏且**断网**；显式 `sandbox = false` 或机器上没有围栏实现时，未分类命令一律问人。围栏断网的命令失败后，模型可以带 `network: true` 重试，那一次由你放行（可「始终允许」，与不联网的同一条命令分开记）；
 2. **命令看不出要出工作区**（`safety::reaches_outside_workspace`）：`curl`/`ssh`/`docker`/`sudo`/`kubectl`、`git push/pull/fetch/clone`、`cargo publish`、`npm i -g` 等，以及含 heredoc、`$(…)`、反引号或解析不了的命令，都算「出去」。
 
 放行记审计来源 `workspace-access`。

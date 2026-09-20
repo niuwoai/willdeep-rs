@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc24（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc25（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -8,6 +8,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 
 ## 核心功能
 
+- OS 级围栏默认开（macOS Seatbelt / Linux bubblewrap）：主 Agent 与子 Agent 的命令、后台任务、监视器、verifier 只能往工作区、临时目录和工具链缓存里写；网络按档位断通（`workspace-write` / `read-only` 断），断网的命令由模型带 `network: true` 重试、由人放行；`willdeep doctor` 报围栏状态。详见 docs/SANDBOX.md。
 - Runtime 控制面可作为平台对外：`willdeep-runtime-client`（Rust SDK）与 `willdeep-runtime-protocol` 发布就绪，README、crate 文档与可运行示例齐全；`willdeep run` 进 CI 的做法与样例见 docs/CI_INTEGRATION.md、examples/ci/。
 - `willdeep audit export` 把一个会话（或一个工作区一段时间）里的审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚汇成一份 Markdown / JSON 审计报告；只读本地状态文件，不需要 Runtime 在跑，报告里没有提示词、模型正文和凭据。详见 docs/AUDIT_EXPORT.md。
 - 接住 WillDeep for macOS 交接过来的会话：`willdeep handoff list / accept / watch` 读取 `willdeep/handoff/*` git 分支，切到分支、导入会话并按 `run` 的路径续跑；`watch --accept` 可常驻轮询、逐条接手。信道是 git 远端，两边各用各的凭据。详见 docs/CLI_REFERENCE.md。
@@ -261,7 +262,7 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [x] MCP Streamable HTTP 与 OAuth（v0.78.0-rc24；服务端主动请求与 GET 事件流未接）；
 - [ ] LSP 诊断、Hooks/插件、自动记忆与 OS 级 Shell 沙箱；当前已有结构化工具门禁、工作区边界和小模型路由，但这些仍是与 Claude Code 完整能力面的主要差距；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
-- [ ] 更强的命令风险分类与平台沙箱；
+- [x] 平台沙箱：写入围栏默认开、网络围栏按档位断通（v0.78.0-rc25）；更强的命令风险分类仍待做；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。
