@@ -1,0 +1,10 @@
+{
+  "id": "ruby-add-test-leap-year",
+  "title": "给闰年判断补世纪规则测试",
+  "kind": "test",
+  "language": "ruby",
+  "requires": ["ruby"],
+  "editable": ["test/leap_year_test.rb"],
+  "verify": [["ruby", "-Ilib", "test/leap_year_test.rb"]],
+  "mutants": ["mutants/every-fourth-year", "mutants/no-400-rule"]
+}

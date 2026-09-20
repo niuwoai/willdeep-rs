@@ -1,0 +1,11 @@
+{
+  "id": "rust-deny-unused",
+  "title": "deny(unused) 下的死代码",
+  "kind": "lint",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]],
+  "must_contain": { "src/lib.rs": ["#![deny(unused)]"] },
+  "must_not_contain": { "src/lib.rs": ["allow("] }
+}

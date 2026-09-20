@@ -1,0 +1,9 @@
+{
+  "id": "rust-checked-factorial",
+  "title": "factorial 溢出应返回 None",
+  "kind": "fix",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}

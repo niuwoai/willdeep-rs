@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.78.0-rc21] - 2026-09-20
+
+### Added
+- **固定任务集模型行为评测（ADR 第 2 项第二步）。** `bench/model-eval/tasks/` 放 20 个可自动验收的小任务（Rust 10、Ruby 4、Python 3、JavaScript 3；修函数 8、实现 6、补测试 4、清 lint 2），每个带 `task.json` 说明书、提示词、fixture、参考答案，补测试类任务另带两个变异实现——新测试抓不住变异就不算过。`scripts/model_eval.rb` 对每个模型把 20 个任务各跑一次 `willdeep run --local` 无头模式（私有 `WILLDEEP_HOME`，配置从用户配置派生并砍掉 `[notifications]` 与 `[mcp_servers.*]`，凭据不进报告），在模型碰不到的干净目录里重建 fixture + 改过的文件跑 verifier，动了受保护文件记 `cheated` 不进分子；行为指标只认 `session_metrics.rb` 一条算路。报告归档到 `bench/model-eval/reports/<日期>/`，摘要 append 进 `history.jsonl`；`scripts/model_eval_trend.rb` 出趋势、写回 `docs/MODEL_EVAL.md`，通过率或人话率比基线（至少七天前的最近一轮）掉超过 10 个点即报警。`scripts/model_eval_nightly.sh` + `scripts/launchd/com.willdeep.model-eval.plist` 每天 03:30 本机跑，不自动提交。
+- **任务集自检进 CI。** `model_eval.rb --check-tasks` 不联网证明每个任务 fixture 原样红、fixture + solution 绿（补测试类：变异在没有新测试时活着、有了就死）；Linux CI 连同 `scripts/test/model_eval_test.rb` 一起跑，坏掉的靶子进不了任务集。
+
 ## [0.78.0-rc20] - 2026-09-20
 
 ### Added

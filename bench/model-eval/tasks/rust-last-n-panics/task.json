@@ -1,0 +1,9 @@
+{
+  "id": "rust-last-n-panics",
+  "title": "last_n 在 n 超长时 panic",
+  "kind": "fix",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}

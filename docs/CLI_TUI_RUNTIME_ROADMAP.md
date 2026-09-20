@@ -221,7 +221,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] TUI 手感对齐：中途汇报、工具行折叠、思维链显示、结束信号、插话送达（v0.78.0-rc4 → rc12）。
 - [x] Web 端对齐同一清单（`docs/EXPERIENCE_BASELINE.md` 第 4 至 8 项，v0.78.0-rc15 → rc18）。
 - [x] 离线指标脚本 `scripts/session_metrics.rb`：人话率、工具调用与失败、思维链占比、平均轮次，JSON + Markdown。
-- [ ] 固定任务集每晚对 DeepSeek V4 / GLM / Claude 各跑一遍，指标做成趋势。
+- [x] 固定任务集每晚对 DeepSeek V4 / GLM / Claude 各跑一遍，指标做成趋势（v0.78.0-rc21：`bench/model-eval/` 20 个任务 + `scripts/model_eval.rb` + 每天 launchd；Claude 的模型 ID 由 `WILLDEEP_EVAL_MODELS` 加入）。
 - [x] 主 Agent `token_budget` 闸门。
 - [ ] `willdeep audit export`。
 - [ ] 检查点回退（回到第 N 步）。

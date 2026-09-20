@@ -1,0 +1,13 @@
+{
+  "id": "rust-clippy-clean",
+  "title": "清掉 clippy 警告",
+  "kind": "lint",
+  "language": "rust",
+  "requires": ["cargo", "cargo-clippy"],
+  "editable": ["src/lib.rs"],
+  "verify": [
+    ["cargo", "clippy", "--offline", "--quiet", "--", "-D", "warnings"],
+    ["cargo", "test", "--offline", "--quiet"]
+  ],
+  "must_not_contain": { "src/lib.rs": ["allow("] }
+}

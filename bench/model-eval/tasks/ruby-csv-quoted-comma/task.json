@@ -1,0 +1,9 @@
+{
+  "id": "ruby-csv-quoted-comma",
+  "title": "CSV 拆行不认引号里的逗号",
+  "kind": "fix",
+  "language": "ruby",
+  "requires": ["ruby"],
+  "editable": ["lib/row_parser.rb"],
+  "verify": [["ruby", "-Ilib", "test/row_parser_test.rb"]]
+}

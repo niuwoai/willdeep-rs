@@ -1,0 +1,9 @@
+{
+  "id": "rust-parse-duration",
+  "title": "实现 parse_duration",
+  "kind": "feature",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}

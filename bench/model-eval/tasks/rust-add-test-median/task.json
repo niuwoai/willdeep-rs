@@ -1,0 +1,10 @@
+{
+  "id": "rust-add-test-median",
+  "title": "给 median 补边界测试",
+  "kind": "test",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["tests/median.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]],
+  "mutants": ["mutants/empty-is-zero", "mutants/even-takes-upper"]
+}

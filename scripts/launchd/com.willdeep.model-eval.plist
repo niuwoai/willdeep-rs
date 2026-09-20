@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  模板：把 __REPO__ 换成仓库绝对路径再装。安装步骤见同目录 README.md。
+  默认每天 03:30 本地时间跑一轮固定任务集。它花真钱：二十个任务 × 每个模型一次。
+  要换模型，在 EnvironmentVariables 里改 WILLDEEP_EVAL_MODELS。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.willdeep.model-eval</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>__REPO__/scripts/model_eval_nightly.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WILLDEEP_EVAL_MODELS</key>
+        <string>glm-5,deepseek-v4-flash,deepseek-v4-pro</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- 错过的场次不补跑：睡醒后连补三轮，就是三倍的账单换一个同样的数字。 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/target/model-eval/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/target/model-eval/launchd.log</string>
+</dict>
+</plist>
