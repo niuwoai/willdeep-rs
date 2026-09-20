@@ -56,11 +56,53 @@ pub(super) enum StreamKind {
     Reply,
 }
 
+/// 思维链临时行最多占这么多行：像滚动字幕，只看得到它此刻在想什么。
+const THINKING_ROWS: usize = 3;
+
+/// 从尾部截取一段，使 `prefix + 结果` 在 `width` 列内不超过 `rows` 行。空白折叠成
+/// 单个空格，截过的以 `…` 开头。
+pub(super) fn tail_within_rows(prefix: &str, text: &str, width: usize, rows: usize) -> String {
+    let width = width.max(1);
+    let fits = |candidate: &str| visual_lines(&format!("{prefix}{candidate}"), width) <= rows;
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if fits(&compact) {
+        return compact;
+    }
+    let chars: Vec<char> = compact.chars().collect();
+    // 每行最多 width 个字符，先按这个上界取尾巴，再逐步收缩到装得下为止。
+    let mut keep = (rows * width).min(chars.len());
+    loop {
+        let candidate: String = std::iter::once('…')
+            .chain(chars[chars.len() - keep..].iter().copied())
+            .collect();
+        if keep == 0 || fits(&candidate) {
+            return candidate;
+        }
+        keep -= (keep / 10).max(1);
+    }
+}
+
 impl App {
+    /// 聊天区底部的临时行：思维链灰色、只留最后 [`THINKING_ROWS`] 行；正文预览
+    /// 照旧整段黄色。正文一开始，思维链缓冲已被清掉，这里自然只剩正文。
+    pub(super) fn transient_row(&self) -> Option<String> {
+        let thought = self.transient_thought.as_deref()?;
+        let label = self.transient_label();
+        Some(match self.transient_kind {
+            StreamKind::Reasoning => {
+                let prefix = format!("· {label}: ");
+                let tail = tail_within_rows(&prefix, thought, self.transcript_width, THINKING_ROWS);
+                format!("{prefix}{tail}")
+            }
+            StreamKind::Reply => format!("WillDeep · {label}: {thought}"),
+        })
+    }
+
     /// 流式增量进临时行：只留最后 [`THOUGHT_PREVIEW_CHARS`] 字，进程内轮次与
     /// Runtime 轮次共用。思考型模型正文常为空，思维链那行是用户唯一能看到的
     /// 「它此刻在干嘛」。
     pub(super) fn stream_transient(&mut self, kind: StreamKind, text: &str) {
+        let text = terminal_safe_text(text);
         if self.transient_kind != kind {
             self.transient_thought = None;
             self.transient_kind = kind;
@@ -74,7 +116,7 @@ impl App {
         }
         .to_owned();
         let mut preview = self.transient_thought.take().unwrap_or_default();
-        preview.push_str(text);
+        preview.push_str(&text);
         let skip = preview
             .chars()
             .count()
@@ -113,9 +155,10 @@ impl App {
     /// 一模一样，用户分不清哪句还没发。
     pub(super) fn queued_prompt_row(&self, text: &str) -> String {
         format!(
-            "You: {}{text}",
+            "You: {}{}",
             self.language
-                .text("［待发］ ", "[queued] ", "［送信待ち］ ")
+                .text("［待发］ ", "[queued] ", "［送信待ち］ "),
+            terminal_safe_text(text)
         )
     }
 
@@ -128,7 +171,7 @@ impl App {
             .rev()
             .find(|line| **line == queued)
         {
-            *line = format!("You: {text}");
+            *line = format!("You: {}", terminal_safe_text(text));
             self.refresh_transcript_height();
         }
     }
@@ -485,6 +528,48 @@ mod tests {
                 .as_deref()
                 .map(|value| value.chars().count()),
             Some(THOUGHT_PREVIEW_CHARS)
+        );
+    }
+
+    #[test]
+    fn terminal_safe_text_expands_tabs_and_keeps_newlines() {
+        assert_eq!(terminal_safe_text("a\tb\nc\td"), "a   b\nc   d");
+        assert_eq!(
+            terminal_safe_text("\tif err != nil {"),
+            "    if err != nil {"
+        );
+        assert_eq!(terminal_safe_text("x\r\u{1b}[0m"), "x\\u{1b}[0m");
+    }
+
+    #[test]
+    fn thinking_tail_fits_the_last_rows_and_collapses_whitespace() {
+        let prefix = "· thinking: ";
+        let text = "word ".repeat(200);
+        let tail = tail_within_rows(prefix, &text, 40, THINKING_ROWS);
+        assert!(visual_lines(&format!("{prefix}{tail}"), 40) <= THINKING_ROWS);
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with("word"), "{tail}");
+        assert_eq!(
+            tail_within_rows(prefix, "short\n\n  thought", 40, THINKING_ROWS),
+            "short thought"
+        );
+    }
+
+    #[test]
+    fn transient_row_is_capped_grey_thinking_until_the_reply_starts() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.transcript_width = 30;
+        app.stream_transient(StreamKind::Reasoning, &"think\t".repeat(100));
+        let row = app.transient_row().unwrap();
+        assert!(row.starts_with("· thinking: "), "{row}");
+        assert!(!row.contains('\t'));
+        assert!(visual_lines(&row, 30) <= THINKING_ROWS);
+
+        // 正文一开始，思维链整段消失，只剩回复预览。
+        app.stream_transient(StreamKind::Reply, "Hello");
+        assert_eq!(
+            app.transient_row().as_deref(),
+            Some("WillDeep · replying: Hello")
         );
     }
 
