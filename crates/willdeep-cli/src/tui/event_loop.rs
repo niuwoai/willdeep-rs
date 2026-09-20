@@ -44,7 +44,23 @@ fn startup_notices(runtime: &TuiRuntime, language: Language) -> Vec<String> {
             )
         ));
     }
-    if let Ok(loaded) = crate::config::LoadedConfig::load(explicit) {
+    let loaded = crate::config::LoadedConfig::load(explicit).ok();
+    // 围栏是默认开的；开不了得说一声，不然用户以为自己有围栏。
+    if loaded
+        .as_ref()
+        .is_none_or(|loaded| loaded.file.agent.sandbox.is_none())
+        && !willdeep_core::sandbox::available()
+    {
+        notices.push(format!(
+            "System: {}",
+            language.text(
+                "这台机器没有 OS 级写入围栏后端（macOS sandbox-exec / Linux bubblewrap），命令不受围栏保护；配置 agent.sandbox = false 可关掉本提示",
+                "No OS write fence backend on this machine (macOS sandbox-exec / Linux bubblewrap): commands run unfenced; set agent.sandbox = false to silence this notice",
+                "このマシンには OS 書き込み囲いのバックエンド（macOS sandbox-exec / Linux bubblewrap）がなく、コマンドは囲いなしで実行されます。agent.sandbox = false でこの通知を消せます",
+            )
+        ));
+    }
+    if let Some(loaded) = loaded {
         for note in crate::config::deprecations(&loaded.file) {
             let text = match note {
                 crate::config::Deprecation::LegacyApproval { spelled } => language

@@ -495,6 +495,7 @@ async fn smart_runs_read_only_shell_but_still_gates_effectful_commands() {
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await
         .expect("read-only command runs without an approval card");
@@ -511,6 +512,7 @@ async fn smart_runs_read_only_shell_but_still_gates_effectful_commands() {
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await;
         assert!(
@@ -559,6 +561,7 @@ async fn only_ambiguous_commands_reach_the_ai_judge() {
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await;
     }
@@ -596,6 +599,7 @@ async fn judge_denial_falls_back_to_the_user() {
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await;
     assert!(matches!(denied, Err(ToolError::ApprovalDenied(_))));
@@ -627,6 +631,7 @@ async fn reviewed_child_never_sends_dangerous_or_sensitive_commands_to_the_judge
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await;
     assert!(
@@ -645,6 +650,7 @@ async fn reviewed_child_never_sends_dangerous_or_sensitive_commands_to_the_judge
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await;
         let Err(ToolError::ApprovalDenied(message)) = denied else {
@@ -677,6 +683,7 @@ async fn human_preapproval_is_exact_and_does_not_authorize_a_decorated_command()
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await
         .expect("exact human-authorized command");
@@ -686,6 +693,7 @@ async fn human_preapproval_is_exact_and_does_not_authorize_a_decorated_command()
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await;
     assert!(matches!(decorated, Err(ToolError::ApprovalDenied(_))));
@@ -901,6 +909,7 @@ async fn a_read_only_git_worker_composes_git_queries_and_nothing_else() {
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await
             .unwrap_or_else(|error| panic!("read-only git must run ({command}): {error}"));
@@ -917,6 +926,7 @@ async fn a_read_only_git_worker_composes_git_queries_and_nothing_else() {
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await;
         assert!(
@@ -981,6 +991,7 @@ async fn a_command_allowlisted_worker_runs_only_its_verifier() {
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await
         .expect("the declared verifier must run");
@@ -990,6 +1001,7 @@ async fn a_command_allowlisted_worker_runs_only_its_verifier() {
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await;
     assert!(
@@ -1005,6 +1017,7 @@ async fn a_command_allowlisted_worker_runs_only_its_verifier() {
             timeout_seconds: None,
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await;
     let Err(ToolError::ApprovalDenied(message)) = decorated else {
@@ -1050,6 +1063,7 @@ async fn a_failing_test_command_carries_a_delegation_hint_for_the_main_agent_onl
             timeout_seconds: Some(30),
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await
         .expect("run cargo test");
@@ -1064,6 +1078,7 @@ async fn a_failing_test_command_carries_a_delegation_hint_for_the_main_agent_onl
             timeout_seconds: Some(30),
             label: None,
             run_in_background: None,
+            network: None,
         })
         .await
         .expect("run cargo test");
@@ -1094,6 +1109,7 @@ async fn approved_background_command_returns_handle_and_publishes_completion() {
             timeout_seconds: Some(10),
             label: Some("test command".to_owned()),
             run_in_background: Some(true),
+            network: None,
         })
         .await
         .expect("start");
@@ -1387,6 +1403,7 @@ async fn verification_evidence_is_recorded_without_an_external_reporter() {
                 timeout_seconds: None,
                 label: None,
                 run_in_background: None,
+                network: None,
             })
             .await
             .unwrap();
@@ -1414,6 +1431,7 @@ async fn a_verification_launch_error_invalidates_previous_success() {
         timeout_seconds: None,
         label: None,
         run_in_background: None,
+        network: None,
     };
     tools.run_command(command()).await.unwrap();
     assert!(tools.completion_has_current_evidence(Some("current")));

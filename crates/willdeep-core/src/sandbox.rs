@@ -71,6 +71,18 @@ impl SandboxPolicy {
     }
 }
 
+/// 网络围栏。两个后端都只有「通」和「断」两档：Seatbelt 能按 IP 端口放行，
+/// bubblewrap 只能整个网络命名空间拿掉，为了两边语义一致不做中间档。
+/// 「断」连回环也断——bwrap 新命名空间里的 `lo` 本来就不通，Seatbelt 这边
+/// 跟着一样，免得同一条命令在两个平台上一个能连本机服务一个不能。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    #[default]
+    Allow,
+    Deny,
+}
+
 /// 一次沙箱执行的完整描述。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SandboxSpec {
@@ -78,9 +90,28 @@ pub struct SandboxSpec {
     /// 允许写入的根，全部为 canonical 路径。空列表在 `WorkspaceWrite` 档下
     /// 等价于「什么都不许写」——这不是错误，是调用方的选择。
     pub writable_roots: Vec<PathBuf>,
+    /// 网络围栏。`ReadOnly` 档永远是断的；`WorkspaceWrite` 档由调用方定。
+    /// 旧的 supervisor 载荷没有这个字段，缺省按通网解——那正是它们当年的语义。
+    #[serde(default)]
+    pub network: NetworkPolicy,
 }
 
 impl SandboxSpec {
+    /// 改网络策略。`ReadOnly` 档拒绝放开：只读的承诺里包含「读到的东西发不出去」。
+    pub fn with_network(mut self, network: NetworkPolicy) -> Self {
+        self.network = if self.policy == SandboxPolicy::ReadOnly {
+            NetworkPolicy::Deny
+        } else {
+            network
+        };
+        self
+    }
+
+    /// 这次执行能不能联网。不套围栏（`Off`）当然能。
+    pub fn allows_network(&self) -> bool {
+        !self.policy.is_enforcing() || self.network == NetworkPolicy::Allow
+    }
+
     /// Move workspace-local grants into a dedicated worker checkout. External
     /// grants stay explicit; a narrower root never becomes the entire checkout.
     pub fn for_workspace(&self, parent: &Path, child: &Path) -> Self {
@@ -99,7 +130,7 @@ impl SandboxSpec {
                 }
             }
         }
-        Self::new(self.policy, roots)
+        Self::new(self.policy, roots).with_network(self.network)
     }
 
     /// 把调用方给的路径规范化后建 spec。规范化不了的路径（不存在、权限不足）
@@ -120,6 +151,11 @@ impl SandboxSpec {
         Self {
             policy,
             writable_roots,
+            network: if policy == SandboxPolicy::ReadOnly {
+                NetworkPolicy::Deny
+            } else {
+                NetworkPolicy::Allow
+            },
         }
     }
 
@@ -130,9 +166,10 @@ impl SandboxSpec {
     pub fn seatbelt_profile(&self) -> String {
         let mut profile = String::from("(version 1)\n(allow default)\n");
 
-        if self.policy == SandboxPolicy::ReadOnly {
-            // 只读档连网也断：这一档的用途是"看看这个仓库有什么问题"，
-            // 既不该改东西，也不该把读到的东西发出去。
+        if !self.allows_network() {
+            // 只读档连网也断：这一档的用途是"看看这个仓库有什么问题"，既不该改
+            // 东西，也不该把读到的东西发出去。`workspace-write` 档由调用方决定。
+            // `network*` 连本机 Unix socket 一起断，与 bwrap 的 `--unshare-net` 对齐。
             profile.push_str("(deny network*)\n");
         }
 
@@ -207,8 +244,8 @@ impl SandboxSpec {
             "--die-with-parent".to_owned(),
         ];
 
-        if self.policy == SandboxPolicy::ReadOnly {
-            // 与 Seatbelt 的 `(deny network*)` 对齐：这一档不该把读到的东西发出去。
+        if !self.allows_network() {
+            // 与 Seatbelt 的 `(deny network*)` 对齐：新的网络命名空间里什么都不通。
             argv.push("--unshare-net".to_owned());
         }
 
@@ -340,6 +377,28 @@ pub fn looks_like_denial(output: &str) -> bool {
     MARKERS.iter().any(|marker| output.contains(marker))
 }
 
+/// 这次失败像不像撞了网络围栏。断网的命令报的是解析不了域名、网络不可达、
+/// 或者（macOS）建 socket 时的 `Operation not permitted`；措辞五花八门，
+/// 但用户要的答案只有一个：这条命令需要联网，而围栏没给。
+pub fn looks_like_network_denial(output: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "Could not resolve host",
+        "Temporary failure in name resolution",
+        "nodename nor servname provided",
+        "Name or service not known",
+        "failed to lookup address information",
+        "Network is unreachable",
+        "getaddrinfo",
+        "ENOTFOUND",
+        "ENETUNREACH",
+        "EAI_AGAIN",
+        "dns error",
+        "error sending request",
+        "Operation not permitted",
+    ];
+    MARKERS.iter().any(|marker| output.contains(marker))
+}
+
 /// Seatbelt 的字符串字面量。反斜杠和引号必须转义，否则一个带引号的路径会把
 /// profile 语法搞断——而语法断掉的 profile 会让 `sandbox-exec` 直接拒绝启动，
 /// 表现为「所有命令都跑不了」。
@@ -415,6 +474,70 @@ mod tests {
         let profile = workspace_spec(vec![]).seatbelt_profile();
 
         assert!(!profile.contains("(deny network*)"));
+    }
+
+    #[test]
+    fn workspace_write_can_cut_the_network_on_both_backends() {
+        let spec = workspace_spec(vec![]).with_network(NetworkPolicy::Deny);
+
+        assert!(!spec.allows_network());
+        assert!(spec.seatbelt_profile().contains("(deny network*)"));
+        let argv = spec.bubblewrap_command_line(Path::new("/usr/bin/bwrap"), "/bin/sh", "true");
+        assert!(argv.iter().any(|arg| arg == "--unshare-net"));
+        assert!(workspace_spec(vec![]).allows_network());
+    }
+
+    #[test]
+    fn read_only_refuses_to_open_the_network() {
+        let spec =
+            SandboxSpec::new(SandboxPolicy::ReadOnly, vec![]).with_network(NetworkPolicy::Allow);
+
+        assert_eq!(spec.network, NetworkPolicy::Deny);
+        assert!(!spec.allows_network());
+        assert!(SandboxSpec::new(SandboxPolicy::Off, vec![]).allows_network());
+    }
+
+    #[test]
+    fn worker_checkout_keeps_the_parent_network_policy() {
+        let scratch = Scratch::new("net-child");
+        let parent = scratch.child("parent");
+        let child = scratch.child("child");
+        let spec = workspace_spec(vec![parent.clone()]).with_network(NetworkPolicy::Deny);
+
+        assert_eq!(
+            spec.for_workspace(&parent, &child).network,
+            NetworkPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn old_supervisor_payloads_without_a_network_field_still_load_as_open() {
+        let spec: SandboxSpec =
+            serde_json::from_str(r#"{"policy":"WorkspaceWrite","writable_roots":[]}"#).unwrap();
+
+        assert_eq!(spec.network, NetworkPolicy::Allow);
+        let round_trip: SandboxSpec = serde_json::from_str(
+            &serde_json::to_string(&workspace_spec(vec![]).with_network(NetworkPolicy::Deny))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(round_trip.network, NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn network_denial_detection_covers_both_platforms() {
+        for output in [
+            "curl: (6) Could not resolve host: crates.io",
+            "error: failed to get `serde` as a dependency\n  ... dns error: failed to lookup address information",
+            "connect: Network is unreachable",
+            "socket: Operation not permitted",
+            "getaddrinfo ENOTFOUND registry.npmjs.org",
+        ] {
+            assert!(looks_like_network_denial(output), "{output}");
+        }
+        assert!(!looks_like_network_denial(
+            "assertion failed: left == right"
+        ));
     }
 
     #[test]
@@ -624,6 +747,48 @@ mod tests {
                 .args(&argv[1..])
                 .output()
                 .expect("沙箱后端应当能启动")
+        }
+
+        /// 断网的围栏连回环都到不了；同一条命令在通网的围栏下能敲到本机监听。
+        /// 用 bash 的 `/dev/tcp`，不依赖 curl / nc 装没装。
+        #[test]
+        fn a_network_denied_fence_cannot_reach_even_loopback() {
+            if !available() {
+                return;
+            }
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("addr").port();
+            listener.set_nonblocking(true).expect("nonblocking");
+            let scratch = Scratch::new("net");
+            let command = format!("bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'");
+
+            let denied = workspace_spec(vec![scratch.path().to_path_buf()])
+                .with_network(NetworkPolicy::Deny);
+            let output = run(&denied, &command);
+            assert!(!output.status.success(), "{output:?}");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "nobody should have connected through a network-denied fence"
+            );
+
+            let allowed = workspace_spec(vec![scratch.path().to_path_buf()]);
+            let output = run(&allowed, &command);
+            assert!(output.status.success(), "{output:?}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok(_) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no connection arrived"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            }
         }
 
         #[test]

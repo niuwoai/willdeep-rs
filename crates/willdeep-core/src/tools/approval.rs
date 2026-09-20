@@ -369,6 +369,32 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// 网络围栏的逃生口：模型声明这条命令必须联网。放不放只有人能定——判官判的
+    /// 是命令危不危险，不是「要不要把围栏的网打开」；`full-access` 本来就没有围栏。
+    /// 「始终允许」记的是带 `network:` 前缀的规范化命令，与不联网的同一条命令分开记。
+    pub(super) async fn gate_network_escalation(
+        &self,
+        command: &str,
+        description: &str,
+    ) -> Result<(), ToolError> {
+        let action = format!("allow network access for command: {description}");
+        if self.allowed_by_full_access(&action) {
+            return Ok(());
+        }
+        self.report_approval(
+            command,
+            ApprovalSource::User,
+            "network fence: the command declared it must reach the network".to_owned(),
+        );
+        match command_signature(command) {
+            Some(signature) => {
+                self.require_rememberable_approval(&action, format!("network:{signature}"))
+                    .await
+            }
+            None => self.require_approval(&action, false).await,
+        }
+    }
+
     async fn ask_for_command(&self, command: &str, description: &str) -> Result<(), ToolError> {
         match command_signature(command) {
             Some(signature) => {
@@ -700,6 +726,50 @@ mod tests {
             .await;
         assert!(matches!(remote, Err(ToolError::ApprovalDenied(_))));
         assert_eq!(judged.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// 网络围栏的逃生口：断网的围栏下 `network: true` 要问人；默认审批器拒绝，
+    /// 所以命令没跑、审计里留了一笔「命令声明要联网」；同一条命令不带 `network`
+    /// 照常在围栏里跑。
+    #[tokio::test]
+    async fn network_escalation_asks_the_user_and_is_audited() {
+        if !crate::sandbox::available() {
+            eprintln!("skipping: no OS sandbox backend on this machine");
+            return;
+        }
+        let root = fixture("network-escalation");
+        let fence = SandboxSpec::new(
+            SandboxPolicy::WorkspaceWrite,
+            [root.clone(), std::env::temp_dir()],
+        )
+        .with_network(crate::sandbox::NetworkPolicy::Deny);
+        let (registry, traces) = traced(
+            ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+                .expect("registry")
+                .with_workspace_sandbox(Some(fence)),
+        );
+        let escalated = ToolCall {
+            id: "call".to_owned(),
+            name: "run_command".to_owned(),
+            arguments: serde_json::json!({ "command": "printf hi > out.txt", "network": true })
+                .to_string(),
+        };
+        let asked = registry.execute(&escalated).await;
+        assert!(
+            matches!(asked, Err(ToolError::ApprovalDenied(_))),
+            "{asked:?}"
+        );
+        assert!(!root.join("out.txt").exists());
+        assert!(traces.lock().unwrap().iter().any(|trace| {
+            trace.source == ApprovalSource::User && trace.detail.contains("network fence")
+        }));
+
+        registry
+            .execute(&command("printf hi > out.txt"))
+            .await
+            .expect("the same command without network runs inside the fence");
+        assert_eq!(std::fs::read_to_string(root.join("out.txt")).unwrap(), "hi");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

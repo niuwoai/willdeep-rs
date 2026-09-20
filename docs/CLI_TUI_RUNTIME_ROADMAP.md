@@ -225,7 +225,8 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 主 Agent `token_budget` 闸门。
 - [x] `willdeep audit export`（v0.78.0-rc22：审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚汇成 Markdown / JSON，见 `docs/AUDIT_EXPORT.md`）。
 - [x] Runtime 作为平台对外（v0.78.0-rc23）：`willdeep-runtime-client` / `willdeep-runtime-protocol` 补齐发布元数据、README、crate 文档与可运行示例，`cargo publish --dry-run` 通过；`willdeep run` 进 CI 的文档 `docs/CI_INTEGRATION.md` 与 `examples/ci/` 样例。真正 `cargo publish` 待持有 crates.io token 的人执行。
-- [x] MCP Streamable HTTP + OAuth（v0.78.0-rc24）：`url` 服务、`Mcp-Session-Id` 与协议版本头、会话过期重握手、`bearer_token_env` / `${env:NAME}` 头、`willdeep mcp login|logout|list|tools`（授权码 + PKCE、回环回调、RFC 9728 / 8414 / 7591 / 8707）。围栏默认开与网络围栏另起。
+- [x] MCP Streamable HTTP + OAuth（v0.78.0-rc24）：`url` 服务、`Mcp-Session-Id` 与协议版本头、会话过期重握手、`bearer_token_env` / `${env:NAME}` 头、`willdeep mcp login|logout|list|tools`（授权码 + PKCE、回环回调、RFC 9728 / 8414 / 7591 / 8707）。
+- [x] 写入围栏默认开 + 网络围栏（v0.78.0-rc25）：有后端就开、工具链缓存默认放行、`~/` 展开；网络按档位断通（`workspace-write` / `read-only` 断），`agent.sandbox_network` 可整体收放，`run_command` 的 `network: true` 逃生口由人放行；`doctor` 报围栏状态。
 - [ ] 检查点回退（回到第 N 步）。
 
 验收：清单每项「已到位」对应一条事件级测试；提示词与路由改动附带指标前后对比。

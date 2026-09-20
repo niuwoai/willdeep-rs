@@ -101,9 +101,9 @@ fn summary(mode: ApprovalMode, language: Language) -> &'static str {
             "ワークスペース内の書き込みは自動。コマンドはルールと AI 審査、判断できない時だけ確認",
         ),
         ApprovalMode::WorkspaceAccess => language.text(
-            "工作区内写入和围栏内命令免审，不过 AI；联网、远程操作仍问",
-            "Workspace writes and fenced commands run without AI review; network and remote actions ask",
-            "ワークスペース内の書き込みと囲い内のコマンドは AI 審査なしで実行。通信・リモート操作は確認",
+            "工作区内写入和围栏内命令免审，不过 AI；围栏断网，联网、远程操作仍问",
+            "Workspace writes and fenced commands run without AI review inside a no-network fence; network and remote actions ask",
+            "ワークスペース内の書き込みと囲い内のコマンドは AI 審査なしで実行（囲いは通信遮断）。通信・リモート操作は確認",
         ),
         ApprovalMode::FullAccess => language.text(
             "联网、任意文件、MCP 都不再问；只有 rm -rf 这类破坏性命令仍问",

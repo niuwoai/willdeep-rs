@@ -23,12 +23,15 @@ auto_title = true       # 会话第一轮自动整理标题；关掉后停在第
 small_model_routing = true
 auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1
-# OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。默认关。
-# 开着时，Shell 命令只能往工作区和临时目录里写——由内核裁决，不由审批闸门裁决。
-# 默认关是因为它会改变已在跑的命令的行为：`cargo fetch` 写不了工作区外的
-# ~/.cargo/registry，除非把那条路径列进 sandbox_writable_roots。
-# sandbox = false
-# sandbox_writable_roots = ["~/.cargo/registry", "~/.cargo/git"]
+# OS 级写入围栏（macOS Seatbelt / Linux bubblewrap）。不写：这台机器有后端就开。
+# 开着时，Shell 命令只能往工作区、临时目录和常见工具链缓存（~/.cargo/registry、
+# ~/.npm、~/.cache …）里写——由内核裁决，不由审批闸门裁决。
+# 网络围栏按档位：read-only 与 workspace-write 断网，strict / smart 通网；
+# 断网时需要联网的命令由模型用 network: true 重试、由你放行。
+# sandbox = true
+# sandbox_writable_roots = ["~/.pyenv"]        # 额外放行的根，支持 ~/
+# sandbox_toolchain_caches = true              # false 则只剩工作区、临时目录与上面列的根
+# sandbox_network = "deny"                     # "deny" 所有套围栏的命令都断网；"allow" 全通
 
 # 与 Swift App 同语义的自建辅助模型。可使用域名、局域网 IP 或回环地址，不需要 API Key。
 # 文本辅助任务共用 summary_model，避免本机同时驻留多份模型。

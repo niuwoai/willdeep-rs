@@ -765,7 +765,8 @@ impl ToolRegistry {
                         "command": {"type": "string", "description": "Shell command line."},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
                         "label": {"type": "string", "description": "Optional concise action label; never include secrets."},
-                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately and keep working. A completion notice is delivered automatically; do not poll or sleep."}
+                        "run_in_background": {"type": "boolean", "description": "Return a job handle immediately and keep working. A completion notice is delivered automatically; do not poll or sleep."},
+                        "network": {"type": "boolean", "description": "Set true only when the command must reach the network and the fence denied it (the previous result carried <sandbox-denied> about the network). The user is asked to allow this exact command with network access."}
                     },
                     "required": ["command"], "additionalProperties": false
                 }),
@@ -1550,7 +1551,17 @@ impl ToolRegistry {
             .unwrap_or_else(|| args.command.clone());
         self.gate_command(&args.command, &description).await?;
         // 围栏跟着档位走：审批刚按哪一档放行，命令就套哪一档的围栏。
-        let sandbox = self.effective_sandbox();
+        let mut sandbox = self.effective_sandbox();
+        if args.network.unwrap_or(false)
+            && sandbox.policy.is_enforcing()
+            && !sandbox.allows_network()
+        {
+            // 模型说这条命令必须联网。围栏放开网络这件事只有人能点头——
+            // 判官不判这个，档位也不管这个。
+            self.gate_network_escalation(&args.command, &description)
+                .await?;
+            sandbox = sandbox.with_network(crate::sandbox::NetworkPolicy::Allow);
+        }
         let timeout = args
             .timeout_seconds
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
@@ -1682,11 +1693,13 @@ impl ToolRegistry {
         let mut text = truncate_bytes(text, self.command_output_limit());
         // 把「命令自己错了」和「命令被围栏拦了」分开说。不分开的话，用户看到的
         // 是一句 `Operation not permitted`，然后花二十分钟怀疑自己的代码。
-        if sandbox.policy.is_enforcing()
-            && !output.status.success()
-            && crate::sandbox::looks_like_denial(&text)
-        {
-            text.push_str(&sandbox_denial_hint(&sandbox));
+        if sandbox.policy.is_enforcing() && !output.status.success() {
+            let network =
+                !sandbox.allows_network() && crate::sandbox::looks_like_network_denial(&text);
+            let write = crate::sandbox::looks_like_denial(&text);
+            if network || write {
+                text.push_str(&sandbox_denial_hint(&sandbox, network));
+            }
         }
         if self.delegation_hints
             && !output.status.success()
@@ -2509,9 +2522,9 @@ exhausted attempt budget comes back to you.\n</delegation-hint>"
     )
 }
 
-/// 围栏拦下之后贴给模型看的话。写清楚「哪一档、能写哪儿」，模型才有可能
-/// 自己改到工作区里去，而不是把同一条越界命令再试三遍。
-fn sandbox_denial_hint(sandbox: &SandboxSpec) -> String {
+/// 围栏拦下之后贴给模型看的话。写清楚「哪一档、能写哪儿、能不能联网」，模型才
+/// 有可能自己改到工作区里去、或者走逃生口请人放行，而不是把同一条命令再试三遍。
+fn sandbox_denial_hint(sandbox: &SandboxSpec, network: bool) -> String {
     let roots = if sandbox.writable_roots.is_empty() {
         "（这一档什么都不许写）".to_owned()
     } else {
@@ -2522,6 +2535,14 @@ fn sandbox_denial_hint(sandbox: &SandboxSpec) -> String {
             .collect::<Vec<_>>()
             .join("、")
     };
+    if network {
+        return format!(
+            "\n\n<sandbox-denied>\n这条命令看起来需要联网，而当前围栏断网（不是命令本身写错了）。\n\
+当前档位只允许写入：{roots}；网络：断。\n\
+如果它确实必须联网，用 network: true 重新调用 run_command，用户会被询问是否放行这条命令；\n\
+能不联网完成（本地缓存、离线模式）就优先那样做。\n</sandbox-denied>"
+        );
+    }
     format!(
         "\n\n<sandbox-denied>\n这条命令看起来是被 OS 级写入围栏拦下的，不是命令本身写错了。\n\
 当前档位只允许写入：{roots}\n\
@@ -2611,6 +2632,8 @@ struct CommandArgs {
     timeout_seconds: Option<u64>,
     label: Option<String>,
     run_in_background: Option<bool>,
+    /// 网络围栏的逃生口：围栏断网时，模型声明这条命令必须联网，由人放行。
+    network: Option<bool>,
 }
 
 #[derive(Deserialize)]

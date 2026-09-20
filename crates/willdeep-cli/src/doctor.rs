@@ -265,6 +265,7 @@ async fn collect(options: &DoctorOptions) -> DoctorReport {
     check_config(options, &mut checks);
     check_workspace(options, &mut checks);
     check_git(options, &mut checks);
+    check_sandbox(options, &mut checks);
     check_web_assets(&mut checks);
     check_plugins(options, &mut checks).await;
     check_runtime(options, &mut checks).await;
@@ -456,6 +457,73 @@ fn check_workspace(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
             CheckStatus::Fail,
             "path does not exist or is not a directory",
         )),
+    }
+}
+
+/// 围栏是默认开的，所以「这台机器到底有没有围栏」得有个地方说清楚：后端是哪个、
+/// 配置是自动还是显式、配置里放行的根有没有真的解析出来。
+fn check_sandbox(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
+    let agent = LoadedConfig::load(options.config_path.as_deref())
+        .map(|loaded| loaded.file.agent)
+        .unwrap_or_default();
+    let backend = willdeep_core::sandbox::backend();
+    let setting = match agent.sandbox {
+        Some(true) => "agent.sandbox = true",
+        Some(false) => "agent.sandbox = false",
+        None => "agent.sandbox unset (auto)",
+    };
+    let network = match agent.sandbox_network {
+        Some(crate::config::SandboxNetwork::Deny) => "network denied for every fenced command",
+        Some(crate::config::SandboxNetwork::Allow) => "network allowed in every tier",
+        None => "network denied under workspace-write and read-only, allowed under strict/smart",
+    };
+    let unresolved = agent
+        .sandbox_writable_roots
+        .iter()
+        .map(|root| crate::harness::expand_home(root))
+        .filter(|root| root.canonicalize().is_err())
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>();
+    match (backend, agent.sandbox) {
+        (None, Some(true)) => checks.push(check(
+            "sandbox",
+            CheckStatus::Fail,
+            "agent.sandbox = true but no OS write fence backend is available (macOS: /usr/bin/sandbox-exec; Linux: install bubblewrap); shell commands will refuse to start",
+        )),
+        (None, Some(false)) => checks.push(check(
+            "sandbox",
+            CheckStatus::Pass,
+            "OS write fence disabled by configuration; no backend on this machine either",
+        )),
+        (None, None) => checks.push(check(
+            "sandbox",
+            CheckStatus::Warning,
+            "no OS write fence backend on this machine (macOS: /usr/bin/sandbox-exec; Linux: install bubblewrap); commands run unfenced. Set agent.sandbox = false to silence this",
+        )),
+        (Some(_), Some(false)) => checks.push(check(
+            "sandbox",
+            CheckStatus::Warning,
+            "OS write fence disabled by configuration although a backend is available",
+        )),
+        (Some(backend), _) => {
+            let name = match backend {
+                willdeep_core::sandbox::SandboxBackend::Seatbelt => "sandbox-exec",
+                willdeep_core::sandbox::SandboxBackend::Bubblewrap => "bubblewrap",
+            };
+            let status = if unresolved.is_empty() {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warning
+            };
+            let mut summary = format!("OS write fence active via {name} ({setting}); {network}");
+            if !unresolved.is_empty() {
+                summary.push_str(&format!(
+                    "; sandbox_writable_roots that do not resolve and will be ignored: {}",
+                    unresolved.join(", ")
+                ));
+            }
+            checks.push(check("sandbox", status, summary));
+        }
     }
 }
 
