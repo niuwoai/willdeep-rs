@@ -112,7 +112,7 @@ export SOMEIM_API_KEY=...          # 或 ANTHROPIC_API_KEY；缺省模型见 doc
 willdeep --workspace .
 ```
 
-不带 Prompt 启动进入终端界面；想用浏览器就加 `--web`；想跑自动化就用 `willdeep run`。
+不带 Prompt 启动进入终端界面；想用浏览器就加 `--web`；想跑自动化就用 `willdeep run`（放进 CI 见 [docs/CI_INTEGRATION.md](docs/CI_INTEGRATION.md)，直接对接常驻 Runtime 的 Rust SDK 见 [crates/willdeep-runtime-client](crates/willdeep-runtime-client/README.md)）。
 
 ```bash
 willdeep --web --workspace /path/to/project     # 浏览器界面，默认 127.0.0.1:9847

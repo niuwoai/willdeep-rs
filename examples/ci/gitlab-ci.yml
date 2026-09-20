@@ -1,0 +1,25 @@
+# 并进 .gitlab-ci.yml。SOMEIM_API_KEY（或 ANTHROPIC_API_KEY）配成 masked 变量；
+# WILLDEEP_PROMPT 可以在手动触发时填。说明见 docs/CI_INTEGRATION.md。
+willdeep-task:
+  stage: test
+  image: ubuntu:24.04
+  timeout: 30m
+  when: manual
+  variables:
+    WILLDEEP_VERSION: v0.78.0-rc23
+    WILLDEEP_MODEL: glm-5
+    WILLDEEP_MAX_TURNS: "40"
+    WILLDEEP_PROMPT: 检查这个仓库的测试是否覆盖了 README 里承诺的行为，只报告，不改代码。
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git
+    - curl -fsSL -o willdeep.tar.gz "https://github.com/niuwoai/willdeep-rs/releases/download/${WILLDEEP_VERSION}/willdeep-linux-amd64.tar.gz"
+    - tar -xzf willdeep.tar.gz && install -m 0755 willdeep /usr/local/bin/willdeep
+    - willdeep --version
+  script:
+    - printf '%s\n' "$WILLDEEP_PROMPT" > prompt.txt
+    - bash examples/ci/run-task.sh prompt.txt
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - willdeep-artifacts/
