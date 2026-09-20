@@ -238,6 +238,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         "session.update_model" => session_update_model(state, &request),
         "session.update_approval_mode" => session_update_approval_mode(state, &request),
         "session.fork" => session_fork(state, &request),
+        "session.rewind" => session_rewind(state, &request).await,
         "session.archive" => session_archive(state, &request),
         "session.delete" => session_delete(state, &request),
         "session.export" => match params::<IdParams>(&request) {
@@ -657,6 +658,7 @@ const MUTATING_OPERATIONS: &[&str] = &[
     "session.update_model",
     "session.update_approval_mode",
     "session.fork",
+    "session.rewind",
     "session.archive",
     "session.delete",
     "turn.submit",
@@ -814,6 +816,23 @@ fn public_turn(turn: session_store::RuntimeTurn) -> willdeep_runtime_protocol::R
         created_at: turn.created_at,
         started_at: turn.started_at,
         completed_at: turn.completed_at,
+        message_start: turn.message_start,
+        message_end: turn.message_end,
+        message_generation: turn.message_generation,
+        workspace_checkpoint: turn.workspace_checkpoint,
+    }
+}
+
+fn public_workspace_rewind(
+    outcome: workspace_checkpoint::RestoreOutcome,
+) -> willdeep_runtime_protocol::WorkspaceRewindResult {
+    willdeep_runtime_protocol::WorkspaceRewindResult {
+        checkpoint: outcome.checkpoint,
+        before_checkpoint: outcome.before_checkpoint,
+        restored: outcome.restored,
+        removed: outcome.removed,
+        skipped: outcome.skipped,
+        recovery_path: outcome.recovery_path.map(|path| path.display().to_string()),
     }
 }
 
@@ -1237,6 +1256,70 @@ fn session_fork(state: &ServerState, request: &ApiRequest) -> ApiResult {
     json(public_session(session))
 }
 
+/// 回到第 N 步。先算计划，再（若要）恢复文件，最后才截断对话：文件恢复失败时
+/// 对话一个字都没动，人拿着错误信息还能重来。
+async fn session_rewind(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::RewindSessionParams>(request)?;
+    let plan = state
+        .sessions
+        .rewind_plan(params.id, params.through_turn_id)
+        .map_err(|error| ApiFailure::invalid(format!("cannot rewind Session: {error}")))?;
+    let workspace = if params.restore_workspace {
+        let checkpoint = plan.workspace_checkpoint.clone().ok_or_else(|| {
+            ApiFailure::invalid(
+                "cannot rewind Session: that step has no workspace checkpoint, only the conversation can be rewound"
+                    .to_owned(),
+            )
+        })?;
+        let outcome = workspace_checkpoint::restore_blocking(
+            state.home.clone(),
+            plan.workspace.clone(),
+            plan.session_id,
+            checkpoint,
+        )
+        .await
+        .map_err(|error| {
+            ApiFailure::invalid(format!(
+                "cannot restore the workspace checkpoint: {error:#}"
+            ))
+        })?;
+        Some(outcome)
+    } else {
+        None
+    };
+    let session = state
+        .sessions
+        .commit_rewind(&plan)
+        .map_err(|error| ApiFailure::invalid(format!("cannot rewind Session: {error}")))?;
+    state
+        .events
+        .append(
+            "session.rewound",
+            format!(
+                "session_id={} through_turn_id={} dropped_turns={} message_count={} restore_workspace={} restored={} removed={} recovery={}",
+                plan.session_id,
+                plan.through_turn_id
+                    .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                plan.dropped_turn_ids.len(),
+                plan.message_end,
+                params.restore_workspace,
+                workspace.as_ref().map_or(0, |outcome| outcome.restored.len()),
+                workspace.as_ref().map_or(0, |outcome| outcome.removed.len()),
+                workspace
+                    .as_ref()
+                    .and_then(|outcome| outcome.recovery_path.as_ref())
+                    .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
+            ),
+        )
+        .map_err(ApiFailure::internal)?;
+    json(willdeep_runtime_protocol::RewindSessionResult {
+        session: public_session(session),
+        message_count: plan.message_end,
+        dropped_turn_ids: plan.dropped_turn_ids,
+        workspace: workspace.map(public_workspace_rewind),
+    })
+}
+
 fn session_archive(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<willdeep_runtime_protocol::ArchiveSessionParams>(request)?;
     let session = if params.archived {
@@ -1261,10 +1344,25 @@ fn session_archive(state: &ServerState, request: &ApiRequest) -> ApiResult {
 
 fn session_delete(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<willdeep_runtime_protocol::DeleteSessionParams>(request)?;
+    let workspace = state
+        .sessions
+        .get(params.id)
+        .ok()
+        .flatten()
+        .map(|session| session.workspace);
     state
         .sessions
         .delete(params.id, params.confirmation)
         .map_err(|error| ApiFailure::invalid(format!("cannot delete Session: {error}")))?;
+    // 会话没了，它的工作区检查点引用也一起摘掉；对象留给 git gc。
+    if let Some(workspace) = workspace
+        && let Err(error) = workspace_checkpoint::forget_session(&state.home, &workspace, params.id)
+    {
+        eprintln!(
+            "forget workspace checkpoints for Session {}: {error:#}",
+            params.id
+        );
+    }
     state
         .events
         .append("session.deleted", format!("session_id={}", params.id))

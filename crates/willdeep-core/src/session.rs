@@ -158,6 +158,22 @@ impl Session {
         });
         true
     }
+
+    /// 回到第 N 步：把 `message_end` 之后的消息全部丢掉。
+    ///
+    /// 执行检查点一并清空——它记的是被丢掉的那些轮次里没拿到结果的调用，留着
+    /// 只会让下一次恢复去「补」一段已经不存在的历史。压缩代数不变：截断不改变
+    /// 前面消息的身份，靠代数校验边界的调用方仍然对得上。
+    /// 边界不小于现有长度时什么都不做，返回 `false`。
+    pub fn rewind_to(&mut self, message_end: usize) -> bool {
+        if message_end >= self.messages.len() {
+            return false;
+        }
+        self.messages.truncate(message_end);
+        self.execution_checkpoint = None;
+        self.updated_at = now();
+        true
+    }
 }
 
 /// 会话列表视图需要的元数据快照，不携带消息正文。
@@ -1597,5 +1613,35 @@ mod tests {
         );
         assert!(!session.replace_with_compressed_messages(session.messages.clone()));
         assert_eq!(session.compression_generation, 1);
+    }
+
+    #[test]
+    fn rewinding_drops_the_tail_and_the_execution_checkpoint_but_keeps_the_generation() {
+        let mut session = Session::new(PathBuf::from("/workspace"), None, "rewind");
+        session.messages = (0..6)
+            .map(|index| Message::user(format!("message {index}")))
+            .collect();
+        assert!(
+            session.replace_with_compressed_messages(
+                (0..4)
+                    .map(|index| Message::user(format!("kept {index}")))
+                    .collect()
+            )
+        );
+        session.execution_checkpoint = Some(crate::checkpoint::CheckpointMetadata::default());
+        assert!(session.rewind_to(2));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].content, "kept 1");
+        assert!(session.execution_checkpoint.is_none());
+        assert_eq!(
+            session.compression_generation, 1,
+            "truncation is not a compression"
+        );
+        assert!(
+            !session.rewind_to(2),
+            "nothing after the boundary, nothing to do"
+        );
+        assert!(!session.rewind_to(9));
+        assert_eq!(session.messages.len(), 2);
     }
 }

@@ -345,6 +345,45 @@ pub struct ForkSessionParams {
     pub model: Option<String>,
 }
 
+/// 回到第 N 步：把会话原地截断到 `through_turn_id` 结束时（`None` 为回到开头），
+/// `restore_workspace` 为真时工作区文件也回到那一步之后、下一步开始前拍的检查点。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RewindSessionParams {
+    pub id: uuid::Uuid,
+    pub through_turn_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub restore_workspace: bool,
+}
+
+/// 工作区按检查点恢复的结果。路径相对工作区。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRewindResult {
+    /// 恢复到的检查点（影子仓库里的 commit）。
+    pub checkpoint: String,
+    /// 恢复前的工作树快照：回退错了可以按它再恢复一次。
+    pub before_checkpoint: String,
+    /// 内容被改回的文件。
+    pub restored: Vec<String>,
+    /// 检查点之后新建、现已挪进回收区的文件。
+    pub removed: Vec<String>,
+    /// 没法恢复的条目（子模块）。
+    pub skipped: Vec<String>,
+    /// 被覆盖或删除的当前文件原件所在；没动任何文件时为 `None`。
+    pub recovery_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewindSessionResult {
+    pub session: RuntimeSession,
+    /// 截断后的消息数。
+    pub message_count: usize,
+    /// 被丢掉的轮次，按排队顺序。
+    pub dropped_turn_ids: Vec<uuid::Uuid>,
+    /// 只回了对话时为 `None`。
+    pub workspace: Option<WorkspaceRewindResult>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveSessionParams {
@@ -465,6 +504,17 @@ pub struct RuntimeTurn {
     pub created_at: u64,
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
+    /// 这一轮在会话消息里的起止下标（`[start, end)`），配合 `message_generation`
+    /// 才有意义：压缩过之后旧下标不再对得上。老 Runtime 不给这几个字段。
+    #[serde(default)]
+    pub message_start: Option<usize>,
+    #[serde(default)]
+    pub message_end: Option<usize>,
+    #[serde(default)]
+    pub message_generation: u64,
+    /// 这一轮开始前的工作区检查点；`None` 表示没拍到（非 git 工作区、被关掉或老记录）。
+    #[serde(default)]
+    pub workspace_checkpoint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1199,6 +1249,7 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "session.update_model",
     "session.update_approval_mode",
     "session.fork",
+    "session.rewind",
     "session.archive",
     "session.delete",
     "session.export",
@@ -1632,11 +1683,32 @@ mod tests {
             created_at: 1,
             started_at: None,
             completed_at: None,
+            message_start: None,
+            message_end: None,
+            message_generation: 0,
+            workspace_checkpoint: None,
         };
         let json = serde_json::to_value(&turn).unwrap();
         assert!(json.get("prompt").is_none());
         assert!(json.get("attachments").is_none());
         assert!(json.get("error").is_none());
+        // 老 Runtime 不发边界字段：缺省也能反序列化。
+        let legacy: RuntimeTurn = serde_json::from_value(serde_json::json!({
+            "id": turn.id, "session_id": session.id, "request_id": turn.request_id,
+            "queue_sequence": 1, "status": "queued", "active_task_id": null, "attempts": 0,
+            "created_at": 1, "started_at": null, "completed_at": null
+        }))
+        .unwrap();
+        assert_eq!(legacy.message_generation, 0);
+        assert_eq!(legacy.workspace_checkpoint, None);
+        let rewind: RewindSessionParams = serde_json::from_value(serde_json::json!({
+            "id": session.id, "through_turn_id": null
+        }))
+        .unwrap();
+        assert!(
+            !rewind.restore_workspace,
+            "restore_workspace defaults to false"
+        );
 
         let task = RuntimeTask {
             origin_client: None,
@@ -1889,6 +1961,7 @@ mod tests {
             "session.update_model",
             "session.update_approval_mode",
             "session.fork",
+            "session.rewind",
             "session.archive",
             "session.delete",
             "session.export",

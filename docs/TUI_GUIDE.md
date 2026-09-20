@@ -68,7 +68,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` | **立即执行**。这些只改本地显示，不碰会话、模型或 Runtime |
 | `/permissions`、Shift+Tab | **立即执行**，而且对正在跑的这一轮生效——切档就是为了处理「跑着跑着一直弹审批」 |
 | 普通提示词、`/local <任务>`、`/runtime <任务>` | **排队**。状态行显示「待发 N」，本轮结束（或被中断）后按顺序自动发出；附件跟着一起排队 |
-| 其余命令（`/model`、`/compress`、`/daemon`、`/diff`、`/session switch` 等） | **说明原因并拒绝**。它们会改会话或 Runtime 状态，延迟几分钟再执行只会更意外 |
+| 其余命令（`/model`、`/compress`、`/daemon`、`/diff`、`/rewind`、`/session switch` 等） | **说明原因并拒绝**。它们会改会话或 Runtime 状态，延迟几分钟再执行只会更意外 |
 
 按 `Esc` 中断当前轮次：Runtime 轮次交给 Daemon 排空（它知道在途工具怎么收尾），
 `/local` 轮次直接掐掉进程内 Harness。中断后队列立刻续上。
@@ -305,6 +305,7 @@ tmux set -g mouse on
 | `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
 | `/agent` | 查看或控制子 Agent，如 `/agent spawn reader\|judge <task>`；命令/写入工种与 Deep 必须由父 Agent走安全链 |
 | `/diff` | 打开 Diff Review Center |
+| `/rewind` | 回到第 N 步：列出 Runtime 跑完的轮次，Enter 确认后对话与文件一起回（`v` 只回对话），见 [检查点回退](CHECKPOINT_REWIND.md) |
 | `/skills` | 查看当前目录发现的技能 |
 | `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |
 | `/clear` | 清空聊天显示 |

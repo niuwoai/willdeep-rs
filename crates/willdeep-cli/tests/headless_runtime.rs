@@ -2243,6 +2243,196 @@ fn re_ensuring_a_session_with_changed_params_is_not_an_idempotency_conflict() {
     guard.stop_daemon();
 }
 
+/// 体验基线第 11 项的事件级用例：两轮跑完后「回到第 1 步」——对话截到第 1 步的
+/// 末尾，文件按第 2 步开始前拍的检查点恢复，被盖掉的原件进回收区，用户仓库的
+/// git 状态一根毫毛不动。
+#[test]
+fn rewind_restores_conversation_and_files_to_an_earlier_turn() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("create test home");
+    std::fs::create_dir_all(workspace.join("src")).expect("create test workspace");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    std::fs::write(workspace.join("src/lib.rs"), "v1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "init"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let mut guard = TestGuard::new(root.clone(), home.clone());
+
+    let run_turn = |session: Option<&str>, prompt: &str| {
+        let mut args = vec![
+            "run",
+            "--config",
+            path_text(&config),
+            "--workspace",
+            path_text(&workspace),
+            "--output",
+            "json",
+        ];
+        if let Some(session) = session {
+            args.extend(["--session", session]);
+        }
+        args.push(prompt);
+        let output = willdeep(&home)
+            .args(&args)
+            .output()
+            .expect("run headless turn");
+        assert_success(&output, prompt);
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse completion JSON");
+        json["session_id"]
+            .as_str()
+            .expect("completion session id")
+            .to_owned()
+    };
+
+    let session_id = run_turn(None, "first step");
+    // 第 1 步「做」的事：改了一个文件、新建了一个。第 2 步开始前的检查点要把这个状态拍下来。
+    std::fs::write(workspace.join("src/lib.rs"), "v2\n").unwrap();
+    std::fs::write(workspace.join("scratch.txt"), "after step one\n").unwrap();
+    assert_eq!(run_turn(Some(&session_id), "second step"), session_id);
+    // 第 2 步「做」的事：再改、再新建。回退要把这些全撤掉。
+    std::fs::write(workspace.join("src/lib.rs"), "v3\n").unwrap();
+    std::fs::write(workspace.join("scratch.txt"), "after step two\n").unwrap();
+    std::fs::write(workspace.join("later.txt"), "only in step two\n").unwrap();
+
+    let session = uuid::Uuid::parse_str(&session_id).expect("session uuid");
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let client = runtime_client(&home);
+    let mut turns = runtime
+        .block_on(client.turns(session))
+        .expect("list turns")
+        .into_result()
+        .expect("turn list");
+    turns.sort_by_key(|turn| turn.queue_sequence);
+    assert_eq!(turns.len(), 2);
+    assert!(
+        turns
+            .iter()
+            .all(|turn| turn.status == willdeep_runtime_protocol::TurnStatus::Completed)
+    );
+    let first_end = turns[0].message_end.expect("first turn boundary");
+    assert!(
+        turns[1].workspace_checkpoint.is_some(),
+        "the second turn must have captured a workspace checkpoint: {:?}",
+        turns[1]
+    );
+    assert_eq!(
+        git(&["for-each-ref", "refs/willdeep"]),
+        "",
+        "checkpoints never touch the user's own repository"
+    );
+
+    let rewind = willdeep(&home)
+        .args([
+            "daemon",
+            "rewind-session",
+            &session_id,
+            "--through-turn",
+            &turns[0].id.to_string(),
+            "--restore-workspace",
+        ])
+        .output()
+        .expect("rewind session");
+    assert_success(&rewind, "rewind to the first turn");
+    let stdout = String::from_utf8_lossy(&rewind.stdout);
+    assert!(
+        stdout.contains(&format!("rewound\tmessages={first_end}\tdropped_turns=1")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("restored\tsrc/lib.rs"), "{stdout}");
+    assert!(stdout.contains("restored\tscratch.txt"), "{stdout}");
+    assert!(stdout.contains("removed\tlater.txt"), "{stdout}");
+
+    // 文件回到第 2 步开始前；第 2 步的产物在回收区，一个没丢。
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/lib.rs")).unwrap(),
+        "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("scratch.txt")).unwrap(),
+        "after step one\n"
+    );
+    assert!(!workspace.join("later.txt").exists());
+    let recovery = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("workspace\t"))
+        .and_then(|line| {
+            line.split('\t')
+                .find_map(|field| field.strip_prefix("recovery="))
+        })
+        .expect("recovery path in the rewind report");
+    let recovery = PathBuf::from(recovery);
+    assert!(
+        recovery.starts_with(home.join("runtime/recovery")),
+        "{}",
+        recovery.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(recovery.join("src/lib.rs")).unwrap(),
+        "v3\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(recovery.join("later.txt")).unwrap(),
+        "only in step two\n"
+    );
+    assert_eq!(
+        git(&["rev-parse", "HEAD"]),
+        head,
+        "HEAD is not moved by a rewind"
+    );
+
+    // 对话截到第 1 步末尾，第 2 步的轮次记录没了，会话不再持有执行检查点。
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("sessions").join(format!("{session_id}.json")))
+            .expect("read stored Session"),
+    )
+    .expect("parse stored Session");
+    assert_eq!(stored["messages"].as_array().map(Vec::len), Some(first_end));
+    assert!(stored["execution_checkpoint"].is_null());
+    let remaining = runtime
+        .block_on(client.turns(session))
+        .expect("list turns after rewind")
+        .into_result()
+        .expect("turn list after rewind");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, turns[0].id);
+
+    // 回退之后会话照常能续：第三轮从第 1 步末尾接着跑。
+    assert_eq!(
+        run_turn(Some(&session_id), "third step after rewind"),
+        session_id
+    );
+    let events = read_ndjson_values(&home.join("runtime/events.ndjson"));
+    assert_eq!(event_kind_count(&events, "session.rewound"), 1);
+
+    guard.stop_daemon();
+}
+
 /// 会话标题走两级：提交那一刻确定性派生，第一轮回复落地后再花一次便宜调用
 /// 摘要。这条用例把两级都钉住，同时把「多打的那一次 Provider 请求」显式写进
 /// 断言——它是这个特性的真实成本，不该藏在别的用例的计数里。

@@ -31,6 +31,8 @@ function accessLabel(access: WorkspaceAccess, t: { accessReadOnly: string; acces
 }
 type Session = { id: string; title: string; preview?: string; workspace: string; updated_at: number; pinned_at: number | null; archived: boolean; active: boolean; active_turn_id: string | null };
 type SessionDetail = { id: string; messages: ConversationItem[] };
+type RewindPoint = { step: number; turn_id: string | null; snippet: string; completed_at: number | null; can_restore_workspace: boolean };
+type RewindResult = { message_count: number; dropped_turn_ids: string[]; workspace: { restored: string[]; removed: string[]; skipped: string[]; recovery_path: string | null } | null };
 type RunStep = { id: string; label: string; detail?: string; status: "active" | "done" | "failed"; startedAt: number; elapsedMs?: number };
 
 /// 一步花了多久。
@@ -705,6 +707,13 @@ export function App() {
   }
 
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  // 「回到第 N 步」：步骤列表由服务端算（只有 Runtime 跑完的轮次才能回），
+  // 前端只问两件事——回到哪一步、文件跟不跟着回。
+  const [rewindPoints, setRewindPoints] = useState<RewindPoint[] | null>(null);
+  const [rewindLoading, setRewindLoading] = useState(false);
+  const [rewindSelection, setRewindSelection] = useState<number>(-1);
+  const [rewindFiles, setRewindFiles] = useState(true);
+  const [rewindNotice, setRewindNotice] = useState("");
 
   // 加进来的工作区只影响这个浏览器视图能看到什么，不改 Runtime 的全局默认。
   // 非回环监听时后端会拒绝并说明理由——那条边界留在启动命令里。
@@ -769,6 +778,33 @@ export function App() {
     const title = window.prompt(t.forkPrompt, `${selectedSession.title}`)?.trim(); if (!title) return;
     try { const fork = await json<{ id: string }>(`/api/sessions/${encodeURIComponent(selectedSession.id)}/fork`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }); await refreshSessions(); await loadSession(fork.id); }
     catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+  }
+
+  async function openRewindDialog() {
+    if (!selectedSession) return;
+    setRewindNotice(""); setRewindLoading(true); setRewindPoints([]); setRewindSelection(-1); setRewindFiles(true);
+    try {
+      const points = await json<RewindPoint[]>(`/api/sessions/${encodeURIComponent(selectedSession.id)}/rewind-points`);
+      setRewindPoints(points);
+      // 默认停在最近的一步：最常见的回退是「上一步做错了」。
+      setRewindSelection(points.length - 1);
+      setRewindFiles(points.length > 0 && points[points.length - 1].can_restore_workspace);
+    } catch (reason) { setRewindPoints(null); setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
+    finally { setRewindLoading(false); }
+  }
+
+  async function confirmRewind() {
+    const target = selectedSession; const points = rewindPoints; const point = points?.[rewindSelection];
+    if (!target || !point) return;
+    const restore_workspace = rewindFiles && point.can_restore_workspace;
+    try {
+      const result = await json<RewindResult>(`/api/sessions/${encodeURIComponent(target.id)}/rewind`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ through_turn_id: point.turn_id, restore_workspace }) });
+      setRewindPoints(null);
+      const done = (point.step === 0 ? t.rewindDoneBeginning : t.rewindDone.replace("{step}", String(point.step))).replace("{dropped}", String(result.dropped_turn_ids.length));
+      const files = result.workspace ? ` · ${t.rewindFilesSummary.replace("{restored}", String(result.workspace.restored.length)).replace("{removed}", String(result.workspace.removed.length))}` : "";
+      setRewindNotice(`${done}${files}`);
+      await refreshSessions(); await loadSession(target.id);
+    } catch (reason) { setError(`${t.sessionActionFailed}: ${reason instanceof Error ? reason.message : String(reason)}`); }
   }
 
   async function toggleArchiveSession(target: Session) {
@@ -964,7 +1000,8 @@ export function App() {
             {showArchived && <VStack align="stretch" gap="1" mt="1">{archivedSessions.map(sessionRow)}</VStack>}
           </Box>}
         </Box>
-        {selectedSession && <Flex mt="2" gap="1" wrap="wrap" flex="0 0 auto"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
+        {selectedSession && <Flex mt="2" gap="1" wrap="wrap" flex="0 0 auto"><Button size="xs" variant="ghost" title={t.forkSession} aria-label={t.forkSession} disabled={busy || selectedSession.active} onClick={() => void forkSelectedSession()}>⑂</Button><Button size="xs" variant="ghost" title={t.rewindSession} aria-label={t.rewindSession} disabled={busy || selectedSession.active} onClick={() => void openRewindDialog()}>↶</Button><Button size="xs" variant="ghost" title={t.exportSession} aria-label={t.exportSession} disabled={busy} onClick={() => void exportSelectedSession()}>⇩</Button></Flex>}
+        {rewindNotice && <Text mt="1" fontSize="xs" color="var(--text-dim)">{rewindNotice}</Text>}
       </Flex>
       <Text as="footer" mt="5" pt="3" borderTop="1px solid" borderColor="var(--bg-panel-hover)" color="var(--text-ghost)" fontSize="2xs" textAlign="right">{t.version}: {version ? `v${version}` : "—"}</Text>
       {/* closeOnInteractOutside 必须显式写：zag 对 role="alertdialog" 默认关掉外部点击，
@@ -983,6 +1020,39 @@ export function App() {
               <Dialog.Footer gap="2">
                 <Button size="sm" variant="outline" borderColor="var(--border-strong)" color="var(--text)" onClick={() => setDeleteTarget(null)}>{t.cancel}</Button>
                 <Button size="sm" colorPalette="red" onClick={() => void confirmDeleteSession()}>{t.confirmDelete}</Button>
+              </Dialog.Footer>
+            </Dialog.Content>
+          </Dialog.Positioner>
+        </Portal>
+      </Dialog.Root>
+      <Dialog.Root role="alertdialog" closeOnInteractOutside open={rewindPoints !== null} onOpenChange={(details) => { if (!details.open) setRewindPoints(null); }}>
+        <Portal>
+          <Dialog.Backdrop bg="var(--shadow)" />
+          <Dialog.Positioner>
+            <Dialog.Content bg="var(--bg-raised)" color="var(--text)" border="1px solid" borderColor="var(--border)" borderRadius="12px" maxW="480px">
+              <Dialog.Header><Dialog.Title fontSize="md">{t.rewindDialogTitle}</Dialog.Title></Dialog.Header>
+              <Dialog.Body>
+                {rewindLoading && <Text fontSize="sm" color="var(--text-dim)">{t.rewindLoading}</Text>}
+                {!rewindLoading && rewindPoints && rewindPoints.length === 0 && <Text fontSize="sm" color="var(--text-dim)">{t.rewindNoPoints}</Text>}
+                {!rewindLoading && rewindPoints && rewindPoints.length > 0 && <VStack align="stretch" gap="1" maxH="40vh" overflowY="auto">
+                  {rewindPoints.map((point, index) => <label key={point.turn_id ?? "beginning"} className="rewind-point" style={{ display: "flex", gap: "8px", alignItems: "baseline", cursor: "pointer" }}>
+                    <input type="radio" name="rewind-point" checked={rewindSelection === index} onChange={() => { setRewindSelection(index); setRewindFiles(point.can_restore_workspace); }} />
+                    <Text as="span" fontWeight="600" whiteSpace="nowrap">{point.step === 0 ? t.rewindBeginning : t.rewindStep.replace("{step}", String(point.step))}</Text>
+                    <Text as="span" fontSize="xs" color="var(--text-dim)" whiteSpace="nowrap">{point.can_restore_workspace ? t.rewindFilesAvailable : t.rewindChatOnly}</Text>
+                    <Text as="span" fontSize="sm" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">{point.snippet}</Text>
+                  </label>)}
+                </VStack>}
+                {!rewindLoading && rewindPoints && rewindPoints[rewindSelection] && <Box mt="3">
+                  <label style={{ display: "flex", gap: "8px", alignItems: "center", cursor: rewindPoints[rewindSelection].can_restore_workspace ? "pointer" : "not-allowed" }}>
+                    <input type="checkbox" checked={rewindFiles && rewindPoints[rewindSelection].can_restore_workspace} disabled={!rewindPoints[rewindSelection].can_restore_workspace} onChange={(event) => setRewindFiles(event.target.checked)} />
+                    <Text as="span" fontSize="sm">{rewindPoints[rewindSelection].can_restore_workspace ? t.rewindRestoreFiles : t.rewindRestoreUnavailable}</Text>
+                  </label>
+                  <Text mt="2" fontSize="xs" color="var(--text-dim)">{t.rewindDropHint.replace("{count}", String(rewindPoints.length - rewindSelection))}</Text>
+                </Box>}
+              </Dialog.Body>
+              <Dialog.Footer gap="2">
+                <Button size="sm" variant="outline" borderColor="var(--border-strong)" color="var(--text)" onClick={() => setRewindPoints(null)}>{t.cancel}</Button>
+                <Button size="sm" colorPalette="orange" disabled={rewindLoading || !rewindPoints || !rewindPoints[rewindSelection]} onClick={() => void confirmRewind()}>{t.rewindConfirm}</Button>
               </Dialog.Footer>
             </Dialog.Content>
           </Dialog.Positioner>

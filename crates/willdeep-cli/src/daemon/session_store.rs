@@ -89,6 +89,28 @@ pub(crate) struct RuntimeTurn {
     pub message_end: Option<usize>,
     #[serde(default)]
     pub message_generation: u64,
+    /// 这一轮开始前的工作区检查点（影子仓库里的 commit）。没拍到就是 `None`：
+    /// 不是 git 仓库、检查点被关掉、或这条记录早于检查点功能。
+    #[serde(default)]
+    pub workspace_checkpoint: Option<String>,
+}
+
+/// 「回到第 N 步」的计划：先算清楚要丢什么、文件要回到哪份检查点，再动手。
+/// 分两步是为了让文件恢复失败时对话还没被截断——半截的回退比不回退更糟。
+#[derive(Clone, Debug)]
+pub(crate) struct RewindPlan {
+    pub session_id: uuid::Uuid,
+    pub workspace: PathBuf,
+    /// 保留到的轮次；`None` 表示回到开头。
+    pub through_turn_id: Option<uuid::Uuid>,
+    /// 截断后的消息数。
+    pub message_end: usize,
+    /// 校验用：计划建立时的压缩代数，提交时必须没变。
+    pub compression_generation: u64,
+    /// 要丢掉的轮次，按排队顺序。
+    pub dropped_turn_ids: Vec<uuid::Uuid>,
+    /// 第一个被丢掉的轮次开始前拍的工作区检查点：回退文件就是回到它。
+    pub workspace_checkpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -546,6 +568,123 @@ impl RuntimeSessionStore {
         Ok(fork)
     }
 
+    /// 轮次开始前拍到的工作区检查点记到轮次上。轮次已经不在跑了就丢弃：
+    /// 一份晚到的检查点对不上任何一步。
+    pub fn record_workspace_checkpoint(&self, turn_id: uuid::Uuid, commit: String) -> Result<()> {
+        let mut turns = self.turns_lock()?;
+        let turn = turns.get_mut(&turn_id).context("Runtime Turn not found")?;
+        anyhow::ensure!(
+            turn.metadata.status == RuntimeTurnStatus::Running,
+            "Runtime Turn is not running; checkpoint discarded"
+        );
+        turn.metadata.workspace_checkpoint = Some(commit);
+        persist_turns(&self.turns_path, &turns)
+    }
+
+    /// 算一份「回到第 N 步」的计划。与 `fork_through` 同一套边界校验：
+    /// 会话不能在跑、边界轮次必须已完成、边界不能早于当前压缩检查点。
+    /// `through_turn_id` 为 `None` 是回到开头，只有从没压缩过的会话做得到——
+    /// 压缩后消息 0 已经不是开头了。
+    pub fn rewind_plan(
+        &self,
+        id: uuid::Uuid,
+        through_turn_id: Option<uuid::Uuid>,
+    ) -> Result<RewindPlan> {
+        self.ensure_manageable(id)?;
+        let session = self.get(id)?.context("Runtime Session not found")?;
+        let core = self
+            .core
+            .load(id)
+            .with_context(|| format!("load Core Session {id}"))?;
+        let turns = self.turns_lock()?;
+        let mut session_turns = turns
+            .values()
+            .filter(|turn| turn.metadata.session_id == id)
+            .map(|turn| turn.metadata.clone())
+            .collect::<Vec<_>>();
+        session_turns.sort_by_key(|turn| turn.queue_sequence);
+        let (message_end, kept_sequence) = match through_turn_id {
+            Some(turn_id) => {
+                let turn = session_turns
+                    .iter()
+                    .find(|turn| turn.id == turn_id)
+                    .context("Runtime Turn does not belong to the Session")?;
+                if turn.status != RuntimeTurnStatus::Completed {
+                    bail!("only a completed Runtime Turn can be a rewind boundary");
+                }
+                if turn.message_generation != core.compression_generation {
+                    bail!(
+                        "Runtime Turn boundary predates the current compression checkpoint and cannot be rewound exactly"
+                    );
+                }
+                let end = turn.message_end.context(
+                    "Runtime Turn predates durable message boundaries and cannot be rewound exactly",
+                )?;
+                (end, Some(turn.queue_sequence))
+            }
+            None => {
+                if core.compression_generation != 0 {
+                    bail!("the Session has been compressed; its beginning is no longer message 0");
+                }
+                (0, None)
+            }
+        };
+        if message_end > core.messages.len() {
+            bail!("Runtime Turn message boundary exceeds the Core Session snapshot");
+        }
+        let dropped = session_turns
+            .iter()
+            .filter(|turn| kept_sequence.is_none_or(|kept| turn.queue_sequence > kept))
+            .collect::<Vec<_>>();
+        if dropped.is_empty() {
+            bail!("nothing to rewind: the Session is already at that step");
+        }
+        Ok(RewindPlan {
+            session_id: id,
+            workspace: session.workspace,
+            through_turn_id,
+            message_end,
+            compression_generation: core.compression_generation,
+            dropped_turn_ids: dropped.iter().map(|turn| turn.id).collect(),
+            workspace_checkpoint: dropped[0].workspace_checkpoint.clone(),
+        })
+    }
+
+    /// 按计划截断对话并摘掉被丢掉的轮次。文件恢复（若要）在调用前完成。
+    pub fn commit_rewind(&self, plan: &RewindPlan) -> Result<RuntimeSession> {
+        self.ensure_manageable(plan.session_id)?;
+        let mut core = self
+            .core
+            .load(plan.session_id)
+            .with_context(|| format!("load Core Session {}", plan.session_id))?;
+        if core.compression_generation != plan.compression_generation {
+            bail!("the Session was compressed while the rewind was being prepared");
+        }
+        if plan.message_end > core.messages.len() {
+            bail!("the Session history shrank while the rewind was being prepared");
+        }
+        core.rewind_to(plan.message_end);
+        self.core.save(&mut core)?;
+        let mut turns = self.turns_lock()?;
+        let removed = turns
+            .extract_if(|id, _| plan.dropped_turn_ids.contains(id))
+            .collect::<HashMap<_, _>>();
+        if let Err(error) = persist_turns(&self.turns_path, &turns) {
+            turns.extend(removed);
+            return Err(error);
+        }
+        drop(turns);
+        let mut sessions = self.lock()?;
+        let session = sessions
+            .get_mut(&plan.session_id)
+            .context("Runtime Session not found")?;
+        session.updated_at = now();
+        session.last_error = None;
+        let result = session.clone();
+        persist_sessions(&self.path, &sessions)?;
+        Ok(result)
+    }
+
     pub fn archive(&self, id: uuid::Uuid) -> Result<RuntimeSession> {
         self.ensure_manageable(id)?;
         self.set_archived(id, true)
@@ -897,6 +1036,7 @@ impl RuntimeSessionStore {
             message_start: None,
             message_end: None,
             message_generation: 0,
+            workspace_checkpoint: None,
         };
         turns.insert(
             metadata.id,
@@ -1876,6 +2016,54 @@ pub(super) async fn fork_session_cli(
             .await?,
     )?;
     print_public_session(&session);
+    Ok(())
+}
+
+pub(super) async fn rewind_session_cli(
+    home: &Path,
+    id: uuid::Uuid,
+    through_turn_id: Option<uuid::Uuid>,
+    restore_workspace: bool,
+) -> Result<()> {
+    let state = ensure_running(home).await?;
+    let result = cli_api_data(
+        runtime_client(&state)?
+            .rewind_session(
+                &willdeep_runtime_protocol::RewindSessionParams {
+                    id,
+                    through_turn_id,
+                    restore_workspace,
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .await?,
+    )?;
+    print_public_session(&result.session);
+    println!(
+        "rewound\tmessages={}\tdropped_turns={}",
+        result.message_count,
+        result.dropped_turn_ids.len()
+    );
+    if let Some(workspace) = result.workspace {
+        println!(
+            "workspace\tcheckpoint={}\tbefore={}\trestored={}\tremoved={}\tskipped={}\trecovery={}",
+            workspace.checkpoint,
+            workspace.before_checkpoint,
+            workspace.restored.len(),
+            workspace.removed.len(),
+            workspace.skipped.len(),
+            workspace.recovery_path.as_deref().unwrap_or("none")
+        );
+        for path in workspace.restored {
+            println!("restored\t{path}");
+        }
+        for path in workspace.removed {
+            println!("removed\t{path}");
+        }
+        for path in workspace.skipped {
+            println!("skipped\t{path}");
+        }
+    }
     Ok(())
 }
 

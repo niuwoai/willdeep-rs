@@ -361,6 +361,8 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/rename", post(rename_session))
         .route("/api/sessions/{id}/steer", post(steer_session))
         .route("/api/sessions/{id}/fork", post(fork_session))
+        .route("/api/sessions/{id}/rewind-points", get(rewind_points))
+        .route("/api/sessions/{id}/rewind", post(rewind_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/unarchive", post(unarchive_session))
         .route("/api/sessions/{id}/pin", post(pin_session))
@@ -1136,6 +1138,43 @@ async fn fork_session(
             id: fork_id.to_string(),
         }),
     ))
+}
+
+#[derive(Deserialize)]
+struct RewindSessionRequest {
+    #[serde(default)]
+    through_turn_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    restore_workspace: bool,
+}
+
+/// 「回到第 N 步」能选的步骤。会话在跑时也能列，真正回退时 Runtime 会拒绝。
+async fn rewind_points(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<Vec<crate::daemon::RewindPoint>>, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::remote_rewind_points(&state.home, id)
+        .await
+        .map(Json)
+        .map_err(WebError::from_anyhow)
+}
+
+async fn rewind_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<RewindSessionRequest>,
+) -> Result<Json<willdeep_runtime_protocol::RewindSessionResult>, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    crate::daemon::rewind_remote_session(
+        &state.home,
+        id,
+        request.through_turn_id,
+        request.restore_workspace,
+    )
+    .await
+    .map(Json)
+    .map_err(WebError::from_anyhow)
 }
 
 async fn archive_session(

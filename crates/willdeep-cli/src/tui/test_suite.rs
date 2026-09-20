@@ -118,7 +118,7 @@ mod command_tests {
             .into_iter()
             .map(|(command, _)| command)
             .collect();
-        assert_eq!(commands.len(), 23);
+        assert_eq!(commands.len(), 24);
         // 面板一屏只画得下 8 条，后面这些此前完全看不到。
         for command in [
             "/daemon",
@@ -214,10 +214,26 @@ mod command_tests {
     }
 
     #[test]
+    fn rewind_is_delegated_to_the_runtime_path_and_listed_with_the_other_commands() {
+        let mut app = App::new(Vec::new(), Language::En);
+        let skills = SkillCatalog::default();
+
+        assert!(!app.handle_slash_command("/rewind", &skills));
+        assert!(app.transcript.is_empty());
+        assert!(
+            command_candidates(Language::ZhCn)
+                .iter()
+                .any(|(command, description)| *command == "/rewind"
+                    && description.contains("回到第 N 步"))
+        );
+    }
+
+    #[test]
     fn ordinary_prompt_is_not_treated_as_command() {
         let mut app = App::new(Vec::new(), Language::En);
         assert!(!app.handle_slash_command("please inspect /docs", &SkillCatalog::default()));
     }
 }
 mod interaction_tests;
+mod rewind_tests;
 mod session_tests;

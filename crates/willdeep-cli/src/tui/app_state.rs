@@ -107,6 +107,7 @@ impl App {
             palette_rect: Rect::default(),
             palette_hits: Vec::new(),
             session_picker: None,
+            rewind_picker: None,
             session_picker_rect: Rect::default(),
             session_picker_hits: Vec::new(),
             model_picker: None,
@@ -172,6 +173,7 @@ impl App {
         self.search = None;
         self.palette = None;
         self.session_picker = None;
+        self.rewind_picker = None;
         self.model_picker = None;
         self.pending_session_switch = None;
         self.attention_read = session.attention_read.clone();
@@ -1734,6 +1736,7 @@ impl App {
                 | "/compress"
                 | "/daemon"
                 | "/diff"
+                | "/rewind"
                 | "/history"
                 | "/local"
                 | "/mobile"

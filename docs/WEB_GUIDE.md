@@ -111,7 +111,7 @@ Web 端的 `/` 命令是前端拦截的：`/clear` 清空显示、`/help` 打印
 
 每行悬停出现四个动作：重命名、置顶/取消置顶、归档/取消归档、删除。活动中的会话禁用重命名、归档和删除。删除需要在弹窗中二次确认。
 
-选中会话下方另有 Fork 和 Export；导出为浏览器本地下载的 `willdeep-session-<id>.json`。
+选中会话下方另有 Fork、回退（↶）和 Export；导出为浏览器本地下载的 `willdeep-session-<id>.json`。回退对话框单选一步、勾选是否同时恢复工作区文件（这一步没检查点时禁用并说明），底下写会丢几步；会话在跑时按钮禁用。口径见 [检查点回退](CHECKPOINT_REWIND.md)。
 
 "新会话"按钮只清空本地状态，不会在服务端创建空会话。
 
@@ -255,6 +255,8 @@ ssh -L 9847:127.0.0.1:9847 user@remote
 | GET | `/api/sessions/{id}/stream?after=` | 断线重连，重新附着活动 Turn |
 | POST | `/api/sessions/{id}/rename` | 重命名 |
 | POST | `/api/sessions/{id}/fork` | Fork |
+| GET | `/api/sessions/{id}/rewind-points` | 还能回到的步骤（步号、提示词首行、有无文件检查点） |
+| POST | `/api/sessions/{id}/rewind` | 回到第 N 步：`{ through_turn_id?, restore_workspace }`，返回 `RewindSessionResult` |
 | POST | `/api/sessions/{id}/archive` · `/unarchive` | 归档 / 取消归档 |
 | POST | `/api/sessions/{id}/pin` · `/unpin` | 置顶 / 取消置顶 |
 | GET | `/api/sessions/{id}/export` | 脱敏 JSON 导出 |

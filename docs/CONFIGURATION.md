@@ -229,6 +229,7 @@ API Key 的完整解析链和权限强制规则见 [认证与凭据](AUTHENTICAT
 | `WILLDEEP_MODEL` | 模型 ID |
 | `WILLDEEP_CONFIG` | 显式 TOML 配置文件路径 |
 | `WILLDEEP_HOME` | 配置与运行时目录，默认 `~/.willdeep` |
+| `WILLDEEP_WORKSPACE_CHECKPOINTS` | 设为 `0` / `false` / `off` 关掉每轮开始前的工作区检查点（`/rewind` 就只能回对话），默认开；见 `docs/CHECKPOINT_REWIND.md` |
 | `WILLDEEP_LANGUAGE` | 界面语言 `zh-CN` / `en` / `ja` |
 | `WILLDEEP_CLIENT_LOGIN_SECRET` | some.im 浏览器登录的客户端密钥，构建时注入 |
 | `SOMEIM_API_KEY` | some.im Key 回退 |

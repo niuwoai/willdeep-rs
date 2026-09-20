@@ -688,6 +688,119 @@ fn adopts_an_existing_core_session_idempotently() {
 }
 
 #[test]
+fn rewinding_truncates_in_place_and_forgets_the_dropped_turns() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-runtime-turn-rewind-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+    let session = store
+        .create(CreateRuntimeSession {
+            id: None,
+            workspace,
+            profile: None,
+            model: None,
+            config: None,
+            title: Some("Rewind".to_owned()),
+        })
+        .unwrap();
+    let core_store = willdeep_core::SessionStore::new(&root);
+    let complete_turn = |prompt: &str, checkpoint: Option<&str>| {
+        let (turn, _) = store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    origin_client: None,
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: prompt.to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        store.claim_next(session.id).unwrap().unwrap();
+        let mut core = core_store.load(session.id).unwrap();
+        core.messages.push(willdeep_core::Message::user(prompt));
+        core.messages
+            .push(willdeep_core::Message::assistant("answer", Vec::new()));
+        core_store.save(&mut core).unwrap();
+        let task_id = uuid::Uuid::new_v4();
+        assert!(store.bind_task(turn.id, task_id).unwrap());
+        if let Some(commit) = checkpoint {
+            store
+                .record_workspace_checkpoint(turn.id, commit.to_owned())
+                .unwrap();
+        }
+        store
+            .complete_task(task_id, RuntimeTaskStatus::Completed, None)
+            .unwrap();
+        turn.id
+    };
+
+    let first = complete_turn("first", Some("c1"));
+    let second = complete_turn("second", Some("c2"));
+    let third = complete_turn("third", None);
+    assert_eq!(
+        store
+            .get_turn(second)
+            .unwrap()
+            .unwrap()
+            .workspace_checkpoint,
+        Some("c2".to_owned())
+    );
+
+    // 已经在最后一步：没有可回退的。
+    let error = store.rewind_plan(session.id, Some(third)).unwrap_err();
+    assert!(error.to_string().contains("nothing to rewind"), "{error:#}");
+
+    // 回到第 1 步：丢第 2、3 步，文件回到第 2 步开始前的检查点。
+    let plan = store.rewind_plan(session.id, Some(first)).unwrap();
+    assert_eq!(plan.message_end, 2);
+    assert_eq!(plan.dropped_turn_ids, vec![second, third]);
+    assert_eq!(plan.workspace_checkpoint.as_deref(), Some("c2"));
+    let rewound = store.commit_rewind(&plan).unwrap();
+    assert_eq!(rewound.id, session.id);
+    let core = core_store.load(session.id).unwrap();
+    assert_eq!(core.messages.len(), 2);
+    assert_eq!(core.messages[0].content, "first");
+    let remaining = store.list_turns(session.id).unwrap();
+    assert_eq!(
+        remaining.iter().map(|turn| turn.id).collect::<Vec<_>>(),
+        vec![first]
+    );
+    assert!(store.get_turn(second).unwrap().is_none());
+
+    // 同一份计划不能提交两次：轮次已经没了。
+    assert!(
+        store.commit_rewind(&plan).is_err() || store.list_turns(session.id).unwrap().len() == 1
+    );
+
+    // 回到开头：没压缩过的会话可以；文件检查点是第 1 步的。
+    let plan = store.rewind_plan(session.id, None).unwrap();
+    assert_eq!(plan.message_end, 0);
+    assert_eq!(plan.dropped_turn_ids, vec![first]);
+    assert_eq!(plan.workspace_checkpoint.as_deref(), Some("c1"));
+    store.commit_rewind(&plan).unwrap();
+    assert!(core_store.load(session.id).unwrap().messages.is_empty());
+    assert!(store.list_turns(session.id).unwrap().is_empty());
+
+    // 压缩过的会话回不到开头。
+    let fourth = complete_turn("fourth", None);
+    let mut core = core_store.load(session.id).unwrap();
+    assert!(core.replace_with_compressed_messages(vec![willdeep_core::Message::user("summary")]));
+    core_store.save(&mut core).unwrap();
+    let error = store.rewind_plan(session.id, None).unwrap_err();
+    assert!(error.to_string().contains("compressed"), "{error:#}");
+    let error = store.rewind_plan(session.id, Some(fourth)).unwrap_err();
+    assert!(
+        error.to_string().contains("compression checkpoint"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn records_message_boundaries_and_forks_through_a_completed_turn() {
     let root = std::env::temp_dir().join(format!(
         "willdeep-runtime-turn-fork-{}",

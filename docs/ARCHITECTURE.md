@@ -74,6 +74,8 @@ Agent Loop 只理解：
 
 会话按 UUID 写入 `$WILLDEEP_HOME/sessions`，使用临时文件加同目录 rename 保证单文件原子替换。恢复历史时会丢弃旧 system message 并注入当前工作区和 Skill 清单，避免陈旧边界跨会话延续。
 
+Runtime 侧每个轮次在 `runtime/turns.json` 里记着自己在会话消息里的起止下标与压缩代数，这是「回到第 N 步」的对话边界。文件边界是**工作区检查点**（`daemon::workspace_checkpoint`）：轮次开始前、模型动手之前，把工作树写成 `$WILLDEEP_HOME/runtime/checkpoints/<工作区哈希>/` 这个私有裸仓库里的一个独立 commit，对象库经 `alternates` 借用工作区自己的 `.git/objects`，引用在 `refs/willdeep/<会话>/<轮次>`，用户仓库的 HEAD、索引与 `git log --all` 不受影响；非 git 工作区没有检查点。控制面 `session.rewind` 先按第 N+1 步的检查点恢复文件（被覆盖的原件进 `runtime/recovery/rewind-<会话>-*`，回退前的整棵树另拍 `before-rewind` 快照），再原地截断会话、摘掉被丢的轮次、清空执行检查点；文件恢复失败时对话不动。回退不删审批、Diff 归属与审计事件。详见 `docs/CHECKPOINT_REWIND.md`。
+
 Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为 `SKILL.md`；附属资源 canonicalize 后必须仍位于 Skill 根目录，单次读取最多 48,000 字符。
 
 MCP server 由 TOML 声明：stdio 服务给 command、args、env，Streamable HTTP 服务给 url、静态 headers 与鉴权方式（`bearer_token_env` 或 `oauth`），两者二选一，规则在 `willdeep-core::mcp::McpServerConfig::validate` 里只定一份，配置校验与连接共用。stdio 建长连接；HTTP 每条 JSON-RPC 一个 POST，JSON 与 SSE 响应都认，维护 `Mcp-Session-Id` 与协商到的协议版本头，会话过期重握手一次，退出时 DELETE。OAuth 由 `mcp::oauth` 实现（授权码 + PKCE、回环回调、RFC 9728 / 8414 / 7591 / 8707），token 存 `$WILLDEEP_HOME/mcp-oauth/`，连接时自动带上并刷新。两种传输都执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；远程服务连不上只警告跳过，本地 stdio 配置错误直接失败。Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链（后两种只免审当前工作区内的 `create_file`、`edit_file`）；`full-access` 下免审并记审计。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
