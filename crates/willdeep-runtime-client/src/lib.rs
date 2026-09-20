@@ -16,9 +16,9 @@ use willdeep_runtime_protocol::{
     RuntimeAgentCommand, RuntimeArtifact, RuntimeCapabilities, RuntimeEvent,
     RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTaskDiagnostics,
     RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
-    RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SubmitTurnParams,
-    UpdateSessionApprovalModeParams, UpdateSessionModelParams, WorkspaceEnsureParams,
-    WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
+    RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SteerTurnOutcome,
+    SteerTurnParams, SubmitTurnParams, UpdateSessionApprovalModeParams, UpdateSessionModelParams,
+    WorkspaceEnsureParams, WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -301,6 +301,16 @@ impl RuntimeClient {
         request_id: uuid::Uuid,
     ) -> Result<ApiResponse<RuntimeAgentCommand>, ClientError> {
         self.call("agent.prompt", params, Some(request_id)).await
+    }
+
+    /// 把用户在本轮进行中说的话送进会话正在跑的任务；没有在途任务时
+    /// `delivered` 为假，由调用方自行排队。
+    pub async fn steer_turn(
+        &self,
+        params: &SteerTurnParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<SteerTurnOutcome>, ClientError> {
+        self.call("turn.steer", params, Some(request_id)).await
     }
 
     pub async fn wait_agent(

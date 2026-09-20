@@ -265,6 +265,7 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
         },
         "agent.spawn" => agent_spawn(state, &request),
         "agent.prompt" => agent_prompt(state, &request).await,
+        "turn.steer" => turn_steer(state, &request),
         "agent.wait" => agent_wait(state, &request).await,
         "agent.stop" => agent_command(state, &request, agent_control::AgentCommandKind::Stop).await,
         "agent.retry" => agent_retry(state, &request).await,
@@ -659,6 +660,7 @@ const MUTATING_OPERATIONS: &[&str] = &[
     "session.archive",
     "session.delete",
     "turn.submit",
+    "turn.steer",
     "turn.stop",
     "diff.review",
     "diff.verification.record",
@@ -1482,6 +1484,35 @@ async fn agent_prompt(state: &ServerState, request: &ApiRequest) -> ApiResult {
     command_response(command)
 }
 
+/// 单条插话的上限，与核心收件箱一致；再长就不是插话而是新任务了。
+const MAX_STEER_MESSAGE_BYTES: usize = 16 * 1024;
+
+/// 用户在本轮进行中说的话，送进会话正在跑的任务；下一次调模型前以用户身份注入。
+/// 没有在途任务不算错，`delivered` 为假，客户端自行排队等本轮结束。
+fn turn_steer(state: &ServerState, request: &ApiRequest) -> ApiResult {
+    let params = params::<willdeep_runtime_protocol::SteerTurnParams>(request)?;
+    let message = params.message.trim();
+    if message.is_empty() || message.len() > MAX_STEER_MESSAGE_BYTES {
+        return Err(ApiFailure::invalid(format!(
+            "message must contain 1 to {MAX_STEER_MESSAGE_BYTES} bytes"
+        )));
+    }
+    let task_id = state.tasks.steer(params.session_id, message.to_owned());
+    if let Some(task_id) = task_id {
+        state
+            .events
+            .append(
+                "turn.steered",
+                format!("session_id={} task_id={task_id}", params.session_id),
+            )
+            .map_err(ApiFailure::internal)?;
+    }
+    json(willdeep_runtime_protocol::SteerTurnOutcome {
+        delivered: task_id.is_some(),
+        task_id,
+    })
+}
+
 fn agent_spawn(state: &ServerState, request: &ApiRequest) -> ApiResult {
     let params = params::<SpawnAgentParams>(request)?;
     let prompt = params.prompt.trim();
@@ -1895,6 +1926,9 @@ mod tests {
         assert!(is_work_producing_operation("agent.spawn"));
         assert!(is_work_producing_operation("agent.prompt"));
         assert!(is_work_producing_operation("agent.retry"));
+        // 插话喂的是正在跑的任务，改状态但不产生新工作。
+        assert!(is_mutating_operation("turn.steer"));
+        assert!(!is_work_producing_operation("turn.steer"));
         assert!(!is_work_producing_operation("agent.stop"));
         assert!(!is_work_producing_operation("approval.resolve"));
     }

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.78.0-rc11] - 2026-09-20
+
+### Added
+- **本轮进行中按回车，话直接送达，不再只能排队。** 此前唯一的捷径是 Esc 中止再让队列发出，正在做的活会被打断。现在：
+  - 核心：根 Agent 与子 Agent 一样带 `AgentInstructionInbox`，主循环每一小轮开始前排空（当前工具跑完、下一次调模型之前）。收件箱条目分 `Parent` / `Operator`：父 Agent 指令仍以宿主口吻合并成一条，用户插话逐条以用户消息（`OperatorInput`）注入，回放显示为 `You:`；模型刚要收尾也会因此再跑一轮。
+  - Runtime：`daemon::steering` 按任务登记收件箱；新控制面操作 `turn.steer`（`session_id` + `message`）按会话找到在途任务送达，返回 `delivered` / `task_id`，没有在途任务不算错。任务结束时没赶上的插话以 `task.output` `type: "steer_undelivered"` 交回客户端。协议加 `SteerTurnParams` / `SteerTurnOutcome`，`SUPPORTED_OPERATIONS` 登记 `turn.steer`，客户端加 `steer_turn`。
+  - TUI：本轮在跑时回车先试送达——Runtime 轮次走 `turn.steer`，进程内轮次直接进 Agent 收件箱——成功就显示 `You: …` 并提示「已送达 · 模型下一步就会看到」；送不到（没有在途任务、Runtime 不可达、带附件）才落回「待发」排队。没赶上的插话自动重新排队并提示。输入框标题改为「本轮进行中 · 回车即送达 · Esc 中止」。
+  - 语义：送达 ≠ 打断。模型在当前这一步做完后看到你的话再决定怎么办，硬停仍用 Esc。
+
 ## [0.78.0-rc10] - 2026-09-20
 
 ### Changed

@@ -35,8 +35,8 @@ pub mod types;
 pub mod worker_tier;
 
 pub use agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentInstructionInbox, AgentOutcome,
-    AgentStopReason, EventSink, SubagentLifecycleStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInstruction, AgentInstructionInbox,
+    AgentOutcome, AgentStopReason, EventSink, SubagentLifecycleStatus,
 };
 pub use attention::{
     AttentionItem, AttentionSection, AttentionSource, RuntimeScopeKind, RuntimeStatus,

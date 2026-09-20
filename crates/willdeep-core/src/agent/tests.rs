@@ -635,6 +635,96 @@ async fn parent_instruction_prevents_early_finish_and_continues_next_turn() {
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
+struct OperatorSteerProvider {
+    calls: std::sync::atomic::AtomicUsize,
+    /// 根 Agent 自带的收件箱，Agent 建好之后才拿得到，所以放在槽位里。
+    inbox: std::sync::Mutex<Option<Arc<AgentInstructionInbox>>>,
+}
+
+#[async_trait]
+impl Provider for OperatorSteerProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<Completion, ProviderError> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            let inbox = self
+                .inbox
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("inbox slot filled");
+            assert!(inbox.push_operator("先别删，只改 handler".to_owned()));
+        } else {
+            // 用户插话以用户身份进对话，不裹「parent Agent」那层宿主口吻。
+            let steer = messages
+                .iter()
+                .find(|message| message.content == "先别删，只改 handler")
+                .expect("operator steering reaches the next model call");
+            assert_eq!(steer.role, crate::types::Role::User);
+            assert_eq!(
+                steer.source,
+                Some(crate::types::MessageSource::OperatorInput)
+            );
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| message.content.contains("Additional instructions")),
+                "no parent-agent wrapper for operator steering"
+            );
+        }
+        Ok(Completion {
+            reasoning: None,
+            content: if call == 0 {
+                "first answer"
+            } else {
+                "revised answer"
+            }
+            .to_owned(),
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_owned()),
+            usage: None,
+        })
+    }
+}
+
+/// 根 Agent 自带收件箱：用户在本轮进行中说的话在下一次调模型前以用户身份注入，
+/// 模型刚要收尾也会因此再跑一轮。
+#[tokio::test]
+async fn operator_steering_is_injected_as_a_user_message_before_the_next_call() {
+    let provider = Arc::new(OperatorSteerProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        inbox: std::sync::Mutex::new(None),
+    });
+    let agent = Agent::new(
+        provider.clone(),
+        registry("steering"),
+        AgentConfig {
+            max_turns: 3,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    );
+    let inbox = agent
+        .instruction_inbox()
+        .expect("root agents carry an inbox");
+    *provider.inbox.lock().unwrap() = Some(inbox);
+
+    let outcome = agent
+        .run("delete the upload module")
+        .await
+        .expect("continued run");
+    assert_eq!(outcome.final_text, "revised answer");
+    assert_eq!(outcome.turns, 2);
+    assert!(outcome.messages.iter().any(|message| {
+        message.content == "先别删，只改 handler"
+            && message.source == Some(crate::types::MessageSource::OperatorInput)
+    }));
+}
+
 fn kernel_event(
     interrupt: crate::kernel::InterruptPolicy,
     title: &str,

@@ -1029,6 +1029,7 @@ impl RuntimeSessionStore {
                 workspace: session.workspace.clone(),
                 workspace_access: None,
                 approval_handle: None,
+                instruction_inbox: None,
                 workspace_skills: None,
                 workspace_mcp_servers: None,
                 profile: session.profile.clone(),

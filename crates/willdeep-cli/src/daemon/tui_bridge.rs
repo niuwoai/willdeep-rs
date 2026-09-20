@@ -875,6 +875,26 @@ pub(crate) async fn spawn_remote_agent(
     Ok(remote_agent(agent))
 }
 
+/// 把用户在本轮进行中说的话送进会话正在跑的任务。返回是否送达；没有在途任务
+/// 时为 false，由调用方排队等本轮结束。
+pub(crate) async fn steer_remote_turn(
+    home: &Path,
+    session_id: uuid::Uuid,
+    message: String,
+) -> Result<bool> {
+    let state = ensure_running(home).await?;
+    let response = runtime_client(&state)?
+        .steer_turn(
+            &willdeep_runtime_protocol::SteerTurnParams {
+                session_id,
+                message,
+            },
+            uuid::Uuid::new_v4(),
+        )
+        .await?;
+    api_data(response).map(|outcome| outcome.delivered)
+}
+
 pub(crate) async fn instruct_remote_agent(
     home: &Path,
     id: uuid::Uuid,

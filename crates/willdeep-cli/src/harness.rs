@@ -171,6 +171,9 @@ pub(crate) enum HarnessFrontend {
         sink: Arc<dyn EventSink>,
         workspace_access: Option<crate::daemon::WorkspaceAccess>,
         approval_handle: Option<willdeep_core::SharedApprovalMode>,
+        /// 用户插话的收件箱，任务管理器持有另一半；`turn.steer` 送进来的话在
+        /// 下一次调模型前注入。
+        instruction_inbox: Option<Arc<willdeep_core::AgentInstructionInbox>>,
         allowed_skills: Vec<String>,
         allowed_mcp_servers: Vec<String>,
     },
@@ -294,6 +297,7 @@ pub(crate) async fn execute_runtime(
             sink,
             workspace_access: request.workspace_access,
             approval_handle: request.approval_handle.clone(),
+            instruction_inbox: request.instruction_inbox.clone(),
             allowed_skills: request.workspace_skills.unwrap_or_default(),
             allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
         },
@@ -648,13 +652,18 @@ pub(crate) async fn build(
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
     let local_auxiliary_config = local_auxiliary_provider_config(&loaded.file.local_model);
-    let (runtime_access, runtime_approval_handle) = match &frontend {
+    let (runtime_access, runtime_approval_handle, runtime_inbox) = match &frontend {
         HarnessFrontend::Runtime {
             workspace_access,
             approval_handle,
+            instruction_inbox,
             ..
-        } => (*workspace_access, approval_handle.clone()),
-        _ => (None, None),
+        } => (
+            *workspace_access,
+            approval_handle.clone(),
+            instruction_inbox.clone(),
+        ),
+        _ => (None, None, None),
     };
     let approval_mode = if let Some(access) = runtime_access {
         access.approval_mode()
@@ -978,6 +987,10 @@ pub(crate) async fn build(
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone())
     .with_event_kernel(kernel.clone());
+    // Runtime 任务的收件箱由任务管理器持有另一半；进程内轮次用 Agent 自带的那个。
+    if let Some(inbox) = runtime_inbox {
+        agent = agent.with_instruction_inbox(inbox);
+    }
     if loaded.file.agent.small_model_routing.unwrap_or(true) {
         let mut routing = RoutingGuard::new(RoutingPolicy {
             auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
