@@ -7,7 +7,8 @@
 //! - 每段定稿的中途文字都作 `WillDeep:` 行落进记录，流式增量仍走临时行预览；
 //! - 每次工具调用先落一行 `· … 名字 · 摘要`，完成后原地改成 `✓` / `✗`；
 //! - 收尾文字只追加还没显示过的部分（比如轮次上限提示），不重复最后一段；
-//! - 连续太多工具行时，显示层把前面的收成一行汇总，只留最新几条，`/tools` 展开。
+//! - 显示层把每段连续工具行收起：早先的段一行汇总，最新的段一行汇总加最新一条，
+//!   `/tools` 展开。
 //!
 //! 进程内轮次与 Runtime 轮次共用这一套，行为一致。
 use super::*;
@@ -17,10 +18,9 @@ const TOOL_PENDING: &str = "…";
 const TOOL_DONE: &str = "✓";
 const TOOL_FAILED: &str = "✗";
 
-/// 连续工具行只露最新这么多条，前面的收成一行汇总。
-const TOOL_ROWS_VISIBLE: usize = 4;
-/// 至少要省下两行才值得收：只藏一行还得配一行汇总，等于没省。
-const TOOL_ROWS_FOLD_AT: usize = TOOL_ROWS_VISIBLE + 2;
+/// 最新那段连续工具行最多占这么多行：一行汇总加最新一条，正在跑的那条永远看得见。
+/// 更早的段一律只留一行汇总（只有一条时原样保留）。
+const LAST_TOOL_RUN_ROWS: usize = 2;
 /// 汇总行的标记，与三种工具行标记都不同；渲染层照样按 `· ` 账目行的灰色画。
 const TOOL_FOLD_MARKER: &str = "⋯";
 
@@ -185,21 +185,18 @@ pub(super) struct FoldedTranscript {
     pub(super) index_of: Vec<usize>,
 }
 
-/// 同一段连续的工具行超过 [`TOOL_ROWS_FOLD_AT`] 条时，前面的收成一行汇总，
-/// 只留最新 [`TOOL_ROWS_VISIBLE`] 条；模型说一句话、轮次收尾都会重新计数。
-/// `expanded` 为真时原样返回（`/tools`）。
+/// 每段连续的工具行（模型说一句话、轮次收尾都会切段）在显示层收起：不是最新那段
+/// 的一律只留一行汇总，只有一条时原样保留；最新那段最多 [`LAST_TOOL_RUN_ROWS`]
+/// 行，一行汇总加最新一条。`expanded` 为真时原样返回（`/tools`）。
 pub(super) fn fold_tool_rows(
     entries: &[String],
     expanded: bool,
     language: Language,
 ) -> FoldedTranscript {
-    let mut rows = Vec::with_capacity(entries.len());
-    let mut index_of = Vec::with_capacity(entries.len());
+    let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut cursor = 0;
     while cursor < entries.len() {
         if tool_row_marker(&entries[cursor]).is_none() {
-            index_of.push(rows.len());
-            rows.push(entries[cursor].clone());
             cursor += 1;
             continue;
         }
@@ -207,15 +204,36 @@ pub(super) fn fold_tool_rows(
         while cursor < entries.len() && tool_row_marker(&entries[cursor]).is_some() {
             cursor += 1;
         }
-        let run = &entries[start..cursor];
-        let hidden = if expanded || run.len() < TOOL_ROWS_FOLD_AT {
+        runs.push((start, cursor));
+    }
+    let last_run = runs.last().copied();
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut index_of = Vec::with_capacity(entries.len());
+    let mut next_run = 0;
+    let mut cursor = 0;
+    while cursor < entries.len() {
+        let Some(&(start, end)) = runs.get(next_run).filter(|(start, _)| *start == cursor) else {
+            index_of.push(rows.len());
+            rows.push(entries[cursor].clone());
+            cursor += 1;
+            continue;
+        };
+        next_run += 1;
+        cursor = end;
+        let run = &entries[start..end];
+        let is_last = last_run == Some((start, end));
+        let hidden = if expanded || run.len() == 1 {
+            0
+        } else if !is_last {
+            run.len()
+        } else if run.len() <= LAST_TOOL_RUN_ROWS {
             0
         } else {
-            run.len() - TOOL_ROWS_VISIBLE
+            run.len() - (LAST_TOOL_RUN_ROWS - 1)
         };
         if hidden > 0 {
             let summary_index = rows.len();
-            rows.push(fold_summary(&run[..hidden], language));
+            rows.push(fold_summary(&run[..hidden], is_last, language));
             index_of.extend(std::iter::repeat_n(summary_index, hidden));
         }
         for line in &run[hidden..] {
@@ -227,7 +245,8 @@ pub(super) fn fold_tool_rows(
 }
 
 /// `· ⋯ 已收起 12 条工具调用 · read_file×3 · run_command×9 · 2 失败 · /tools 展开`
-fn fold_summary(hidden: &[String], language: Language) -> String {
+/// 「/tools 展开」只挂在最新那段的汇总上，早先的段不重复提示。
+fn fold_summary(hidden: &[String], with_hint: bool, language: Language) -> String {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut failed = 0;
     for line in hidden {
@@ -255,7 +274,13 @@ fn fold_summary(hidden: &[String], language: Language) -> String {
                 .replace("{k}", &failed.to_string()),
         );
     }
-    summary.push_str(language.text(" · /tools 展开", " · /tools to expand", " · /tools で展開"));
+    if with_hint {
+        summary.push_str(language.text(
+            " · /tools 展开",
+            " · /tools to expand",
+            " · /tools で展開",
+        ));
+    }
     format!("· {TOOL_FOLD_MARKER} {summary}")
 }
 
@@ -426,64 +451,86 @@ mod tests {
     }
 
     #[test]
-    fn short_tool_runs_stay_as_they_are() {
-        let entries = tool_rows(TOOL_ROWS_FOLD_AT - 1);
-        let folded = fold_tool_rows(&entries, false, Language::En);
-        assert_eq!(folded.rows, entries);
-        assert_eq!(folded.index_of, (0..entries.len()).collect::<Vec<_>>());
+    fn one_or_two_row_runs_stay_as_they_are() {
+        for count in 1..=LAST_TOOL_RUN_ROWS {
+            let entries = tool_rows(count);
+            let folded = fold_tool_rows(&entries, false, Language::En);
+            assert_eq!(folded.rows, entries);
+            assert_eq!(folded.index_of, (0..count).collect::<Vec<_>>());
+        }
     }
 
     #[test]
-    fn long_tool_runs_fold_older_rows_into_one_summary() {
+    fn the_latest_run_keeps_one_summary_plus_its_newest_row() {
         let mut entries = vec!["You: go".to_owned()];
         entries.extend(tool_rows(8));
         entries.push("WillDeep: done".to_owned());
         let folded = fold_tool_rows(&entries, false, Language::En);
         assert_eq!(
             folded.rows.len(),
-            1 + 1 + TOOL_ROWS_VISIBLE + 1,
+            1 + LAST_TOOL_RUN_ROWS + 1,
             "{:?}",
             folded.rows
         );
         assert_eq!(folded.rows[0], "You: go");
         let summary = &folded.rows[1];
         assert!(
-            summary.starts_with("· ⋯ 4 earlier tool calls folded"),
+            summary.starts_with("· ⋯ 7 earlier tool calls folded"),
             "{summary}"
         );
         assert!(
-            summary.contains(" · read_file×2 · run_command×2"),
+            summary.contains(" · read_file×3 · run_command×4"),
             "{summary}"
         );
-        assert!(summary.contains(" · 1 failed"), "{summary}");
+        assert!(summary.contains(" · 2 failed"), "{summary}");
         assert!(summary.ends_with(" · /tools to expand"), "{summary}");
-        assert_eq!(
-            &folded.rows[2..6],
-            &entries[5..9],
-            "the latest rows stay visible"
-        );
-        assert_eq!(folded.rows[6], "WillDeep: done");
-        assert_eq!(folded.index_of, vec![0, 1, 1, 1, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(folded.rows[2], entries[8], "the newest row stays visible");
+        assert_eq!(folded.rows[3], "WillDeep: done");
+        assert_eq!(folded.index_of, vec![0, 1, 1, 1, 1, 1, 1, 1, 2, 3]);
     }
 
     #[test]
-    fn folding_restarts_after_any_non_tool_row_and_expanded_view_shows_all() {
+    fn earlier_runs_collapse_to_one_line_and_expanded_view_shows_all() {
         let mut entries = tool_rows(5);
         entries.push("WillDeep: half way".to_owned());
-        entries.extend(tool_rows(5));
+        entries.extend(tool_rows(3));
         let folded = fold_tool_rows(&entries, false, Language::ZhCn);
-        assert_eq!(folded.rows, entries, "two short runs never fold");
-
-        let mut long = tool_rows(9);
-        long.push("WillDeep: x".to_owned());
-        assert_eq!(fold_tool_rows(&long, true, Language::ZhCn).rows, long);
-        let folded = fold_tool_rows(&long, false, Language::ZhCn);
+        assert_eq!(
+            folded.rows.len(),
+            1 + 1 + LAST_TOOL_RUN_ROWS,
+            "{:?}",
+            folded.rows
+        );
         assert!(
             folded.rows[0].starts_with("· ⋯ 已收起 5 条工具调用"),
             "{}",
             folded.rows[0]
         );
-        assert_eq!(folded.rows.len(), 1 + TOOL_ROWS_VISIBLE + 1);
+        assert!(
+            !folded.rows[0].contains("/tools"),
+            "the hint belongs to the latest run only: {}",
+            folded.rows[0]
+        );
+        assert_eq!(folded.rows[1], "WillDeep: half way");
+        assert!(
+            folded.rows[2].starts_with("· ⋯ 已收起 2 条工具调用")
+                && folded.rows[2].ends_with("/tools 展开"),
+            "{}",
+            folded.rows[2]
+        );
+        assert_eq!(folded.rows[3], entries[8]);
+        assert_eq!(folded.index_of, vec![0, 0, 0, 0, 0, 1, 2, 2, 3]);
+
+        // 早先的段只有一条时原样保留，不值得配一行汇总。
+        let mut single = tool_rows(1);
+        single.push("WillDeep: x".to_owned());
+        single.extend(tool_rows(3));
+        assert_eq!(
+            fold_tool_rows(&single, false, Language::ZhCn).rows[0],
+            single[0]
+        );
+
+        assert_eq!(fold_tool_rows(&entries, true, Language::ZhCn).rows, entries);
     }
 
     #[test]
@@ -492,7 +539,7 @@ mod tests {
         for line in tool_rows(9) {
             app.append_transcript(line);
         }
-        assert_eq!(app.display_transcript().rows.len(), 1 + TOOL_ROWS_VISIBLE);
+        assert_eq!(app.display_transcript().rows.len(), LAST_TOOL_RUN_ROWS);
 
         assert!(app.handle_slash_command("/tools", &SkillCatalog::default()));
         assert!(app.tool_rows_expanded);
@@ -501,10 +548,7 @@ mod tests {
 
         assert!(app.handle_slash_command("/tools", &SkillCatalog::default()));
         assert!(!app.tool_rows_expanded);
-        assert_eq!(
-            app.display_transcript().rows.len(),
-            1 + TOOL_ROWS_VISIBLE + 2
-        );
+        assert_eq!(app.display_transcript().rows.len(), LAST_TOOL_RUN_ROWS + 2);
     }
 
     #[test]
