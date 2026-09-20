@@ -13,6 +13,7 @@ use willdeep_core::{
     SubagentLifecycleStatus, UserQuestion,
 };
 
+mod audit_cmd;
 mod config;
 mod daemon;
 mod detached_delivery;
@@ -238,6 +239,11 @@ enum CliCommand {
     Plugin {
         #[command(subcommand)]
         action: plugin_cmd::PluginAction,
+    },
+    /// Export an auditable report: approvals, human decisions, hook denials, verification evidence and change attribution.
+    Audit {
+        #[command(subcommand)]
+        action: audit_cmd::AuditAction,
     },
     /// Diagnose local configuration and runtime readiness without contacting a Provider.
     Doctor {
@@ -547,6 +553,16 @@ async fn run() -> Result<()> {
                 .await
             }
             CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
+            CliCommand::Audit { action } => {
+                // 审计是管理命令，不该被「没有配置」拦进首次设置；配置能读就取它的
+                // 语言，读不了就用命令行给的或缺省。
+                let configured = LoadedConfig::load(cli.config.as_deref())
+                    .ok()
+                    .and_then(|loaded| loaded.file.agent.language);
+                let language =
+                    i18n::Language::parse(cli.language.as_deref().or(configured.as_deref()))?;
+                audit_cmd::run(action, &willdeep_home()?, language)
+            }
             CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {
                     config_path: cli.config.clone(),

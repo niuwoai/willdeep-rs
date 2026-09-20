@@ -29,6 +29,9 @@ const CONTROL_SERVER_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 
 mod agent_control;
 mod agent_store;
+// 审计导出直接读 `agents.json`，不走 `AgentStore::open`：open 会把运行中的 Agent
+// 标成中断并落盘，一个只读命令不能有这种副作用。
+pub(crate) use agent_store::{RuntimeAgent as StoredAgent, load_agents};
 mod approval_modes;
 mod control_api;
 pub(crate) mod diff_review;
@@ -688,7 +691,7 @@ pub(crate) enum ApprovalArg {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum InteractionKind {
+pub(crate) enum InteractionKind {
     Approval {
         description: String,
         always_allow_available: bool,
@@ -702,7 +705,7 @@ enum InteractionKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
-enum InteractionResolution {
+pub(crate) enum InteractionResolution {
     AllowOnce,
     Deny,
     AlwaysAllow,
@@ -711,21 +714,23 @@ enum InteractionResolution {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum InteractionStatus {
+pub(crate) enum InteractionStatus {
     Pending,
     Resolved,
     Cancelled,
 }
 
+/// 一次等人拍板的交互及其结果。`pub(crate)` 是给 `audit_cmd` 读的：审计导出
+/// 直接读 `runtime/interactions.json`，不经过 Runtime。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct RuntimeInteraction {
-    id: uuid::Uuid,
-    task_id: uuid::Uuid,
-    kind: InteractionKind,
-    status: InteractionStatus,
-    resolution: Option<InteractionResolution>,
-    created_at: u64,
-    resolved_at: Option<u64>,
+pub(crate) struct RuntimeInteraction {
+    pub(crate) id: uuid::Uuid,
+    pub(crate) task_id: uuid::Uuid,
+    pub(crate) kind: InteractionKind,
+    pub(crate) status: InteractionStatus,
+    pub(crate) resolution: Option<InteractionResolution>,
+    pub(crate) created_at: u64,
+    pub(crate) resolved_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2590,24 +2595,24 @@ async fn fetch_events(state: &DaemonState, after: u64) -> Result<Vec<RuntimeEven
         .await?)
 }
 
-struct DaemonPaths {
+pub(crate) struct DaemonPaths {
     directory: PathBuf,
     state: PathBuf,
     log: PathBuf,
     events: PathBuf,
-    tasks: PathBuf,
+    pub(crate) tasks: PathBuf,
     tools: PathBuf,
-    agents: PathBuf,
+    pub(crate) agents: PathBuf,
     agent_commands: PathBuf,
     idempotency: PathBuf,
     runtime_sessions: PathBuf,
     lock: PathBuf,
-    interactions: PathBuf,
+    pub(crate) interactions: PathBuf,
     local_socket: PathBuf,
 }
 
 impl DaemonPaths {
-    fn new(home: &Path) -> Self {
+    pub(crate) fn new(home: &Path) -> Self {
         let directory = home.join("runtime");
         Self {
             state: directory.join("daemon.json"),
@@ -2698,7 +2703,7 @@ fn agent_status(status: RuntimeTaskStatus) -> RuntimeAgentStatus {
     }
 }
 
-fn load_tasks(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeTask>> {
+pub(crate) fn load_tasks(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeTask>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -2712,7 +2717,7 @@ fn persist_tasks(path: &Path, tasks: &HashMap<uuid::Uuid, RuntimeTask>) -> Resul
     write_json_atomic(path, &tasks)
 }
 
-fn load_interactions(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeInteraction>> {
+pub(crate) fn load_interactions(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeInteraction>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }

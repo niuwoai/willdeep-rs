@@ -907,6 +907,41 @@ pub fn format_iso8601(timestamp: u64) -> String {
     )
 }
 
+/// `format_iso8601` 的严格反向：接受 `YYYY-MM-DD`（按 00:00:00Z）和 `YYYY-MM-DDTHH:MM:SSZ`。
+/// 1970 年之前、不存在的日期（2 月 30 日）、带时区偏移或小数秒的写法都返回 `None`——
+/// 审计导出的时间窗宁可拒绝也不能猜。宽松的 Xedit 兼容解析是上面的 `parse_iso8601`，
+/// 那个容忍 `+00:00` 与小数秒，但不收纯日期。
+pub fn parse_iso8601_utc(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (date, time) = match text.split_once('T') {
+        Some((date, time)) => (date, Some(time.strip_suffix('Z')?)),
+        None => (text, None),
+    };
+    let mut fields = date.splitn(3, '-');
+    let year: i64 = fields.next()?.parse().ok()?;
+    let month: u32 = fields.next()?.parse().ok()?;
+    let day: u32 = fields.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 || civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    let mut seconds = 0;
+    if let Some(time) = time {
+        let mut fields = time.splitn(3, ':');
+        let hour: u64 = fields.next()?.parse().ok()?;
+        let minute: u64 = fields.next()?.parse().ok()?;
+        let second: u64 = fields.next()?.parse().ok()?;
+        if hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+        seconds = hour * 3_600 + minute * 60 + second;
+    }
+    Some(days as u64 * 86_400 + seconds)
+}
+
 // Howard Hinnant 的 days_from_civil / civil_from_days 算法（公历、以 1970-01-01 为第 0 天）。
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
@@ -930,6 +965,44 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
+#[cfg(test)]
+mod iso8601_tests {
+    use super::*;
+
+    #[test]
+    fn strict_parse_is_the_inverse_of_format() {
+        for timestamp in [0, 86_399, 951_782_400, 1_789_000_000, 4_102_444_800] {
+            assert_eq!(
+                parse_iso8601_utc(&format_iso8601(timestamp)),
+                Some(timestamp)
+            );
+        }
+        assert_eq!(parse_iso8601_utc("2026-09-20"), Some(1_789_862_400));
+        assert_eq!(
+            parse_iso8601_utc(" 2026-09-20T03:30:00Z "),
+            Some(1_789_862_400 + 3 * 3_600 + 30 * 60)
+        );
+    }
+
+    #[test]
+    fn strict_parse_rejects_dates_that_do_not_exist_or_are_ambiguous() {
+        for text in [
+            "",
+            "2026-02-30",
+            "2026-13-01",
+            "1969-12-31",
+            "2026-09-20T03:30:00+08:00",
+            "2026-09-20T03:30:00+00:00",
+            "2026-09-20T03:30:00.5Z",
+            "2026-09-20T24:00:00Z",
+            "2026/09/20",
+            "yesterday",
+        ] {
+            assert_eq!(parse_iso8601_utc(text), None, "{text:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

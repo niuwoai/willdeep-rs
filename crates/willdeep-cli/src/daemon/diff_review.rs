@@ -1331,18 +1331,24 @@ fn normalize_review_note(note: Option<String>) -> Result<Option<String>, StatusC
     Ok(note)
 }
 
-fn review_store_path(home: &Path) -> PathBuf {
+pub(crate) fn review_store_path(home: &Path) -> PathBuf {
     home.join("runtime/diff-reviews.json")
 }
 
-fn load_reviews(path: &Path) -> Result<Vec<DiffReviewRecord>> {
+/// 安全撤销把未跟踪文件挪进来的回收区；每次撤销一个 `<快照 id>-<随机>` 子目录。
+/// 审计导出靠目录名反推「这个快照被回滚过」，所以命名规则只在这里定一次。
+pub(crate) fn recovery_root(home: &Path) -> PathBuf {
+    home.join("runtime/recovery")
+}
+
+pub(crate) fn load_reviews(path: &Path) -> Result<Vec<DiffReviewRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
-fn verification_store_path(home: &Path) -> PathBuf {
+pub(crate) fn verification_store_path(home: &Path) -> PathBuf {
     home.join("runtime/diff-verifications.json")
 }
 
@@ -1350,11 +1356,11 @@ fn attribution_store_lock() -> &'static tokio::sync::Mutex<()> {
     ATTRIBUTION_STORE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn attribution_store_path(home: &Path) -> PathBuf {
+pub(crate) fn attribution_store_path(home: &Path) -> PathBuf {
     home.join("runtime/diff-attributions.json")
 }
 
-fn load_attributions(path: &Path) -> Result<Vec<DiffAttributionRecord>> {
+pub(crate) fn load_attributions(path: &Path) -> Result<Vec<DiffAttributionRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -1390,7 +1396,7 @@ fn attribution_lineage(
     lineage
 }
 
-fn load_verifications(path: &Path) -> Result<Vec<DiffVerificationRecord>> {
+pub(crate) fn load_verifications(path: &Path) -> Result<Vec<DiffVerificationRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -2124,9 +2130,8 @@ fn safe_revert(
         return Ok(None);
     }
 
-    let recovery_root = home
-        .join("runtime/recovery")
-        .join(format!("{snapshot_id}-{}", uuid::Uuid::new_v4().simple()));
+    let recovery_root =
+        recovery_root(home).join(format!("{snapshot_id}-{}", uuid::Uuid::new_v4().simple()));
     let mut recovered = false;
     for path in paths {
         if tracked_in_head(workspace, path) {
