@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.78.0-rc24] - 2026-09-20
+
+### Added
+- **MCP Streamable HTTP 传输（ADR 第 5 项前半段）。** `[mcp_servers.<name>]` 给 `url` 即为远程服务（与 `command` 二选一，`url` 须 https、回环地址允许 http）：每条 JSON-RPC 一个 POST，JSON 与 SSE 响应都认；`initialize` 回的 `Mcp-Session-Id` 之后每个请求带回去，服务端 404 时重新握手一次再重发；服务端选的协议版本按 `MCP-Protocol-Version` 头带回；退出时 DELETE 会话。静态头 `headers` 支持 `${env:NAME}`，名字像凭据的头必须这么写，`Authorization` 头一律不收；静态 token 走 `bearer_token_env`。远程服务连不上、没登录、5xx 只警告并跳过，本地 stdio 配置错误仍直接失败。校验规则在 core 的 `McpServerConfig::validate` 只定一份，`config check` 与连接共用。
+- **远程 MCP 服务的 OAuth 2.1 登录。** `[mcp_servers.<name>.oauth]` + `willdeep mcp login <name>`：未鉴权探一次拿 401 的资源元数据（RFC 9728）→ 授权服务器元数据（RFC 8414，退回 OIDC discovery 与固定端点）→ 没有 `client_id` 就动态注册（RFC 7591）→ 授权码 + PKCE S256，本机 `127.0.0.1` 随机端口收一次回调、`state` 不对拒绝 → token 请求带 `resource`（RFC 8707）。token 存 `$WILLDEEP_HOME/mcp-oauth/<name>.json`（0700/0600、原子写），Harness 连服务时自动带上，过期前 30 秒起自动刷新，授权服务器不认 refresh token 时提示重新登录。`willdeep mcp list / logout / tools` 配套。`docs/AUTHENTICATION.md` 加第七节，`docs/SKILLS_AND_MCP.md`、`ARCHITECTURE.md` 同步。
+- 测试：手写 HTTP/1.1 假服务端下的 Streamable HTTP 会话与头、401 提示、会话过期重握手；OAuth 的 PKCE 向量（RFC 7636）、发现地址推导、回调解析、token 落盘权限，以及对假授权服务器的端到端登录（动态注册 + 交换）。
+
+### Changed
+- `McpServerConfig.command` 变为可选（`Option<String>`），新增 `url` / `headers` / `bearer_token_env` / `oauth`；插件宿主与测试里的构造改用 `..Default::default()`。`config.example.toml` 多一个停用的远程服务示例。
+
 ## [0.78.0-rc23] - 2026-09-20
 
 ### Added

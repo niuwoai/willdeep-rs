@@ -331,7 +331,7 @@ pub fn redact_credentials(command: &str) -> String {
     output.join(" ")
 }
 
-fn key_looks_sensitive(key: &str) -> bool {
+pub(crate) fn key_looks_sensitive(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
     SENSITIVE_KEY_MARKERS
         .iter()

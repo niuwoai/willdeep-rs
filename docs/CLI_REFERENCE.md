@@ -20,6 +20,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `job` | 查看脱离父进程的后台作业：跑完没有、退出码、输出 |
 | `audit` | 导出一个会话（或一个工作区一段时间）的审计报告：审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚 |
+| `mcp` | 查看配置里的 MCP 服务、给远程服务做 OAuth 登录 / 登出、连上去列工具 |
 | `handoff` | 接住 WillDeep for macOS 用 `/handoff` 推来的会话：列出、接手续跑、轮询等待 |
 | `integrations` | 查看和管理可选外部集成 |
 | `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |
@@ -212,6 +213,19 @@ willdeep doctor --bundle ./willdeep-diagnostic.zip
 ```
 
 `--bundle` 导出不含日志和本地路径的私有脱敏 ZIP，便于提交问题报告。详见 [故障排查](TROUBLESHOOTING.md)。
+
+## `willdeep mcp` — MCP 服务
+
+```bash
+willdeep mcp list [--json]              # 传输（stdio / http）、启用状态、鉴权与登录状态
+willdeep mcp login <name> [--timeout 300] [--no-browser]
+willdeep mcp logout <name>
+willdeep mcp tools <name> [--json]      # 连上去列工具；--json 带完整输入 schema
+```
+
+`login` 只对配了 `url` 与 `[mcp_servers.<name>.oauth]` 的服务有效：授权码 + PKCE，本机 `127.0.0.1`
+随机端口收一次回调，token 存 `$WILLDEEP_HOME/mcp-oauth/<name>.json`；`--no-browser` 只打印授权
+URL。登完立刻连一次并报告工具数。详见 [Skills 与 MCP](SKILLS_AND_MCP.md) 与 [认证与凭据](AUTHENTICATION.md)。
 
 ## `willdeep job` — 脱离父进程的后台作业
 

@@ -25,6 +25,7 @@ mod harness;
 mod i18n;
 mod integrations;
 mod job_cmd;
+mod mcp_cmd;
 mod mobile;
 mod model_routing;
 mod notify;
@@ -240,6 +241,11 @@ enum CliCommand {
         #[command(subcommand)]
         action: plugin_cmd::PluginAction,
     },
+    /// Inspect configured MCP servers, log in to remote ones with OAuth, list their tools.
+    Mcp {
+        #[command(subcommand)]
+        action: mcp_cmd::McpAction,
+    },
     /// Export an auditable report: approvals, human decisions, hook denials, verification evidence and change attribution.
     Audit {
         #[command(subcommand)]
@@ -394,6 +400,15 @@ fn handoff_forwarded_args(cli: &Cli) -> Vec<std::ffi::OsString> {
         args.push(max_turns.to_string().into());
     }
     args
+}
+
+/// 管理类子命令的界面语言：命令行给了用命令行的，否则取配置里的 `agent.language`，
+/// 配置读不了就用缺省——这些命令不该因为「没有配置」被拦进首次设置。
+fn administrative_language(cli: &Cli) -> anyhow::Result<i18n::Language> {
+    let configured = LoadedConfig::load(cli.config.as_deref())
+        .ok()
+        .and_then(|loaded| loaded.file.agent.language);
+    i18n::Language::parse(cli.language.as_deref().or(configured.as_deref()))
 }
 
 fn invalid_run_input(message: impl Into<String>) -> anyhow::Error {
@@ -554,14 +569,12 @@ async fn run() -> Result<()> {
             }
             CliCommand::Plugin { action } => plugin_cmd::run(action, &willdeep_home()?).await,
             CliCommand::Audit { action } => {
-                // 审计是管理命令，不该被「没有配置」拦进首次设置；配置能读就取它的
-                // 语言，读不了就用命令行给的或缺省。
-                let configured = LoadedConfig::load(cli.config.as_deref())
-                    .ok()
-                    .and_then(|loaded| loaded.file.agent.language);
-                let language =
-                    i18n::Language::parse(cli.language.as_deref().or(configured.as_deref()))?;
+                let language = administrative_language(&cli)?;
                 audit_cmd::run(action, &willdeep_home()?, language)
+            }
+            CliCommand::Mcp { action } => {
+                let language = administrative_language(&cli)?;
+                mcp_cmd::run(action, &willdeep_home()?, cli.config.as_deref(), language).await
             }
             CliCommand::Doctor { json, bundle } => {
                 doctor::run(doctor::DoctorOptions {

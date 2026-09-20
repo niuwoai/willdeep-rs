@@ -1,6 +1,6 @@
 # 认证与凭据
 
-WillDeep 涉及四类互不相通的凭据：Provider API Key、some.im 浏览器登录、Runtime Daemon 控制 Token、手机中继 Token。本文说明它们各自的来源、存放位置和安全边界。
+WillDeep 涉及五类互不相通的凭据：Provider API Key、some.im 浏览器登录、Runtime Daemon 控制 Token、手机中继 Token、远程 MCP 服务的 OAuth token。本文说明它们各自的来源、存放位置和安全边界。
 
 ## 一、Provider API Key
 
@@ -72,7 +72,7 @@ Runtime 协议层有防泄漏断言：序列化后的公开 DTO 不允许包含 
 4. 服务端返回 `connected` / `success` / `completed` / `authenticated` 视为成功，`expired` / `cancelled` / `timeout` 立即失败；
 5. 成功后把返回的 API Key 与默认模型写入配置文件的 `[providers.default]`。
 
-这是"打开 URL + 轮询状态"，**不是 OAuth 授权码交换**：没有 refresh token，没有本地回调 HTTP 服务器，CLI 全程不监听端口。
+这是"打开 URL + 轮询状态"，**不是 OAuth 授权码交换**：没有 refresh token，没有本地回调 HTTP 服务器，这条流程不监听端口。（远程 MCP 服务的 OAuth 是另一条流程，见第七节。）
 
 ### `WILLDEEP_CLIENT_LOGIN_SECRET`
 
@@ -162,8 +162,25 @@ Daemon 同时监听随机 `127.0.0.1` 端口和一个本地传输通道。客户
 | `WILLDEEP_CLIENT_LOGIN_SECRET` | some.im 浏览器登录的客户端密钥，构建时注入 |
 | `WILLDEEP_HOME` | 配置与运行时目录，默认 `~/.willdeep` |
 | `WILLDEEP_CONFIG` | 显式配置文件路径 |
+| `[mcp_servers.*].bearer_token_env` 指向的变量 | 远程 MCP 服务的静态 Bearer token，变量名由配置指定 |
+| `[mcp_servers.*.oauth].client_secret_env` 指向的变量 | 机密 OAuth 客户端的 client_secret，公共客户端不需要 |
 
 完整环境变量清单见 [配置指南](CONFIGURATION.md)。
+
+## 七、远程 MCP 服务的 OAuth token
+
+配了 `[mcp_servers.<name>.oauth]` 的 Streamable HTTP 服务用 `willdeep mcp login <name>` 登录：
+OAuth 2.1 授权码 + PKCE（S256），本机开一个只监听 `127.0.0.1` 的随机端口收**一次**回调，
+`state` 对不上一律拒绝；没有预注册 `client_id` 就按 RFC 7591 动态注册；token 请求带
+`resource`（RFC 8707）把 token 绑到这个服务。
+
+- 存放：`$WILLDEEP_HOME/mcp-oauth/<name>.json`，目录 `0700`、文件 `0600`、原子写；内容是
+  access token、refresh token、过期时间、token 端点、client_id（机密客户端还有 client_secret）。
+- 使用：Harness 连该服务时自动带 `Authorization: Bearer`；过期前 30 秒起算过期，自动用
+  refresh token 换新并落盘；授权服务器不认 refresh token 时报「需要登录」而不是当传输故障。
+- 边界：token 只发给配置里那个 `url`；不进会话记录、不进审批日志、不进 `willdeep config show`
+  与诊断包；`willdeep mcp logout <name>` 删文件即撤销本机副本（远端撤销要去授权服务器）。
+- 发现链见 [Skills 与 MCP](SKILLS_AND_MCP.md)。
 
 ## 相关文档
 

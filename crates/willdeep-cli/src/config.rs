@@ -616,12 +616,10 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         }
     }
     for (name, server) in &file.mcp_servers {
-        if server.command.trim().is_empty() {
-            bail!("mcp_servers.{name}.command cannot be empty");
-        }
-        if !(1..=300).contains(&server.startup_timeout_seconds) {
-            bail!("mcp_servers.{name}.startup_timeout_seconds must be between 1 and 300");
-        }
+        // 传输方式、url 协议、头里的凭据写法：规则只在 core 里定一份，连接时再校一遍。
+        server
+            .validate(name)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
     enforce_secret_file_permissions(file, path)
 }
@@ -888,7 +886,7 @@ context_window = 400000
     fn example_config_stays_valid() {
         let parsed: ConfigFile = toml::from_str(include_str!("../../../config.example.toml"))
             .expect("parse config.example.toml");
-        assert_eq!(parsed.mcp_servers.len(), 1);
+        assert_eq!(parsed.mcp_servers.len(), 2);
         assert_eq!(parsed.providers.len(), 3);
         assert_eq!(
             parsed.notifications.sound.as_deref(),

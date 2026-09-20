@@ -18,7 +18,7 @@ ProviderConfig ── Provider 身份（鉴权/专属头）
         ▼
 Agent Loop ── 工具注册表 ── 工作区边界与审批
         ├── Skills Catalog（SKILL.md）
-        ├── MCP stdio（动态工具）
+        ├── MCP stdio / Streamable HTTP（动态工具；远程服务可 OAuth）
         ├── Session Store（版本化 JSON）
         └── 工具结果回传 Provider，直到最终文本
 ```
@@ -76,7 +76,7 @@ Agent Loop 只理解：
 
 Skill Catalog 只扫描配置根目录的直接子目录，读取入口固定为 `SKILL.md`；附属资源 canonicalize 后必须仍位于 Skill 根目录，单次读取最多 48,000 字符。
 
-MCP server 由 TOML 声明 command、args、env 和启动超时。客户端建立 stdio 长连接，执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链（后两种只免审当前工作区内的 `create_file`、`edit_file`）；`full-access` 下免审并记审计。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
+MCP server 由 TOML 声明：stdio 服务给 command、args、env，Streamable HTTP 服务给 url、静态 headers 与鉴权方式（`bearer_token_env` 或 `oauth`），两者二选一，规则在 `willdeep-core::mcp::McpServerConfig::validate` 里只定一份，配置校验与连接共用。stdio 建长连接；HTTP 每条 JSON-RPC 一个 POST，JSON 与 SSE 响应都认，维护 `Mcp-Session-Id` 与协商到的协议版本头，会话过期重握手一次，退出时 DELETE。OAuth 由 `mcp::oauth` 实现（授权码 + PKCE、回环回调、RFC 9728 / 8414 / 7591 / 8707），token 存 `$WILLDEEP_HOME/mcp-oauth/`，连接时自动带上并刷新。两种传输都执行 initialize/initialized/tools/list，并以 `mcp__<server>__<tool>` 建立内部索引；远程服务连不上只警告跳过，本地 stdio 配置错误直接失败。Provider 侧只常驻 `list_mcp_tools` / `call_mcp_tool` 两个固定工具，匹配 Schema 按需加载，避免全量目录占满小上下文。MCP 调用在 `strict`、`smart`、`workspace-write` 三种模式下都进入审批链（后两种只免审当前工作区内的 `create_file`、`edit_file`）；`full-access` 下免审并记审计。MCP stderr 继承到宿主终端，stdout 仅作为 JSON-RPC 通道。
 
 ### Prompt 与附件
 
