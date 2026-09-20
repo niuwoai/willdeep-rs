@@ -26,11 +26,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
     configs.insert(
         "mock".to_owned(),
         crate::mcp::McpServerConfig {
-            command: "/bin/sh".to_owned(),
+            command: Some("/bin/sh".to_owned()),
             args: vec!["-c".to_owned(), script.to_owned()],
-            env: BTreeMap::new(),
             startup_timeout_seconds: 5,
-            enabled: true,
+            ..crate::mcp::McpServerConfig::default()
         },
     );
     let mcp = Arc::new(McpRegistry::connect(&configs).await.expect("connect MCP"));

@@ -130,7 +130,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **模型** | Chat Completions · Responses · Anthropic Messages · some.im |
 | **工具** | 文件搜索/读写/精确编辑 · Git 状态/Diff/Blame · Shell · 后台 Job · Web 搜索与抓取 |
 | **界面** | Ratatui TUI · React Web · 手机中继 · NDJSON 自动化输出 |
-| **扩展** | `SKILL.md` 技能 · MCP stdio server · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
+| **扩展** | `SKILL.md` 技能 · MCP（stdio 与 Streamable HTTP，远程服务 OAuth 登录） · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
 | **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
 | **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 门禁 Hooks · `willdeep audit export` 一份审计报告（审批放行、人工裁决、hook 拦截、验证证据、改动归属） |
@@ -145,7 +145,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 
 - **OS 级写入围栏是预览，默认关。** macOS（Seatbelt）与 Linux（bubblewrap）两个后端都在，语义一致：能读能跑，只能往工作区和临时目录里写，只读档另外断网。默认关是因为它会改变已在跑的命令的行为——`cargo fetch` 写不了工作区外的 `~/.cargo/registry`，除非显式放行。目前只罩住 Shell 工具这一条路径，后台任务与子 Agent 的 verifier 还没接。`agent.sandbox = true` 打开。
 - **Hooks 只有三个触发点。** `pre_tool` / `post_tool` / `approval_resolved`，其中 `approval_resolved` 还没接线；没有 `session_start`、`turn_end`、`pre_write`，hook 也改不了参数（只能放行或拦截）。
-- **MCP 只有 stdio。** 没有 Streamable HTTP，没有 OAuth。
+- **MCP 不接服务端主动请求。** stdio 与 Streamable HTTP（含 OAuth 登录）都有了，但 `sampling/*`、`roots/*` 这类服务端发起的请求和 GET 事件流一律不处理：宿主没有替远端代发模型请求的授权。
 - **无 checkpoint / rewind。** 回退靠 Diff 审查 + 安全撤销，是合格替代，但长任务的可观测性弱于逐轮快照。
 - **不含 Computer Use 与 Browser Use。**
 - **Web 模式是单用户模式，没有应用层鉴权**（详见下方安全须知）。

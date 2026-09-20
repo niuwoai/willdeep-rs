@@ -308,7 +308,7 @@ impl PluginHost {
             configs.insert(
                 name.clone(),
                 McpServerConfig {
-                    command: expand(&spec.command),
+                    command: Some(expand(&spec.command)),
                     args: spec.args.iter().map(|item| expand(item)).collect(),
                     env: spec
                         .env
@@ -317,6 +317,7 @@ impl PluginHost {
                         .collect(),
                     startup_timeout_seconds: spec.startup_timeout_seconds,
                     enabled: true,
+                    ..McpServerConfig::default()
                 },
             );
         }

@@ -702,7 +702,7 @@ pub(crate) async fn build(
         mcp_servers.retain(|name, _| allowed_mcp_servers.contains(name));
     }
     let mcp = Arc::new(
-        willdeep_core::McpRegistry::connect(&mcp_servers)
+        willdeep_core::McpRegistry::connect_in(Some(home), &mcp_servers)
             .await
             .context("initialize MCP servers")?,
     );

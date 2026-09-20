@@ -205,9 +205,9 @@ tool_output_limit = 4096
 [subagents.git_detective]
 context_window = 32768
 
-# MCP stdio servers are initialized once and exposed as
-# mcp__<server>__<tool>. Put credentials in inherited environment variables;
-# do not write tokens into this file.
+# MCP servers are initialized once and exposed as mcp__<server>__<tool>.
+# A server is either stdio (`command`) or Streamable HTTP (`url`); never both.
+# Put credentials in environment variables; do not write tokens into this file.
 [mcp_servers.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
@@ -216,6 +216,24 @@ enabled = false
 
 [mcp_servers.filesystem.env]
 NODE_NO_WARNINGS = "1"
+
+# Remote server over Streamable HTTP. Authentication is one of:
+#   bearer_token_env = "REMOTE_MCP_TOKEN"   # static token from the environment
+#   [mcp_servers.remote.oauth]              # OAuth 2.1: `willdeep mcp login remote`
+# Static headers may reference the environment as ${env:NAME}; headers whose
+# name looks like a credential must be written that way.
+[mcp_servers.remote]
+url = "https://mcp.example.com/mcp"
+startup_timeout_seconds = 30
+enabled = false
+
+[mcp_servers.remote.headers]
+X-Trace = "willdeep"
+
+[mcp_servers.remote.oauth]
+# client_id = "preregistered-client"      # omit to register dynamically (RFC 7591)
+# client_secret_env = "REMOTE_MCP_CLIENT_SECRET"
+scopes = []
 
 # Additional roots whose immediate child directories contain SKILL.md.
 [skills]

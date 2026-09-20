@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc23（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc24（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -197,7 +197,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Web 恢复请求与 Turn 完成竞态安全：若断线期间活动 Turn 已进入终态，服务端从最新持久 Turn 和 Core Session 返回最终消息，而不是要求仍存在 `active_turn_id`；
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
-- MCP stdio 工具发现、注册和调用；工具 Schema 不再全量常驻每轮上下文，通过 `list_mcp_tools` 按需搜索、`call_mcp_tool` 精确调用；
+- MCP 工具发现、注册和调用，stdio 与 Streamable HTTP 两种传输，远程服务支持静态 Bearer 与 OAuth 2.1 登录（`willdeep mcp login`）；工具 Schema 不再全量常驻每轮上下文，通过 `list_mcp_tools` 按需搜索、`call_mcp_tool` 精确调用；
 - `/goal` 命令模式和 `$skill-name` 显式技能触发；
 - 分阶段 CLI/TUI/Runtime 产品路线图与逐项验收状态；
 - `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
@@ -258,7 +258,7 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 
 - [ ] Provider 原生 token streaming；当前 SSE 已实时传输 Harness 阶段、工具进度和最终回答。
 - [ ] ACP/Codex App Server/Goose 接入；
-- [ ] MCP Streamable HTTP 与 OAuth；
+- [x] MCP Streamable HTTP 与 OAuth（v0.78.0-rc24；服务端主动请求与 GET 事件流未接）；
 - [ ] LSP 诊断、Hooks/插件、自动记忆与 OS 级 Shell 沙箱；当前已有结构化工具门禁、工作区边界和小模型路由，但这些仍是与 Claude Code 完整能力面的主要差距；
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [ ] 更强的命令风险分类与平台沙箱；

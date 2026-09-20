@@ -67,7 +67,7 @@ WillDeep 列为 2026-09-20 代码实况；竞品列沿用 2026-08-21 调研，�
 
 1. **终端手感刚追平，Web 还没跟上**。中途汇报、工具行折叠、思维链、结束信号、插话送达都只在 TUI 做了，Web 端的 `reasoning_delta` 直接丢弃。清单见 `docs/EXPERIENCE_BASELINE.md`。
 2. **模型行为层没有回归测试**。提示词改一句效果只能肉眼看；「人话率」这种数字要事后用脚本数。→ ADR 第 2 项。
-3. **MCP 仅 stdio**，无 Streamable HTTP / OAuth。
+3. ~~**MCP 仅 stdio**，无 Streamable HTTP / OAuth。~~ rc24 补齐：Streamable HTTP 传输与 OAuth 登录（`willdeep mcp login`）；未接服务端主动请求。
 4. **无检查点回退**；首次使用体验差（`config.toml` 手写，旧值静默改变行为）。
 5. 路由分类仍是中英关键词表；实弹靶场不在 CI。
 6. 主 Agent 直到 rc12 没有 token 预算闸门（rc13 补）。
