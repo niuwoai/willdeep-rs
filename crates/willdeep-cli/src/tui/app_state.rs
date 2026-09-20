@@ -1748,6 +1748,10 @@ impl App {
         }
         match command {
             "/help" => self.append_transcript(help_text(self.language)),
+            "/version" => {
+                let report = self.version_report();
+                self.append_transcript(report);
+            }
             "/plan" => {
                 toggle_plan_details(&mut self.transcript);
                 self.refresh_transcript_height();
