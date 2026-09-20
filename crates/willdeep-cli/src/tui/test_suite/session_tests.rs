@@ -2147,3 +2147,61 @@ fn ordinary_prompts_default_to_runtime_with_explicit_local_escape() {
         PromptExecution::Local("inspect process".to_owned())
     );
 }
+
+/// 压缩反馈此前只有进程内轮次认，Runtime 托管会话整条丢掉——状态栏的占用只
+/// 跟着 `usage` 走，而 usage 要请求成功才回来。于是压缩前的真实体量从来没上过
+/// 屏：一次真实故障里，用户盯着压缩后的 4.6 万 token，实际送出去的是 94 万。
+#[test]
+fn runtime_compression_events_reach_the_status_bar_and_the_progress_line() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-tui-runtime-compression-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(&root);
+    let mut session = Session::new(root.clone(), None, "compression test");
+    let mut app = App::new(Vec::new(), Language::En);
+    let session_id = session.id;
+    let output = |sequence: u64, payload: &str| crate::daemon::RemoteRuntimeEvent {
+        sequence,
+        kind: "task.output".to_owned(),
+        message: format!("task_id=12345678-0000-0000-0000-000000000000 {payload}"),
+        visible: true,
+        session_id: Some(session_id),
+    };
+
+    runtime_ui::apply_runtime_events(
+        &mut app,
+        vec![output(
+            1,
+            r#"{"type":"compression_started","estimated_tokens":944662}"#,
+        )],
+        &mut session,
+        &store,
+    )
+    .unwrap();
+    assert_eq!(
+        app.context_tokens, 944_662,
+        "the pre-compaction size is the one that blows the window"
+    );
+
+    runtime_ui::apply_runtime_events(
+        &mut app,
+        vec![output(
+            2,
+            r#"{"type":"compression_completed","estimated_tokens":45998,"dropped_messages":3}"#,
+        )],
+        &mut session,
+        &store,
+    )
+    .unwrap();
+    assert_eq!(app.context_tokens, 45_998);
+    assert!(
+        app.progress_log
+            .iter()
+            .any(|line| line.contains("Context compressed") && line.contains('3')),
+        "compression must leave a progress line naming the dropped messages: {:?}",
+        app.progress_log
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

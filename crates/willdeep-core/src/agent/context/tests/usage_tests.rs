@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
 async fn manual_compression_bill_survives_reload_and_stale_metadata_save() {
-    let (agent, _) = agent(8192);
+    let (agent, _) = agent(WINDOW);
     let home = std::env::temp_dir().join(format!("compression-ledger-{}", uuid::Uuid::new_v4()));
     let store = crate::SessionStore::new(&home);
     let mut session = crate::Session::new(home.clone(), None, "test");
@@ -40,7 +40,7 @@ async fn manual_compression_bill_survives_reload_and_stale_metadata_save() {
 
 #[tokio::test]
 async fn failed_manual_compression_keeps_bill_and_original_history() {
-    let (agent, _) = agent(8192);
+    let (agent, _) = agent(WINDOW);
     let home = std::env::temp_dir().join(format!(
         "compression-failed-ledger-{}",
         uuid::Uuid::new_v4()
@@ -138,7 +138,7 @@ impl EventSink for Ledger {
 
 #[tokio::test]
 async fn automatic_compression_counts_in_outcome_and_durable_usage() {
-    let (mut agent, _) = agent(8192);
+    let (mut agent, _) = agent(WINDOW);
     let root = BilledProvider::new("done", 3);
     let compressor = BilledProvider::new("summary", 10);
     agent.provider = RwLock::new(root.clone());
@@ -166,7 +166,7 @@ async fn automatic_compression_counts_in_outcome_and_durable_usage() {
 
 #[tokio::test]
 async fn compression_exhausting_budget_prevents_root_request_and_keeps_bill() {
-    let (mut agent, _) = agent(8192);
+    let (mut agent, _) = agent(WINDOW);
     let root = BilledProvider::new("must not run", 3);
     agent.provider = RwLock::new(root.clone());
     agent.config.token_budget = Some(12);
@@ -193,7 +193,7 @@ async fn compression_exhausting_budget_prevents_root_request_and_keeps_bill() {
 
 #[tokio::test]
 async fn manual_compression_reports_unusable_and_interrupted_fallback_usage() {
-    let (agent, _) = agent(8192);
+    let (agent, _) = agent(WINDOW);
     let interrupted = Arc::new(BilledProvider {
         calls: AtomicUsize::new(0),
         content: "partial",

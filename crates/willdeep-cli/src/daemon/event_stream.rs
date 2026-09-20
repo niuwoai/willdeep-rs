@@ -85,8 +85,72 @@ pub(super) fn public_event(mut event: RuntimeEvent) -> RuntimeEvent {
         event.message = redact_task_output(&event.message);
     }
     event.message = redact_suffix(&event.message, " root=");
-    event.message = redact_suffix(&event.message, " error=");
+    event.message = replace_error_with_reason(&event.message);
     event
+}
+
+/// 失败原因的公共分类。
+///
+/// 起因是一次真实故障：会话历史涨到 94 万 token，压缩撞上 provider 的 1M 上限，
+/// 而 TUI 吃的是公共事件流——`error=` 整段被剥掉之后，用户手上只剩
+/// `failure_domain=provider` 和两串 UUID，看不出是自己的上下文炸了。
+///
+/// 原文不能放行：它带着本机路径、命令行，还可能带凭据，而 Web 桥接和手机中继
+/// 都吃这条流。折中是只放行一个**闭集合**里的静态标签——能说清「为什么失败」，
+/// 又在构造上不可能夹带任何现场内容。完整错误照旧只留在本机 `task.diagnostics`。
+fn failure_reason(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| error.contains(needle));
+    if has(&[
+        "maximum context length",
+        "context_length_exceeded",
+        "context window",
+        "reduce the length of the messages",
+        "too many tokens",
+    ]) {
+        "context_overflow"
+    } else if has(&["429", "rate limit", "rate_limit", "too many requests"]) {
+        "rate_limited"
+    } else if has(&[
+        "401",
+        "403",
+        "invalid_api_key",
+        "invalid api key",
+        "unauthorized",
+        "authentication",
+    ]) {
+        "auth"
+    } else if has(&["insufficient", "quota", "balance", "payment", "402"]) {
+        "quota"
+    } else if has(&["timeout", "timed out", "deadline"]) {
+        "timeout"
+    } else if has(&[
+        "tls",
+        "handshake",
+        "connection",
+        "dns",
+        "unexpected eof",
+        "connect error",
+    ]) {
+        "network"
+    } else if has(&["500", "502", "503", "504", "overloaded", "server error"]) {
+        "provider_unavailable"
+    } else {
+        "unclassified"
+    }
+}
+
+/// 把 `error=<原文>` 换成 `reason=<分类>`，而不是整段删掉。
+fn replace_error_with_reason(message: &str) -> String {
+    let marker = " error=";
+    let Some(index) = message.find(marker) else {
+        return message.to_owned();
+    };
+    let error = message[index + marker.len()..].trim();
+    if error.is_empty() {
+        return message[..index].to_owned();
+    }
+    format!("{} reason={}", &message[..index], failure_reason(error))
 }
 
 fn redact_task_output(message: &str) -> String {
@@ -436,7 +500,47 @@ mod tests {
             kind: "task.failed".to_owned(),
             message: "task_id=abc exit_code=1 error=/private/path token=secret".to_owned(),
         });
-        assert_eq!(event.message, "task_id=abc exit_code=1");
+        assert_eq!(event.message, "task_id=abc exit_code=1 reason=unclassified");
+    }
+
+    /// 失败原因必须说得出口，又不能夹带现场：放行的只有闭集合里的静态标签。
+    #[test]
+    fn public_failures_carry_a_classified_reason_but_never_the_error_text() {
+        let event = public_event(RuntimeEvent {
+            sequence: 4,
+            timestamp: 5,
+            kind: "task.failed".to_owned(),
+            message: concat!(
+                "task_id=abc session_id=def exit_code=none failure_domain=provider ",
+                r#"error=provider returned HTTP 400 Bad Request: {"error":{"message":"#,
+                r#""This model's maximum context length is 1048576 tokens. However, you "#,
+                r#"requested 1305317 tokens","param":null}} at /Users/someone/secret-repo"#
+            )
+            .to_owned(),
+        });
+        assert_eq!(
+            event.message,
+            "task_id=abc session_id=def exit_code=none failure_domain=provider \
+             reason=context_overflow"
+        );
+        for leaked in ["1305317", "/Users/someone", "Bad Request"] {
+            assert!(!event.message.contains(leaked), "leaked {leaked}");
+        }
+    }
+
+    #[test]
+    fn failure_reasons_cover_the_common_provider_faults() {
+        for (error, expected) in [
+            ("HTTP 429 Too Many Requests", "rate_limited"),
+            ("HTTP 401 invalid_api_key", "auth"),
+            ("tls handshake eof", "network"),
+            ("request timed out after 60s", "timeout"),
+            ("HTTP 503 upstream overloaded", "provider_unavailable"),
+            ("insufficient balance", "quota"),
+            ("something nobody predicted", "unclassified"),
+        ] {
+            assert_eq!(failure_reason(error), expected, "for {error}");
+        }
     }
 
     /// 失败的工具事件现在会带上参数和输出，供本机 `task.diagnostics` 排查。
