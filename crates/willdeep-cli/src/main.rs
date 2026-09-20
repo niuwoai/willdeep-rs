@@ -571,11 +571,13 @@ async fn run() -> Result<()> {
     }
     let administrative =
         cli.list_projects || cli.list_sessions || cli.list_approvals || cli.clear_approvals;
+    // 没有配置文件不等于要先设置：环境里有认得出的钥匙（或命令行给全了）就直接跑。
     if cli.onboarding
         || (!cli.web
             && !administrative
             && cli.config.is_none()
-            && !config::default_config_path()?.exists())
+            && !config::default_config_path()?.exists()
+            && !zero_config_ready(&cli))
     {
         onboarding::run(cli.config.as_deref()).await?;
     }
@@ -1027,6 +1029,75 @@ fn model_accepts_images(model: &str) -> bool {
         return false;
     }
     !lower.starts_with("someim-auto") && !lower.starts_with("someim-coding")
+}
+
+/// 没有配置文件、也没有 `--provider` 时，按环境里有哪把钥匙推断 Provider：
+/// `SOMEIM_API_KEY` → some.im，`ANTHROPIC_API_KEY` → Anthropic；`OPENAI_API_KEY` 只有
+/// 同时给了 `WILLDEEP_API_BASE` 才算数，OpenAI-compatible 的端点没法猜。
+pub(crate) fn provider_from_env() -> Option<ProviderArg> {
+    let present = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+    provider_from_keys(
+        present("SOMEIM_API_KEY"),
+        present("ANTHROPIC_API_KEY"),
+        present("OPENAI_API_KEY") && present("WILLDEEP_API_BASE"),
+    )
+}
+
+fn provider_from_keys(
+    some_im: bool,
+    anthropic: bool,
+    openai_with_base: bool,
+) -> Option<ProviderArg> {
+    if some_im {
+        Some(ProviderArg::SomeIm)
+    } else if anthropic {
+        Some(ProviderArg::Anthropic)
+    } else if openai_with_base {
+        Some(ProviderArg::OpenAiCompatible)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn provider_arg_name(provider: ProviderArg) -> &'static str {
+    match provider {
+        ProviderArg::Auto => "auto",
+        ProviderArg::OpenAiCompatible => "openai-compatible",
+        ProviderArg::SomeIm => "some-im",
+        ProviderArg::Anthropic => "anthropic",
+    }
+}
+
+/// 没写模型名时各 Provider 的缺省模型；OpenAI-compatible 端点五花八门，不猜。
+pub(crate) fn default_model(kind: ProviderKind) -> Option<&'static str> {
+    match kind {
+        ProviderKind::SomeIm => Some("glm-5"),
+        ProviderKind::Anthropic => Some("claude-sonnet-4-5"),
+        ProviderKind::OpenAiCompatible => None,
+    }
+}
+
+/// 没有配置文件也能开工的条件：Provider 推得出、API Base 定得下、钥匙拿得到、
+/// 模型名有着落。满足就跳过首次设置直接跑，不逼用户先手写 TOML。
+fn zero_config_ready(cli: &Cli) -> bool {
+    let present = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let Some(provider) = cli
+        .provider
+        .or_else(provider_from_env)
+        .or_else(|| present(&cli.api_base).then_some(ProviderArg::Auto))
+    else {
+        return false;
+    };
+    let Ok(base) = resolve_base(cli, None, Some(provider)) else {
+        return false;
+    };
+    let kind = resolve_provider(provider, &base);
+    resolve_api_key(cli, None, kind).is_ok()
+        && (present(&cli.model) || default_model(kind).is_some())
 }
 
 fn resolve_base(
@@ -2528,5 +2599,30 @@ mod tests {
                 "output_bytes": 512
             })
         );
+    }
+
+    /// 零配置：钥匙决定 Provider，some.im 优先；OpenAI-compatible 没端点不猜。
+    #[test]
+    fn provider_is_inferred_from_whichever_key_is_present() {
+        assert_eq!(
+            provider_from_keys(true, true, true),
+            Some(ProviderArg::SomeIm)
+        );
+        assert_eq!(
+            provider_from_keys(false, true, true),
+            Some(ProviderArg::Anthropic)
+        );
+        assert_eq!(
+            provider_from_keys(false, false, true),
+            Some(ProviderArg::OpenAiCompatible)
+        );
+        assert_eq!(provider_from_keys(false, false, false), None);
+        assert_eq!(default_model(ProviderKind::SomeIm), Some("glm-5"));
+        assert_eq!(
+            default_model(ProviderKind::Anthropic),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(default_model(ProviderKind::OpenAiCompatible), None);
+        assert_eq!(provider_arg_name(ProviderArg::SomeIm), "some-im");
     }
 }

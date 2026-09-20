@@ -599,7 +599,11 @@ pub(crate) async fn build(
         .and_then(|provider| provider.provider.as_deref())
         .map(parse_provider)
         .transpose()?;
-    let selected_provider = cli.provider.or(profile_provider);
+    // 没有任何 Provider 配置时，按环境里有哪把钥匙推断，零配置也能开工。
+    let selected_provider = cli
+        .provider
+        .or(profile_provider)
+        .or_else(|| profile.is_none().then(crate::provider_from_env).flatten());
     let base = resolve_base(cli, profile, selected_provider)?;
     let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
     let profile_api = profile
@@ -624,7 +628,7 @@ pub(crate) async fn build(
         .model
         .clone()
         .or_else(|| profile.and_then(|provider| provider.model.clone()))
-        .or_else(|| (kind == ProviderKind::SomeIm).then(|| "glm-5".to_owned()))
+        .or_else(|| crate::default_model(kind).map(str::to_owned))
         .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: base.clone(),

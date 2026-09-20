@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc18（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-20 | 当前版本：v0.78.0-rc19（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -83,7 +83,8 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI Agent 列表保持最小摘要，按 Enter 才读取受保护单项详情；详情按 Agent 过滤最近工具时间线与 Workspace Change Artifact，展示已有结果报告，并支持键盘、鼠标滚轮浏览长内容；后台 Agent 可在详情中用键盘或鼠标补充指令、停止、原模型重试、指定模型重试和查看 Worktree Diff，且不会覆盖 Composer 既有草稿；公开 Agent 详情不下发 Prompt 原文；原派工提示词随私有恢复记录保存；
 - 统一 `agent.retry` 与 Rust Client 支持为终态后台 Child Agent 指定可选新模型；Harness 在重试边界基于原 Provider 配置重建模型实例，运行中的 Agent 不热切；
 - 手动压缩持久记录压缩代次与消息计数检查点；Runtime Fork 仅接受当前压缩代次的精确 Turn 边界；
-- `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；
+- `willdeep config init/check/show` 可安全创建、严格校验并脱敏展示 TOML 配置；`check` 以 `legacy` 行点名旧写法（如 `approval = "ask"`），TUI 开屏与 `doctor` 同步提示；
+- 零配置启动：没有配置文件时，环境里的 `SOMEIM_API_KEY` / `ANTHROPIC_API_KEY`（或 `OPENAI_API_KEY` + `WILLDEEP_API_BASE`）足以直接开工，Provider 与缺省模型按钥匙推断，不再强制首次设置；TUI 开屏提示凭据来源与 `willdeep config init` 固化方式；
 - Ratatui 多轮 TUI、可滚动聊天记录、可点击聚焦并展开/收起的聚合工具活动和界面内审批；审批动作纵向排列，支持方向键加 Enter、Y/A/N、中文“是/否”和整行鼠标点击，输入法提交的无关字符不会触发决定；
 - TUI 侧边栏右下角以低对比度常驻显示当前发版版本；`/` 候选与命令分发均识别 `/webapp`；
 - 空白新会话的即时工作区欢迎引导；

@@ -26,8 +26,11 @@ pub fn handle(action: ConfigAction, explicit_path: Option<&Path>) -> Result<()> 
     match action {
         ConfigAction::Init => init(&path),
         ConfigAction::Check => {
-            load_required(&path)?;
+            let loaded = load_required(&path)?;
             println!("valid\t{}\tversion={CONFIG_VERSION}", path.display());
+            for note in deprecations(&loaded.file) {
+                println!("legacy\t{}", note.summary());
+            }
             Ok(())
         }
         ConfigAction::Show => show(&path),
@@ -400,6 +403,37 @@ pub fn willdeep_home() -> Result<PathBuf> {
         .to_path_buf())
 }
 
+/// 还能解析、但语义可能与用户记忆不同的旧写法。启动时、`config check` 与 doctor
+/// 都点名，不再静默映射：线上一份 `approval = "ask"` 让用户每开一个终端都得手动切档。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Deprecation {
+    /// `agent.approval` 用了 `ask` / `request-every-time`：等同 `strict`，每次写入、
+    /// 命令、联网都问；推荐 `smart`。
+    LegacyApproval { spelled: String },
+}
+
+impl Deprecation {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::LegacyApproval { spelled } => format!(
+                "agent.approval = \"{spelled}\" is a legacy spelling of \"strict\" (every write, command and network call asks); the recommended default is \"smart\" — run `/permissions default smart` in the TUI or edit the file"
+            ),
+        }
+    }
+}
+
+pub fn deprecations(file: &ConfigFile) -> Vec<Deprecation> {
+    let mut notes = Vec::new();
+    if let Some(spelled) = file.agent.approval.as_deref()
+        && matches!(spelled, "ask" | "request-every-time")
+    {
+        notes.push(Deprecation::LegacyApproval {
+            spelled: spelled.to_owned(),
+        });
+    }
+    notes
+}
+
 pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
     if let Some(version) = file.version
         && version != CONFIG_VERSION
@@ -662,6 +696,31 @@ mod tests {
                 error.contains("agent.token_budget must be between"),
                 "{error}"
             );
+        }
+    }
+
+    /// 旧写法仍能解析，但必须被点名；正名与不写都不算旧写法。
+    #[test]
+    fn legacy_approval_spellings_are_reported_not_silently_mapped() {
+        for spelled in ["ask", "request-every-time"] {
+            let parsed: ConfigFile =
+                toml::from_str(&format!("version = 1\n[agent]\napproval = \"{spelled}\"\n"))
+                    .unwrap();
+            let notes = deprecations(&parsed);
+            assert_eq!(
+                notes,
+                vec![Deprecation::LegacyApproval {
+                    spelled: spelled.to_owned()
+                }]
+            );
+            assert!(notes[0].summary().contains("legacy spelling of \"strict\""));
+        }
+        for fine in [
+            "version = 1\n",
+            "version = 1\n[agent]\napproval = \"smart\"\n",
+        ] {
+            let parsed: ConfigFile = toml::from_str(fine).unwrap();
+            assert!(deprecations(&parsed).is_empty());
         }
     }
 

@@ -30,6 +30,37 @@ fn persist_turn_result(session: &mut Session, store: &SessionStore) -> Result<()
     }
 }
 
+/// 开屏提示：没有配置文件时说明凭据来自哪里、怎么固化；配置里有旧写法时点名。
+fn startup_notices(runtime: &TuiRuntime, language: Language) -> Vec<String> {
+    let explicit = runtime.runtime_submit.config.as_deref();
+    let mut notices = Vec::new();
+    if explicit.is_none() && crate::config::default_config_path().is_ok_and(|path| !path.exists()) {
+        notices.push(format!(
+            "System: {}",
+            language.text(
+                "还没有配置文件：本次使用环境变量或命令行提供的凭据；运行 `willdeep config init` 可固化为 ~/.willdeep/config.toml",
+                "No config file yet: this run uses credentials from the environment or command line; `willdeep config init` writes them into ~/.willdeep/config.toml",
+                "設定ファイルはまだありません。今回は環境変数またはコマンドラインの認証情報を使います。`willdeep config init` で ~/.willdeep/config.toml に保存できます",
+            )
+        ));
+    }
+    if let Ok(loaded) = crate::config::LoadedConfig::load(explicit) {
+        for note in crate::config::deprecations(&loaded.file) {
+            let text = match note {
+                crate::config::Deprecation::LegacyApproval { spelled } => language
+                    .text(
+                        "配置里 agent.approval = \"{spelled}\" 是旧写法，等同 strict（写文件、跑命令、联网都先问）；推荐 smart，输入 /permissions default smart 可写回",
+                        "agent.approval = \"{spelled}\" in the config is a legacy spelling of strict (every write, command and network call asks); smart is recommended — /permissions default smart writes it back",
+                        "設定の agent.approval = \"{spelled}\" は古い書き方で strict と同じ（書き込み・コマンド・通信のたびに確認）。smart を推奨、/permissions default smart で保存できます",
+                    )
+                    .replace("{spelled}", &spelled),
+            };
+            notices.push(format!("System: {text}"));
+        }
+    }
+    notices
+}
+
 /// 本轮在跑时把用户的话直接送进正在跑的那一轮：Runtime 轮次走 `turn.steer`，
 /// 进程内轮次直接进 Agent 收件箱，都是在下一次调模型前注入，不打断手上的活。
 /// 送不进去（没有在途任务、Runtime 不可达）返回 false，由调用方排队。
@@ -108,6 +139,8 @@ pub(super) async fn event_loop(
     if initial_transcript.is_empty() {
         initial_transcript.push(welcome_message(&session.workspace, language));
     }
+    // 首次使用与旧写法都在开屏说清楚，不让配置静默改变行为。
+    initial_transcript.extend(startup_notices(runtime, language));
     let mut app = App::new(initial_transcript, language);
     app.approval_mode = agent.approval_mode_handle().get();
     let (media_resize_tx, mut media_resize_rx) =
