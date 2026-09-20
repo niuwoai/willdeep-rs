@@ -493,4 +493,3 @@ fn clamping_keeps_both_ends_and_respects_the_token_budget() {
     assert!(clamped.ends_with("TAIL"));
     assert_eq!(clamp_text("short", 1_024), "short");
 }
-

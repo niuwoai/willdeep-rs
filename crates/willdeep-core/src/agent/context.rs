@@ -127,9 +127,7 @@ impl Agent {
                 // Incremental: previous summary plus only the messages it does not cover.
                 let mut source = vec![summary_message(&entry.summary)];
                 source.extend_from_slice(&result[entry.through..split]);
-                let summary = self
-                    .summarize_history(&source, record_usage)
-                    .await?;
+                let summary = self.summarize_history(&source, record_usage).await?;
                 let entry = SummaryCache::new(&result, split, summary);
                 result = compact_prefix(&result, split, &entry.summary);
                 *cache = Some(entry);
@@ -267,7 +265,9 @@ impl Agent {
             if parts.len() <= 1 {
                 break;
             }
-            parts = self.reduce_summaries(parts, budget, part_budget, record_usage).await?;
+            parts = self
+                .reduce_summaries(parts, budget, part_budget, record_usage)
+                .await?;
         }
         parts
             .pop()
@@ -451,10 +451,7 @@ fn chunk_for_summary(messages: &[Message], budget: u64) -> Vec<Vec<Message>> {
     for message in messages {
         let message = clamp_message(message, budget);
         let cost = estimate_tokens(std::slice::from_ref(&message));
-        if !current.is_empty()
-            && message.role != Role::Tool
-            && used.saturating_add(cost) > budget
-        {
+        if !current.is_empty() && message.role != Role::Tool && used.saturating_add(cost) > budget {
             chunks.push(std::mem::take(&mut current));
             used = 0;
         }

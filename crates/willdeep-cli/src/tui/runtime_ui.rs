@@ -470,7 +470,10 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
         // 体量（一次真实故障里是 94 万 token）从来没上过屏，用户盯着一个压缩后
         // 的 36% 一头撞进模型上限。两条路径的反馈必须一致。
         Some("compression_started") => {
-            if let Some(tokens) = value.get("estimated_tokens").and_then(|value| value.as_u64()) {
+            if let Some(tokens) = value
+                .get("estimated_tokens")
+                .and_then(|value| value.as_u64())
+            {
                 app.context_tokens = tokens;
             }
             app.record_progress(
@@ -484,12 +487,17 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             );
         }
         Some("compression_completed") => {
-            if let Some(tokens) = value.get("estimated_tokens").and_then(|value| value.as_u64()) {
+            if let Some(tokens) = value
+                .get("estimated_tokens")
+                .and_then(|value| value.as_u64())
+            {
                 app.context_tokens = tokens;
             }
-            let compressed =
-                app.language
-                    .text("上下文已压缩", "Context compressed", "コンテキストを圧縮しました");
+            let compressed = app.language.text(
+                "上下文已压缩",
+                "Context compressed",
+                "コンテキストを圧縮しました",
+            );
             let dropped = value
                 .get("dropped_messages")
                 .and_then(|value| value.as_u64())
