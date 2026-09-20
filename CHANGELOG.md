@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.78.0-rc19] - 2026-09-20
+
+### Added
+- **零配置首次使用。** 此前没有 `config.toml` 时一律拦进首次设置，`willdeep run` 在无交互终端下直接报错，哪怕环境里已经有 `SOMEIM_API_KEY`。现在环境里有认得出的钥匙就直接开工：`SOMEIM_API_KEY` → some.im（缺省模型 `glm-5`），`ANTHROPIC_API_KEY` → Anthropic（缺省 `claude-sonnet-4-5`），`OPENAI_API_KEY` + `WILLDEEP_API_BASE` → OpenAI-compatible（须给 `WILLDEEP_MODEL`）；命令行参数优先。TUI 开屏提示凭据来自环境、`willdeep config init` 可固化；`doctor` 在这种情况下 `provider` 项报通过并写明来源。
+- **旧写法不再静默映射。** `agent.approval = "ask"` / `"request-every-time"` 仍按 `strict` 解析，但 TUI 开屏、`willdeep config check` 的 `legacy` 行和 `doctor` 的 `config` 告警都会点名并给出 `/permissions default smart`。线上一份 `ask` 让用户每开一个终端都得手动切档，这就是根因。体验基线清单第 16 项两端到位。
+
 ## [0.78.0-rc18] - 2026-09-20
 
 ### Added

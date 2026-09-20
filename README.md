@@ -104,8 +104,9 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 cd web && yarn install --frozen-lockfile && yarn build && cd ..
 cargo build --release
 
-# 2. 登录
+# 2. 给一把钥匙：浏览器登录写入配置文件，或者只导出一个环境变量、不写配置直接跑
 willdeep --onboarding
+export SOMEIM_API_KEY=...          # 或 ANTHROPIC_API_KEY；缺省模型见 docs/CONFIGURATION.md「零配置启动」
 
 # 3. 开干
 willdeep --workspace .

@@ -307,9 +307,21 @@ fn check_config(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
         checks.push(check(
             "config",
             CheckStatus::Warning,
-            "not created; TUI onboarding or `willdeep config init` can create it",
+            "not created; SOMEIM_API_KEY / ANTHROPIC_API_KEY in the environment is enough to run, or use `willdeep config init`",
         ));
-        check_cli_provider(options, checks);
+        // 零配置：环境里有认得出的钥匙就能跑，不必逼着先写 TOML。
+        if let Some(provider) = crate::provider_from_env() {
+            checks.push(check(
+                "provider",
+                CheckStatus::Pass,
+                format!(
+                    "credentials from the environment; provider={}",
+                    crate::provider_arg_name(provider)
+                ),
+            ));
+        } else {
+            check_cli_provider(options, checks);
+        }
         return;
     }
     let loaded = match LoadedConfig::load(Some(&path)) {
@@ -328,6 +340,9 @@ fn check_config(options: &DoctorOptions, checks: &mut Vec<DoctorCheck>) {
         CheckStatus::Pass,
         format!("valid; provider_profiles={}", loaded.file.providers.len()),
     ));
+    for note in crate::config::deprecations(&loaded.file) {
+        checks.push(check("config", CheckStatus::Warning, note.summary()));
+    }
     check_notifications(&loaded, checks);
     match loaded.select_provider(options.profile.as_deref()) {
         Ok(Some(provider)) => {

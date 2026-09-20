@@ -202,6 +202,20 @@ willdeep \
 
 API Key 的完整解析链和权限强制规则见 [认证与凭据](AUTHENTICATION.md)。
 
+## 零配置启动
+
+没有 `config.toml` 也能跑：环境里有认得出的钥匙就直接开工，不再强制先走首次设置。
+
+| 环境里有 | 推断出的 Provider | API Base | 缺省模型 |
+|---|---|---|---|
+| `SOMEIM_API_KEY` | some.im | `https://some.im/v1` | `glm-5` |
+| `ANTHROPIC_API_KEY` | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-5` |
+| `OPENAI_API_KEY` + `WILLDEEP_API_BASE` | OpenAI-compatible | 取 `WILLDEEP_API_BASE` | 无，须给 `WILLDEEP_MODEL` |
+
+命令行的 `--provider` / `--api-base` / `--api-key` / `--model` 优先于推断。TUI 开屏会提示凭据来自环境、`willdeep config init` 可固化；`willdeep doctor` 的 `provider` 项在这种情况下报通过。
+
+旧写法不再静默映射：`agent.approval = "ask"`（等同 `strict`）会在 TUI 开屏、`willdeep config check` 的 `legacy` 行和 `doctor` 的 `config` 告警里点名，推荐改成 `smart`。
+
 ## 环境变量
 
 | 环境变量 | 用途 |
