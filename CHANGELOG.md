@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.78.0-rc27] - 2026-09-21
+
+### Fixed
+- **headless 集成测试不再被 US-ASCII locale 打死。** `interrupted_foreground_child_is_discovered_resumed_and_reported_without_replay` 由 Rust 测试生成的 `interrupt.rb` 观察者用 `File.read` 读子 Agent 的会话 JSON；`LANG` / `LC_ALL` / `LC_CTYPE` 都没设时 Ruby 的 `Encoding.default_external` 是 US-ASCII，会话里的非 ASCII 文本（省略号、中文）让 `JSON.parse` 在 `encode` 处抛 `Encoding::InvalidByteSequenceError`，控制器退出码 1，测试必红。现在这一处读取显式 `encoding: 'UTF-8'`，与 `scripts/lib/agent_eval_observation.rb` 按二进制读、`scripts/test/agent_metrics_test.rb` 对子进程输出 `force_encoding('UTF-8')` 是同一条纪律。`scripts/lib/agent_eval_process.rb` 自己不解析 willdeep 的输出（stdout / stderr 按字节落日志，状态管道里只有 supervisor 写的纯 ASCII JSON），不用改。
+
 ## [0.78.0-rc26] - 2026-09-21
 
 ### Added
