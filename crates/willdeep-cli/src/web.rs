@@ -1686,10 +1686,9 @@ fn client_event(value: serde_json::Value, language: Language) -> Option<serde_js
     if kind == "assistant_text_delta" {
         return Some(serde_json::json!({"type":kind,"text":value.get("text")?.as_str()?}));
     }
-    // 思维链增量目前只给终端做「思考中」行；网页端还没有对应的显示位，先不下发，
-    // 否则会落到下面的兜底分支，变成一行行 `reasoning_delta` 标签。
+    // 思维链增量与正文增量一样只带文本；前端做灰色「思考中」尾巴行，正文一来就隐藏。
     if kind == "reasoning_delta" {
-        return None;
+        return Some(serde_json::json!({"type":kind,"text":value.get("text")?.as_str()?}));
     }
     if kind == "subagent_retry_wait" {
         let id = value.get("id")?.as_str()?.parse::<uuid::Uuid>().ok()?;
@@ -2025,6 +2024,15 @@ mod tests {
     fn streaming_client_events_preserve_text_and_localize_retry_wait() {
         let event = client_event(serde_json::json!({"type":"assistant_text_delta", "text":"正在生成正文", "internal":"hidden"}), Language::ZhCn).unwrap();
         assert_eq!(event["text"], "正在生成正文");
+        assert!(event.get("internal").is_none());
+        // 思维链增量同样只传文本和类型，前端据此画「思考中」尾巴行。
+        let event = client_event(
+            serde_json::json!({"type":"reasoning_delta", "text":"先看日志", "internal":"hidden"}),
+            Language::ZhCn,
+        )
+        .unwrap();
+        assert_eq!(event["type"], "reasoning_delta");
+        assert_eq!(event["text"], "先看日志");
         assert!(event.get("internal").is_none());
         let event = client_event(
             serde_json::json!({"type":"provider_retry_wait", "delay_ms":1500}),
