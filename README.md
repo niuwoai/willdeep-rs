@@ -95,6 +95,35 @@ Diff 快照精确到**是哪个 Turn、哪个 Agent、哪次工具调用**改的
 </details>
 <!-- range:end -->
 
+### 线上派工，每周一张快照
+
+靶场是实验室，这里是线上：日常使用中 Runtime 真实派出去的子 Agent，每周一拍一张，只有计数和比率，没有 prompt、路径、agent id。口径、目标与发布流程见 [线上派工指标](docs/AGENT_METRICS.md)，历次快照在 [`bench/agent-metrics/`](bench/agent-metrics/)。
+
+下面这段由 `ruby scripts/agent_metrics_trend.rb --inject` 生成，别手改。
+
+<!-- agent-metrics:begin -->
+最近快照：**2026-09-20T17:04:54Z** · 窗口 7d · 代码 `b5d1fcc` · 版本 `0.78.0-rc26`
+
+| 指标 | 近 7d | 对比上次 | 目标 | 趋势 |
+|---|---|---|---|---|
+| **Deep Share** | 0% | — | ≤ 5% | `▄` |
+| Skill Coverage | 60% | — | ≥ 50% | `▄` |
+| **Worker Verified Success** | - | — | ≥ 85% | `·` |
+| Escalation Rate | - | — | ≤ 15% | `·` |
+| 只读工种引用准确率 | - | — | — | `·` |
+
+近 7d：子 Agent 运行 5（窄工种 3 · 标准 2 · deep 0）· 有 verifier 0 · 未验证 5 · 平均尝试 -
+累计：子 Agent 运行 11 · Deep Share 0% · Worker Verified Success 0%（0/2）· 未验证 9
+
+<details><summary>历史 1 次快照</summary>
+
+| 时间 | 代码 | 窗口 | 子运行 | Deep Share | Skill Coverage | Verified Success | Escalation | 引用准确率 | 平均尝试 |
+|---|---|---|---:|---|---|---|---|---|---|
+| 2026-09-20T17:04:54Z | `b5d1fcc` | 7d | 5 | 0% | 60% | - | - | - | - |
+
+</details>
+<!-- agent-metrics:end -->
+
 ---
 
 ## 30 秒上手
@@ -167,6 +196,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [Runtime Daemon 与工作区](docs/RUNTIME_DAEMON.md) — 常驻控制面
 - [子 Agent 与后台任务](docs/SUBAGENTS.md) — 六个公开工种、内部兼容路由、命令审核与 Worktree
 - [小上下文 Skill Worker](docs/SKILL_WORKERS.md) — 派工纪律、Verifier 闭环、实弹靶场
+- [线上派工指标](docs/AGENT_METRICS.md) — Deep Share、Worker Verified Success 每周快照与目标
 - [插件系统](docs/PLUGINS.md) — 与 macOS 版共享插件包，沙箱边界与审批为何各管各的
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [OS 级写入围栏](docs/SANDBOX.md) — Seatbelt / bubblewrap，预览态

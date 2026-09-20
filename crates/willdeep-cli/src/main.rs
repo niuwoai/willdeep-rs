@@ -13,6 +13,7 @@ use willdeep_core::{
     SubagentLifecycleStatus, UserQuestion,
 };
 
+mod agent_metrics;
 mod audit_cmd;
 mod config;
 mod daemon;

@@ -360,17 +360,25 @@ ruby scripts/range_trend.rb --inject      # 把趋势写回 README 与本文档
 **「没验证」是独立的第三种答案**，不是通过也不是失败。把它并进任何一边，都会让指标开始自我恭维——每份没验证过的报告都会凭空变成一次成功（或一次失败），而它两样都没挣到。命令原文不进公开记录：命令行会带路径和参数，而算指标根本不需要它。
 
 ```bash
-willdeep daemon agent-metrics
+willdeep daemon agent-metrics                 # 人看的 TSV
+willdeep daemon agent-metrics --json          # 同一份数的 JSON，分母为 0 的比率是 null
+willdeep daemon agent-metrics --since 7d      # 只算窗口内新建的子 Agent
 ```
 
 ```text
 agents                     children=5   workers=4
-skill_coverage             80.0%    (窄工种运行数 / 全部子 Agent 运行数；目标 ≥ 50%)
+model_tiers                worker=4   standard=1   deep=0
+deep_share                 0.0%     (deep 运行数 / 全部子 Agent 运行数：0/5；目标 ≤ 5%)
+skill_coverage             80.0%    (窄工种运行数 / 全部子 Agent 运行数：4/5；目标 ≥ 50%)
 worker_verified_success    66.7%    (通过数 / 有 verifier 的运行数：2/3；目标 ≥ 85%)
-escalation_rate            33.3%    (尝试打满、需要更大模型的比例；目标 ≤ 15%)
+escalation_rate            33.3%    (尝试打满、需要更大模型的比例：1/3；目标 ≤ 15%)
+citation_accuracy          -        (只读工种引用位置存在数 / 检查数：0/0)
 attempts_per_verified_run  2.00
 unverified_runs            2        (没给 verifier，所以两边都没证明)
 ```
+
+每周一张快照归档到 `bench/agent-metrics/history.jsonl`，Deep Share 与 Worker Verified Success 的趋势写回 README，
+流程与目标见 [线上派工指标](AGENT_METRICS.md)。
 
 三条口径说明：
 

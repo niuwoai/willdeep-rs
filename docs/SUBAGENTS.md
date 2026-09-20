@@ -268,13 +268,13 @@ willdeep daemon quarantine-agent-worktree <AGENT_ID> --snapshot <CHILD_SNAPSHOT_
 ```bash
 willdeep daemon agents
 willdeep daemon agent <agent-id>
-willdeep daemon agent-metrics
+willdeep daemon agent-metrics [--json] [--since 7d]
 willdeep daemon stop-agent <agent-id>
 willdeep daemon retry-agent <agent-id>
 willdeep daemon instruct-agent <agent-id> "补充要求"
 ```
 
-`agent <id>` 显示单个 Agent 的 Workspace、Profile、状态、轮次、当前工具、Token 和验证判定（是否通过 / 尝试次数 / 起始 commit）。`agent-metrics` 汇总派工指标，口径见 [小上下文 Skill Worker](SKILL_WORKERS.md)。终态 Agent 可以重试，**重试沿用同一 Agent UUID**；`agent.retry` 支持指定新模型，Harness 在重试边界基于原 Provider 配置重建模型实例——运行中的 Agent 不做热切换。
+`agent <id>` 显示单个 Agent 的 Workspace、Profile、状态、轮次、当前工具、Token 和验证判定（是否通过 / 尝试次数 / 起始 commit）。`agent-metrics` 汇总派工指标，口径见 [小上下文 Skill Worker](SKILL_WORKERS.md)，`--json` 出机器读的同一份数，`--since` 只算窗口内新建的子 Agent，每周快照与对外发布见 [线上派工指标](AGENT_METRICS.md)。终态 Agent 可以重试，**重试沿用同一 Agent UUID**；`agent.retry` 支持指定新模型，Harness 在重试边界基于原 Provider 配置重建模型实例——运行中的 Agent 不做热切换。
 
 这些命令与其他 Runtime API 一样必须携带私有 `x-willdeep-token`，通过持久队列交给所属的原 Harness 执行并确认。
 

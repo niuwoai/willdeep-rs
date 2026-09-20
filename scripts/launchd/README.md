@@ -48,11 +48,29 @@ tail -f target/model-eval/nightly.log
 `bench/model-eval/history.jsonl`、`bench/model-eval/reports/<日期>/` 和 `docs/MODEL_EVAL.md` 的趋势区块，
 同样不自动提交。通过率或人话率比基线掉超过 10 个点时退出码 2，日志里有报警行。
 
+## 线上派工指标（每周）
+
+`willdeep daemon agent-metrics --json` 的快照每周一 04:00 拍一张，模板 `com.willdeep.agent-metrics.plist`。
+它不花钱、不联网，只读本机 Runtime（没起就顺手拉起来）：
+
+```bash
+sed "s|__REPO__|$(pwd)|g" scripts/launchd/com.willdeep.agent-metrics.plist \
+  > ~/Library/LaunchAgents/com.willdeep.agent-metrics.plist
+launchctl load ~/Library/LaunchAgents/com.willdeep.agent-metrics.plist
+launchctl start com.willdeep.agent-metrics     # 先手动试一次
+tail -f target/agent-metrics/weekly.log
+```
+
+窗口在 plist 的 `EnvironmentVariables` 里改 `WILLDEEP_METRICS_WINDOW`（缺省 `7d`，跟拍照周期对齐）。它会动
+`bench/agent-metrics/history.jsonl` 与 `README.md` / `docs/AGENT_METRICS.md` 的趋势区块，同样不自动提交。
+窗口内有指标没达到设计目标（Deep Share ≤ 5%、Worker Verified Success ≥ 85% 等）时退出码 2，日志里有报警行。
+
 ## Linux（cron）
 
 ```cron
 0 3 * * 1 cd /path/to/willdeep-rs && ./scripts/range_weekly.sh
 30 3 * * * cd /path/to/willdeep-rs && ./scripts/model_eval_nightly.sh
+0 4 * * 1 cd /path/to/willdeep-rs && ./scripts/agent_metrics_weekly.sh
 ```
 
 cron 的环境变量比登录 shell 干净得多，`ruby` 和 `cargo` 很可能不在 `PATH` 里。
@@ -67,6 +85,8 @@ cron 的环境变量比登录 shell 干净得多，`ruby` 和 `cargo` 很可能�
 | `bench/skill-worker-range/history.jsonl` | 多一行摘要 |
 | `bench/skill-worker-range/runs/*.json` | 多一份完整报告 |
 | `README.md`、`docs/SKILL_WORKERS.md` | 趋势区块被重写 |
+| `bench/agent-metrics/history.jsonl` | 多一行快照 |
+| `README.md`、`docs/AGENT_METRICS.md` | 线上派工趋势区块被重写 |
 
 **它不自动提交，也不自动 `git pull`。** 一轮成绩是不是该进历史得有人看一眼，
 尤其是当它变差的时候；测哪版代码也该由人决定，而不是由定时器决定。
