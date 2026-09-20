@@ -127,7 +127,11 @@ const SOMEIM_CONTEXT_COMPRESSOR_MODEL: &str = "someim-32b-compressor";
 /// audit trail for "why did that command run without asking me" — and the
 /// raw material for tuning the static rules. Best-effort: a logging failure
 /// must never block a tool call.
-pub(crate) fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
+pub(crate) fn record_approval_trace(
+    path: &Path,
+    session_id: Option<uuid::Uuid>,
+    trace: &ApprovalTrace,
+) {
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,6 +141,9 @@ pub(crate) fn record_approval_trace(path: &Path, trace: &ApprovalTrace) {
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_secs())
             .unwrap_or_default(),
+        // rc22 起带会话 id：`willdeep audit export` 按它把放行记录归到会话名下。
+        // 更早的记录没有这个字段，只能按会话时间窗归入，报告里会标明。
+        "session_id": session_id,
         "source": source,
         "detail": trace.detail,
         // The command is stored redacted: this file outlives the session.
@@ -795,7 +802,7 @@ pub(crate) async fn build(
         .with_hooks(hooks)
         .with_approver(approver)
         .with_approval_reporter(move |trace| {
-            record_approval_trace(&approval_log, &trace);
+            record_approval_trace(&approval_log, Some(session_id), &trace);
         })
         .with_skills(skills.clone())
         .with_mcp(mcp.clone())

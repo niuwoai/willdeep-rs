@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.78.0-rc22] - 2026-09-20
+
+### Added
+- **`willdeep audit export`（ADR 第 3 项）。** 把一个会话（`--session <id>|latest`，缺省最近一个）或一个工作区一段时间（`--workspace` + `--since` / `--until`）里 Agent 干过的事汇成一份审计报告，Markdown 到 stdout 或 `--json`，`--output` 落文件：审批放行（按来源计数、每条的命令与原因）、人工裁决（允许一次 / 始终允许 / 拒绝 / 回答 / 未决，描述按命令审批同一套规则打码）、hook 拦截（从会话记录里的 `<hook-denied>` 工具结果反推，点名 hook 与被拦的工具）、验证证据（检查点的要求 / 基线 / 证据与绑定到快照的验证命令，按快照 + 命令去重）、子 Agent 裁决（通过 / 失败 / 未验证三档）、改动归属（根 / 子 Agent、工具、文件、快照）、审阅裁定与回滚痕迹（回收区目录）。只读 `$WILLDEEP_HOME` 下的状态文件，不需要 Runtime 在跑、不调 Provider、不走会产生副作用的 `AgentStore::open`；报告里没有提示词、模型正文、工具入参和凭据。三种语言随全局 `--language`。详见 `docs/AUDIT_EXPORT.md`。
+- **`approvals.jsonl` 每行带 `session_id`。** 此前放行记录没有任何键，只能按时间猜属于谁；现在 TUI 切档和 Harness 放行都写上会话 id，审计导出按它归入，更早的记录按会话时间窗归入并在报告里单独计数。
+- `willdeep_core::session::parse_iso8601_utc`：`format_iso8601` 的严格反向，`YYYY-MM-DD` 与 `YYYY-MM-DDTHH:MM:SSZ`，不存在的日期、时区偏移与小数秒一律拒绝（宽松的 Xedit 兼容解析保持原样）。
+
 ## [0.78.0-rc21] - 2026-09-20
 
 ### Added

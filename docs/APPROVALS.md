@@ -96,7 +96,7 @@ safety_judge = true                      # 默认开启；关掉后拿不准的�
 # judge_model = "someim-security-guard"  # some.im 默认值；其它 provider 默认取会话模型
 ```
 
-每次自动放行/升级都追加一行到 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），记录 `static` / `judge` / `always-allow` / `user` / `workspace-access` / `full-access` / `mode-change` / `not-required` 等来源和原因——这是「为什么这条命令没问我」的审计入口。判官来源的记录里带上实际使用的模型（如 `AI review (someim-security-guard): …`），模型被换掉或判官掉线都能在日志里直接看出来。
+每次自动放行/升级都追加一行到 `$WILLDEEP_HOME/approvals.jsonl`（`0600`，命令已脱敏），记录 `static` / `judge` / `always-allow` / `user` / `workspace-access` / `full-access` / `mode-change` / `not-required` 等来源和原因——这是「为什么这条命令没问我」的审计入口。判官来源的记录里带上实际使用的模型（如 `AI review (someim-security-guard): …`），模型被换掉或判官掉线都能在日志里直接看出来。rc22 起每行带 `session_id`；`willdeep audit export` 按它把放行记录归到会话名下，更早的记录只能按会话时间窗归入，报告里会标明（见 [审计导出](AUDIT_EXPORT.md)）。
 
 ## 交互式审批
 

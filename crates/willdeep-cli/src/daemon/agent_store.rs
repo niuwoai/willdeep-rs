@@ -780,7 +780,7 @@ fn event_path(value: &serde_json::Value, field: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn load_agents(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeAgent>> {
+pub(crate) fn load_agents(path: &Path) -> Result<HashMap<uuid::Uuid, RuntimeAgent>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }

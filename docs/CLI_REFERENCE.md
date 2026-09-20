@@ -19,6 +19,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `detach` | 确认当前客户端可以断开而不停止 Runtime |
 | `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `job` | 查看脱离父进程的后台作业：跑完没有、退出码、输出 |
+| `audit` | 导出一个会话（或一个工作区一段时间）的审计报告：审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚 |
 | `handoff` | 接住 WillDeep for macOS 用 `/handoff` 推来的会话：列出、接手续跑、轮询等待 |
 | `integrations` | 查看和管理可选外部集成 |
 | `plugin` | 安装、批准、启停与卸载插件（包与 macOS 版共享） |

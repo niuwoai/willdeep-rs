@@ -133,7 +133,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **扩展** | `SKILL.md` 技能 · MCP stdio server · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
 | **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
-| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 审计与门禁 Hooks |
+| **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级写入围栏（预览） · 门禁 Hooks · `willdeep audit export` 一份审计报告（审批放行、人工裁决、hook 拦截、验证证据、改动归属） |
 | **遥测** | 子 Agent 判定落盘 · Skill Coverage / Verified Success / Escalation Rate · 实弹靶场 |
 | **语言** | 简体中文 · English · 日本語 |
 

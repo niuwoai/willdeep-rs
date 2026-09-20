@@ -223,7 +223,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] 离线指标脚本 `scripts/session_metrics.rb`：人话率、工具调用与失败、思维链占比、平均轮次，JSON + Markdown。
 - [x] 固定任务集每晚对 DeepSeek V4 / GLM / Claude 各跑一遍，指标做成趋势（v0.78.0-rc21：`bench/model-eval/` 20 个任务 + `scripts/model_eval.rb` + 每天 launchd；Claude 的模型 ID 由 `WILLDEEP_EVAL_MODELS` 加入）。
 - [x] 主 Agent `token_budget` 闸门。
-- [ ] `willdeep audit export`。
+- [x] `willdeep audit export`（v0.78.0-rc22：审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚汇成 Markdown / JSON，见 `docs/AUDIT_EXPORT.md`）。
 - [ ] 检查点回退（回到第 N 步）。
 
 验收：清单每项「已到位」对应一条事件级测试；提示词与路由改动附带指标前后对比。

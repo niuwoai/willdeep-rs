@@ -306,6 +306,7 @@ pub(super) async fn apply(
     app.approval_mode = mode;
     crate::harness::record_approval_trace(
         &runtime.home.join("approvals.jsonl"),
+        Some(session.id),
         &ApprovalTrace {
             command: mode.as_str().to_owned(),
             source: ApprovalSource::ModeChange,
