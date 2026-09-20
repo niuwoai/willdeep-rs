@@ -49,7 +49,7 @@ function settleActiveSteps(steps: RunStep[], now: number): RunStep[] {
     ? { ...step, status: "done" as const, elapsedMs: step.elapsedMs ?? now - step.startedAt }
     : step);
 }
-type ChatMessage = { id: string; role: ConversationItem["role"] | "activity"; content: string; steps?: RunStep[]; thinking?: string; plan?: Plan; details?: string[] };
+type ChatMessage = { id: string; role: ConversationItem["role"] | "activity" | "divider"; content: string; steps?: RunStep[]; thinking?: string; plan?: Plan; details?: string[] };
 /// 思维链只留尾巴：像滚动字幕，看得到它此刻在想什么就够了，正文一来就隐藏。
 const THINKING_TAIL_CHARS = 240;
 function thinkingTail(text: string): string {
@@ -246,6 +246,9 @@ export function App() {
   const [skillSearch, setSkillSearch] = useState("");
   const [version, setVersion] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]); const [prompt, setPrompt] = useState("");
+  // 轮次收尾时要从运行卡片里数工具步，而会话重载会把卡片整个换掉，先照一份镜像。
+  const chatRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { chatRef.current = chat; }, [chat]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [goal, setGoal] = useState("");
   const [composer, setComposer] = useState<ComposerData>({ commands: defaultCommands, skills: [] });
@@ -425,6 +428,19 @@ export function App() {
     setChat((current) => current.map((message) => message.id === runId ? { ...message, steps: updater(message.steps ?? []) } : message));
   }
 
+  /// 「── 本轮结束 · 总耗时 · 工具 N 次 · 轮到你 ──」：与 TUI 同一条分隔线。会话重载
+  /// 后运行卡片就没了，所以在重载前算好，重载后再追加。
+  function turnDivider(runId: string, startedAt: number | null): ChatMessage {
+    const steps = chatRef.current.find((message) => message.id === runId)?.steps ?? [];
+    const tools = steps.filter((step) => !step.id.startsWith("turn-"));
+    const failed = tools.filter((step) => step.status === "failed").length;
+    const parts = [t.turnFinished];
+    if (startedAt !== null) parts.push(`${t.totalElapsed} ${formatStepElapsed(Date.now() - startedAt)}`);
+    if (tools.length) parts.push(`${t.toolCount.replace("{count}", String(tools.length))}${failed ? t.foldedFailed.replace("{count}", String(failed)) : ""}`);
+    parts.push(t.yourTurn);
+    return { id: nextId("divider"), role: "divider", content: `── ${parts.join(" · ")} ──` };
+  }
+
   function applySessionDetail(detail: SessionDetail) {
     setSessionId(detail.id);
     localStorage.setItem(`${lastSessionPrefix}${workspace}`, detail.id);
@@ -577,8 +593,11 @@ export function App() {
           : step);
       });
       if (!controller.signal.aborted) {
+        // 恢复的轮次不知道开始时间，分隔线只报工具数。
+        const divider = turnDivider(runId, null);
         const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`);
         applySessionDetail(detail);
+        setChat((current) => [...current, divider]);
         if (terminalError) setError(`${t.requestFailed}: ${terminalError}`);
       }
       await refreshSessions();
@@ -806,6 +825,7 @@ export function App() {
     const harnessPrompt = goal && content !== "/compress" ? `<goal>\n${goal}\n</goal>\nContinue until this goal is genuinely complete.\n\n${content}` : content;
     const outgoingAttachments = attachments;
     const runId = nextId("run"); const controller = new AbortController(); abortRef.current = controller;
+    const startedAt = Date.now();
     activeRunRef.current = runId;
     followBottomRef.current = true;
     setPrompt(""); setAttachments([]); setError(""); setActivity(t.thinking); setBusy(true);
@@ -831,10 +851,12 @@ export function App() {
       if (!terminal) throw new Error(t.streamDisconnected);
       updateRun(runId, (steps) => settleActiveSteps(steps, Date.now()));
       setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: answer || t.emptyReply }]);
+      const divider = turnDivider(runId, startedAt);
       if (completedSessionId) {
         const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(completedSessionId)}`);
         applySessionDetail(detail);
       }
+      setChat((current) => [...current, divider]);
       refreshSessions().catch(() => undefined);
     } catch (reason) {
       const recoverSessionId = activeSessionRef.current;
@@ -951,7 +973,7 @@ export function App() {
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="var(--text-dim)">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "plan" || message.role === "system" ? <ConversationCard key={message.id} plan={message.plan} details={message.details} messages={t} /> : message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.thinking && <Text fontSize="xs" color="var(--text-dim)" px="3" py="1" whiteSpace="pre-wrap" wordBreak="break-word">{t.thinking}: {message.thinking}</Text>}{message.content &&<Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "plan" || message.role === "system" ? <ConversationCard key={message.id} plan={message.plan} details={message.details} messages={t} /> : message.role === "divider" ? <Text key={message.id} className="turn-divider">{message.content}</Text> : message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.thinking && <Text fontSize="xs" color="var(--text-dim)" px="3" py="1" whiteSpace="pre-wrap" wordBreak="break-word">{t.thinking}: {message.thinking}</Text>}{message.content &&<Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="var(--danger-text)" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
@@ -985,7 +1007,7 @@ export function App() {
             <SfIcon name="sf:plus.circle" size={16} />
           </button>
         )}
-        <Text className="send-hint">{t.sendHint}</Text>
+        <Text className="send-hint" style={{ color: busy ? "var(--accent)" : "var(--success)" }}>{busy ? t.hintBusy : t.hintIdle}</Text>
         <Button aria-label={busy ? t.stop : t.send} title={busy ? t.stop : t.send} className={`send-button ${busy ? "stop" : ""}`} onClick={busy ? () => void stop() : () => void send()} disabled={!busy && ((!prompt.trim() && !attachments.length) || selectedSession?.archived)}>{busy ? <Box className="stop-icon" /> : <Text className="send-icon">↑</Text>}</Button>
       </Box>
       <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} theme={theme} onThemeChange={setTheme} />
