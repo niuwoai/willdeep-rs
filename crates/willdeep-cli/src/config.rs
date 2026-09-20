@@ -193,6 +193,9 @@ pub struct AgentSettings {
     #[serde(default)]
     pub verification_commands: Vec<String>,
     pub max_turns: Option<usize>,
+    /// 主 Agent 一轮的 token 预算（输入 + 输出累计）。轮次上限放到 200 之后，
+    /// 这是唯一的自动闸门；用尽时交出部分结果与交接信息，不判失败。不写不限。
+    pub token_budget: Option<u64>,
     pub approval: Option<String>,
     pub language: Option<String>,
     /// Consult the AI judge for commands the static classifier cannot
@@ -298,6 +301,9 @@ pub struct ProviderProfile {
 /// 结果，所以放得开；跑偏靠 Esc 中止和审批档位兜底。
 pub(crate) const DEFAULT_MAX_TURNS: usize = 200;
 pub(crate) const MAX_TURNS_CEILING: usize = 1000;
+/// `[agent] token_budget` 的合法区间，与子 Agent 的预算区间一致。
+pub(crate) const TOKEN_BUDGET_MIN: u64 = 1_000;
+pub(crate) const TOKEN_BUDGET_MAX: u64 = 10_000_000;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -409,6 +415,11 @@ pub(crate) fn validate(file: &ConfigFile, path: &Path) -> Result<()> {
         && !(1..=MAX_TURNS_CEILING).contains(&max_turns)
     {
         bail!("agent.max_turns must be between 1 and {MAX_TURNS_CEILING}");
+    }
+    if let Some(budget) = file.agent.token_budget
+        && !(TOKEN_BUDGET_MIN..=TOKEN_BUDGET_MAX).contains(&budget)
+    {
+        bail!("agent.token_budget must be between {TOKEN_BUDGET_MIN} and {TOKEN_BUDGET_MAX}");
     }
     if file
         .agent
@@ -624,6 +635,34 @@ mod tests {
         );
         let defaults: ConfigFile = toml::from_str("[agent]\nmax_turns = 4\n").unwrap();
         assert!(defaults.agent.verification_commands.is_empty());
+    }
+
+    /// 轮次上限放到 200 之后，token 预算是唯一的自动闸门：区间必须校验，不写不限。
+    #[test]
+    fn agent_token_budget_is_optional_and_range_checked() {
+        let unset: ConfigFile = toml::from_str("version = 1\n").unwrap();
+        assert_eq!(unset.agent.token_budget, None);
+
+        let parsed: ConfigFile =
+            toml::from_str("version = 1\n[agent]\ntoken_budget = 2000000\n").unwrap();
+        assert_eq!(parsed.agent.token_budget, Some(2_000_000));
+        let complaint = validate(&parsed, Path::new("config.toml"))
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(!complaint.contains("token_budget"), "{complaint}");
+
+        for bad in ["10", "99999999999"] {
+            let parsed: ConfigFile =
+                toml::from_str(&format!("version = 1\n[agent]\ntoken_budget = {bad}\n")).unwrap();
+            let error = validate(&parsed, Path::new("config.toml"))
+                .expect_err("out-of-range budget is rejected")
+                .to_string();
+            assert!(
+                error.contains("agent.token_budget must be between"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

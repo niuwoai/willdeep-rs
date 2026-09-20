@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.78.0-rc13] - 2026-09-20
+
+### Added
+- **主 Agent 的 token 预算闸门 `[agent] token_budget`。** 轮次上限放到 200 之后它是唯一的自动闸门；合法区间 1000–10000000，用尽时交出部分结果与交接信息、不判失败，不写不限。示例配置与 `docs/CONFIGURATION.md` 同步。
+- **离线模型行为指标 `scripts/session_metrics.rb`。** 从会话记录算人话率、静默工具轮、思维链占比、工具调用与失败、调用次数，按模型汇总，输出 JSON + Markdown，只输出计数不输出正文。用法与指标定义见 `docs/MODEL_EVAL.md`。
+
+### Docs
+- `docs/COMPETITIVE_LANDSCAPE.md` 按 v0.78.0-rc12 代码实况重写：沙箱与 hooks 已补，短板第一位改为「终端手感刚追平、Web 未跟上」。
+- 新增决策记录 `docs/decisions/2026-09-20-experience-baseline-and-model-eval.md` 与体验基线清单 `docs/EXPERIENCE_BASELINE.md`；路线图新增阶段 13。
+
 ## [0.78.0-rc12] - 2026-09-20
 
 ### Added
