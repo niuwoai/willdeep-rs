@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.78.0-rc20] - 2026-09-20
+
+### Added
+- **会话重开后工具行照样回放。** 此前 `conversation::project` 只投影用户与助手消息，只带工具调用、正文为空的 assistant 消息整条被跳过，重开会话就只剩几句话。现在投影项带 `tools`：每条调用的名字、脱敏摘要（`tool_detail` 从 cli 搬进 core 复用，命令只取前三个词、路径打码、凭据脱敏、原始参数不出投影）与有无结果；TUI 回放时按实时路径同一种行落 `· ✓ 名字 · 摘要`，没结果的画 `…`（轮次在那里被打断），记录里没有成败所以不画 ✗。Web 会话详情同样带 `tools`，回放成运行卡片。体验基线清单第 18 项两端到位，只剩第 11 项检查点回退。
+
+### Fixed
+- `willdeep-core` 投影测试里一处 `clone` 触发新版 clippy 的 `cloned_ref_to_slice_refs`，一直卡着 workspace 级 `cargo clippy --all-targets -- -D warnings`；改为 `std::slice::from_ref`，CI 的 clippy 步骤可以绿了。
+
 ## [0.78.0-rc19] - 2026-09-20
 
 ### Added

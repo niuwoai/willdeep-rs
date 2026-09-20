@@ -32,6 +32,20 @@ fn tool_line(marker: &str, name: &str, detail: Option<&str>) -> String {
     }
 }
 
+/// 会话重开时按记录回放工具行：有结果的画 ✓，没结果的画 …（轮次在那里被打断）。
+/// 记录里没有成败，回放不画 ✗。
+pub(super) fn replayed_tool_row(trace: &willdeep_core::conversation::ToolTrace) -> String {
+    tool_line(
+        if trace.completed {
+            TOOL_DONE
+        } else {
+            TOOL_PENDING
+        },
+        &trace.name,
+        trace.detail.as_deref(),
+    )
+}
+
 /// 这行是不是工具行；是的话给出它的状态标记。
 fn tool_row_marker(line: &str) -> Option<&'static str> {
     let rest = line.strip_prefix("· ")?;

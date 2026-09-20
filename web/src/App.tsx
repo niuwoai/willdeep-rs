@@ -56,11 +56,29 @@ function thinkingTail(text: string): string {
   const compact = text.replace(/\s+/g, " ");
   return compact.length > THINKING_TAIL_CHARS ? `…${compact.slice(-THINKING_TAIL_CHARS)}` : compact;
 }
-function sessionChat(detail: SessionDetail, attachmentLabel: string): ChatMessage[] {
-  return detail.messages.map((message, index) => ({
-    id: `${detail.id}-${index}`, role: message.role, plan: message.plan, details: message.details,
-    content: `${message.content}${message.attachment_count ? `\n[${message.attachment_count} ${attachmentLabel}]` : ""}`,
-  }));
+function sessionChat(detail: SessionDetail, t: Messages): ChatMessage[] {
+  const chat: ChatMessage[] = [];
+  detail.messages.forEach((message, index) => {
+    const id = `${detail.id}-${index}`;
+    // 回放的工具调用先落成运行卡片，再跟正文。记录里没有成败，只分「有结果 / 被打断」。
+    if (message.tools?.length) {
+      const now = Date.now();
+      chat.push({ id: `${id}-tools`, role: "activity", content: "", steps: message.tools.map((tool, order) => ({
+        id: `${id}-tool-${order}`,
+        label: `${tool.completed ? t.toolDone : t.interrupted} ${tool.name}`,
+        detail: tool.detail,
+        status: tool.completed ? "done" as const : "failed" as const,
+        startedAt: now,
+      })) });
+    }
+    // 只带工具调用、正文为空的助手消息不再单独占一个气泡。
+    if (!message.content && !message.plan && !message.details?.length) return;
+    chat.push({
+      id, role: message.role, plan: message.plan, details: message.details,
+      content: `${message.content}${message.attachment_count ? `\n[${message.attachment_count} ${t.attachmentCount}]` : ""}`,
+    });
+  });
+  return chat;
 }
 type Attachment = { kind: "text"; name: string; content: string } | { kind: "image"; name: string; media_type: string; data: string; width: number; height: number };
 type ComposerSkill = { identifier: string; name: string; description: string };
@@ -393,7 +411,7 @@ export function App() {
           const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(visible.id)}`);
           if (active && sessionIdRef.current === visible.id && !activeRunRef.current) {
             displayRevisionRef.current = revision;
-            setChat(sessionChat(detail, t.attachmentCount));
+            setChat(sessionChat(detail, t));
           }
         })
         .catch(() => undefined)
@@ -401,7 +419,7 @@ export function App() {
     };
     void refresh(); const timer = window.setInterval(refresh, 2000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [workspace, t.attachmentCount]);
+  }, [workspace, t]);
   useEffect(() => { if (followBottomRef.current) endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat, activity]);
 
   const [showArchived, setShowArchived] = useState(false);
@@ -444,7 +462,7 @@ export function App() {
   function applySessionDetail(detail: SessionDetail) {
     setSessionId(detail.id);
     localStorage.setItem(`${lastSessionPrefix}${workspace}`, detail.id);
-    setChat(sessionChat(detail, t.attachmentCount));
+    setChat(sessionChat(detail, t));
     followBottomRef.current = true;
   }
 

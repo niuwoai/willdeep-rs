@@ -106,16 +106,16 @@ pub(super) fn projected_transcript(
 ) -> Vec<String> {
     willdeep_core::conversation::project(messages, plan)
         .into_iter()
-        .map(|item| {
+        .flat_map(|item| {
             if let Some(plan) = item.plan {
-                return plan_entry(&PlanTranscript {
+                return vec![plan_entry(&PlanTranscript {
                     plan,
                     details: item.details,
                     expanded: false,
-                });
+                })];
             }
             match item.role {
-                "user" => format!(
+                "user" => vec![format!(
                     "You: {}{}",
                     item.content,
                     if item.attachment_count == 0 {
@@ -123,16 +123,24 @@ pub(super) fn projected_transcript(
                     } else {
                         format!(" [{} attachment(s)]", item.attachment_count)
                     }
-                ),
-                "system" => format!(
+                )],
+                "system" => vec![format!(
                     "System: {}",
                     language.text(
                         "系统自动推进",
                         "Automatic system activity",
                         "システムの自動進行"
                     )
-                ),
-                _ => format!("WillDeep: {}", item.content),
+                )],
+                _ => {
+                    // 与实时路径同一套行：先正文（有的话），再逐条工具行。
+                    let mut rows = Vec::with_capacity(1 + item.tools.len());
+                    if !item.content.trim().is_empty() {
+                        rows.push(format!("WillDeep: {}", item.content));
+                    }
+                    rows.extend(item.tools.iter().map(narration::replayed_tool_row));
+                    rows
+                }
             }
         })
         .collect()
@@ -240,6 +248,36 @@ mod tests {
         assert!(rendered.contains('✓'));
         assert!(rendered.contains('–'));
         assert!(!rendered.contains("```"));
+    }
+
+    /// 会话重开后工具行照样回放：有结果的 ✓，没结果的 …，与实时路径同一种行。
+    #[test]
+    fn reopened_history_replays_tool_rows_between_replies() {
+        let call = |id: &str, name: &str, arguments: &str| willdeep_core::types::ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        };
+        let history = [
+            Message::user("go"),
+            Message::assistant(
+                "Looking around first.",
+                vec![call("a", "run_command", r#"{"command":"cargo test -p x"}"#)],
+            ),
+            Message::tool(&call("a", "run_command", "{}"), "ok"),
+            Message::assistant("", vec![call("b", "read_file", r#"{"path":"x"}"#)]),
+            Message::assistant("done", Vec::new()),
+        ];
+        assert_eq!(
+            projected_transcript(&history, None, Language::En),
+            vec![
+                "You: go",
+                "WillDeep: Looking around first.",
+                "· ✓ run_command · cargo test -p",
+                "· … read_file",
+                "WillDeep: done",
+            ]
+        );
     }
 
     #[test]
