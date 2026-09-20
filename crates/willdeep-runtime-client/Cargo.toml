@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Rust SDK for the WillDeep Runtime control plane: sessions, turns, agents, approvals, diff review and a resumable NDJSON event stream over the local loopback / unix socket transport."
+readme = "README.md"
+documentation = "https://docs.rs/willdeep-runtime-client"
+keywords = ["willdeep", "coding-agent", "sdk", "runtime"]
+categories = ["api-bindings", "development-tools"]
+include = ["src/**", "examples/**", "README.md"]
 
 [dependencies]
 bytes.workspace = true

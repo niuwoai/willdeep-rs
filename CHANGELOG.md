@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.78.0-rc23] - 2026-09-20
+
+### Added
+- **Runtime 作为平台对外（ADR 第 4 项）。** `willdeep-runtime-protocol` 与 `willdeep-runtime-client` 补齐发布元数据（description / readme / keywords / categories / include），workspace 里的路径依赖带上 `version = "0.78.0-rc1"`（整条 0.78 线都满足），各自有 README；客户端 crate 加了带可编译示例的 crate 文档，以及两个可运行示例 `submit_turn`（创建会话、提交一轮、从提交前的游标流式读事件、到该轮终态停）和 `tail_events`（从游标尾随事件流，流被关掉就沿最后序号重连）。`cargo publish --dry-run` 两个包都通过；真正发布到 crates.io 由持有 token 的维护者执行。
+- **`willdeep run` 进 CI。** `docs/CI_INTEGRATION.md` 讲安装、凭据与 `WILLDEEP_HOME` 隔离、为什么用 `run --local` 与 `--full-auto`、退出码策略、产物与成本护栏；`examples/ci/` 放通用脚本 `run-task.sh`（结果与 `audit export --session latest` 报告落成产物，退出码原样交给作业）、GitHub Actions 与 GitLab CI 样例。样例语法（`bash -n`、YAML 解析）进本仓库 CI；真跑模型不进公共 CI。
+
 ## [0.78.0-rc22] - 2026-09-20
 
 ### Added

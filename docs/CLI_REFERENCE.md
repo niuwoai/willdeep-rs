@@ -150,6 +150,8 @@ willdeep run --local "显式使用进程内兼容 Harness"
 | `4` | 等待/拒绝审批，或 Workspace 策略拒绝 |
 | `5` | Harness / Tool 执行失败 |
 
+放进 CI 流水线的做法（安装、凭据、`--local`、退出码策略、产物与审计报告）见 [CI 集成](CI_INTEGRATION.md)，样例在 `examples/ci/`。
+
 ## `willdeep session` — 会话查询与停止
 
 常用 Session 操作不必记住 `daemon` 下的内部命令：

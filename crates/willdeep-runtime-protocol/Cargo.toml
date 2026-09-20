@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Stable control-plane protocol for the WillDeep Runtime: operation names, request/response DTOs, the response envelope, events and the agent kernel event contract."
+readme = "README.md"
+documentation = "https://docs.rs/willdeep-runtime-protocol"
+keywords = ["willdeep", "coding-agent", "protocol", "runtime"]
+categories = ["api-bindings", "development-tools"]
+include = ["src/**", "fixtures/**", "README.md"]
 
 [dependencies]
 http.workspace = true

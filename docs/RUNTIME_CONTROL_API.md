@@ -246,3 +246,17 @@ Swift、Android 和第三方客户端应在 CI 中逐项解码 `responses`，并
 3. UUID、可空字段、snake_case 枚举和 64 位时间/序号保持精度；
 4. `status=error` 与 `status=ok` 使用显式分支处理；
 5. 夹具更新需要与 Rust 协议测试、版本号和 Changelog 同批提交。
+
+## 11. Rust SDK
+
+`willdeep-runtime-client` 就是 CLI、TUI 与 Web 桥接内部使用的客户端，作为 crate 对外：每个稳定操作一个类型化方法，DTO 与信封来自 `willdeep-runtime-protocol`，事件流按游标续传。两个 crate 的版本跟随 `willdeep` 发行版本，workspace 内以 `0.78.0-rc1` 为版本要求（整条 0.78 线都满足），`cargo publish --dry-run` 在 CI 里校验打包；实际发布到 crates.io 由持有 token 的维护者执行。
+
+```bash
+willdeep daemon start
+cargo run -p willdeep-runtime-client --example submit_turn -- /path/to/workspace "总结这个项目的风险"
+cargo run -p willdeep-runtime-client --example tail_events -- 0
+```
+
+连接方式（读 `runtime/daemon.json`、优先本机传输）、错误模型与升级交接时的重连约定见
+[`crates/willdeep-runtime-client/README.md`](../crates/willdeep-runtime-client/README.md)；
+不想常驻 Runtime 的一次性作业用 CLI，见 [`CI_INTEGRATION.md`](CI_INTEGRATION.md)。

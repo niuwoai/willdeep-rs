@@ -1,3 +1,65 @@
+//! Rust SDK for the WillDeep Runtime control plane.
+//!
+//! The Runtime is a local daemon (`willdeep daemon start`) that owns sessions, turns,
+//! agents, approvals and diff review. This crate is the same client the `willdeep`
+//! CLI, TUI and Web bridge use: one typed method per stable operation
+//! (`session.create`, `turn.submit`, `event.list`, …), the shared response envelope
+//! from [`willdeep_runtime_protocol`], and a resumable NDJSON event stream.
+//!
+//! # Connecting
+//!
+//! The daemon only listens on loopback or a local socket and requires the per-process
+//! token it writes to `$WILLDEEP_HOME/runtime/daemon.json` (`~/.willdeep` by default).
+//! Read that file and prefer the local transport when it is present:
+//!
+//! ```no_run
+//! use willdeep_runtime_client::RuntimeClient;
+//! use willdeep_runtime_protocol::ApiResponse;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let home = std::path::PathBuf::from(std::env::var("HOME")?).join(".willdeep");
+//! let state: serde_json::Value =
+//!     serde_json::from_slice(&std::fs::read(home.join("runtime/daemon.json"))?)?;
+//! let token = state["token"].as_str().unwrap_or_default();
+//! let client = match state["local_transport"]["path"].as_str() {
+//!     #[cfg(unix)]
+//!     Some(socket) => RuntimeClient::new_unix_socket(socket, token)?,
+//!     _ => RuntimeClient::new(
+//!         format!("http://{}", state["address"].as_str().unwrap_or_default()),
+//!         token,
+//!     )?,
+//! };
+//! match client.capabilities(None).await? {
+//!     ApiResponse::Ok { data, meta } => {
+//!         println!("runtime {} speaks protocol {}", meta.server_version, data.protocol_version);
+//!     }
+//!     ApiResponse::Error { error, .. } => eprintln!("runtime refused: {error}"),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Negotiate with [`RuntimeClient::capabilities`] once per connection: it returns the
+//! protocol version, the minimum client version and the operations this Runtime
+//! actually serves. Only call what it declares.
+//!
+//! # Submitting work and following it
+//!
+//! `examples/submit_turn.rs` creates a session, submits one turn, streams
+//! `task.output` events from the cursor taken before submitting and stops on that
+//! turn's terminal event; `examples/tail_events.rs` follows the event stream from any
+//! cursor and reconnects when the stream is closed (for instance across
+//! `willdeep daemon upgrade`).
+//!
+//! # Versioning and safety
+//!
+//! The crate version tracks the `willdeep` release it ships with; the wire contract is
+//! [`willdeep_runtime_protocol::PROTOCOL_VERSION`], negotiated at runtime. Only loopback
+//! `http://127.0.0.1:…`, `http://[::1]:…` and `http://localhost:…` endpoints are
+//! accepted; anything else is [`ClientError::UnsafeEndpoint`]. The control plane is not
+//! a remote API: put your own gateway and authentication in front of it if you need one.
+
 use std::pin::Pin;
 
 use bytes::Bytes;

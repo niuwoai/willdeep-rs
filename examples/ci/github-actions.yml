@@ -1,0 +1,54 @@
+# 复制到 .github/workflows/willdeep.yml。手动触发时填提示词；把 secrets.SOMEIM_API_KEY
+# （或 ANTHROPIC_API_KEY）配好即可。说明见 docs/CI_INTEGRATION.md。
+name: WillDeep task
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 交给 Agent 的任务（只读任务请写明「只报告，不改代码」）
+        required: true
+        default: 检查这个仓库的测试是否覆盖了 README 里承诺的行为，只报告，不改代码。
+  # 定时体检示例：每周一早上跑一次固定提示词（把 prompt 换成文件里的内容）
+  # schedule:
+  #   - cron: "0 1 * * 1"
+
+concurrency:
+  group: willdeep-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  willdeep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WILLDEEP_VERSION: v0.78.0-rc23
+      WILLDEEP_MODEL: glm-5
+      WILLDEEP_MAX_TURNS: "40"
+      SOMEIM_API_KEY: ${{ secrets.SOMEIM_API_KEY }}
+      # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install willdeep
+        run: |
+          curl -fsSL -o willdeep.tar.gz \
+            "https://github.com/niuwoai/willdeep-rs/releases/download/${WILLDEEP_VERSION}/willdeep-linux-amd64.tar.gz"
+          tar -xzf willdeep.tar.gz
+          sudo install -m 0755 willdeep /usr/local/bin/willdeep
+          willdeep --version
+
+      # 提示词先落文件再交给脚本：inputs 直接拼进 shell 就是注入口。
+      - name: Write prompt
+        env:
+          PROMPT: ${{ inputs.prompt }}
+        run: printf '%s\n' "$PROMPT" > prompt.txt
+
+      - name: Run
+        run: bash examples/ci/run-task.sh prompt.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: willdeep-${{ github.run_id }}
+          path: willdeep-artifacts
