@@ -67,6 +67,8 @@ impl App {
                 self.agent_detail_rect,
             )),
             (self.diff_review.is_some()).then_some(OverlayLayer::Blocking),
+            // 回退面板自己处理 Esc（确认阶段的 Esc 是「返回列表」，不是关掉）。
+            (self.rewind_picker.is_some()).then_some(OverlayLayer::Blocking),
             (self.routing_settings.is_some()).then_some(OverlayLayer::Dismissible(
                 DismissibleOverlay::RoutingSettings,
                 self.routing_settings_rect,

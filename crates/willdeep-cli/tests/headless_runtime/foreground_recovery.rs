@@ -79,7 +79,9 @@ observer = lambda do
   children = Dir.glob(File.join(home, 'workers/sessions/*.json'))
   parents = Dir.glob(File.join(home, 'sessions/*.json'))
   next false unless children.size == 1 && parents.size == 1
-  child = JSON.parse(File.read(children.first))
+  # 显式 UTF-8：LANG / LC_ALL / LC_CTYPE 都没设时 default_external 是 US-ASCII，
+  # 会话 JSON 里的非 ASCII 文本会让 JSON.parse 抛 Encoding::InvalidByteSequenceError。
+  child = JSON.parse(File.read(children.first, encoding: 'UTF-8'))
   checkpoint = child['execution_checkpoint']
   next false unless checkpoint && checkpoint['status'] == 'running' && checkpoint['pending_call_ids'] == []
   next false unless child['messages'].any? { |message| message['role'] == 'tool' && message['tool_call_id'] == 'foreground-write' }

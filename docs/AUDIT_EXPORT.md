@@ -34,6 +34,7 @@ willdeep --language en audit export                     # 报告语言跟全局 
 | 子 Agent | `runtime/agents.json` | 只列子级：标签 / 档案、状态、verifier 结论、尝试次数、引用核对、起点 commit、worktree 是否已合并 |
 | 改动归属 | `runtime/diff-attributions.json` | 记录自带 `session_id`：时间、根 / 子 Agent、工具、文件、快照 |
 | 审阅 / 回滚 | `runtime/diff-reviews.json`、`runtime/recovery/<快照>-*` | 按本会话的快照 id |
+| 检查点回退 | `runtime/recovery/rewind-<会话>-*`、事件流 `session.rewound` | 按本会话 id |
 
 JSON 的 `schema_version` 为 1，顶层 `summary` 与每个 `sessions[]` 项的字段名和 Markdown 各段一一对应。
 

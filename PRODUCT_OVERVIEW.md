@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-21 | 当前版本：v0.78.0-rc26（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-21 | 当前版本：v0.78.0-rc28（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -264,6 +264,7 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] 手机端工具审批和跨设备 Patch 审核；
 - [x] 平台沙箱：写入围栏默认开、网络围栏按档位断通（v0.78.0-rc25）；更强的命令风险分类仍待做；
 - [x] 小模型路线做成数据：`agent-metrics --json --since` + 每周快照发布 Deep Share / Worker Verified Success（v0.78.0-rc26，`docs/AGENT_METRICS.md`）；
+- [x] 检查点回退：每轮开始前工作树快照进私有影子 git 仓库，`/rewind` / Web ↶ / `session.rewind` 回到第 N 步，对话与文件可一起回（v0.78.0-rc28，`docs/CHECKPOINT_REWIND.md`）；
 - [ ] 流式真实 reasoning 摘要；当前单行区域显示可验证的运行阶段，不伪造模型思考内容；
 - [ ] Swift/Rust 共享会话 schema 稳定后开放双向原地写入；当前采用安全副本。
 - [ ] 抽取 Swift/Rust 共用的签名 Computer Use Helper 协议，再开放 AX 检查与短效控制租约。

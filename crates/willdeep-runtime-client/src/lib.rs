@@ -74,13 +74,14 @@ use willdeep_runtime_protocol::{
     DiffSnapshotQueryParams, DiffVerification, DiffVerificationParams, EmptyParams,
     EventListParams, ForkSessionParams, IdParams, ListArtifactsParams, ListToolsParams,
     ListTurnsParams, ObjectMutationResult, PendingApproval, PendingQuestion,
-    RegisterWorkspaceParams, RenameSessionParams, ResolveApprovalParams, RuntimeAgent,
-    RuntimeAgentCommand, RuntimeArtifact, RuntimeCapabilities, RuntimeEvent,
-    RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask, RuntimeTaskDiagnostics,
-    RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit, RuntimeWorktreeMergeResult,
-    RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview, SearchSessionsParams, SteerTurnOutcome,
-    SteerTurnParams, SubmitTurnParams, UpdateSessionApprovalModeParams, UpdateSessionModelParams,
-    WorkspaceEnsureParams, WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
+    RegisterWorkspaceParams, RenameSessionParams, ResolveApprovalParams, RewindSessionParams,
+    RewindSessionResult, RuntimeAgent, RuntimeAgentCommand, RuntimeArtifact, RuntimeCapabilities,
+    RuntimeEvent, RuntimeInteractionResult, RuntimeSession, RuntimeStatus, RuntimeTask,
+    RuntimeTaskDiagnostics, RuntimeTool, RuntimeTurn, RuntimeWorkspace, RuntimeWorktreeAudit,
+    RuntimeWorktreeMergeResult, RuntimeWorktreeQuarantineResult, RuntimeWorktreeReview,
+    SearchSessionsParams, SteerTurnOutcome, SteerTurnParams, SubmitTurnParams,
+    UpdateSessionApprovalModeParams, UpdateSessionModelParams, WorkspaceEnsureParams,
+    WorktreeMergeParams, WorktreeQuarantineParams, WorktreeReviewParams,
 };
 
 const TOKEN_HEADER: &str = "x-willdeep-token";
@@ -316,6 +317,15 @@ impl RuntimeClient {
         request_id: uuid::Uuid,
     ) -> Result<ApiResponse<RuntimeSession>, ClientError> {
         self.call("session.fork", params, Some(request_id)).await
+    }
+
+    /// 回到第 N 步：原地截断会话，可选恢复工作区文件。会话在跑时被拒绝。
+    pub async fn rewind_session(
+        &self,
+        params: &RewindSessionParams,
+        request_id: uuid::Uuid,
+    ) -> Result<ApiResponse<RewindSessionResult>, ClientError> {
+        self.call("session.rewind", params, Some(request_id)).await
     }
 
     pub async fn archive_session(

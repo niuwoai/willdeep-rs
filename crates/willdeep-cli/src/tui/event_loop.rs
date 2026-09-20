@@ -800,6 +800,27 @@ pub(super) async fn event_loop(
                         }
                         continue;
                     }
+                    if app.rewind_picker.is_some(){
+                        match app.handle_rewind_picker_key(key) {
+                            RewindPickerAction::None=>{},
+                            RewindPickerAction::Close=>app.rewind_picker=None,
+                            RewindPickerAction::Rewind{step,through_turn_id,restore_workspace}=>{
+                                app.rewind_picker=None;
+                                match crate::daemon::rewind_remote_session(&runtime.home,session.id,through_turn_id,restore_workspace).await {
+                                    Ok(result)=>{
+                                        // Runtime 已经把会话截断落盘；本地这份是旧的，整份重读再重画。
+                                        match store.load(session.id) {
+                                            Ok(loaded)=>{*session=loaded;app.load_session(session);},
+                                            Err(error)=>app.notice=Some(format!("{}: {error}",language.text("重新读取会话失败","Reload Session failed","セッションの再読込に失敗"))),
+                                        }
+                                        app.append_transcript(rewind_summary(&result,step,language));
+                                    },
+                                    Err(error)=>app.notice=Some(format!("{}: {error}",language.text("回退失败","Rewind failed","巻き戻しに失敗"))),
+                                }
+                            },
+                        }
+                        continue;
+                    }
                     if app.palette.is_some(){app.handle_palette_key(key,&runtime.background_tasks);continue;}
                     if app.search.is_some(){app.handle_search_key(key);continue;}
                     if app.handle_help_key(key) {continue;}
@@ -1113,6 +1134,14 @@ pub(super) async fn event_loop(
                                 match load_diff_review_state(&runtime.home,&session.workspace).await {
                                     Ok(review)=>app.diff_review=Some(review),
                                     Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("打开 Diff Review 失败","Open Diff Review failed","Diff Review を開けませんでした"))),
+                                }
+                                continue;
+                            }
+                            if prompt.trim()=="/rewind" {
+                                match crate::daemon::remote_rewind_points(&runtime.home,session.id).await {
+                                    Ok(points) if points.is_empty()=>app.append_transcript(format!("System: {}",language.text("没有可回退的步骤：只有 Runtime 跑完的轮次才能回，最后一步不算","Nothing to rewind to: only completed Runtime turns count, and the last one is where you already are","戻せるステップがありません：Runtime が完了したターンのみ対象で、最後のステップは現在地です"))),
+                                    Ok(points)=>app.open_rewind_picker(points),
+                                    Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("读取可回退步骤失败","Load rewind steps failed","戻せるステップの取得に失敗"))),
                                 }
                                 continue;
                             }

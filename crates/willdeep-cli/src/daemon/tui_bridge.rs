@@ -182,6 +182,122 @@ pub(crate) async fn fork_remote_session(
     Ok(session.id)
 }
 
+/// 「回到第 N 步」的一个可选步骤。TUI 面板和 Web 对话框画的是同一份。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RewindPoint {
+    /// 第几步，从 1 起；0 是「开头」。
+    pub step: usize,
+    /// `None` 就是开头。
+    pub turn_id: Option<uuid::Uuid>,
+    /// 这一步的用户输入第一行，最多 80 个字符；开头没有。
+    pub snippet: String,
+    pub completed_at: Option<u64>,
+    /// 回到这一步之后能不能连文件一起回：看下一步开始前有没有拍到检查点。
+    pub can_restore_workspace: bool,
+}
+
+const REWIND_SNIPPET_CHARS: usize = 80;
+
+fn rewind_snippet(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut snippet: String = line.chars().take(REWIND_SNIPPET_CHARS).collect();
+    if line.chars().count() > REWIND_SNIPPET_CHARS {
+        snippet.push('…');
+    }
+    snippet
+}
+
+/// 列出一个会话现在还能回到的步骤：只算已完成、边界与当前压缩代数对得上的轮次；
+/// 最后一步不算（已经在那儿了）。没压缩过的会话还多一条「开头」。
+pub(crate) fn rewind_points(
+    turns: &[willdeep_runtime_protocol::RuntimeTurn],
+    session: &willdeep_core::Session,
+) -> Vec<RewindPoint> {
+    let mut turns = turns
+        .iter()
+        .filter(|turn| turn.session_id == session.id)
+        .collect::<Vec<_>>();
+    turns.sort_by_key(|turn| turn.queue_sequence);
+    let eligible = |turn: &willdeep_runtime_protocol::RuntimeTurn| {
+        turn.status == willdeep_runtime_protocol::TurnStatus::Completed
+            && turn.message_generation == session.compression_generation
+            && turn
+                .message_end
+                .is_some_and(|end| end <= session.messages.len())
+    };
+    let mut points = Vec::new();
+    if session.compression_generation == 0
+        && let Some(first) = turns.first()
+    {
+        points.push(RewindPoint {
+            step: 0,
+            turn_id: None,
+            snippet: String::new(),
+            completed_at: None,
+            can_restore_workspace: first.workspace_checkpoint.is_some(),
+        });
+    }
+    for (index, turn) in turns.iter().enumerate() {
+        let Some(next) = turns.get(index + 1) else {
+            break; // 最后一步：没有可丢的。
+        };
+        if !eligible(turn) {
+            continue;
+        }
+        let snippet = turn
+            .message_start
+            .and_then(|start| session.messages.get(start))
+            .filter(|message| message.role == willdeep_core::Role::User)
+            .map(|message| rewind_snippet(&message.content))
+            .unwrap_or_default();
+        points.push(RewindPoint {
+            step: index + 1,
+            turn_id: Some(turn.id),
+            snippet,
+            completed_at: turn.completed_at,
+            can_restore_workspace: next.workspace_checkpoint.is_some(),
+        });
+    }
+    points
+}
+
+pub(crate) async fn remote_rewind_points(
+    home: &Path,
+    session_id: uuid::Uuid,
+) -> Result<Vec<RewindPoint>> {
+    let state = ensure_running(home).await?;
+    let turns = api_data(runtime_client(&state)?.turns(session_id).await?)?;
+    let session = willdeep_core::SessionStore::new(home)
+        .load(session_id)
+        .with_context(|| format!("load Session {session_id}"))?;
+    Ok(rewind_points(&turns, &session))
+}
+
+pub(crate) async fn rewind_remote_session(
+    home: &Path,
+    id: uuid::Uuid,
+    through_turn_id: Option<uuid::Uuid>,
+    restore_workspace: bool,
+) -> Result<willdeep_runtime_protocol::RewindSessionResult> {
+    let state = ensure_running(home).await?;
+    api_data(
+        runtime_client(&state)?
+            .rewind_session(
+                &willdeep_runtime_protocol::RewindSessionParams {
+                    id,
+                    through_turn_id,
+                    restore_workspace,
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .await?,
+    )
+}
+
 pub(crate) async fn set_remote_session_archived(
     home: &Path,
     id: uuid::Uuid,
@@ -1357,5 +1473,126 @@ mod tests {
             !fallback.detail.contains("Task: "),
             "标题已是 UUID 时正文不再重复"
         );
+    }
+}
+
+#[cfg(test)]
+mod rewind_point_tests {
+    use super::*;
+    use willdeep_runtime_protocol::TurnStatus;
+
+    fn turn(
+        session_id: uuid::Uuid,
+        sequence: u64,
+        status: TurnStatus,
+        range: (usize, usize),
+        generation: u64,
+        checkpoint: Option<&str>,
+    ) -> willdeep_runtime_protocol::RuntimeTurn {
+        willdeep_runtime_protocol::RuntimeTurn {
+            id: uuid::Uuid::new_v4(),
+            session_id,
+            request_id: uuid::Uuid::new_v4(),
+            queue_sequence: sequence,
+            status,
+            active_task_id: None,
+            attempts: 1,
+            created_at: sequence,
+            started_at: Some(sequence),
+            completed_at: Some(sequence + 1),
+            message_start: Some(range.0),
+            message_end: Some(range.1),
+            message_generation: generation,
+            workspace_checkpoint: checkpoint.map(str::to_owned),
+        }
+    }
+
+    fn session_with(prompts: &[&str]) -> willdeep_core::Session {
+        let mut session =
+            willdeep_core::Session::new(std::path::PathBuf::from("/workspace"), None, "rewind");
+        for prompt in prompts {
+            session.messages.push(willdeep_core::Message::user(*prompt));
+            session
+                .messages
+                .push(willdeep_core::Message::assistant("ok", Vec::new()));
+        }
+        session
+    }
+
+    #[test]
+    fn rewind_points_skip_the_last_turn_and_carry_the_next_turns_checkpoint() {
+        let session = session_with(&["修登录\n细节在第二行", "补测试", "再来一次"]);
+        let turns = vec![
+            turn(session.id, 1, TurnStatus::Completed, (0, 2), 0, Some("c1")),
+            turn(session.id, 2, TurnStatus::Completed, (2, 4), 0, None),
+            turn(session.id, 3, TurnStatus::Completed, (4, 6), 0, Some("c3")),
+            // 别的会话的轮次不算。
+            turn(
+                uuid::Uuid::new_v4(),
+                9,
+                TurnStatus::Completed,
+                (0, 2),
+                0,
+                Some("x"),
+            ),
+        ];
+        let points = rewind_points(&turns, &session);
+        assert_eq!(
+            points.iter().map(|point| point.step).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(points[0].turn_id, None);
+        assert!(
+            points[0].can_restore_workspace,
+            "the beginning restores to the first turn's checkpoint"
+        );
+        assert_eq!(points[1].snippet, "修登录");
+        assert_eq!(points[1].turn_id, Some(turns[0].id));
+        assert!(
+            !points[1].can_restore_workspace,
+            "turn 2 took no checkpoint"
+        );
+        assert_eq!(points[2].snippet, "补测试");
+        assert!(points[2].can_restore_workspace, "turn 3 did");
+    }
+
+    #[test]
+    fn compression_and_unfinished_turns_narrow_the_choices() {
+        let mut session = session_with(&["a", "b", "c"]);
+        session.compression_generation = 1;
+        let stale = vec![
+            turn(session.id, 1, TurnStatus::Completed, (0, 2), 0, Some("c1")),
+            turn(session.id, 2, TurnStatus::Completed, (2, 4), 0, None),
+        ];
+        assert!(
+            rewind_points(&stale, &session).is_empty(),
+            "no beginning after compression, stale boundaries skipped"
+        );
+
+        let mixed = vec![
+            turn(session.id, 1, TurnStatus::Failed, (0, 2), 1, None),
+            turn(session.id, 2, TurnStatus::Completed, (2, 4), 1, None),
+            turn(session.id, 3, TurnStatus::Completed, (4, 6), 1, Some("c3")),
+        ];
+        let points = rewind_points(&mixed, &session);
+        assert_eq!(
+            points.iter().map(|point| point.step).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(points[0].can_restore_workspace);
+
+        let overflow = vec![
+            turn(session.id, 1, TurnStatus::Completed, (0, 99), 1, None),
+            turn(session.id, 2, TurnStatus::Completed, (99, 100), 1, None),
+        ];
+        assert!(
+            rewind_points(&overflow, &session).is_empty(),
+            "a boundary past the history is not offered"
+        );
+        assert_eq!(
+            rewind_snippet(&"字".repeat(100)).chars().count(),
+            REWIND_SNIPPET_CHARS + 1
+        );
+        assert_eq!(rewind_snippet("\n\n  short  \nmore"), "short");
     }
 }

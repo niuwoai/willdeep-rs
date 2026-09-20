@@ -27,6 +27,7 @@
 | [子 Agent 与后台任务](SUBAGENTS.md) | 八种 Profile、模型绑定、Worktree 审查与合并 |
 | [Agent Runtime Kernel（任务书）](AGENT_RUNTIME_KERNEL.md) | 统一事件信封、三档中断、lease 与外部事件的移植计划 |
 | [小上下文 Skill Worker](SKILL_WORKERS.md) | 工种分档、Task Packet、Verifier 闭环、文件集锁 |
+| [检查点回退](CHECKPOINT_REWIND.md) | `/rewind` 回到第 N 步：每轮开始前的工作树快照存哪、回退时发生什么 |
 | [双端共享模型目录](SHARED_MODEL_CATALOG.md) | Xedit / rs 共用 Provider、模型事实、候选池与凭据引用契约 |
 | [审批与自动化](APPROVALS.md) | 三档审批模式、Always Allow 边界、CI 用法、`ask_user` |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |

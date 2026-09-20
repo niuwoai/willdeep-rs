@@ -681,10 +681,18 @@ fn audit_session(session: &Session, sources: &Sources) -> SessionAudit {
         })
         .collect();
 
+    // 检查点回退的回收区目录带会话 id 而不是快照 id：`rewind-<会话>-<随机>`。
+    let rewind_prefix = format!("rewind-{}-", session.id.simple());
     let reverts = sources
         .recovery_dirs
         .iter()
         .filter_map(|directory| {
+            if directory.starts_with(&rewind_prefix) {
+                return Some(RevertEntry {
+                    snapshot_id: "rewind".to_owned(),
+                    recovery_dir: directory.clone(),
+                });
+            }
             snapshot_ids
                 .iter()
                 .find(|snapshot_id| directory.starts_with(&format!("{snapshot_id}-")))
@@ -1609,6 +1617,17 @@ mod tests {
         );
         std::fs::create_dir_all(home.0.join("runtime/recovery/snap-b-deadbeef")).unwrap();
         std::fs::create_dir_all(home.0.join("runtime/recovery/snap-z-cafe")).unwrap();
+        // 检查点回退的回收区按会话 id 命名：本会话的算，别的会话的不算。
+        std::fs::create_dir_all(home.0.join(format!(
+            "runtime/recovery/rewind-{}-feed",
+            session.id.simple()
+        )))
+        .unwrap();
+        std::fs::create_dir_all(home.0.join(format!(
+            "runtime/recovery/rewind-{}-beef",
+            Uuid::new_v4().simple()
+        )))
+        .unwrap();
         (home, session, workspace)
     }
 
@@ -1669,8 +1688,28 @@ mod tests {
         assert_eq!(audit.changes[0].agent, "root");
         assert_eq!(audit.files_changed, vec!["src/lib.rs"]);
         assert_eq!(audit.reviews.len(), 1);
-        assert_eq!(audit.reverts.len(), 1);
-        assert_eq!(audit.reverts[0].recovery_dir, "snap-b-deadbeef");
+        assert_eq!(
+            audit.reverts.len(),
+            2,
+            "one snapshot revert plus this session's rewind"
+        );
+        assert!(
+            audit
+                .reverts
+                .iter()
+                .any(|entry| entry.snapshot_id == "rewind" && entry.recovery_dir.ends_with("-feed")),
+            "{:?}",
+            audit.reverts
+        );
+        assert!(
+            audit
+                .reverts
+                .iter()
+                .any(|entry| entry.snapshot_id == "snap-b"
+                    && entry.recovery_dir == "snap-b-deadbeef"),
+            "{:?}",
+            audit.reverts
+        );
         assert_eq!(audit.input_tokens, Some(100));
         assert_eq!(report.summary.input_tokens, 100);
         assert_eq!(audit.status.as_deref(), Some("completed"));

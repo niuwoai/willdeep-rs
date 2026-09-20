@@ -55,6 +55,7 @@ mod overlay_dismiss;
 mod permission_commands;
 mod plan_ui;
 mod rendering;
+mod rewind_ui;
 mod routing_settings;
 mod runtime_ui;
 mod session_commands;
@@ -80,6 +81,7 @@ use permission_commands::{
 };
 use plan_ui::*;
 use rendering::*;
+use rewind_ui::{RewindPickerAction, RewindPickerState, render_rewind_picker, rewind_summary};
 use routing_settings::{RoutingSettingsAction, RoutingSettingsState, render_routing_settings};
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
@@ -325,6 +327,7 @@ struct App {
     palette_rect: Rect,
     palette_hits: Vec<(u16, usize)>,
     session_picker: Option<SessionPickerState>,
+    rewind_picker: Option<RewindPickerState>,
     session_picker_rect: Rect,
     session_picker_hits: Vec<(u16, usize)>,
     model_picker: Option<ModelPickerState>,
@@ -1757,6 +1760,7 @@ fn draw(
             }
         }
         render_session_picker(f, app);
+        render_rewind_picker(f, app);
         render_model_picker(f, app);
         render_permission_picker(f, app);
         render_routing_settings(f, app);

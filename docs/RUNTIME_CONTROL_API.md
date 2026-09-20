@@ -72,6 +72,7 @@ session.rename
 session.update_model
 session.update_approval_mode
 session.fork
+session.rewind
 session.archive
 session.delete
 session.export

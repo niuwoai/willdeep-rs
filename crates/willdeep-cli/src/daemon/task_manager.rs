@@ -464,7 +464,36 @@ impl TaskManager {
         ));
         // 用户在本轮进行中的插话由此送达：turn.steer 按会话找到这个收件箱。
         request.instruction_inbox = Some(self.steering.register(id, request.session_id));
+        let checkpoint_target = task.session_id.zip(task.turn_id);
+        let checkpoint_workspace = request.workspace.clone();
         tokio::spawn(async move {
+            // 模型动手之前给工作树拍一张：「回到第 N 步」恢复文件靠的就是这一张。
+            // 拍不成不拦这一轮——回退时会说这一步没有文件检查点。
+            if let Some((session_id, turn_id)) = checkpoint_target
+                && super::workspace_checkpoint::enabled()
+            {
+                match super::workspace_checkpoint::capture_blocking(
+                    home.clone(),
+                    checkpoint_workspace,
+                    session_id,
+                    turn_id,
+                )
+                .await
+                {
+                    Ok(checkpoint) => {
+                        if let Err(error) = manager
+                            .sessions
+                            .record_workspace_checkpoint(turn_id, checkpoint.commit)
+                        {
+                            eprintln!("record workspace checkpoint for Turn {turn_id}: {error:#}");
+                        }
+                    }
+                    Err(error) if error.to_string().contains("not a git repository") => {}
+                    Err(error) => {
+                        eprintln!("workspace checkpoint for Turn {turn_id} skipped: {error:#}");
+                    }
+                }
+            }
             let execution =
                 crate::harness::execute_runtime(&home, request, connection, sink, |core| {
                     manager.sessions.prepare_execution(id, core)

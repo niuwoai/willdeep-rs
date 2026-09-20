@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.78.0-rc28] - 2026-09-21
+
+### Added
+- **检查点回退（体验基线第 11 项，`/rewind`）。** 每个 Runtime 轮次开始前，工作树先在私有影子 git 仓库（`$WILLDEEP_HOME/runtime/checkpoints/<工作区哈希>/`）里拍一份内容快照：对象库借用工作区自己的 `.git/objects`（alternates），没改过的文件不重复存；引用在 `refs/willdeep/<会话>/<轮次>`，用户仓库的 HEAD、索引、`git log --all` 一概不受影响；未跟踪文件超过 2000 个只拍已跟踪的，单个超过 4 MiB 的不拍；不是 git 仓库的工作区没有文件检查点。新控制面操作 `session.rewind { id, through_turn_id?, restore_workspace }`：会话**原地**截断到第 N 步结束（`None` 为回到开头，压缩过的会话回不到开头），被丢掉的轮次从 `turns.json` 摘掉，执行检查点清空；`restore_workspace` 为真时文件按第 N+1 步开始前的检查点恢复——被覆盖、被删的当前文件先进 `runtime/recovery/rewind-<会话>-<随机>/`，回退前的整棵树也拍成 `before-rewind` 快照，回退本身可回退。顺序是先文件、后对话：文件恢复失败时对话一个字没动。会话在跑、有排队轮次、边界轮次没完成或早于压缩检查点时拒绝。文档 `docs/CHECKPOINT_REWIND.md`。
+- TUI `/rewind`：面板列出还能回到的步骤（Runtime 跑完的轮次；最后一步不算；没压缩过的会话多一条「开头」），每行带提示词首行和「文件✓ / 仅对话」，默认停在最近一步；Enter 进确认行，再按 Enter 对话与文件一起回、`v` 只回对话、Esc 返回；回退后整份会话重读重画，聊天区写一行摘要。运行中拒绝。
+- Web：会话工具栏新增 ↶，对话框单选一步、勾选「同时恢复工作区文件」（没检查点时禁用并说明）、提示会丢几步；`GET /api/sessions/{id}/rewind-points`、`POST /api/sessions/{id}/rewind`。三种语言。
+- `willdeep daemon rewind-session <id> [--through-turn <turn-id>] [--restore-workspace]`。`turn.list` / `turn.get` 的 `RuntimeTurn` 新增 `message_start` / `message_end` / `message_generation` / `workspace_checkpoint`（老 Runtime 缺省）；`session.rewind` 进 `SUPPORTED_OPERATIONS`。`WILLDEEP_WORKSPACE_CHECKPOINTS=0` 关掉拍照。`willdeep audit export` 把 `rewind-<会话>-*` 回收区目录列进回滚证据。
+- 测试：影子仓库拍照 / 恢复 / 回收区 / before-rewind 再恢复 / 非 git 工作区 / 删会话清引用；会话存储的原地回退（丢轮次、回开头、压缩后拒绝、最后一步无可回）；核心 `Session::rewind_to`；TUI 面板键位状态机、行文案与渲染；协议往返；真 Daemon 集成用例 `rewind_restores_conversation_and_files_to_an_earlier_turn`（两轮跑完回到第 1 步，文件与对话都恢复、原件在回收区、HEAD 不动、回退后还能续跑）。
+
+### Changed
+- README「边界」不再写「无 checkpoint / rewind」；`docs/EXPERIENCE_BASELINE.md` 第 11 项两端到位。
+
+## [0.78.0-rc27] - 2026-09-21
+
+### Fixed
+- **headless 集成测试不再被 US-ASCII locale 打死。** `interrupted_foreground_child_is_discovered_resumed_and_reported_without_replay` 由 Rust 测试生成的 `interrupt.rb` 观察者用 `File.read` 读子 Agent 的会话 JSON；`LANG` / `LC_ALL` / `LC_CTYPE` 都没设时 Ruby 的 `Encoding.default_external` 是 US-ASCII，会话里的非 ASCII 文本（省略号、中文）让 `JSON.parse` 在 `encode` 处抛 `Encoding::InvalidByteSequenceError`，控制器退出码 1，测试必红。现在这一处读取显式 `encoding: 'UTF-8'`，与 `scripts/lib/agent_eval_observation.rb` 按二进制读、`scripts/test/agent_metrics_test.rb` 对子进程输出 `force_encoding('UTF-8')` 是同一条纪律。`scripts/lib/agent_eval_process.rb` 自己不解析 willdeep 的输出（stdout / stderr 按字节落日志，状态管道里只有 supervisor 写的纯 ASCII JSON），不用改。
+
 ## [0.78.0-rc26] - 2026-09-21
 
 ### Added

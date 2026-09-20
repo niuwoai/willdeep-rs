@@ -228,7 +228,7 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 - [x] MCP Streamable HTTP + OAuth（v0.78.0-rc24）：`url` 服务、`Mcp-Session-Id` 与协议版本头、会话过期重握手、`bearer_token_env` / `${env:NAME}` 头、`willdeep mcp login|logout|list|tools`（授权码 + PKCE、回环回调、RFC 9728 / 8414 / 7591 / 8707）。
 - [x] 写入围栏默认开 + 网络围栏（v0.78.0-rc25）：有后端就开、工具链缓存默认放行、`~/` 展开；网络按档位断通（`workspace-write` / `read-only` 断），`agent.sandbox_network` 可整体收放，`run_command` 的 `network: true` 逃生口由人放行；`doctor` 报围栏状态。
 - [x] 小模型路线做成数据（v0.78.0-rc26）：`agent-metrics --json --since`，每周快照进 `bench/agent-metrics/history.jsonl`，Deep Share / Worker Verified Success 趋势写回 README 与 `docs/AGENT_METRICS.md`，没达设计目标退出码 2。
-- [ ] 检查点回退（回到第 N 步）。
+- [x] 检查点回退（v0.78.0-rc28）：每轮开始前工作树快照进私有影子 git 仓库，`session.rewind` 原地截断对话、可选按快照恢复文件（原件进回收区、回退前另拍快照）；TUI `/rewind` 面板、Web ↶ 对话框、`willdeep daemon rewind-session`，见 `docs/CHECKPOINT_REWIND.md`。
 
 验收：清单每项「已到位」对应一条事件级测试；提示词与路由改动附带指标前后对比。
 

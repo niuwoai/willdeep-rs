@@ -44,6 +44,7 @@ mod session_store;
 mod steering;
 mod tool_store;
 pub(crate) mod tui_bridge;
+mod workspace_checkpoint;
 mod workspace_store;
 mod worktree_maintenance;
 mod worktree_review;
@@ -55,12 +56,13 @@ use event_stream::EventLog;
 pub(crate) use headless::{HeadlessRuntimeRequest, HeadlessRuntimeStatus, execute_headless_turn};
 use local_transport::LocalTransportState;
 pub(crate) use tui_bridge::{
-    RemoteGate, RemoteRuntimeEvent, RuntimeSnapshot, answer_remote_question, cancel_remote_task,
-    delete_remote_session, ensure_runtime_session, export_remote_session, fork_remote_session,
-    instruct_remote_agent, remote_active_turn, remote_agent_detail, remote_latest_turn,
-    remote_session_states, remote_task_diagnostics, remote_turn_session, rename_remote_session,
-    resolve_remote_approval, retry_remote_agent, retry_remote_agent_with_model, runtime_event_head,
-    runtime_events, runtime_snapshot, search_remote_session_results, set_remote_session_archived,
+    RemoteGate, RemoteRuntimeEvent, RewindPoint, RuntimeSnapshot, answer_remote_question,
+    cancel_remote_task, delete_remote_session, ensure_runtime_session, export_remote_session,
+    fork_remote_session, instruct_remote_agent, remote_active_turn, remote_agent_detail,
+    remote_latest_turn, remote_rewind_points, remote_session_states, remote_task_diagnostics,
+    remote_turn_session, rename_remote_session, resolve_remote_approval, retry_remote_agent,
+    retry_remote_agent_with_model, rewind_remote_session, runtime_event_head, runtime_events,
+    runtime_snapshot, search_remote_session_results, set_remote_session_archived,
     spawn_remote_agent, start_runtime_event_follower, steer_remote_turn, stop_remote_agent,
     stop_remote_turn, submit_runtime_turn, update_remote_session_approval_mode,
     update_remote_session_model,
@@ -375,6 +377,16 @@ pub enum DaemonAction {
         provider_profile: Option<String>,
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Rewind an inactive Runtime Session to the end of a completed Turn.
+    RewindSession {
+        id: uuid::Uuid,
+        /// Keep history through this Turn; omit to rewind to the beginning.
+        #[arg(long, value_name = "TURN_ID")]
+        through_turn: Option<uuid::Uuid>,
+        /// Also restore workspace files to the checkpoint taken before the first dropped Turn.
+        #[arg(long)]
+        restore_workspace: bool,
     },
     /// Archive an inactive Runtime Session.
     ArchiveSession { id: uuid::Uuid },
@@ -875,6 +887,11 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
             session_store::fork_session_cli(&home, id, title, through_turn, provider_profile, model)
                 .await
         }
+        DaemonAction::RewindSession {
+            id,
+            through_turn,
+            restore_workspace,
+        } => session_store::rewind_session_cli(&home, id, through_turn, restore_workspace).await,
         DaemonAction::ArchiveSession { id } => {
             session_store::archive_session_cli(&home, id, false).await
         }

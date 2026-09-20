@@ -161,7 +161,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 | **界面** | Ratatui TUI · React Web · 手机中继 · NDJSON 自动化输出 |
 | **扩展** | `SKILL.md` 技能 · MCP（stdio 与 Streamable HTTP，远程服务 OAuth 登录） · 项目上下文文件 · 插件（与 macOS 版共享插件包） |
 | **协作** | 持久 Session/Turn · 历史会话检索 · Fork 与归档 · 多工作区 · 子 Agent 树 |
-| **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 |
+| **审查** | Diff 快照与归属 · Worktree 审查合并 · Commit Preview · 安全撤销 · 检查点回退（`/rewind` 回到第 N 步，对话与文件） |
 | **闸门** | 三档工作区策略 · 静态规则 + AI judge 两级命令审批 · 持久 Always Allow · OS 级围栏（写入 + 网络，默认开） · 门禁 Hooks · `willdeep audit export` 一份审计报告（审批放行、人工裁决、hook 拦截、验证证据、改动归属） |
 | **遥测** | 子 Agent 判定落盘 · Skill Coverage / Verified Success / Escalation Rate · 实弹靶场 |
 | **语言** | 简体中文 · English · 日本語 |
@@ -175,7 +175,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - **OS 级围栏不限制读取，网络没有中间档。** 写入围栏与网络围栏两个后端语义一致，但进程读什么不管（`~/.aws/credentials` 读得到），网络只有通 / 断两档，不能只放某个域名。`[[hooks]]` 命令、MCP stdio 子进程和宿主自己的 `git` / `rg` 调用不在围栏里；没装 bubblewrap 的 Linux 机器没有围栏。
 - **Hooks 只有三个触发点。** `pre_tool` / `post_tool` / `approval_resolved`，其中 `approval_resolved` 还没接线；没有 `session_start`、`turn_end`、`pre_write`，hook 也改不了参数（只能放行或拦截）。
 - **MCP 不接服务端主动请求。** stdio 与 Streamable HTTP（含 OAuth 登录）都有了，但 `sampling/*`、`roots/*` 这类服务端发起的请求和 GET 事件流一律不处理：宿主没有替远端代发模型请求的授权。
-- **无 checkpoint / rewind。** 回退靠 Diff 审查 + 安全撤销，是合格替代，但长任务的可观测性弱于逐轮快照。
+- **检查点只到轮次粒度，只认 git 仓库。** `/rewind` 回到第 N 步靠每轮开始前的工作树快照（私有影子 git 仓库，不碰你的 `.git`）；不是 git 仓库的工作区只能回对话，一轮之内逐个工具的改动仍靠 `/diff` 的归属记录。
 - **不含 Computer Use 与 Browser Use。**
 - **Web 模式是单用户模式，没有应用层鉴权**（详见下方安全须知）。
 
@@ -200,6 +200,7 @@ willdeep run --output json "总结当前风险"        # 自动化，稳定退�
 - [插件系统](docs/PLUGINS.md) — 与 macOS 版共享插件包，沙箱边界与审批为何各管各的
 - [审批与自动化](docs/APPROVALS.md) — 三档模式与 CI 用法
 - [OS 级写入围栏](docs/SANDBOX.md) — Seatbelt / bubblewrap，预览态
+- [检查点回退](docs/CHECKPOINT_REWIND.md) — `/rewind` 回到第 N 步，快照存哪、回退时发生什么
 - [生命周期挂钩](docs/HOOKS.md) — 审计留痕与 CI / 合规门禁
 - [故障排查](docs/TROUBLESHOOTING.md) — 出问题先看这里
 
