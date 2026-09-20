@@ -49,7 +49,13 @@ function settleActiveSteps(steps: RunStep[], now: number): RunStep[] {
     ? { ...step, status: "done" as const, elapsedMs: step.elapsedMs ?? now - step.startedAt }
     : step);
 }
-type ChatMessage = { id: string; role: ConversationItem["role"] | "activity"; content: string; steps?: RunStep[]; plan?: Plan; details?: string[] };
+type ChatMessage = { id: string; role: ConversationItem["role"] | "activity"; content: string; steps?: RunStep[]; thinking?: string; plan?: Plan; details?: string[] };
+/// 思维链只留尾巴：像滚动字幕，看得到它此刻在想什么就够了，正文一来就隐藏。
+const THINKING_TAIL_CHARS = 240;
+function thinkingTail(text: string): string {
+  const compact = text.replace(/\s+/g, " ");
+  return compact.length > THINKING_TAIL_CHARS ? `…${compact.slice(-THINKING_TAIL_CHARS)}` : compact;
+}
 function sessionChat(detail: SessionDetail, attachmentLabel: string): ChatMessage[] {
   return detail.messages.map((message, index) => ({
     id: `${detail.id}-${index}`, role: message.role, plan: message.plan, details: message.details,
@@ -176,13 +182,50 @@ function waitForReconnect(delay: number, signal: AbortSignal) {
 /// 一次长任务动辄几十步，全列出来会把整个聊天区顶满，而人真正关心的只有
 /// 「现在在干什么、刚才几步是什么」。折起来的部分只报个数，不留一长串。
 const VISIBLE_RUN_STEPS = 5;
+/// 与 TUI 同一套折叠规则：以「正在思考 · 第 N 轮」步为界分小轮次，早先的小轮次收成
+/// 一行汇总，最新一轮留一行汇总加最新一步，正在跑的那步永远可见；外层再按
+/// VISIBLE_RUN_STEPS 兜底。
+const LATEST_TURN_ROWS = 2;
+type RunRow = { kind: "step"; step: RunStep } | { kind: "summary"; id: string; label: string; status: "done" | "failed" };
+
+function summarizeSteps(id: string, head: RunStep, hidden: RunStep[], t: Messages): RunRow {
+  const failed = hidden.filter((step) => step.status === "failed").length;
+  const label = `${head.label} · ${t.foldedSteps.replace("{count}", String(hidden.length))}${failed ? t.foldedFailed.replace("{count}", String(failed)) : ""}`;
+  return { kind: "summary", id, label, status: failed ? "failed" : "done" };
+}
+
+function foldRunSteps(steps: RunStep[], t: Messages): RunRow[] {
+  const segments: RunStep[][] = [];
+  for (const step of steps) {
+    if (step.id.startsWith("turn-") || segments.length === 0) segments.push([step]);
+    else segments[segments.length - 1].push(step);
+  }
+  const rows: RunRow[] = [];
+  segments.forEach((segment, index) => {
+    const [head, ...tools] = segment;
+    const latest = index === segments.length - 1;
+    if (!latest) {
+      if (tools.length === 0) rows.push({ kind: "step", step: head });
+      else rows.push(summarizeSteps(`${head.id}-summary`, head, tools, t));
+      return;
+    }
+    if (segment.length <= LATEST_TURN_ROWS) { segment.forEach((step) => rows.push({ kind: "step", step })); return; }
+    const newest = tools[tools.length - 1];
+    rows.push(summarizeSteps(`${head.id}-summary`, head, tools.slice(0, -1), t));
+    rows.push({ kind: "step", step: newest });
+  });
+  return rows;
+}
 
 function RunCard({ steps, messages: t }: { steps: RunStep[]; messages: Messages }) {
-  const hidden = Math.max(0, steps.length - VISIBLE_RUN_STEPS);
-  const visible = steps.slice(hidden);
+  const rows = foldRunSteps(steps, t);
+  const hidden = Math.max(0, rows.length - VISIBLE_RUN_STEPS);
+  const visible = rows.slice(hidden);
   return <Box className="run-card">
     {hidden > 0 && <Text className="run-collapsed">{t.earlierSteps.replace("{count}", String(hidden))}</Text>}
-    {visible.map((step) => <Flex key={step.id} className={`run-step ${step.status}`}><Box className="step-dot" /><Text>{step.label}</Text>{step.detail && <Text className="run-step-detail" title={step.detail}>{step.detail}</Text>}{step.elapsedMs !== undefined && <Text className="run-step-elapsed">{formatStepElapsed(step.elapsedMs)}</Text>}</Flex>)}
+    {visible.map((row) => row.kind === "summary"
+      ? <Flex key={row.id} className={`run-step ${row.status}`}><Box className="step-dot" /><Text>{row.label}</Text></Flex>
+      : <Flex key={row.step.id} className={`run-step ${row.step.status}`}><Box className="step-dot" /><Text>{row.step.label}</Text>{row.step.detail && <Text className="run-step-detail" title={row.step.detail}>{row.step.detail}</Text>}{row.step.elapsedMs !== undefined && <Text className="run-step-elapsed">{formatStepElapsed(row.step.elapsedMs)}</Text>}</Flex>)}
   </Box>;
 }
 
@@ -406,7 +449,7 @@ export function App() {
     const currentTurnId = event.turn_id || activeTurnRef.current;
     if (currentSessionId && currentTurnId) saveRuntimeCursor(currentSessionId, currentTurnId, event.cursor);
     if (event.type === "completed" || event.type === "partial") {
-      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "" } : message));
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "", thinking: "" } : message));
       setActiveRuntimeSessionId("");
       activeSessionRef.current = null;
       activeTurnRef.current = null;
@@ -414,12 +457,17 @@ export function App() {
     }
     if (event.type === "error") return { terminal: true as const, error: event.message || t.requestFailed };
     if (event.type === "assistant_text_delta") {
-      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: message.content + (event.text || "") } : message));
+      // 正文一开始，思维链尾巴就隐藏。
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: message.content + (event.text || ""), thinking: "" } : message));
+    }
+    else if (event.type === "reasoning_delta") {
+      setActivity(t.thinking);
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, thinking: thinkingTail(`${message.thinking ?? ""}${event.text || ""}`) } : message));
     }
     else if (["provider_retry_wait", "subagent_retry_wait", "provider_retry_started", "subagent_retry_started"].includes(event.type)) setActivity(event.label || t.thinking);
     else if (event.type === "thought") setActivity(event.text || t.thinking);
     else if (event.type === "turn_started") {
-      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "" } : message));
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "", thinking: "" } : message));
       setActivity(event.label || t.thinking);
       const stepId = event.id || `turn-${event.cursor ?? nextId("turn")}`;
       updateRun(runId, (steps) => {
@@ -430,6 +478,7 @@ export function App() {
     }
     else if (event.type === "tool_requested") {
       setActivity(event.label || t.toolRunning);
+      setChat((current) => current.map((message) => message.id === runId ? { ...message, thinking: "" } : message));
       const stepId = event.id || `tool-${event.cursor ?? nextId("tool")}`;
       updateRun(runId, (steps) => steps.some((step) => step.id === stepId) ? steps : [...steps, { id: stepId, label: event.label || t.toolRunning, detail: event.detail, status: "active", startedAt: Date.now() }]);
     }
@@ -902,7 +951,7 @@ export function App() {
     </Box>
     <Container maxW="920px" px={{ base: "4", md: "8" }} py="6" display="flex" flexDir="column" h="100vh">
       <Box ref={chatViewportRef} className="chat-viewport" flex="1" minH="0" overflowY="auto" pb="10" onScroll={() => { const node = chatViewportRef.current; if (node) followBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }}>{!chat.length && <Box py="24"><Heading size="2xl" mb="4">{t.welcomeTitle}</Heading><Text color="var(--text-dim)">{t.welcomeBody}</Text></Box>}
-        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "plan" || message.role === "system" ? <ConversationCard key={message.id} plan={message.plan} details={message.details} messages={t} /> : message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.content && <Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
+        <VStack align="stretch" gap="3">{chat.map((message) => message.role === "plan" || message.role === "system" ? <ConversationCard key={message.id} plan={message.plan} details={message.details} messages={t} /> : message.role === "activity" ? <Box key={message.id}><RunCard steps={message.steps ?? []} messages={t} />{message.thinking && <Text fontSize="xs" color="var(--text-dim)" px="3" py="1" whiteSpace="pre-wrap" wordBreak="break-word">{t.thinking}: {message.thinking}</Text>}{message.content &&<Box className="message assistant"><Markdown content={message.content} /></Box>}</Box> : <Box key={message.id} className={`message ${message.role}`}>{message.role === "assistant" ? <Markdown content={message.content} /> : message.content}</Box>)}</VStack>
         {error && <Text color="var(--danger-text)" py="4">{error}</Text>}<div ref={endRef} />
       </Box>
       {/* 聊天正文选中气泡。插件拿到的 `text` 是用户真正看到的那段字，
