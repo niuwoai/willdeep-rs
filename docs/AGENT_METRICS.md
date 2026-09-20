@@ -68,13 +68,26 @@ ruby scripts/agent_metrics_trend.rb --alarm    # 最新快照的窗口指标有�
 下面这段由 `ruby scripts/agent_metrics_trend.rb --inject` 生成，别手改。
 
 <!-- agent-metrics:begin -->
-还没有拍过快照（`bench/agent-metrics/history.jsonl` 为空）。
+最近快照：**2026-09-20T17:04:54Z** · 窗口 7d · 代码 `b5d1fcc` · 版本 `0.78.0-rc26`
 
-```bash
-ruby scripts/agent_metrics_publish.rb
-```
+| 指标 | 近 7d | 对比上次 | 目标 | 趋势 |
+|---|---|---|---|---|
+| **Deep Share** | 0% | — | ≤ 5% | `▄` |
+| Skill Coverage | 60% | — | ≥ 50% | `▄` |
+| **Worker Verified Success** | - | — | ≥ 85% | `·` |
+| Escalation Rate | - | — | ≤ 15% | `·` |
+| 只读工种引用准确率 | - | — | — | `·` |
 
-它只读本机 Runtime 的 agent 记录，不花钱，拍完自动归档并在这里长出趋势。
+近 7d：子 Agent 运行 5（窄工种 3 · 标准 2 · deep 0）· 有 verifier 0 · 未验证 5 · 平均尝试 -
+累计：子 Agent 运行 11 · Deep Share 0% · Worker Verified Success 0%（0/2）· 未验证 9
+
+<details><summary>历史 1 次快照</summary>
+
+| 时间 | 代码 | 窗口 | 子运行 | Deep Share | Skill Coverage | Verified Success | Escalation | 引用准确率 | 平均尝试 |
+|---|---|---|---:|---|---|---|---|---|---|
+| 2026-09-20T17:04:54Z | `b5d1fcc` | 7d | 5 | 0% | 60% | - | - | - | - |
+
+</details>
 <!-- agent-metrics:end -->
 
 ## 局限
