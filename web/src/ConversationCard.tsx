@@ -10,6 +10,8 @@ export type ConversationItem = {
   attachment_count: number;
   plan?: Plan;
   details?: string[];
+  /// 这条助手消息发起的工具调用：名字、脱敏摘要、有无结果。原始参数不下发。
+  tools?: { name: string; detail?: string; completed: boolean }[];
 };
 
 export function ConversationCard({ plan, details = [], messages: t }: { plan?: Plan; details?: string[]; messages: Messages }) {

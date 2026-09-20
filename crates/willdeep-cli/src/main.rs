@@ -1705,71 +1705,10 @@ pub(crate) fn client_identity(surface: Surface) -> &'static str {
     cell.get_or_init(|| format!("{}:{}", surface.prefix(), uuid::Uuid::new_v4()))
 }
 
-/// 一句话说清这一步在干什么，供远端界面显示在工具名旁边。
-///
-/// **它不是参数，是摘要。** 完整参数属于私有请求内容（`arguments` 那个字段名
-/// 会被公共事件流剥掉，本机排查走 `task.diagnostics`）；这里给的是够回答「执行
-/// 了什么」的最小信息，且三道处理都不可省：
-///
-/// - 命令只取前三个词。整条命令行常带路径，而「路径不下发浏览器」是既有承诺；
-/// - 看起来像路径的词换成 `…`，包括 `/abs`、`~/x` 与 `--flag=/abs` 这种；
-/// - 按命令审批同一套规则打码，再按**字符**截断——用户完全可能把 token 粘进
-///   命令行。
-///
-/// 认不出的工具返回 `None`：宁可不显示，也不要把一段不知道含什么的参数漏出去。
-pub(crate) fn tool_detail(name: &str, arguments: &str) -> Option<String> {
-    const MAX_DETAIL_CHARS: usize = 60;
-    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
-    let detail = match name {
-        "run_command" => {
-            let command = parsed.get("command")?.as_str()?;
-            command
-                .split_whitespace()
-                .take(3)
-                .map(elide_path_like)
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        "spawn_agent" => {
-            let profile = parsed
-                .get("profile")
-                .and_then(|value| value.as_str())
-                .unwrap_or("generalist");
-            match parsed.get("label").and_then(|value| value.as_str()) {
-                Some(label) if !label.trim().is_empty() => {
-                    format!("{profile} · {}", label.trim())
-                }
-                _ => profile.to_owned(),
-            }
-        }
-        _ => return None,
-    };
-    let redacted = willdeep_core::judge::redact_credentials(&detail);
-    if redacted.trim().is_empty() {
-        return None;
-    }
-    let mut chars = redacted.chars();
-    let excerpt: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();
-    Some(if chars.next().is_some() {
-        format!("{excerpt}…")
-    } else {
-        excerpt
-    })
-}
-
-/// 看起来像路径的词换成省略号。
-///
-/// 判定放宽到 `--flag=/abs` 这种形式：把路径藏在等号后面是最常见的漏法。
-fn elide_path_like(token: &str) -> String {
-    let candidate = token.split_once('=').map_or(token, |(_, value)| value);
-    if candidate.starts_with('/') || candidate.starts_with('~') || candidate.starts_with("./") {
-        return match token.split_once('=') {
-            Some((flag, _)) => format!("{flag}=…"),
-            None => "…".to_owned(),
-        };
-    }
-    token.to_owned()
-}
+// 工具调用摘要（一句话说清这一步在干什么，路径打码、凭据脱敏、按字符截断）搬进了
+// core 的 `conversation::tool_detail`：会话回放的投影也要用它。这里只再导出，事件
+// JSON 与进程内 TUI 照旧调用，测试也留在这里。
+pub(crate) use willdeep_core::conversation::tool_detail;
 
 pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
     match event {

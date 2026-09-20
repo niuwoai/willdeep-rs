@@ -1,5 +1,60 @@
 use super::*;
 
+/// 工具行回放：只带工具调用的 assistant 消息也进投影，每条调用带名字、脱敏摘要
+/// 与有无结果；原始参数不出投影。
+#[test]
+fn tool_only_assistant_messages_project_their_calls_with_results() {
+    let call = |id: &str, name: &str, arguments: &str| crate::types::ToolCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments: arguments.to_owned(),
+    };
+    let messages = [
+        Message::user("go"),
+        Message::assistant(
+            "",
+            vec![
+                call(
+                    "a",
+                    "run_command",
+                    r#"{"command":"cargo test -p x --manifest-path /secret/Cargo.toml"}"#,
+                ),
+                call("b", "read_file", r#"{"path":"/etc/hosts"}"#),
+            ],
+        ),
+        Message::tool(&call("a", "run_command", "{}"), "ok"),
+        Message::assistant("done", Vec::new()),
+    ];
+    let items = project(&messages, None);
+    assert_eq!(
+        items.iter().map(|item| item.role).collect::<Vec<_>>(),
+        vec!["user", "assistant", "assistant"]
+    );
+    assert_eq!(items[1].content, "");
+    assert_eq!(
+        items[1].tools,
+        vec![
+            ToolTrace {
+                name: "run_command".into(),
+                detail: Some("cargo test -p".into()),
+                completed: true,
+            },
+            ToolTrace {
+                name: "read_file".into(),
+                detail: None,
+                completed: false,
+            },
+        ]
+    );
+    assert!(items[2].tools.is_empty());
+    let json = serde_json::to_string(&items[1]).unwrap();
+    assert!(
+        !json.contains("/secret") && !json.contains("/etc/hosts"),
+        "{json}"
+    );
+    assert!(!json.contains("arguments"), "{json}");
+}
+
 const PLAN: &str = "```plan\n1. A-TRACE-1: 核验接口\n2. D-REL-1: 发布\n```";
 const PROGRESS: &str = "全部步骤已结束。\n```progress\nA-TRACE-1: done\nD-REL-1: skipped\n```";
 
@@ -138,7 +193,7 @@ fn attached_skill_context_is_hidden_but_operator_text_is_preserved() {
         "{ATTACHED_CONTEXT_HEADER}\n\n### Skill routing candidates — metadata only\n\nThe host found these possibly relevant installed skills.\n- `example-skill` — metadata\n\n{USER_TEXT_BOUNDARY}\n\n{authored}"
     );
     let message = Message::user(&content);
-    let items = project(&[message.clone()], None);
+    let items = project(std::slice::from_ref(&message), None);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].role, "user");
     assert_eq!(items[0].content, authored);
