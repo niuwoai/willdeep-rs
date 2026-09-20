@@ -32,10 +32,27 @@ launchctl unload ~/Library/LaunchAgents/com.willdeep.range.plist
 rm ~/Library/LaunchAgents/com.willdeep.range.plist
 ```
 
+## 模型行为评测（每天）
+
+固定任务集（`bench/model-eval/`）每天一轮，模板 `com.willdeep.model-eval.plist`，默认 03:30：
+
+```bash
+sed "s|__REPO__|$(pwd)|g" scripts/launchd/com.willdeep.model-eval.plist \
+  > ~/Library/LaunchAgents/com.willdeep.model-eval.plist
+launchctl load ~/Library/LaunchAgents/com.willdeep.model-eval.plist
+launchctl start com.willdeep.model-eval        # 先手动试一次
+tail -f target/model-eval/nightly.log
+```
+
+评哪些模型在 plist 的 `EnvironmentVariables` 里改 `WILLDEEP_EVAL_MODELS`（逗号分隔）。它会动
+`bench/model-eval/history.jsonl`、`bench/model-eval/reports/<日期>/` 和 `docs/MODEL_EVAL.md` 的趋势区块，
+同样不自动提交。通过率或人话率比基线掉超过 10 个点时退出码 2，日志里有报警行。
+
 ## Linux（cron）
 
 ```cron
 0 3 * * 1 cd /path/to/willdeep-rs && ./scripts/range_weekly.sh
+30 3 * * * cd /path/to/willdeep-rs && ./scripts/model_eval_nightly.sh
 ```
 
 cron 的环境变量比登录 shell 干净得多，`ruby` 和 `cargo` 很可能不在 `PATH` 里。

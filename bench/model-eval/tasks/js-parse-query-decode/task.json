@@ -1,0 +1,9 @@
+{
+  "id": "js-parse-query-decode",
+  "title": "parseQuery 不解码",
+  "kind": "fix",
+  "language": "javascript",
+  "requires": ["node"],
+  "editable": ["query.js"],
+  "verify": [["node", "--test"]]
+}

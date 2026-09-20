@@ -1,0 +1,10 @@
+{
+  "id": "js-add-test-clamp",
+  "title": "给 clamp 补边界测试",
+  "kind": "test",
+  "language": "javascript",
+  "requires": ["node"],
+  "editable": ["test/clamp.test.js"],
+  "verify": [["node", "--test"]],
+  "mutants": ["mutants/no-upper-bound", "mutants/swaps-instead-of-throwing"]
+}

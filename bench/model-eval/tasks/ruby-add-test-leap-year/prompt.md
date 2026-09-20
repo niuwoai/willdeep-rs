@@ -1,0 +1,1 @@
+`lib/leap_year.rb` 的 `LeapYear.leap?` 已经实现好了，但 `test/leap_year_test.rb` 只测了普通年份。请补上世纪年的规则：整百年不是闰年（比如 1900），能被 400 整除的除外（比如 2000）。只改 `test/leap_year_test.rb`，不要动 `lib/`，加完跑 `ruby -Ilib test/leap_year_test.rb`。

@@ -1,0 +1,9 @@
+{
+  "id": "ruby-cart-nil-quantity",
+  "title": "Cart#total 遇到 nil 数量崩溃",
+  "kind": "fix",
+  "language": "ruby",
+  "requires": ["ruby"],
+  "editable": ["lib/cart.rb"],
+  "verify": [["ruby", "-Ilib", "test/cart_test.rb"]]
+}

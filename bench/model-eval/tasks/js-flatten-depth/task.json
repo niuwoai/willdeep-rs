@@ -1,0 +1,10 @@
+{
+  "id": "js-flatten-depth",
+  "title": "实现带深度的 flatten",
+  "kind": "feature",
+  "language": "javascript",
+  "requires": ["node"],
+  "editable": ["flatten.js"],
+  "verify": [["node", "--test"]],
+  "must_not_contain": { "flatten.js": [".flat("] }
+}

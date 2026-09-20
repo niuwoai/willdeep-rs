@@ -13,7 +13,7 @@
 按下面的顺序推进，每一项都有可验收的产物；先把地基上的房子盖到能住，再对外讲地基多好。
 
 1. **体验基线对齐 Claude Code**。以 `docs/EXPERIENCE_BASELINE.md` 为清单逐项过，每项标「已到位 / 待做」，TUI 与 Web 分别打勾。验收方式是脚本化的 TUI 会话回放（`crates/willdeep-cli/src/tui/test_suite/` 已有事件级测试，补齐整轮回放）。
-2. **模型行为评测进定期流水线**。第一步是离线指标：`scripts/session_metrics.rb` 从会话记录算出「人话率」（有正文的 assistant 消息占比）、工具调用数与失败数、思维链占比、平均轮次，输出 JSON + Markdown。第二步是固定任务集每晚对 DeepSeek V4、GLM、Claude 各跑一遍（`willdeep run` 无头），把同一套指标画成趋势。没有这个，提示词调优就是碰运气。
+2. **模型行为评测进定期流水线**。第一步是离线指标：`scripts/session_metrics.rb` 从会话记录算出「人话率」（有正文的 assistant 消息占比）、工具调用数与失败数、思维链占比、平均轮次，输出 JSON + Markdown。第二步是固定任务集每晚对 DeepSeek V4、GLM、Claude 各跑一遍（`willdeep run` 无头），把同一套指标画成趋势。没有这个，提示词调优就是碰运气。（第二步 v0.78.0-rc21 落地：`bench/model-eval/` 20 个任务、`scripts/model_eval.rb`、趋势与报警脚本、每天 launchd；见 `docs/MODEL_EVAL.md`。）
 3. **审计做成能演示的东西**：`willdeep audit export`，把 `approvals.jsonl`、hooks 拦截、verifier 裁决、diff 归属汇成一份报告。企业客户看的是这个。
 4. **Runtime 作为平台对外**：控制面 60 个操作已稳定，`willdeep-runtime-client` 作为 SDK 发布；`willdeep run` 进 CI 流水线的文档与样例。
 5. **MCP Streamable HTTP + OAuth**；写入围栏默认开并补网络围栏。

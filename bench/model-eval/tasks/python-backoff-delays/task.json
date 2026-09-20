@@ -1,0 +1,9 @@
+{
+  "id": "python-backoff-delays",
+  "title": "实现指数退避序列",
+  "kind": "feature",
+  "language": "python",
+  "requires": ["python3"],
+  "editable": ["backoff.py"],
+  "verify": [["python3", "-m", "unittest", "-q"]]
+}

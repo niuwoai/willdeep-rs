@@ -1,0 +1,10 @@
+{
+  "id": "python-add-test-normalize",
+  "title": "给 normalize_whitespace 补空白测试",
+  "kind": "test",
+  "language": "python",
+  "requires": ["python3"],
+  "editable": ["test_textutil.py"],
+  "verify": [["python3", "-m", "unittest", "-q"]],
+  "mutants": ["mutants/only-spaces", "mutants/no-strip"]
+}

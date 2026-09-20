@@ -1,0 +1,9 @@
+{
+  "id": "rust-version-display",
+  "title": "给 Version 实现 Display",
+  "kind": "feature",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}

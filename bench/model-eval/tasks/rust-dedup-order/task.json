@@ -1,0 +1,9 @@
+{
+  "id": "rust-dedup-order",
+  "title": "实现保序去重",
+  "kind": "feature",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}

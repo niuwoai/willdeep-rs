@@ -1,0 +1,9 @@
+{
+  "id": "rust-parse-port-result",
+  "title": "parse_port 不该 unwrap",
+  "kind": "fix",
+  "language": "rust",
+  "requires": ["cargo"],
+  "editable": ["src/lib.rs"],
+  "verify": [["cargo", "test", "--offline", "--quiet"]]
+}
