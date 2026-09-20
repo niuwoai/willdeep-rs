@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.78.0-rc12] - 2026-09-20
+
+### Added
+- **新命令 `/version`：一眼看到 CLI 与 Runtime 各自的版本。** 输出形如 `System: CLI 0.78.0-rc12 · Runtime 0.78.0-rc12`；Runtime 版本来自快照，没连上时写「未连接」；两边不一致时点明并提示 `willdeep daemon upgrade`。本轮在跑时也能用，`/help` 与补全菜单同步登记。
+
 ## [0.78.0-rc11] - 2026-09-20
 
 ### Added

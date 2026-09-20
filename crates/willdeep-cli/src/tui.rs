@@ -444,7 +444,7 @@ fn busy_input(prompt: &str) -> BusyInput {
     let command = value.split_whitespace().next().unwrap_or_default();
     match command {
         // 切档正是为了处理「这一轮在跑、又不停地弹审批」，必须当场生效。
-        "/help" | "/clear" | "/sidebar" | "/skills" | "/history" | "/permissions"
+        "/help" | "/version" | "/clear" | "/sidebar" | "/skills" | "/history" | "/permissions"
         | "/permission-mode" => BusyInput::RunNow,
         "/session" => match value.split_whitespace().nth(1) {
             Some("search") => BusyInput::RunNow,

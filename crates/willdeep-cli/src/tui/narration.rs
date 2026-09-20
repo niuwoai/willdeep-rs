@@ -132,6 +132,25 @@ impl App {
         }
     }
 
+    /// `/version`：终端这边的 CLI 版本与 Runtime 守护进程的版本各是多少。Runtime
+    /// 版本来自快照，没连上就说没连上；两边不一致时点明，因为命令实际在 Runtime 里跑。
+    pub(super) fn version_report(&self) -> String {
+        let runtime = self.runtime_version.clone().unwrap_or_else(|| {
+            self.language
+                .text("未连接", "not connected", "未接続")
+                .to_owned()
+        });
+        let mut report = format!("System: CLI {} · Runtime {runtime}", willdeep_core::VERSION);
+        if self.stale_runtime_version().is_some() {
+            report.push_str(self.language.text(
+                " · 版本不一致，命令在 Runtime 里跑，请执行 `willdeep daemon upgrade` 对齐",
+                " · versions differ; commands run inside the Runtime, run `willdeep daemon upgrade`",
+                " · バージョン不一致。コマンドは Runtime 側で実行されます。`willdeep daemon upgrade` で揃えてください",
+            ));
+        }
+        report
+    }
+
     /// 输入框标题上的状态词：跑的时候回车只是排队，空闲时才轮到用户。
     pub(super) fn composer_state(&self) -> (&'static str, Color) {
         if self.running {
@@ -633,6 +652,28 @@ mod tests {
             app.transient_row().as_deref(),
             Some("WillDeep · replying: Hello")
         );
+    }
+
+    #[test]
+    fn version_command_reports_cli_and_runtime_and_flags_a_mismatch() {
+        let mut app = App::new(Vec::new(), Language::En);
+        assert!(app.handle_slash_command("/version", &SkillCatalog::default()));
+        let line = app.transcript.last().cloned().unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "System: CLI {} · Runtime not connected",
+                willdeep_core::VERSION
+            )
+        );
+
+        app.runtime_version = Some(willdeep_core::VERSION.to_owned());
+        assert!(!app.version_report().contains("versions differ"));
+
+        app.runtime_version = Some("0.1.0".to_owned());
+        let report = app.version_report();
+        assert!(report.contains("Runtime 0.1.0"), "{report}");
+        assert!(report.contains("versions differ"), "{report}");
     }
 
     #[test]

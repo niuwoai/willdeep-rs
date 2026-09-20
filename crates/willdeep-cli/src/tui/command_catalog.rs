@@ -38,11 +38,12 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 22] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 23] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
             "/help",
+            "/version",
             "/goal <文本>|off",
             "/plan",
             "/tools",
@@ -67,6 +68,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 22] {
         ],
         Language::En => [
             "/help",
+            "/version",
             "/goal <text>|off",
             "/plan",
             "/tools",
@@ -91,6 +93,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 22] {
         ],
         Language::Ja => [
             "/help",
+            "/version",
             "/goal <テキスト>|off",
             "/plan",
             "/tools",
@@ -128,11 +131,19 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 22] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 22] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 23] {
     [
         (
             "/help",
             language.text("查看帮助", "Show help", "ヘルプを表示"),
+        ),
+        (
+            "/version",
+            language.text(
+                "查看 CLI 与 Runtime 的版本",
+                "Show CLI and Runtime versions",
+                "CLI と Runtime のバージョンを表示",
+            ),
         ),
         (
             "/goal",
