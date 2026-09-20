@@ -214,6 +214,20 @@ Daemon 内原生 Harness 的拆分边界、取消语义和验收证据见 [`IN_P
 
 验收：Swift、TUI、Web、移动端对同一任务观察到一致状态；迁移与回退不丢会话、事件、附件、审批或用户修改。
 
+### 阶段 13：体验基线与模型行为评测（v0.79–v0.80）
+
+决策记录：`docs/decisions/2026-09-20-experience-baseline-and-model-eval.md`。
+
+- [x] TUI 手感对齐：中途汇报、工具行折叠、思维链显示、结束信号、插话送达（v0.78.0-rc4 → rc12）。
+- [ ] Web 端对齐同一清单（`docs/EXPERIENCE_BASELINE.md` 第 4、5、6、7 项；第 8 项插话送达已于 v0.78.0-rc15 到位）。
+- [x] 离线指标脚本 `scripts/session_metrics.rb`：人话率、工具调用与失败、思维链占比、平均轮次，JSON + Markdown。
+- [ ] 固定任务集每晚对 DeepSeek V4 / GLM / Claude 各跑一遍，指标做成趋势。
+- [x] 主 Agent `token_budget` 闸门。
+- [ ] `willdeep audit export`。
+- [ ] 检查点回退（回到第 N 步）。
+
+验收：清单每项「已到位」对应一条事件级测试；提示词与路由改动附带指标前后对比。
+
 ## 4. 实施原则
 
 1. 每个阶段先定义结构化状态和协议，再实现具体 UI。

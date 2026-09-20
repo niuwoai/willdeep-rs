@@ -359,6 +359,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         )
         .route("/api/sessions/{id}/stream", get(resume_session_stream))
         .route("/api/sessions/{id}/rename", post(rename_session))
+        .route("/api/sessions/{id}/steer", post(steer_session))
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/unarchive", post(unarchive_session))
@@ -1087,6 +1088,30 @@ async fn rename_session(
         .await
         .map_err(WebError::from_anyhow)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct SteerSessionRequest {
+    message: String,
+}
+
+/// 本轮进行中的用户插话：送进该会话正在跑的任务，下一次调模型前以用户身份注入，
+/// 不打断手上的活。没有在途任务时 `delivered` 为假，前端提示稍后再发——Web 没有
+/// 本地队列，不替用户暗中排队。
+async fn steer_session(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<SteerSessionRequest>,
+) -> Result<Json<serde_json::Value>, WebError> {
+    ensure_web_runtime_session(&state, id).await?;
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err(WebError::bad_request("message must not be empty"));
+    }
+    let delivered = crate::daemon::steer_remote_turn(&state.home, id, message.to_owned())
+        .await
+        .map_err(WebError::from_anyhow)?;
+    Ok(Json(serde_json::json!({ "delivered": delivered })))
 }
 
 async fn fork_session(

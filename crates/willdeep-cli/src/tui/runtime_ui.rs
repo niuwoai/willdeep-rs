@@ -260,12 +260,15 @@ fn apply_runtime_event(
             // 事件里带着 `exit_code=…` 这类活下来的线索，此前被整条丢掉，
             // 只打印一句固定文案。完整命令与错误在侧栏详情里（`task.diagnostics`）。
             app.append_transcript(format!(
-                "Error: {}{}",
+                "Error: {}{}{}",
                 app.language.text(
                     "Runtime 任务失败",
                     "Runtime task failed",
                     "Runtime タスクが失敗しました"
                 ),
+                failure_reason_text(&event.message, app.language)
+                    .map(|reason| format!(" · {reason}"))
+                    .unwrap_or_default(),
                 event_details(&event.message)
             ));
             app.record_progress(
@@ -307,10 +310,62 @@ fn apply_runtime_event(
 }
 
 /// 事件消息形如 `task_id=… exit_code=1`。task_id 对用户没意义，剩下的有。
+/// 公共事件流只放行一个闭集合里的失败分类（见 `daemon::event_stream::failure_reason`）。
+/// 这里把那个标签翻成一句人话——一串 `failure_domain=provider` 谁也看不出是自己
+/// 的上下文炸了还是机房掉线。
+fn failure_reason_text(message: &str, language: Language) -> Option<&'static str> {
+    let reason = message
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("reason="))?;
+    Some(match reason {
+        "context_overflow" => language.text(
+            "上下文超出模型窗口，先 /compress 或开新会话",
+            "Context exceeds the model window — run /compress or start a new session",
+            "コンテキストがモデルの上限を超過 — /compress か新しいセッションを",
+        ),
+        "rate_limited" => language.text(
+            "provider 限流，稍后重试",
+            "Rate limited by the provider — retry later",
+            "provider のレート制限 — 後で再試行",
+        ),
+        "auth" => language.text(
+            "provider 认证失败，检查 API Key",
+            "Provider authentication failed — check the API key",
+            "provider 認証失敗 — API キーを確認",
+        ),
+        "quota" => language.text(
+            "provider 额度或余额不足",
+            "Provider quota or balance exhausted",
+            "provider のクォータ・残高不足",
+        ),
+        "timeout" => language.text(
+            "请求超时",
+            "The request timed out",
+            "リクエストがタイムアウト",
+        ),
+        "network" => language.text(
+            "网络或 TLS 中断",
+            "Network or TLS failure",
+            "ネットワーク／TLS 障害",
+        ),
+        "provider_unavailable" => language.text(
+            "provider 暂时不可用",
+            "The provider is temporarily unavailable",
+            "provider が一時的に利用不可",
+        ),
+        _ => language.text(
+            "原因未分类，侧栏 Inbox 里有完整错误",
+            "Unclassified — the sidebar Inbox carries the full error",
+            "未分類 — 詳細はサイドバー Inbox に",
+        ),
+    })
+}
+
 fn event_details(message: &str) -> String {
     let details = message
         .split_whitespace()
         .filter(|part| !part.starts_with("task_id="))
+        .filter(|part| !part.starts_with("reason="))
         .collect::<Vec<_>>()
         .join(" ");
     if details.is_empty() {
@@ -409,6 +464,55 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             app.record_turn_usage(&usage);
             app.latest_usage = usage;
             app.context_tokens = app.latest_usage.input_tokens.unwrap_or(app.context_tokens);
+        }
+        // 压缩的两条反馈此前只有进程内轮次认，Runtime 托管会话整条丢掉：状态栏
+        // 的占用只跟着 `usage` 走，而 usage 是请求成功才回来的——压缩前的真实
+        // 体量（一次真实故障里是 94 万 token）从来没上过屏，用户盯着一个压缩后
+        // 的 36% 一头撞进模型上限。两条路径的反馈必须一致。
+        Some("compression_started") => {
+            if let Some(tokens) = value
+                .get("estimated_tokens")
+                .and_then(|value| value.as_u64())
+            {
+                app.context_tokens = tokens;
+            }
+            app.record_progress(
+                app.language
+                    .text(
+                        "正在压缩上下文",
+                        "Compressing context",
+                        "コンテキストを圧縮中",
+                    )
+                    .to_owned(),
+            );
+        }
+        Some("compression_completed") => {
+            if let Some(tokens) = value
+                .get("estimated_tokens")
+                .and_then(|value| value.as_u64())
+            {
+                app.context_tokens = tokens;
+            }
+            let compressed = app.language.text(
+                "上下文已压缩",
+                "Context compressed",
+                "コンテキストを圧縮しました",
+            );
+            let dropped = value
+                .get("dropped_messages")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_default();
+            app.record_progress(if dropped > 0 {
+                app.language.pick(
+                    format!("{compressed} · 本轮请求丢弃 {dropped} 条最旧消息（存档不受影响）"),
+                    format!(
+                        "{compressed} · dropped {dropped} oldest message(s) from this request (the archive is untouched)"
+                    ),
+                    format!("{compressed} · 今回のリクエストから最も古い {dropped} 件を破棄（アーカイブは無変更）"),
+                )
+            } else {
+                compressed.to_owned()
+            });
         }
         Some("subagent_started") => {
             let id = short_event_agent(&value);

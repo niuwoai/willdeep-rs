@@ -7,6 +7,8 @@ default_provider = "some-im"
 # verification_commands = ["cargo test --workspace"]
 # 模型/工具轮次上限，1–1000，不写时 200。触顶只交出部分结果，不判失败；跑偏用 Esc 中止。
 max_turns = 200
+# 主 Agent 一轮的 token 预算（输入 + 输出累计），1000–10000000；用尽时交出部分结果与交接信息。不写不限。
+# token_budget = 2000000
 # strict | smart | workspace-write | full-access。TUI 里 /permissions 或 Shift+Tab 临时切换，
 # /permissions default <档位> 写回这里。详见 docs/APPROVALS.md。
 approval = "smart"

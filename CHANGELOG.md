@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.78.0-rc15] - 2026-09-20
+
+### Added
+- **Web 端本轮进行中按回车直接送达。** 此前 Web 在本轮跑着时回车被静默吞掉（`send()` 直接返回）。现在新增 `POST /api/sessions/{id}/steer`，复用会话归属校验后转 Runtime 的 `turn.steer`；送达即在聊天里落一条用户消息并提示「已送达 · 模型下一步就会看到」，输入框占位文案在本轮进行中改为「回车即送达，不打断手上的活」。Web 没有本地队列：没有在途任务或带了附件时提示等本轮结束再发，不暗中排队。体验基线清单第 8 项 Web 列到位。
+
+## [0.78.0-rc14] - 2026-09-20
+
+### Fixed
+- **上下文压缩把自己撑死，会话就此永久锁死。** 压缩把整段待摘要前缀一次性塞进一条 user 消息发给模型，而 durable 历史从不回写——喂给摘要器的原料跟着历史无限长。一条真实会话涨到 94 万 token 后，摘要请求被 provider 以 `400 · maximum context length is 1048576 tokens, you requested 1305317` 顶回来；压缩是每轮必经之路，于是失败 ⇒ 历史只增不减 ⇒ 下一轮更大，连 `/compress` 都走同一条路救不回来（同一条会话连撞 4 次）。现在摘要原料自己封顶（窗口减输出预留减指令开销）：超了就分块各摘一遍再合并，必要时多合并几轮；单条消息自己超预算的先按头尾截断，不再把超限往下一层挪。正常会话的前缀在水位线附近、仍是一次调用，不额外烧钱。
+- **Runtime 托管会话看不到压缩发生。** `compression_started` / `compression_completed` 只有进程内轮次认，托管会话整条丢掉：状态栏的占用只跟着 `usage` 走，而 usage 要请求成功才回来。于是压缩前的真实体量从来没上过屏——真实故障里用户盯着压缩后的 4.6 万 token，实际送出去的是 94 万。现在两条路径的反馈一致：压缩开始时状态栏跳到压缩前的估算，完成后落回投影值，进度行同步写「正在压缩上下文 / 上下文已压缩（含丢弃条数）」。
+- **任务失败在界面上只剩两串 UUID。** 公共事件流（TUI、Web 桥接、手机中继都吃它）把 `error=` 之后整段剥掉防泄露，结果用户只看到 `failure_domain=provider`，看不出是自己的上下文炸了还是机房掉线。现在改为放行一个闭集合里的失败分类 `reason=`（`context_overflow` / `rate_limited` / `auth` / `quota` / `timeout` / `network` / `provider_unavailable` / `unclassified`），构造上不可能夹带现场内容；TUI 把它翻成一句带下一步的人话。完整错误照旧只留在本机 `task.diagnostics`。
+
+## [0.78.0-rc13] - 2026-09-20
+
+### Added
+- **主 Agent 的 token 预算闸门 `[agent] token_budget`。** 轮次上限放到 200 之后它是唯一的自动闸门；合法区间 1000–10000000，用尽时交出部分结果与交接信息、不判失败，不写不限。示例配置与 `docs/CONFIGURATION.md` 同步。
+- **离线模型行为指标 `scripts/session_metrics.rb`。** 从会话记录算人话率、静默工具轮、思维链占比、工具调用与失败、调用次数，按模型汇总，输出 JSON + Markdown，只输出计数不输出正文。用法与指标定义见 `docs/MODEL_EVAL.md`。
+
+### Docs
+- `docs/COMPETITIVE_LANDSCAPE.md` 按 v0.78.0-rc12 代码实况重写：沙箱与 hooks 已补，短板第一位改为「终端手感刚追平、Web 未跟上」。
+- 新增决策记录 `docs/decisions/2026-09-20-experience-baseline-and-model-eval.md` 与体验基线清单 `docs/EXPERIENCE_BASELINE.md`；路线图新增阶段 13。
+
 ## [0.78.0-rc12] - 2026-09-20
 
 ### Added

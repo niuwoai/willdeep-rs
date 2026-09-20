@@ -78,6 +78,7 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | 键 | 说明 |
 |---|---|
 | `max_turns` | 模型/工具轮次上限，1–1000，不写时 200；`--max-turns` 优先。触顶交出部分结果，不判失败 |
+| `token_budget` | 主 Agent 一轮的 token 预算（输入 + 输出累计），1000–10000000；用尽时交出部分结果与交接信息，不判失败。不写不限 |
 | `approval` | `strict` / `smart`（默认）/ `workspace-write` / `full-access`；TUI 中 `/permissions default <档位>` 可写回，见 [审批与自动化](APPROVALS.md) |
 | `language` | 界面语言 `zh-CN` / `en` / `ja` |
 | `small_model_routing` | Runtime 小模型优先路由；默认 `true` |

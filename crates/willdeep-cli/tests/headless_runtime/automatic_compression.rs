@@ -63,21 +63,32 @@ fn local_automatic_compression_preserves_constraints_batches_and_usage() {
         );
     }
     let requests = provider.captured_requests.lock().unwrap();
-    assert_eq!(
-        requests.len(),
-        2,
-        "one automatic summary and one task request"
+    // 这段历史（约 5 万 token）本来就比窗口（3.2 万）大，所以摘要必然分块：
+    // 若干条摘要请求，最后一条才是任务本身。分块之前这里是「一口吞」，对着真
+    // provider 就是一个 400——正是会话被锁死的那条路。
+    assert!(
+        requests.len() >= 2,
+        "expected summary requests plus one task request, got {}",
+        requests.len()
     );
-    let summary_source = requests[0]["messages"].to_string();
+    let (task, summaries) = requests.split_last().unwrap();
+    for summary in summaries {
+        let estimated = summary["messages"].to_string().chars().count() / 4;
+        assert!(
+            estimated < 32_000,
+            "summary request of ~{estimated} tokens must stay inside the 32000 window"
+        );
+    }
+    let summary_source = summaries[0]["messages"].to_string();
     assert!(summary_source.contains("old-inspection-0"));
-    let task = requests[1]["messages"].as_array().unwrap();
+    let task = task["messages"].as_array().unwrap();
     assert!(
         task.iter()
             .any(|message| message["role"] == "user" && message["content"] == constraint)
     );
     assert!(
-        !requests[1]["messages"]
-            .to_string()
+        !serde_json::to_string(task)
+            .unwrap()
             .contains("old-inspection-0")
     );
     let call_index = task
@@ -93,7 +104,13 @@ fn local_automatic_compression_preserves_constraints_batches_and_usage() {
     assert_eq!(task[call_index + 1]["content"], "recent tool result");
     let session = willdeep_core::SessionStore::new(&home).load(id).unwrap();
     let checkpoint = session.execution_checkpoint.unwrap();
-    assert_eq!((checkpoint.input_tokens, checkpoint.output_tokens), (10, 6));
+    // 每次 provider 调用都要记一笔账——分块摘要多打了几次，账就得多几笔，
+    // 写死的数字只会在块数变化时掩盖真正的漏记。
+    let calls = requests.len() as u64;
+    assert_eq!(
+        (checkpoint.input_tokens, checkpoint.output_tokens),
+        (5 * calls, 3 * calls)
+    );
     assert_eq!(session.manual_compression_usage.reported_calls, 0);
     assert!(
         session

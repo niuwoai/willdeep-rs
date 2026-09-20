@@ -979,7 +979,8 @@ pub(crate) async fn build(
             max_turns,
             system_prompt,
             context_window,
-            token_budget: None,
+            // 轮次上限之外唯一的自动闸门；不配就不限，与此前行为一致。
+            token_budget: loaded.file.agent.token_budget,
         },
     )
     .with_event_sink(sink)

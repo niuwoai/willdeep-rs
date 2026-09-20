@@ -1,6 +1,12 @@
 use super::*;
 use std::sync::Mutex;
 
+/// 够放下 `history()` 整段前缀的窗口。
+///
+/// 再小，前缀本身就超过一次摘要请求的预算，压缩会走分块路径——那条路另有
+/// 专门的测试，混进来只会让「缓存命中几次」「记了几笔账」这些断言跟着跳。
+pub(super) const WINDOW: u64 = 12_288;
+
 mod usage_tests;
 
 #[tokio::test]
@@ -132,7 +138,7 @@ fn assert_pairs(messages: &[Message]) {
 
 #[tokio::test]
 async fn automatic_compression_preserves_constraints_and_tool_protocol() {
-    let (agent, provider) = agent(8_192);
+    let (agent, provider) = agent(WINDOW);
     let messages = history();
     let result = agent.request_messages(&messages, &mut None).await.unwrap();
     assert!(
@@ -183,7 +189,7 @@ async fn oversized_instructions_are_rejected_instead_of_silently_cropped() {
 
 #[tokio::test]
 async fn oversized_tool_middle_is_retrievable_without_a_summary_request() {
-    let (agent, provider) = agent(8_192);
+    let (agent, provider) = agent(WINDOW);
     let call = ToolCall {
         id: "call".to_owned(),
         name: "read_file".to_owned(),
@@ -219,7 +225,7 @@ async fn oversized_tool_middle_is_retrievable_without_a_summary_request() {
 
 #[tokio::test]
 async fn manual_compression_keeps_user_instructions_and_whole_tool_batches() {
-    let (agent, _) = agent(8_192);
+    let (agent, _) = agent(WINDOW);
     let original = history();
     let compressed = agent.compress_history(original.clone()).await.unwrap();
     assert!(compressed.len() < original.len());
@@ -263,7 +269,7 @@ fn estimates_include_tool_arguments_text_attachments_and_non_ascii() {
 
 #[tokio::test]
 async fn compression_starts_at_the_reserved_capacity_watermark_even_for_short_histories() {
-    let (agent, provider) = agent(8_192);
+    let (agent, provider) = agent(WINDOW);
     let capacity =
         message_capacity(agent.config.context_window, &agent.tools.definitions()).unwrap();
     let payload_tokens = capacity * COMPRESSION_TRIGGER_PERCENT / 100;
@@ -275,7 +281,7 @@ async fn compression_starts_at_the_reserved_capacity_watermark_even_for_short_hi
     ];
     agent.request_messages(&messages, &mut None).await.unwrap();
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    let (agent, provider) = self::agent(8_192);
+    let (agent, provider) = self::agent(WINDOW);
     agent
         .request_messages(
             &[Message::system("system"), Message::user("short question")],
@@ -306,7 +312,7 @@ async fn urgent_recent_batches_are_archived_as_groups() {
 
 #[tokio::test]
 async fn hosted_compressor_receives_structured_transcript_without_duplicate_prompt() {
-    let (mut agent, _) = agent(8_192);
+    let (mut agent, _) = agent(WINDOW);
     let compressor = Arc::new(CaptureProvider {
         requests: Mutex::new(Vec::new()),
     });
@@ -338,7 +344,7 @@ fn push_batch(messages: &mut Vec<Message>, index: usize) {
 #[tokio::test]
 async fn consecutive_steps_above_the_watermark_summarize_incrementally() {
     const STEPS: usize = 30;
-    let (agent, provider) = agent(8_192);
+    let (agent, provider) = agent(WINDOW);
     let capacity =
         message_capacity(agent.config.context_window, &agent.tools.definitions()).unwrap();
     let mut messages = history();
@@ -386,7 +392,7 @@ async fn consecutive_steps_above_the_watermark_summarize_incrementally() {
 
 #[tokio::test]
 async fn rewritten_prefix_invalidates_the_request_summary_cache() {
-    let (agent, provider) = agent(8_192);
+    let (agent, provider) = agent(WINDOW);
     let mut messages = history();
     let mut cache = None;
     agent.request_messages(&messages, &mut cache).await.unwrap();
@@ -399,4 +405,91 @@ async fn rewritten_prefix_invalidates_the_request_summary_cache() {
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests[1][0].content.contains("src/file-0.rs"));
+}
+
+/// 真实故障的回归：会话历史涨到 94 万 token 后，压缩把整段前缀塞进一条 user
+/// 消息，被 provider 以 400 顶回来。压缩是每轮必经之路，于是会话永久锁死。
+/// 送出去的每一条摘要请求都必须自己封顶，与 durable 历史有多长无关。
+#[tokio::test]
+async fn summary_requests_stay_within_budget_however_long_the_history_grows() {
+    let (agent, provider) = agent(WINDOW);
+    let budget = agent.summary_input_budget();
+    let mut messages = history();
+    for index in 20..80 {
+        let call = ToolCall {
+            id: format!("call-{index}"),
+            name: "read_file".to_owned(),
+            arguments: format!(r#"{{"path":"src/file-{index}.rs"}}"#),
+        };
+        messages.push(Message::assistant("inspect", vec![call.clone()]));
+        messages.push(Message::tool(
+            &call,
+            format!("file-{index}: {}", "x".repeat(1_900)),
+        ));
+    }
+    messages.push(Message::user("continue"));
+    assert!(
+        estimate_tokens(&messages) > budget * 3,
+        "the fixture must be far larger than one summary request"
+    );
+
+    agent.request_messages(&messages, &mut None).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert!(
+        requests.len() > 1,
+        "an oversized prefix must be summarized in chunks, not in one shot"
+    );
+    for request in requests.iter() {
+        let estimated = estimate_tokens(request);
+        assert!(
+            estimated <= budget + SUMMARY_OVERHEAD_TOKENS,
+            "summary request of {estimated} tokens exceeds the {budget} budget"
+        );
+    }
+}
+
+/// 单条消息自己就超预算时不能原样放行，否则分块只是把超限往下挪了一层。
+#[tokio::test]
+async fn one_oversized_message_is_truncated_instead_of_being_sent_whole() {
+    let (agent, provider) = agent(WINDOW);
+    let budget = agent.summary_input_budget();
+    let mut messages = history();
+    // 工具结果在摘要之前已被 `page_tool_outputs` 归档成摘录，所以这里要的是一条
+    // 没人替它兜底、又确实能进摘要的 assistant 长消息。
+    messages.insert(
+        2,
+        Message::assistant(
+            format!("recap: {}", "y".repeat(budget as usize * 8)),
+            Vec::new(),
+        ),
+    );
+
+    agent.request_messages(&messages, &mut None).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert!(!requests.is_empty());
+    for request in requests.iter() {
+        let estimated = estimate_tokens(request);
+        assert!(
+            estimated <= budget + SUMMARY_OVERHEAD_TOKENS,
+            "summary request of {estimated} tokens exceeds the {budget} budget"
+        );
+    }
+    assert!(
+        requests
+            .iter()
+            .any(|request| request[0].content.contains("truncated for summarization")),
+        "the oversized paste must be marked as truncated, not silently dropped"
+    );
+}
+
+#[test]
+fn clamping_keeps_both_ends_and_respects_the_token_budget() {
+    let text = format!("HEAD{}TAIL", "中".repeat(20_000));
+    let clamped = clamp_text(&text, 1_024);
+    assert!(text_tokens(&clamped) <= 1_024 + text_tokens("\n[…truncated for summarization…]\n"));
+    assert!(clamped.starts_with("HEAD"));
+    assert!(clamped.ends_with("TAIL"));
+    assert_eq!(clamp_text("short", 1_024), "short");
 }

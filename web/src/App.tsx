@@ -727,6 +727,22 @@ export function App() {
   // `override` 给插件的 `window.willdeep.chat.send` 用：它递进来的文本要
   // 立刻起一个回合，而 setPrompt 是异步的——读 state 会读到上一轮的值。
   // 走的是与用户敲回车完全相同的这条路：审批档位与沙箱一个都不绕。
+  async function steer(content: string) {
+    const target = activeSessionRef.current || activeRuntimeSessionId;
+    if (!target || attachments.length) { setError(t.steerUnavailable); return; }
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(target)}/steer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: content }) });
+      if (!response.ok) throw new Error(await response.text());
+      const result = (await response.json()) as { delivered: boolean };
+      if (!result.delivered) { setError(t.steerUnavailable); return; }
+      setPrompt(""); setError("");
+      setChat((current) => [...current, { id: nextId("user"), role: "user", content }]);
+      setActivity(t.steered);
+    } catch (cause) {
+      setError(`${t.requestFailed}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
   async function send(override?: string) {
     const typed = (override ?? prompt).trim();
     if (selectedSession?.archived) { setError(`${t.requestFailed}: ${t.archived}`); return; }
@@ -735,7 +751,9 @@ export function App() {
     if (typed === "/skills") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: composer.skills.length ? composer.skills.map((skill) => `$${skill.identifier} · ${skill.name}\n${skill.description}`).join("\n\n") : t.noSkills }]); setPrompt(""); return; }
     if (typed === "/goal off") { setGoal(""); setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: t.goalOff }]); setPrompt(""); return; }
     if (typed.startsWith("/goal ")) { setGoal(typed.slice(6).trim()); setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: `${t.goalSet}: ${typed.slice(6).trim()}` }]); setPrompt(""); return; }
-    const content = typed || (attachments.length ? t.attachmentPrompt : ""); if (!content || busy || !workspace) return;
+    const content = typed || (attachments.length ? t.attachmentPrompt : ""); if (!content || !workspace) return;
+    // 本轮在跑时回车不是排队也不是被吞：直接送进正在跑的这一轮，下一次调模型前注入。
+    if (busy) { await steer(content); return; }
     const harnessPrompt = goal && content !== "/compress" ? `<goal>\n${goal}\n</goal>\nContinue until this goal is genuinely complete.\n\n${content}` : content;
     const outgoingAttachments = attachments;
     const runId = nextId("run"); const controller = new AbortController(); abortRef.current = controller;
@@ -903,7 +921,7 @@ export function App() {
         {commandMatches.length > 0 && <Box className="suggestions"><Text className="suggestion-title">{t.commands}</Text>{commandMatches.map((command) => <button key={command} type="button" onMouseDown={(event) => { event.preventDefault(); setPrompt(command); }}>{command}</button>)}</Box>}
         {skillQuery !== undefined && <Box className="suggestions"><Text className="suggestion-title">{t.skills}</Text><Input className="skill-search" size="sm" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t.searchSkills} aria-label={t.searchSkills} />{skillMatches.length ? skillMatches.map((skill) => <button key={skill.identifier} type="button" onMouseDown={(event) => { event.preventDefault(); setSkillSearch(""); setPrompt((current) => current.replace(/\$[\w-]*$/, `$${skill.identifier} `)); }}><strong>${skill.identifier}</strong><small>{skill.name} · {skill.description}</small></button>) : <Text className="suggestion-empty">{t.noSkills}</Text>}</Box>}
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
-        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
+        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={busy ? t.steerPlaceholder : t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
         {composerEntries.length > 0 && (
           <button
             type="button"
