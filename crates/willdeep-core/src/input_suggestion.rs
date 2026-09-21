@@ -119,14 +119,18 @@ pub fn payload(messages: &[Message]) -> Option<String> {
     Some(body)
 }
 
+/// 发给模型的那两条消息。实弹评测要看清洗之前的原始输出，所以单独拿出来。
+pub(crate) fn request_messages(payload: &str) -> [Message; 2] {
+    [Message::system(SYSTEM_PROMPT), Message::user(payload)]
+}
+
 /// 一次往返。`Ok(None)` 是「请求成功但没有可用预测」（模型说 NONE、或输出没过清洗），
 /// `Err` 才是请求本身失败——调用方靠这个区分「换下一家再问」和「就此作罢」。
 pub async fn predict(
     provider: Arc<dyn Provider>,
     payload: &str,
 ) -> Result<Option<String>, ProviderError> {
-    let messages = [Message::system(SYSTEM_PROMPT), Message::user(payload)];
-    let completion = provider.complete(&messages, &[]).await?;
+    let completion = provider.complete(&request_messages(payload), &[]).await?;
     Ok(sanitize(&completion.content))
 }
 

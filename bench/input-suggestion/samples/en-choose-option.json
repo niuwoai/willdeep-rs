@@ -1,0 +1,15 @@
+{
+  "id": "en-choose-option",
+  "language": "en",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "the build is too slow, any ideas?"
+    },
+    {
+      "role": "assistant",
+      "content": "Two cheap wins: enable sccache (about 40% faster on warm builds), or split the integration tests into their own crate so unit tests stop recompiling them. I can do either — which one first?"
+    }
+  ]
+}
