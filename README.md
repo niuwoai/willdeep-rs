@@ -16,6 +16,8 @@
 willdeep --workspace . "检查当前仓库并修复测试"
 ```
 
+![WillDeep TUI 演示：找到缺陷、改一行、裸跑测试验证，收尾后空输入框里灰字预测下一句](docs/media/readme-demo.gif)
+
 ---
 
 ## 30 秒上手

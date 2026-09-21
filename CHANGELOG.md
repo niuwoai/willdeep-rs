@@ -8,6 +8,7 @@
 - 测试：web 端点单测钉住首个答复的候选胜出且失败的只问一次、全部失败与装不出 Provider 回 `null`、会话在跑与缺正文时一次都不问模型、开关关与未知会话 200 + `null` 且 `$WILLDEEP_HOME` 前后文件与 mtime 不变；新增浏览器回归 `scripts/web_input_suggestion_test.cjs`（灰字出现、Tab 不发请求、打字与 Esc 放弃不复现、刷新不复现、`null` 不显示、英日两语提示）；`web_runtime_retry_fixture.mjs` 加 `complete` 模式与预测假回包。
 - 下一句预测实弹评测：`bench/input-suggestion/`（16 条中英日样本、每轮归档与 `history.jsonl`）、`willdeep-core` 的 `#[ignore]` 实弹测试 `input_suggestion_live_fire` 与进常规测试的样本自检、驱动脚本 `scripts/input_suggestion_eval.rb`（`--rescore` 人工判定后重算）。首批四轮：修复前 none 命中 50% / 75%、日文 suggest 全灭；修复后两模型 reject / none / suggest 均 100%，凭据泄漏 0。凭据读取抽到 `scripts/lib/willdeep_credentials.rb`，靶场脚本同用。
 
+- README 首屏加一张真实 TUI 演示 GIF（`docs/media/readme-demo.gif`，0.95 MB / 24 秒）：找到缺陷、改一行、裸跑测试验证、收尾后灰字预测下一句。由 `docs/media/readme-demo.tape` 经 `scripts/record_readme_demo.rb` 生成：真跑模型，演示仓库与 `WILLDEEP_HOME` 都在 `/tmp/willdeep-demo` 现建现删，key 只走环境变量；vhs 0.12 在本机合成视频会静默失败，改为只出 PNG 帧、由脚本用 ffmpeg 叠层、倍速、调色板压缩；没录到灰字预测时自动重录（最多 3 次）。提示词在 README 原句后加了「改完我先看看」——不加时模型会去 `git commit` 并停在审批卡上。
 ### Changed
 - `harness` 抽出 `resolve_parent_provider_config` 与 `auxiliary_providers`：会话主 Provider 与标题 / 预测候选的装配从 `build` 里拿出来，TUI 与 Web 共用一段，免得两处在某个档案上悄悄分叉。行为不变。
 - `willdeep-core` 新增 `input_suggestion::predict_first`（按顺序问候选、失败才换下一家），`Agent::suggest_next_input` 改为调它。
@@ -18,6 +19,7 @@
 - **多行命令不再被误判为「带凭据」。** 凭据检测拿脱敏结果与原文比较，而脱敏会按空白切词再用单空格拼回，于是任何多行命令（如 `python -c "…多行…"`）或带连续空格的命令都被当成带凭据：子 Agent 的 verifier 直接被拒、连安全判官都不送。现在先用同一把尺子规范化原文再比较；真带凭据的多行命令照旧拦下。
 - **宿主要求补验证时，说清楚哪种形式算数。** 完成验证只认单条前台测试命令，管道、`;`、重定向、`echo $?` 包装一律不算（管道会吞掉退出码——录演示时就撞见测试 FAIL 而 `| tail` 返回 0）。但宿主的补验证提示只说「对当前文件跑适用的检查」，模型于是一遍遍给命令套上 `; echo EXIT=$?` 来自证，每次都不算，三轮后以「⚠ 任务仅部分完成」收尾。现在两条提示都点明：单条前台命令、举例 `cargo test` / `pytest -q` / `python3 -m unittest -v` / `npm test`，包装形式不算。
 - **做完但没收口时仍预测下一步。** 本版早先给提示词加的「助手报告完成且没提问就答 NONE」太宽，把「修好了、测试全绿、还没提交」这种有明显下一步的收尾也压没了——录 README 演示时三次都录不到灰字预测才发现，评测样本也漏了这一类。现在只有已提交 / 合并 / 发布或对话结束才 `NONE`，完成的工作照常预测「提交」「开 PR」之类；客套话仍一律不给。评测补 3 条「做完未提交」样本（共 19 条），两模型 suggest 给出 100%、人工判定 12/12 合理。
+- **`docs/CI_INTEGRATION.md` 的源码安装命令在干净机器上装不上。** `cargo install --git … willdeep` 取到的源码里没有 `web/dist`（不入库、由 `yarn build` 生成），rust-embed 在 release 构建时直接编译失败——2026-09-21 在干净检出里实测复现。改为先 clone、`yarn build`、再 `cargo install --locked --path crates/willdeep-cli`，同样在干净 clone 里跑通。
 - **日文的「是」不再被当成助手口吻拦掉。** 清洗规则里光秃秃的「はい、」把「はい、そのままコミットして」这类用户回答一并误杀——实弹评测里两个模型的日文 suggest 样本全军覆没。改为只拦「はい、承知」「はい、かしこまり」「はい、では」这类助手才会接的开头。
 - **任务已收口时不再预测客套话。** 提示词加一条：助手报告完成且没有提问时答 `NONE`，不要用「谢谢 / 明天见」填空。实弹评测里 none 命中原为 50%（deepseek-v4-flash）与 75%（glm-5）。
 

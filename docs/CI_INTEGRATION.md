@@ -18,8 +18,11 @@ curl -fsSL -o willdeep.tar.gz \
 tar -xzf willdeep.tar.gz && install -m 0755 willdeep /usr/local/bin/willdeep
 willdeep --version
 
-# 或者从源码装（要 Rust 1.94+ 与 Node 22 构建内嵌 Web）：
-cargo install --git https://github.com/niuwoai/willdeep-rs --tag v0.78.0-rc23 willdeep
+# 或者从源码装（要 Rust 1.94+、Node 22 与 yarn）。内嵌 Web 的 web/dist 不入库、
+# 由 yarn build 生成，所以 `cargo install --git` 在干净机器上会编译失败，要先 clone：
+git clone --depth 1 --branch v0.78.0-rc23 https://github.com/niuwoai/willdeep-rs
+(cd willdeep-rs/web && yarn install --frozen-lockfile && yarn build)
+cargo install --locked --path willdeep-rs/crates/willdeep-cli
 ```
 
 把版本号钉死在 CI 配置里；不要在流水线里追 `latest`。
