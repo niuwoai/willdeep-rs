@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.80.0-rc2] - 2026-09-21
+
+### Fixed
+**CI 工作流重新起 job。** rc23 加的「CI samples parse」步骤把 `ruby -e '... YAML.safe_load_file(path, aliases: true) ...'` 写成了 YAML 普通标量，其中 `aliases: ` 被解析成映射键，整份 `ci.yml` 解析失败——此后每次 push / PR 都是 0 秒失败、0 个 job（「workflow file issue」），`release.yml` 不受影响所以没人察觉。改为 `run: |` 块标量，`actionlint` 通过。
+- 注：CI 重新起 job 之后暴露出停跑期间积下的失败，与本修复无关、另行处理：`crates/willdeep-cli/tests/headless_runtime.rs` 3015 行超过 3000 行上限（文件行数检查失败）；`willdeep-runtime-client` 的 Unix socket 测试在交叉编译容器里 panic。
+
 ## [0.80.0-rc1] - 2026-09-21
 
 ### Changed
