@@ -1330,3 +1330,81 @@ fn session_picker_line_leads_with_the_title_and_flags_bridged_sessions() {
         session_picker_ui::session_picker_result_line(&managed, false, Language::ZhCn, false);
     assert!(!line.contains('['), "{line}");
 }
+
+/// 轮次结束后的下一句预测：空输入框里 Tab 采用，只填入不发送。
+#[test]
+fn input_suggestion_is_accepted_with_tab_and_only_filled_in() {
+    let mut app = App::new(Vec::new(), Language::En);
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("run the tests again".to_owned()), epoch));
+    assert_eq!(app.visible_input_suggestion(), Some("run the tests again"));
+
+    assert!(app.accept_input_suggestion());
+    assert_eq!(app.input.text(), "run the tests again");
+    assert!(
+        app.input_suggestion.is_none(),
+        "accepted once, gone afterwards"
+    );
+    assert!(
+        !app.accept_input_suggestion(),
+        "Tab with text in the box is not ours to handle"
+    );
+}
+
+/// 打字或 Esc 都放弃预测，删光了也不回来。
+#[test]
+fn typing_or_escape_dismisses_the_input_suggestion() {
+    let mut app = App::new(Vec::new(), Language::En);
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("commit it".to_owned()), epoch));
+
+    app.edit_input(|input| input.insert("n"));
+    assert!(app.visible_input_suggestion().is_none());
+    assert!(app.input_suggestion.is_none());
+    app.edit_input(|input| input.backspace());
+    assert!(app.input.is_empty());
+    assert!(
+        app.visible_input_suggestion().is_none(),
+        "a dismissed suggestion does not come back"
+    );
+
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("commit it".to_owned()), epoch));
+    assert!(app.dismiss_input_suggestion());
+    assert!(app.visible_input_suggestion().is_none());
+    assert!(
+        !app.dismiss_input_suggestion(),
+        "Esc with nothing to dismiss falls through to its usual meaning"
+    );
+}
+
+/// 晚到的预测对不上世代号就丢；在跑、已打字、有附件时也不落地。
+#[test]
+fn late_input_suggestions_are_dropped_when_the_world_moved_on() {
+    let mut app = App::new(Vec::new(), Language::En);
+    let stale_epoch = app.input_suggestion_epoch;
+    app.begin_turn(false, "working".to_owned());
+    assert!(
+        !app.adopt_input_suggestion(Some("stale".to_owned()), stale_epoch),
+        "a new turn turns the page"
+    );
+    app.finish_turn();
+
+    let epoch = app.input_suggestion_epoch;
+    app.input.insert("half-typed");
+    assert!(!app.adopt_input_suggestion(Some("late".to_owned()), epoch));
+    app.input.take();
+
+    assert!(
+        !app.adopt_input_suggestion(None, epoch),
+        "the model saw no obvious next step: nothing to show"
+    );
+    assert!(app.visible_input_suggestion().is_none());
+
+    assert!(app.adopt_input_suggestion(Some("fresh".to_owned()), epoch));
+    assert_eq!(app.visible_input_suggestion(), Some("fresh"));
+
+    app.begin_turn(false, "working".to_owned());
+    assert!(app.visible_input_suggestion().is_none());
+    assert!(app.input_suggestion.is_none(), "cleared, not merely hidden");
+}

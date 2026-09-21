@@ -205,6 +205,35 @@ pub(super) fn dispatch_retitle(
     });
 }
 
+/// 轮次正常收尾后预测用户的下一句。一次网络往返，扔进后台；结果带着发起时的
+/// 世代号回来，主循环复核后才落地。这里的判断只是省一次请求，真正的闸门在
+/// [`App::adopt_input_suggestion`]。
+pub(super) fn dispatch_input_suggestion(
+    app: &App,
+    session: &Session,
+    agent: &Arc<Agent>,
+    tx: &mpsc::UnboundedSender<UiMessage>,
+) {
+    if !agent.input_suggestions_enabled()
+        || app.running
+        || !app.input.is_empty()
+        || !app.attachments.is_empty()
+        || !app.queued_prompts.is_empty()
+    {
+        return;
+    }
+    let Some(payload) = willdeep_core::input_suggestion::payload(&session.messages) else {
+        return;
+    };
+    let epoch = app.input_suggestion_epoch;
+    let agent = agent.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let suggestion = agent.suggest_next_input(&payload).await;
+        let _ = tx.send(UiMessage::InputSuggested { suggestion, epoch });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

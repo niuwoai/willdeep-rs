@@ -61,6 +61,7 @@
 | [Xedit 联动现状与路径](XEDIT_INTEROP_STATUS.md) | 文件层/契约层/运行时层三段式现状、漂移清单、建议路径（2026-08-21） |
 | [竞争力分析](COMPETITIVE_LANDSCAPE.md) | vs pi / Claude Code / Codex / dsh，护城河与短板排序（2026-08-21） |
 | [Herdr 研究与集成方案](HERDR_RESEARCH_AND_INTEGRATION.md) | 终端复用器集成的取舍与边界 |
+| [需求单：rc29 收尾](decisions/2026-09-21-input-suggestion-followups.md) | 发布 rc29、Web 端下一句预测、README 演示 GIF、预测质量实弹、英文 README（待实现，给新会话开工用） |
 
 ## 文档约定
 

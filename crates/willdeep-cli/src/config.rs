@@ -215,6 +215,9 @@ pub struct AgentSettings {
     /// 而这条链路只在会话**第一轮**花一次便宜调用，不随对话长度增长。
     /// 关掉后标题停在第一条提示词的确定性派生，仍然可读。
     pub auto_title: Option<bool>,
+    /// 轮次结束后在空输入框里灰字预测用户的下一句，Tab 采用。不写按开。
+    /// 用与标题摘要相同的模型候选，但开关独立于 `auto_title`。
+    pub input_suggestions: Option<bool>,
     /// 会话标题摘要模型。默认取会话模型——标题请求只发一问一答各 800 字，
     /// 成本可忽略，而另指一个端点意味着它可能缺凭据、然后静默退化。
     pub title_model: Option<String>,
@@ -904,6 +907,15 @@ context_window = 400000
                 "should reject: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn input_suggestions_toggle_parses_and_is_unset_by_default() {
+        let parsed: ConfigFile =
+            toml::from_str("[agent]\ninput_suggestions = false\n").expect("parse toggle");
+        assert_eq!(parsed.agent.input_suggestions, Some(false));
+        let parsed: ConfigFile = toml::from_str("[agent]\n").expect("parse empty agent");
+        assert!(parsed.agent.input_suggestions.is_none());
     }
 
     #[test]

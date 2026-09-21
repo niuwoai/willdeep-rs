@@ -8,6 +8,7 @@ pub mod detached_job;
 mod execution;
 pub mod goal;
 pub mod hooks;
+pub mod input_suggestion;
 pub mod judge;
 pub mod kernel;
 pub mod kernel_ingress;

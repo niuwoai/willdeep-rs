@@ -210,7 +210,7 @@ pub fn sanitize_summary(raw: &str) -> Option<String> {
 }
 
 /// 成对的包裹符号剥一层。调用方负责循环。
-fn strip_wrapping_pair(title: &str) -> String {
+pub(crate) fn strip_wrapping_pair(title: &str) -> String {
     const PAIRS: [(char, char); 10] = [
         ('"', '"'),
         ('\'', '\''),
@@ -245,7 +245,7 @@ fn strip_wrapping_pair(title: &str) -> String {
 }
 
 /// 凭据特征检查。宁可错杀一个标题，不可漏放一个密钥。
-fn looks_sensitive(text: &str) -> bool {
+pub(crate) fn looks_sensitive(text: &str) -> bool {
     let lowercase = text.to_ascii_lowercase();
     let marker = [
         "api_key",
@@ -290,7 +290,7 @@ fn clamp_title(title: &str, limit: usize) -> String {
     clamped
 }
 
-fn clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
