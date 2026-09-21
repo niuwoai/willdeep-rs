@@ -49,7 +49,9 @@ jobs:
         run: ruby scripts/test/agent_metrics_test.rb
       - name: CI samples parse
         if: runner.os == 'Linux'
-        run: bash -n examples/ci/run-task.sh && ruby -ryaml -e 'ARGV.each { |path| YAML.safe_load_file(path, aliases: true); puts "ok #{path}" }' examples/ci/github-actions.yml examples/ci/gitlab-ci.yml
+        # 块标量：命令里的 `aliases: true` 放进普通标量会被 YAML 当成映射，整份工作流解析失败、一个 job 都不起。
+        run: |
+          bash -n examples/ci/run-task.sh && ruby -ryaml -e 'ARGV.each { |path| YAML.safe_load_file(path, aliases: true); puts "ok #{path}" }' examples/ci/github-actions.yml examples/ci/gitlab-ci.yml
       - name: SDK crates package
         if: runner.os == 'Linux'
         run: cargo publish --dry-run --locked -p willdeep-runtime-protocol -p willdeep-runtime-client

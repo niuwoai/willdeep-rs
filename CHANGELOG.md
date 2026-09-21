@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.78.0-rc31] - 2026-09-21
+
+### Fixed
+- **CI 工作流重新起 job。** rc23 加的「CI samples parse」步骤把 `ruby -e '... YAML.safe_load_file(path, aliases: true) ...'` 写成了 YAML 普通标量，其中 `aliases: ` 被解析成映射键，整份 `ci.yml` 解析失败——此后每次 push / PR 都是 0 秒失败、0 个 job（「workflow file issue」），`release.yml` 不受影响所以没人察觉。改为 `run: |` 块标量，`actionlint` 通过。
+
 ## [0.78.0-rc30] - 2026-09-21
 
 ### Added
