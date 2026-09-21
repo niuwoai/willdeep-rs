@@ -1,6 +1,6 @@
 # 需求单：rc29 收尾——发布、Web 端下一句预测、README 演示、预测质量实弹（2026-09-21）
 
-> 状态：待实现 | 基于 develop @ 0.78.0-rc29（**工作树未提交**） | 关联：`docs/EXPERIENCE_BASELINE.md` 第 19 项、`docs/TUI_GUIDE.md`「轮次结束后的下一句预测」、`CHANGELOG.md` `[0.78.0-rc29]`
+> 状态：A / C / D / E / G 已完成，B 待人工确认，F 未做（2026-09-21，见文末「完成记录」） | 基于 develop @ 0.78.0-rc29（**工作树未提交**） | 关联：`docs/EXPERIENCE_BASELINE.md` 第 19 项、`docs/TUI_GUIDE.md`「轮次结束后的下一句预测」、`CHANGELOG.md` `[0.78.0-rc29]`
 > 这份文件是给新会话直接开工用的：每一项都有背景、目标、验收、落点与边界。按顺序做，A 不做完其余都挂在未提交的状态上。
 
 ## 现状（新会话开工前先核对）
@@ -164,3 +164,20 @@ A → B（人敲一条命令）→ C（rc30）→ E（可与 C 并行，不改�
 | 浏览器回归 | `docs/WEB_RUNTIME_RETRY_QA.md`、`scripts/web_runtime_retry_fixture.mjs`、`scripts/web_*_test.cjs` |
 | 靶场归档惯例 | `bench/skill-worker-range/README.md`、`scripts/range_report.rb` |
 | README 方法论 | `~/.willdeep/skills/github-readme/SKILL.md`（Codex 里 `$github-readme`） |
+
+## 完成记录（2026-09-21）
+
+| 项 | 结果 | 落点 |
+|---|---|---|
+| A | `v0.78.0-rc29` 已发布，四个平台的发行包齐全，`releases/latest` 可以直接下载 | PR #7、#8（顺带合入子模块 git 目录放行的沙箱修复） |
+| B | rocky 已在 TUI 里执行 `/daemon upgrade`，待用 `willdeep daemon status` 确认版本 | — |
+| C | Web 端下一句预测上线，归 rc30 | PR #9 |
+| D | README 首屏 GIF：0.95 MB、24 秒；提示词在原句后加了「改完我先看看」，避免模型去提交后卡在审批卡上 | PR #17 |
+| E | 19 条样本，两个模型共跑十一轮并全部归档；修掉日文「はい、」被误杀、收口时给客套话、「做完未提交」被压成 NONE 三处 | PR #10、#11、#16 |
+| F | 未做（可选） | — |
+| G | 实测 `cargo install --git` 在干净机器上装不上；文档改为先 `yarn build` 再 `cargo install --path`，同样实测跑通 | PR #17 |
+
+执行中顺带修了三个产品问题：验证命令认不出 `unittest` 和虚拟环境里的解释器（#13）；多行命令被误判为带凭据（#14）；补验证提示没说清哪种命令形式才算证据（#15）。
+
+还没收尾的：CI 从 2026-08-10 起每次都在 0 秒失败、一个 job 都不起，已另开会话处理；Xedit 侧的预测提示词和清洗规则需要同步本次两处修复。
+
