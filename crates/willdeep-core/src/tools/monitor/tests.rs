@@ -1,8 +1,12 @@
 use super::*;
+// 下面几个辅助函数只给 Unix 上的 monitor 测试用（命令是 POSIX shell）。
+#[cfg(unix)]
 use crate::kernel::InterruptPolicy;
 
+#[cfg(unix)]
 struct AllowApprover;
 
+#[cfg(unix)]
 #[async_trait]
 impl Approver for AllowApprover {
     async fn approve(&self, _description: &str, _always_allow_available: bool) -> ApprovalDecision {
@@ -56,6 +60,7 @@ fn temp_root(name: &str) -> PathBuf {
     root.canonicalize().unwrap()
 }
 
+#[cfg(unix)]
 fn monitored_registry(
     root: &Path,
     kernel: &EventKernel,
@@ -69,6 +74,7 @@ fn monitored_registry(
     (tools, background)
 }
 
+#[cfg(unix)]
 async fn start(tools: &ToolRegistry, command: &str, timeout: Option<u64>) -> String {
     let result = tools
         .monitor(MonitorArgs {
@@ -86,6 +92,7 @@ async fn start(tools: &ToolRegistry, command: &str, timeout: Option<u64>) -> Str
         .to_owned()
 }
 
+#[cfg(unix)]
 async fn wait_for_body(kernel: &EventKernel, needle: &str) -> KernelEventView {
     for _ in 0..200 {
         if let Some(event) = kernel.snapshot().into_iter().find(|event| {
@@ -108,6 +115,7 @@ async fn wait_for_body(kernel: &EventKernel, needle: &str) -> KernelEventView {
     );
 }
 
+#[cfg(unix)]
 struct KernelEventView {
     body: String,
     dedup_key: String,
