@@ -1,0 +1,15 @@
+{
+  "id": "zh-done-uncommitted",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "检查当前仓库并修复测试，不用提交"
+    },
+    {
+      "role": "assistant",
+      "content": "已修复：`calc.py:3` 把百分比当成了小数，改为 `price * percent / 100`。`python3 -m unittest -v` 两个用例全部通过。按你的要求没有提交，改动留在工作区。"
+    }
+  ]
+}
