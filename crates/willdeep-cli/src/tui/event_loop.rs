@@ -252,6 +252,18 @@ pub(super) async fn event_loop(
                 }
             }
         }
+        // 本轮里收下的 `/model` 在这里真正切：放在排队提示词之前，它们用的就是新模型。
+        if !app.running
+            && let Some(model) = app.pending_model.take()
+        {
+            match switch_model(&model, &mut app, session, store, runtime, &agent).await {
+                Ok(message) => app.append_transcript(format!("System: {message}")),
+                Err(error) => app.append_transcript(format!(
+                    "Error: {}: {error}",
+                    language.text("切换模型失败", "Model switch failed", "モデル切替に失敗")
+                )),
+            }
+        }
         // 排队的提示词在这里续上：本轮正常结束、被 Esc 中断、或 Runtime 报失败，
         // 都会走到这，不必在每个终态各写一遍。**待投递的运行时事件优先**——
         // 用户排在后面的那句话，很可能正是基于还没看到的后台结果说的。
@@ -435,7 +447,7 @@ pub(super) async fn event_loop(
                             MouseEventKind::ScrollDown=>app.model_picker_scroll(1),
                             MouseEventKind::Down(MouseButton::Left)=>{
                                 if let Some(model)=app.activate_model_picker_at(mouse.column,mouse.row) {
-                                    match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                         Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
                                         Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                     }
@@ -793,7 +805,7 @@ pub(super) async fn event_loop(
                             ModelPickerAction::None=>{},
                             ModelPickerAction::Close=>app.model_picker=None,
                             ModelPickerAction::Select(model)=>{
-                                match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                     Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
                                     Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                 }
@@ -1116,7 +1128,7 @@ pub(super) async fn event_loop(
                                         let current=session.model.clone().unwrap_or_else(||runtime.provider_config.model.clone());
                                         request_model_list(&mut app,runtime,current);
                                     },
-                                    ModelCommand::Switch(model)=>match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    ModelCommand::Switch(model)=>match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                         Ok(message)=>app.append_transcript(format!("System: {message}")),
                                         Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                     },

@@ -32,6 +32,7 @@ impl App {
             mobile_gateway: None,
             mobile_qr: None,
             queued_prompts: VecDeque::new(),
+            pending_model: None,
             local_turn: None,
             latest_usage: Usage::default(),
             turn_input_tokens: 0,

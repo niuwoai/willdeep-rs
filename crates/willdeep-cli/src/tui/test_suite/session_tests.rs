@@ -1820,6 +1820,9 @@ fn a_running_turn_no_longer_swallows_every_enter() {
         "/sidebar off",
         "/skills",
         "/history 登录",
+        // 换模型只作用于下一轮：当场收下，本轮结束再切。
+        "/model",
+        "/model qwen3-coder",
     ] {
         assert_eq!(busy_input(command), BusyInput::RunNow, "{command}");
     }
@@ -1829,12 +1832,7 @@ fn a_running_turn_no_longer_swallows_every_enter() {
     for prompt in ["继续重构这个模块", "/local 跑一下测试", "/runtime 修一下"] {
         assert_eq!(busy_input(prompt), BusyInput::Queue, "{prompt}");
     }
-    for command in [
-        "/model qwen3-coder",
-        "/compress",
-        "/daemon upgrade",
-        "/diff",
-    ] {
+    for command in ["/compress", "/daemon upgrade", "/diff"] {
         assert_eq!(busy_input(command), BusyInput::Refuse, "{command}");
     }
 }
@@ -2262,4 +2260,18 @@ fn typing_in_selection_mode_releases_it_and_moves_focus_to_the_prompt() {
     app.release_selection_for_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     assert!(!app.selection_mode);
     assert_eq!(app.focus, FocusPane::Chat);
+}
+
+#[test]
+fn model_switch_during_a_turn_is_recorded_not_applied() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.running = true;
+    let message = super::model_commands::defer_model_switch(&mut app, " glm-5 ").unwrap();
+    assert_eq!(app.pending_model.as_deref(), Some("glm-5"));
+    assert!(message.contains("glm-5"), "{message}");
+    // 同一轮里再换一次，以最后一次为准。
+    super::model_commands::defer_model_switch(&mut app, "deepseek-v4-flash").unwrap();
+    assert_eq!(app.pending_model.as_deref(), Some("deepseek-v4-flash"));
+    assert!(super::model_commands::defer_model_switch(&mut app, "  ").is_err());
+    assert_eq!(app.pending_model.as_deref(), Some("deepseek-v4-flash"));
 }

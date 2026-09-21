@@ -310,6 +310,44 @@ pub(super) fn request_model_list(app: &mut App, runtime: &TuiRuntime, current_mo
     });
 }
 
+/// 本轮在跑时只记下来，本轮结束再切；否则当场切。
+///
+/// 不能在轮次中途真的切：`agent.set_model` 会让进程内（`/local`）这一轮的下一次
+/// 调模型就换掉，而这一轮的会话文件正由运行中的轮次写着，这里再 `store.save`
+/// 会互相覆盖。延到轮次结束，行为就和「下一轮生效」的承诺一致。
+pub(super) async fn switch_or_defer_model(
+    model: &str,
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &mut TuiRuntime,
+    agent: &Arc<Agent>,
+) -> Result<String> {
+    if app.running {
+        return defer_model_switch(app, model);
+    }
+    switch_model(model, app, session, store, runtime, agent).await
+}
+
+/// 记下待切换的模型。只校验名字、不碰 Agent / Runtime / 会话文件；同一轮里
+/// 再敲一次 `/model` 以最后一次为准。
+pub(super) fn defer_model_switch(app: &mut App, model: &str) -> Result<String> {
+    let model = model.trim();
+    if model.is_empty() || model.len() > MAX_MODEL_NAME_BYTES || model.chars().any(char::is_control)
+    {
+        bail!("model must contain 1 to {MAX_MODEL_NAME_BYTES} bytes");
+    }
+    app.pending_model = Some(model.to_owned());
+    Ok(app
+        .language
+        .text(
+            "本轮结束后切换到 {model}，下一轮起生效",
+            "Switches to {model} when this turn ends; applies from the next turn",
+            "このターン終了後に {model} へ切り替え、次のターンから適用",
+        )
+        .replace("{model}", model))
+}
+
 pub(super) async fn switch_model(
     model: &str,
     app: &mut App,

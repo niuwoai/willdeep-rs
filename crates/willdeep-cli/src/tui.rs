@@ -76,7 +76,7 @@ use dispatch::{
 use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
-    switch_model,
+    switch_model, switch_or_defer_model,
 };
 use narration::StreamKind;
 use permission_commands::{
@@ -245,6 +245,8 @@ struct App {
     /// 本轮在跑时收到的提示词。键盘和手机共用一条队列，本轮一结束就按顺序发出去；
     /// 中断当前轮次同样会让队列立刻续上。
     queued_prompts: VecDeque<QueuedPrompt>,
+    /// 本轮进行中收到的 `/model`：本轮结束、排队的提示词发出之前切过去。
+    pending_model: Option<String>,
     /// 进程内 Harness 当前轮次的句柄。Runtime 轮次由 Daemon 停，本地轮次只能靠
     /// 掐这个 Task——没有它，`/local` 跑飞了就只剩退出 TUI 一条路。
     local_turn: Option<tokio::task::JoinHandle<()>>,
@@ -466,6 +468,9 @@ fn busy_input(prompt: &str) -> BusyInput {
         // 切档正是为了处理「这一轮在跑、又不停地弹审批」，必须当场生效。
         "/help" | "/version" | "/clear" | "/sidebar" | "/skills" | "/history" | "/permissions"
         | "/permission-mode" => BusyInput::RunNow,
+        // 换模型本来就只作用于下一轮，没有理由让用户等到本轮结束再敲一遍：当场收下，
+        // 记成待切换，本轮结束时再真正切（见 `switch_or_defer_model`）。
+        "/model" => BusyInput::RunNow,
         "/session" => match value.split_whitespace().nth(1) {
             Some("search") => BusyInput::RunNow,
             _ => BusyInput::Refuse,
