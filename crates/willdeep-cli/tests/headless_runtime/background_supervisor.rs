@@ -55,7 +55,25 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
             "timeout_seconds": 60
         }),
     );
-    wait_until(Duration::from_secs(5), || child_pid_path.exists());
+    // 20 秒是给 Windows PowerShell 冷启动（外层再嵌一个 powershell.exe）留的余量；
+    // 真正要钉的「断开后 5 秒内收掉」在下面单独断言。等不到时带上 supervisor 的输出，
+    // 分得清是慢还是命令本身出错。
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !child_pid_path.exists() {
+        if std::time::Instant::now() >= deadline {
+            drop(disconnected_liveness);
+            let output = disconnected
+                .wait_with_output()
+                .expect("collect background supervisor output");
+            panic!(
+                "supervised command wrote no PID file within 20s; supervisor exited {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     // Windows 上照样读取并解析 PID（证明子进程确实起来了），只是不查它是否还活着。
     #[cfg_attr(not(unix), allow(unused_variables))]
     let child_pid = std::fs::read_to_string(&child_pid_path)
