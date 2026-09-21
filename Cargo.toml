@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.81.0-rc1"
+version = "0.81.0-rc3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/niuwoai/willdeep-rs"
@@ -49,5 +49,5 @@ qrcode = { version = "0.14", default-features = false }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # 带 version 才能发布：crates.io 上的包不认 path。要求写成 0.78 系列的第一个
 # 预发布号，整条 0.78 线（含正式 0.78.0）都满足，不用每个 rc 跟着改。
-willdeep-runtime-protocol = { path = "crates/willdeep-runtime-protocol", version = "0.81.0-rc1" }
-willdeep-runtime-client = { path = "crates/willdeep-runtime-client", version = "0.81.0-rc1" }
+willdeep-runtime-protocol = { path = "crates/willdeep-runtime-protocol", version = "0.81.0-rc3" }
+willdeep-runtime-client = { path = "crates/willdeep-runtime-client", version = "0.81.0-rc3" }
