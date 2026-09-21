@@ -355,6 +355,8 @@ pub struct Agent {
     compressors: Vec<(Arc<dyn Provider>, bool)>,
     /// 会话标题摘要的专用 Provider。没绑就没有 L2 润色，列表停在 L1 派生标题。
     titlers: Vec<Arc<dyn Provider>>,
+    /// 轮次结束后预测用户下一句的 Provider，与标题同一档。没绑就不预测。
+    input_suggesters: Vec<Arc<dyn Provider>>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
@@ -374,6 +376,7 @@ impl Agent {
             image_fallback: None,
             compressors: Vec::new(),
             titlers: Vec::new(),
+            input_suggesters: Vec::new(),
             subagents: None,
             // 根 Agent 也带收件箱：用户在本轮进行中说的话由此送达，不必等轮次结束。
             instruction_inbox: Some(Arc::new(AgentInstructionInbox::default())),
@@ -451,6 +454,31 @@ impl Agent {
     pub fn with_titlers(mut self, providers: Vec<Arc<dyn Provider>>) -> Self {
         self.titlers = providers;
         self
+    }
+
+    /// Bind the candidates that predict the user's next message after a turn,
+    /// in preference order. Unbound means the feature is off for this agent.
+    pub fn with_input_suggesters(mut self, providers: Vec<Arc<dyn Provider>>) -> Self {
+        self.input_suggesters = providers;
+        self
+    }
+
+    pub fn input_suggestions_enabled(&self) -> bool {
+        !self.input_suggesters.is_empty()
+    }
+
+    /// 预测用户的下一句。`payload` 来自 [`crate::input_suggestion::payload`]。
+    /// 按候选顺序试，**第一个请求成功的就定案**——哪怕它说没有明显的下一步，
+    /// 也不再换下一家重问：预测是装饰，不值得为它多花一次钱。
+    pub async fn suggest_next_input(&self, payload: &str) -> Option<String> {
+        for provider in &self.input_suggesters {
+            if let Ok(suggestion) =
+                crate::input_suggestion::predict(provider.clone(), payload).await
+            {
+                return suggestion;
+            }
+        }
+        None
     }
 
     /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回

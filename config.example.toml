@@ -20,6 +20,7 @@ safety_judge = true
 # compressor_model = "someim-32b-compressor" # 上下文压缩模型；some.im 默认走网关托管压缩（固定指令服务端注入），其它 provider 默认取会话模型
 auto_title = true       # 会话第一轮自动整理标题；关掉后停在第一条提示词的派生标题
 # title_model = "glm-5" # 标题摘要模型；默认取会话模型（请求只发一问一答各 800 字）
+input_suggestions = true # 轮次结束后在空输入框里灰字预测你的下一句，Tab 采用；用 title_model 那一档模型，与 auto_title 互不影响
 small_model_routing = true
 auto_dispatch_read_only = true
 max_deep_calls_per_harness = 1

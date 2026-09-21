@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.78.0-rc29] - 2026-09-21
+
+### Added
+- **回合结束后，TUI 输入框里预测你的下一句（体验基线第 19 项，与 macOS 版 1.385.0-rc1 同一契约）。** Agent 回复完，空输入框里以灰字显示一句最可能的下一条消息（如「提交并合回 develop」），后面带「Tab 采用」提示；`Tab` 填入输入框**不自动发送**，直接打字或 `Esc` 即放弃，放弃了不回来。预测是轮次收尾后额外一次独立小请求，走标题摘要那一档模型候选（本地优先、`title_model` 兜底），只发最近两条用户原话（各 400 字）与助手回复尾部 1500 字，成本与对话长度无关；本地轮次与 Runtime 轮次（`task.completed` / `task.partial`）两条收尾路径都触发，失败、中断、输入框已有内容或附件、还有排队提示词时不请求。结果带发起时的输入框世代号回来，用户已开始打字、新一轮已开始、或模型答 `NONE` 时静默丢弃。输出先清洗再上屏：只取一行，剥引号与 `User:` / `下一句：` 导语，超过 120 字、助手口吻（「好的，我来…」「Sure, I'll…」）、疑似凭据一律不显示。预测只活在内存里，不进会话文件、不经 Runtime 协议。`[agent] input_suggestions = false` 关掉，与 `auto_title` 互不影响。`willdeep-core` 新增 `input_suggestion` 模块（`payload` / `sanitize` / `predict`），`Agent::with_input_suggesters` / `suggest_next_input`。
+- 测试：core 钉住 payload 只取最近两条用户原话与助手尾部、缺任一边为空、宿主指令不算用户原话，清洗的剥导语 / 剥包裹 / 拒 `NONE` / 拒超长 / 拒助手口吻 / 拒凭据；TUI 钉住 Tab 采用只填入不发送、打字与 Esc 放弃且不回来、世代号翻页后晚到结果丢弃、在跑 / 已打字 / `None` 不落地；`config.rs` 钉住 `input_suggestions` 解析与缺省。
+
+### Changed
+- **README 重排，面向「三秒知道是什么、三十秒跑起来」。** 第一屏改成一句话定位 + 英文摘要 + CI / Release / License 徽章 + 一条命令；「30 秒上手」前置并改为下载发行包（`releases/latest/download/...`）而不是先编译，源码构建挪到「参与开发」；新增「适合谁 / 不适合」表与 Runtime 拓扑示意；六个差异点从长段落压成可扫读的要点并逐条链接到对应文档，hooks 给真实 TOML 片段；文档区按「想做什么」分组；`range` / `agent-metrics` 两对注入标记原样保留，线上快照折进 `<details>`。内容口径不变，只动结构。
+- `docs/TUI_GUIDE.md` 输入快捷键表加 `Tab`（空输入框）一行并新增「轮次结束后的下一句预测」小节；`docs/CONFIGURATION.md`、`config.example.toml` 加 `input_suggestions`；`docs/EXPERIENCE_BASELINE.md` 第 19 项。
+- 新增需求单 `docs/decisions/2026-09-21-input-suggestion-followups.md`：发布 rc29、Runtime 升级、Web 端下一句预测（rc30）、README 演示 GIF、预测质量实弹、英文 README 与 `cargo install --git` 核实，每项带验收标准；`docs/README.md` 索引加行。
+
 ## [0.78.0-rc28] - 2026-09-21
 
 ### Added
@@ -11,6 +22,8 @@
 
 ### Changed
 - README「边界」不再写「无 checkpoint / rewind」；`docs/EXPERIENCE_BASELINE.md` 第 11 项两端到位。
+
+
 
 ## [0.78.0-rc27] - 2026-09-21
 

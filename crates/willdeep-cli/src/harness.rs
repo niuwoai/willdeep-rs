@@ -1053,13 +1053,17 @@ pub(crate) async fn build(
     agent = agent.with_compressors(compressors);
 
     // 标题同样本地优先、会话 Provider 兜底；请求仍只带一问一答各 800 字。
-    if loaded.file.agent.auto_title.unwrap_or(true) {
-        let mut titlers = Vec::new();
+    // 轮次结束后的「下一句预测」用同一档模型候选，但开关各管各的：关掉自动标题
+    // 不该顺手把预测也关了，反过来也一样。
+    let auto_title = loaded.file.agent.auto_title.unwrap_or(true);
+    let input_suggestions = loaded.file.agent.input_suggestions.unwrap_or(true);
+    if auto_title || input_suggestions {
+        let mut auxiliaries = Vec::new();
         if loaded.file.local_model.enabled
             && loaded.file.local_model.prefer_for_titles
             && let Some(local_config) = local_auxiliary_config
         {
-            titlers.push(
+            auxiliaries.push(
                 build_provider(local_config).context("initialize local session title model")?,
             );
         }
@@ -1067,8 +1071,14 @@ pub(crate) async fn build(
         if let Some(title_model) = loaded.file.agent.title_model.clone() {
             title_config.model = title_model;
         }
-        titlers.push(build_provider(title_config).context("initialize session title provider")?);
-        agent = agent.with_titlers(titlers);
+        auxiliaries
+            .push(build_provider(title_config).context("initialize session title provider")?);
+        if auto_title {
+            agent = agent.with_titlers(auxiliaries.clone());
+        }
+        if input_suggestions {
+            agent = agent.with_input_suggesters(auxiliaries);
+        }
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {

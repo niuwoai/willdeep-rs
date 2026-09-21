@@ -255,7 +255,11 @@ fn apply_runtime_event(
         }
         // 撞轮次上限、预算耗尽这类「没收敛」的收尾走 partial，不是 completed。
         // 漏了它界面就一直挂着「工作中」，直到快照对账强行复位。
-        "task.completed" | "turn.completed" | "task.partial" | "turn.partial" => app.finish_turn(),
+        "task.completed" | "turn.completed" | "task.partial" | "turn.partial" => {
+            app.finish_turn();
+            // 正常收尾（含没收敛的 partial）才值得预测下一句；失败与中断不预测。
+            app.runtime_turn_settled = true;
+        }
         "task.failed" => {
             // 事件里带着 `exit_code=…` 这类活下来的线索，此前被整条丢掉，
             // 只打印一句固定文案。完整命令与错误在侧栏详情里（`task.diagnostics`）。

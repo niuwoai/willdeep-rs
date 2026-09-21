@@ -25,6 +25,9 @@ impl App {
             prompt_scroll: 0,
             composer_expanded: false,
             notice: None,
+            input_suggestion: None,
+            input_suggestion_epoch: 0,
+            runtime_turn_settled: false,
             goal: None,
             mobile_gateway: None,
             mobile_qr: None,
@@ -722,6 +725,10 @@ impl App {
     }
     pub(super) fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
+        // 开始打字就放弃预测：灰字只在空输入框里有意义，删光了也不回来。
+        if !self.input.is_empty() && self.input_suggestion.is_some() {
+            self.clear_input_suggestion();
+        }
         self.skill_selected = 0;
         self.skill_menu_dismissed = false;
         self.command_selected = 0;
@@ -969,7 +976,66 @@ impl App {
         self.bell_pending = true;
     }
 
+    /// 把预测清掉并翻世代：在途的结果回来时对不上号，自然丢弃。
+    pub(super) fn clear_input_suggestion(&mut self) {
+        self.input_suggestion = None;
+        self.input_suggestion_epoch = self.input_suggestion_epoch.wrapping_add(1);
+    }
+
+    /// 预测结果落地前复核：世代号没变、还空闲、输入框还是空的、没有附件。
+    /// 任一不满足就静默丢弃——晚到的建议比没有建议更碍事。
+    pub(super) fn adopt_input_suggestion(
+        &mut self,
+        suggestion: Option<String>,
+        epoch: u64,
+    ) -> bool {
+        if epoch != self.input_suggestion_epoch
+            || self.running
+            || !self.input.is_empty()
+            || !self.attachments.is_empty()
+        {
+            return false;
+        }
+        let Some(suggestion) = suggestion else {
+            return false;
+        };
+        self.input_suggestion = Some(suggestion);
+        true
+    }
+
+    /// 灰字只在空闲且输入框为空时存在；其余时候当它不存在。
+    pub(super) fn visible_input_suggestion(&self) -> Option<&str> {
+        if self.running || !self.input.is_empty() {
+            return None;
+        }
+        self.input_suggestion.as_deref()
+    }
+
+    /// Tab：把灰字填进输入框，**不发送**。输入框非空时 Tab 不归这里管。
+    pub(super) fn accept_input_suggestion(&mut self) -> bool {
+        let Some(suggestion) = self.visible_input_suggestion().map(str::to_owned) else {
+            return false;
+        };
+        self.edit_input(|input| input.insert(&suggestion));
+        true
+    }
+
+    /// Esc：放弃这条预测。没有可放弃的就返回 `false`，让 Esc 走它原来的路。
+    pub(super) fn dismiss_input_suggestion(&mut self) -> bool {
+        if self.visible_input_suggestion().is_none() {
+            return false;
+        }
+        self.clear_input_suggestion();
+        true
+    }
+
+    pub(super) fn take_runtime_turn_settled(&mut self) -> bool {
+        std::mem::take(&mut self.runtime_turn_settled)
+    }
+
     pub(super) fn begin_turn(&mut self, runtime_turn: bool, initial_progress: String) {
+        // 新一轮开始，上一轮的预测作废；在途的结果回来也对不上世代号。
+        self.clear_input_suggestion();
         let now = Instant::now();
         self.running = true;
         self.runtime_turn = runtime_turn;

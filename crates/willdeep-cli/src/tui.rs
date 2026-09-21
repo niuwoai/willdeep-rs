@@ -69,7 +69,10 @@ use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
-use dispatch::{dispatch_compress, dispatch_prompt, dispatch_retitle, wake_for_kernel_events};
+use dispatch::{
+    dispatch_compress, dispatch_input_suggestion, dispatch_prompt, dispatch_retitle,
+    wake_for_kernel_events,
+};
 use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
@@ -124,6 +127,12 @@ pub enum UiMessage {
     Retitled {
         title: Option<String>,
         requested: bool,
+    },
+    /// 轮次结束后的下一句预测回来了。`epoch` 是发起时输入框的世代号：用户已经
+    /// 开始打字、或新一轮已经开始，世代号就翻页了，晚到的结果原地丢弃。
+    InputSuggested {
+        suggestion: Option<String>,
+        epoch: u64,
     },
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
@@ -222,6 +231,14 @@ struct App {
     prompt_scroll: usize,
     composer_expanded: bool,
     notice: Option<String>,
+    /// 轮次结束后预测的「你可能想说的下一句」。只在空闲且输入框为空时以灰字显示，
+    /// Tab 采用（只填入，不发送），打字 / Esc / 新一轮开始即清掉。只活在内存里。
+    input_suggestion: Option<String>,
+    /// 输入框世代号：每次清预测就加一。在途的预测带着旧世代号回来时对不上号，丢弃。
+    input_suggestion_epoch: u64,
+    /// Runtime 轮次刚正常收尾（completed / partial）。事件循环据此发起一次预测；
+    /// 失败与中断的收尾不置位。
+    runtime_turn_settled: bool,
     goal: Option<String>,
     mobile_gateway: Option<RelayGateway>,
     mobile_qr: Option<String>,
@@ -1544,8 +1561,24 @@ fn draw(
         let visible = areas[3].height.saturating_sub(2).max(1) as usize;
         app.prompt_scroll = row.saturating_sub(visible - 1);
         let wrapped_input = app.input.wrapped_text(width);
-        f.render_widget(
-            Paragraph::new(wrapped_input)
+        // 空输入框里的灰字预测：顶替正文而不是叠加，「Tab 采用」的提示跟在后面。
+        let suggestion_visible = app.visible_input_suggestion().is_some();
+        let composer_body = match app.visible_input_suggestion() {
+            Some(suggestion) => Text::from(Line::from(vec![
+                Span::styled(suggestion.to_owned(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(
+                        "  {}",
+                        app.language.text("Tab 采用", "Tab to accept", "Tab で採用")
+                    ),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ])),
+            None => Text::from(wrapped_input),
+        };
+        let composer = Paragraph::new(composer_body)
                 .block(
                     Block::default()
                         .title(Line::from(vec![
@@ -1596,9 +1629,14 @@ fn draw(
                 // typing and what you already said read as one voice instead of
                 // falling back to the terminal's default foreground.
                 .style(Style::default().fg(Color::Cyan))
-                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0)),
-            areas[3],
-        );
+                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0));
+        // 正文由编辑器按宽度预先折行；灰字预测没走编辑器，交给 Paragraph 折。
+        let composer = if suggestion_visible {
+            composer.wrap(Wrap { trim: false })
+        } else {
+            composer
+        };
+        f.render_widget(composer, areas[3]);
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
