@@ -1,0 +1,15 @@
+{
+  "id": "ja-done-uncommitted",
+  "language": "ja",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "失敗しているテストを直して"
+    },
+    {
+      "role": "assistant",
+      "content": "修正しました。`format_price` が小数点以下を切り捨てていたのを四捨五入に変えました。`npm test` は全部通っています。変更はまだコミットしていません。"
+    }
+  ]
+}

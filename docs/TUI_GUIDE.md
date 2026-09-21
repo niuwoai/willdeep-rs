@@ -146,7 +146,7 @@ Agent 回复完，空输入框里会以灰字显示一句最可能的下一条�
 - 这些情况不预测：轮次失败或被中断、输入框已有内容或附件、还有排队的提示词、模型判断没有明显的下一步。结果晚到时（你已经开始打字、或新一轮已经开始）静默丢弃。
 - 模型返回的内容先清洗再上屏：只取一行，剥掉引号和「User:」之类的导语，超过 120 字、助手口吻（「好的，我来…」）或疑似凭据的一律不显示。
 - 预测只活在内存里，不写进会话文件，也不经过 Runtime 协议。`[agent] input_suggestions = false` 关掉；它与 `auto_title` 互不影响。
-- 实弹评测（2026-09-21，16 条中英日样本，deepseek-v4-flash 与 glm-5）：凭据泄漏 0；该答 `NONE` 时答 `NONE` 与该给一句时给出均为 100%，人工判定合理 9/9（两模型各自）；deepseek-v4-flash 平均 0.7 秒，glm-5 3.0 秒。样本、逐轮明细与历史见 [`bench/input-suggestion/`](../bench/input-suggestion/README.md)。
+- 实弹评测（2026-09-21，19 条中英日样本，deepseek-v4-flash 与 glm-5）：凭据泄漏 0；该给一句时给出 100%、人工判定合理 12/12；该答 `NONE` 时 glm-5 为 100%，deepseek-v4-flash 两次分别 75% 与 100%（none 样本只有 4 条）；deepseek-v4-flash 平均 0.8 秒，glm-5 3.2 秒。做完但还没提交时会预测「提交」这类下一步，只有已提交 / 合并 / 发布或对话结束才不给。样本、逐轮明细与历史见 [`bench/input-suggestion/`](../bench/input-suggestion/README.md)。
 
 ### 切换模型
 

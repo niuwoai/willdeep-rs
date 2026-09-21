@@ -34,8 +34,9 @@ Rules:
 - No quotes, no \"User:\" prefix, no explanation, no markdown.
 - If the assistant asked a yes/no question or offered to continue, answer it the way this user would.
 - Never speak as the assistant. Never start with \"Sure\", \"I'll\", \"Let me\" or the like.
-- If the assistant reports the work is done and asks nothing, output exactly: NONE.
-  Do not fill the gap with thanks, greetings or goodbyes.
+- Finished work usually still has a next step (commit, open a PR, deploy, test more): suggest it.
+- Output NONE only when the work is fully wrapped up (already committed, merged or released)
+  or the conversation is ending. Never fill the gap with thanks, greetings or goodbyes.
 - If there is no obvious next step, output exactly: NONE";
 
 /// 模型返回的那一行被判定为「助手口吻」的开头。用户不会这样开口，模型会。
