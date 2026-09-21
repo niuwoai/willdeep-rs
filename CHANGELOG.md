@@ -8,6 +8,7 @@
 - 测试：web 端点单测钉住首个答复的候选胜出且失败的只问一次、全部失败与装不出 Provider 回 `null`、会话在跑与缺正文时一次都不问模型、开关关与未知会话 200 + `null` 且 `$WILLDEEP_HOME` 前后文件与 mtime 不变；新增浏览器回归 `scripts/web_input_suggestion_test.cjs`（灰字出现、Tab 不发请求、打字与 Esc 放弃不复现、刷新不复现、`null` 不显示、英日两语提示）；`web_runtime_retry_fixture.mjs` 加 `complete` 模式与预测假回包。
 - 下一句预测实弹评测：`bench/input-suggestion/`（16 条中英日样本、每轮归档与 `history.jsonl`）、`willdeep-core` 的 `#[ignore]` 实弹测试 `input_suggestion_live_fire` 与进常规测试的样本自检、驱动脚本 `scripts/input_suggestion_eval.rb`（`--rescore` 人工判定后重算）。首批四轮：修复前 none 命中 50% / 75%、日文 suggest 全灭；修复后两模型 reject / none / suggest 均 100%，凭据泄漏 0。凭据读取抽到 `scripts/lib/willdeep_credentials.rb`，靶场脚本同用。
 
+- README 首屏加一张真实 TUI 演示 GIF（`docs/media/readme-demo.gif`，0.95 MB / 24 秒）：找到缺陷、改一行、裸跑测试验证、收尾后灰字预测下一句。由 `docs/media/readme-demo.tape` 经 `scripts/record_readme_demo.rb` 生成：真跑模型，演示仓库与 `WILLDEEP_HOME` 都在 `/tmp/willdeep-demo` 现建现删，key 只走环境变量；vhs 0.12 在本机合成视频会静默失败，改为只出 PNG 帧、由脚本用 ffmpeg 叠层、倍速、调色板压缩；没录到灰字预测时自动重录（最多 3 次）。提示词在 README 原句后加了「改完我先看看」——不加时模型会去 `git commit` 并停在审批卡上。
 ### Changed
 - `harness` 抽出 `resolve_parent_provider_config` 与 `auxiliary_providers`：会话主 Provider 与标题 / 预测候选的装配从 `build` 里拿出来，TUI 与 Web 共用一段，免得两处在某个档案上悄悄分叉。行为不变。
 - `willdeep-core` 新增 `input_suggestion::predict_first`（按顺序问候选、失败才换下一家），`Agent::suggest_next_input` 改为调它。
