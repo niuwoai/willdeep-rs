@@ -14,6 +14,7 @@
 - `docs/WEB_GUIDE.md`「Composer」与「JSON API」、`docs/WEB_RUNTIME_RETRY_QA.md`、`docs/EXPERIENCE_BASELINE.md` 第 19 项、`PRODUCT_OVERVIEW.md` 同步。
 
 ### Fixed
+- **Python 项目的测试跑过了却被判「缺少有效的通过验证记录」。** 完成验证只认一张测试命令白名单，里面没有 `python -m unittest`，也认不出按路径调用的解释器（`.venv/bin/python -m pytest`、`venv/bin/python3.12 -m unittest`）。于是测试明明 exit 0 也记不成证据，宿主再要求验证三遍，最后以「⚠ 任务仅部分完成」收尾——白跑三轮、结论还是错的。现在 `python` / `python3` / `python3.N` 无论裸调还是带路径都归一识别，并补上 `unittest`；`python2`、`pythonista`、`-m http.server` 之类仍不算。录 README 演示时撞见。
 - **日文的「是」不再被当成助手口吻拦掉。** 清洗规则里光秃秃的「はい、」把「はい、そのままコミットして」这类用户回答一并误杀——实弹评测里两个模型的日文 suggest 样本全军覆没。改为只拦「はい、承知」「はい、かしこまり」「はい、では」这类助手才会接的开头。
 - **任务已收口时不再预测客套话。** 提示词加一条：助手报告完成且没有提问时答 `NONE`，不要用「谢谢 / 明天见」填空。实弹评测里 none 命中原为 50%（deepseek-v4-flash）与 75%（glm-5）。
 

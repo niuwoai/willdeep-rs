@@ -309,9 +309,14 @@ pub(super) fn report_verification(
 }
 
 pub(super) fn is_verification_command(command: &str) -> bool {
-    let Some(words) = verification_words(command) else {
+    let Some(mut words) = verification_words(command) else {
         return false;
     };
+    if let Some(first) = words.first_mut()
+        && let Some(interpreter) = python_interpreter(first)
+    {
+        *first = interpreter.to_owned();
+    }
     if words.iter().any(|word| {
         matches!(
             word.as_str(),
@@ -326,7 +331,7 @@ pub(super) fn is_verification_command(command: &str) -> bool {
         "go test",
         "pytest",
         "python -m pytest",
-        "python3 -m pytest",
+        "python -m unittest",
         "ruby test",
         "bundle exec rspec",
         "bundle exec rake test",
@@ -353,6 +358,21 @@ pub(super) fn is_verification_command(command: &str) -> bool {
             .take(prefix.split_whitespace().count())
             .eq(prefix.split_whitespace())
     })
+}
+
+/// 虚拟环境里的解释器（`.venv/bin/python`、`venv/bin/python3.12`）与裸
+/// `python3` 都归一成 `python`：Python 项目几乎都这么跑测试，认不出来的话
+/// 测试明明过了也记不成证据，轮次会被要求再验三遍、最后报「仅部分完成」。
+/// 证据闸门防的是「没跑就说过了」，不是权限边界——解释器是谁不改变退出码的含义。
+fn python_interpreter(word: &str) -> Option<&'static str> {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    let version = name.strip_prefix("python")?;
+    let plain = version.is_empty()
+        || version == "3"
+        || version.strip_prefix("3.").is_some_and(|minor| {
+            !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    plain.then_some("python")
 }
 
 // Evidence requires one foreground command whose exit status is the test's.
@@ -887,6 +907,10 @@ mod tests {
             "cargo test -- --list",
             "Cargo test",
             "cargo test 'unfinished",
+            "python -m unittest --help",
+            "pythonista -m pytest",
+            "python2 -m pytest",
+            "python3 -m http.server",
         ] {
             assert!(!is_verification_command(command), "{command}");
         }
@@ -895,6 +919,12 @@ mod tests {
             "cargo nextest run",
             "yarn run test",
             "pytest -k 'one or two'",
+            "python3 -m pytest -q",
+            "python -m unittest",
+            "python3 -m unittest discover -v",
+            ".venv/bin/python -m pytest -q",
+            "venv/bin/python3.12 -m unittest",
+            "/usr/bin/python3 -m pytest tests/test_api.py",
             "cargo test 'literal;value'",
             "cargo test \"literal|value\"",
             "cargo test '$(literal)'",
