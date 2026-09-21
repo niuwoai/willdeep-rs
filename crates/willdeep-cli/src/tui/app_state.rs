@@ -53,6 +53,8 @@ impl App {
             runtime_gates: Vec::new(),
             runtime_version: None,
             runtime_version_warned: false,
+            runtime_auto_upgrade_pending: false,
+            runtime_auto_upgrade_tried: false,
             surfaced_gates: BTreeSet::new(),
             runtime_agents: Vec::new(),
             runtime_tools: Vec::new(),
@@ -1138,6 +1140,10 @@ impl App {
             return;
         }
         self.runtime_version_warned = true;
+        // 只升不降：Runtime 比客户端旧才考虑自动升级，每个客户端进程只试一次。
+        if !self.runtime_auto_upgrade_tried && version_is_older(&stale, willdeep_core::VERSION) {
+            self.runtime_auto_upgrade_pending = true;
+        }
         let message = self
             .language
             .text(
@@ -1996,4 +2002,23 @@ impl App {
             format!("{}\n\n{prompt}", blocks.join("\n\n"))
         }
     }
+}
+
+/// `a` 是否严格早于 `b`。认 `MAJOR.MINOR.PATCH` 与可选的 `-rcN`，正式版晚于同号 rc。
+/// 解析不了就返回 false——拿不准就不自动升级。
+pub(super) fn version_is_older(a: &str, b: &str) -> bool {
+    fn parse(value: &str) -> Option<(u64, u64, u64, Option<u64>)> {
+        let (core, pre) = match value.trim().split_once('-') {
+            Some((core, pre)) => (core, Some(pre.strip_prefix("rc")?.parse().ok()?)),
+            None => (value.trim(), None),
+        };
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+        let parsed = (parts.next()??, parts.next()??, parts.next()??, pre);
+        parts.next().is_none().then_some(parsed)
+    }
+    let (Some(a), Some(b)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    let rank = |pre: Option<u64>| pre.map_or((1, 0), |rc| (0, rc));
+    (a.0, a.1, a.2, rank(a.3)) < (b.0, b.1, b.2, rank(b.3))
 }

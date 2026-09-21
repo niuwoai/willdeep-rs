@@ -5,6 +5,9 @@
 ### Added
 - **轮次进行中可以直接 `/model`。** 以前本轮在跑时 `/model` 与 `/compress`、`/diff` 等一起被拒绝，只能等本轮结束或 Esc 中断再敲一遍。换模型本来就只作用于下一轮，现在当场收下：`/model <名>` 或从 `/model` 列表里选，状态行提示「本轮结束后切换到 X，下一轮起生效」，本轮结束（正常、中断或失败）时、在排队的提示词发出之前真正切过去；同一轮里换多次以最后一次为准。不在轮次中途真切，是因为进程内 `/local` 轮次的下一次调模型会立刻换掉，且会话文件正由运行中的轮次写着。`docs/TUI_GUIDE.md` 同步。
 
+- **Runtime 比客户端旧且空闲时，TUI 自动升级它。** 以前每次装了新版都要看到「版本不一致」警告再手动 `/daemon upgrade`。现在满足三个条件就自动升级一次、在对话里写一行结果：Runtime 严格早于客户端（按 `MAJOR.MINOR.PATCH[-rcN]` 比较，解析不了就不升）；当前 TUI 没有在跑的轮次；Runtime 里所有工作区都没有未终结的任务——包括等人审批 / 回答的，交接会把它们一起丢掉，而它们可能在别的工作区。条件不满足时说明原因、保留警告；Runtime 比客户端新时绝不降级；每个 TUI 进程只试一次。不做成 Agent 可调用的工具：Agent 这一轮本身跑在 Runtime 里，且让受审批约束的一方替换执行审批的一方不合适。
+- `/daemon upgrade` 等 Runtime 操作的最终结果改为写进对话（新增 `UiMessage::RuntimeResult`）；以前只进状态行，下一条提示一来就被覆盖，看到的只剩「操作已提交」。
+
 ### Fixed
 - **提升到 0.79.0-rc1 后整个工作区编译失败。** 根 `Cargo.toml` 里 `willdeep-runtime-protocol` / `willdeep-runtime-client` 的版本要求还是 `0.78.0-rc1`，`^0.78.0-rc1` 匹配不了 0.79.0-rc1。两处跟上工作区版本，并新增 `crates/willdeep-cli/tests/workspace_versions.rs` 钉住「内部依赖版本要求 = `[workspace.package] version`」。
 

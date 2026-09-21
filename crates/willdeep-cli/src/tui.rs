@@ -112,6 +112,9 @@ pub enum UiMessage {
         willdeep_core::checkpoint::ClaimedSessionCheckpointSink,
     ),
     RuntimeNotice(String),
+    /// Runtime 操作的最终结果：同时进聊天记录与状态行。只进状态行的话，下一条
+    /// 提示一来就被覆盖，用户看到的只剩「操作已提交」。
+    RuntimeResult(String),
     ModelsLoaded(std::result::Result<Vec<String>, String>),
     MediaLoaded {
         target: String,
@@ -282,6 +285,9 @@ struct App {
     /// A version mismatch is announced once in the transcript; the sidebar
     /// warning then stays up on its own.
     runtime_version_warned: bool,
+    /// Runtime 比客户端旧、本会话还没试过自动升级：事件循环据此发起一次。
+    runtime_auto_upgrade_pending: bool,
+    runtime_auto_upgrade_tried: bool,
     /// Runtime interactions already turned into a dialog, so a snapshot that
     /// still lists them does not reopen the same card every second.
     surfaced_gates: BTreeSet<uuid::Uuid>,
