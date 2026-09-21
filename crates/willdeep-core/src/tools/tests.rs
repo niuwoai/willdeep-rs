@@ -1535,3 +1535,15 @@ fn write_denial_hint_names_the_two_real_ways_out_and_rules_out_asking() {
     // 不再给「放宽工作区策略」这种没有落点的说法，模型会拿它去问一个改不了围栏的问题。
     assert!(!hint.contains("放宽工作区策略"), "{hint}");
 }
+
+#[test]
+fn multiline_or_spaced_commands_are_not_mistaken_for_credentials() {
+    let multiline = "cd sdk && .venv/bin/python -c \"\nimport pathlib\nassert pathlib.Path('README.md').exists()\nprint('ok')\n\"";
+    assert!(!child_command_is_sensitive(multiline));
+    assert!(!child_command_is_sensitive("pytest  -q\t tests/"));
+    // 真带凭据的照旧拦下，多行也一样。
+    assert!(child_command_is_sensitive(
+        "curl \\\n  --token sk-abcdefghijklmnop0123 https://example.com"
+    ));
+    assert!(child_command_is_sensitive("API_KEY=secret-value-123 ./run"));
+}
