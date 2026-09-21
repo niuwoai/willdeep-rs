@@ -68,8 +68,9 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 |---|---|
 | `/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` | **立即执行**。这些只改本地显示，不碰会话、模型或 Runtime |
 | `/permissions`、Shift+Tab | **立即执行**，而且对正在跑的这一轮生效——切档就是为了处理「跑着跑着一直弹审批」 |
+| `/model` | **当场收下**，状态行提示「本轮结束后切换到 X」；本轮结束、排队的提示词发出之前真正切过去。换模型本来就只作用于下一轮，不必等 |
 | 普通提示词、`/local <任务>`、`/runtime <任务>` | **排队**。状态行显示「待发 N」，本轮结束（或被中断）后按顺序自动发出；附件跟着一起排队 |
-| 其余命令（`/model`、`/compress`、`/daemon`、`/diff`、`/rewind`、`/session switch` 等） | **说明原因并拒绝**。它们会改会话或 Runtime 状态，延迟几分钟再执行只会更意外 |
+| 其余命令（`/compress`、`/daemon`、`/diff`、`/rewind`、`/session switch` 等） | **说明原因并拒绝**。它们会改会话或 Runtime 状态，延迟几分钟再执行只会更意外 |
 
 按 `Esc` 中断当前轮次：Runtime 轮次交给 Daemon 排空（它知道在途工具怎么收尾），
 `/local` 轮次直接掐掉进程内 Harness。中断后队列立刻续上。
@@ -152,7 +153,7 @@ Agent 回复完，空输入框里会以灰字显示一句最可能的下一条�
 
 - 输入 `/model <模型名>` 可直接切换当前 Session 后续对话使用的模型，例如 `/model qwen3-coder`。
 - 只输入 `/model` 会从当前 Provider 的 `/v1/models` 获取完整模型列表。直接键入文字即可模糊筛选，使用 `↑` / `↓` / `Tab`、`PageUp` / `PageDown` 或鼠标滚轮浏览，按 `Enter` 或点击模型完成切换，`Esc` 关闭。
-- 模型选择按 Session 持久保存，并同步到 Runtime 与进程内 `/local` Agent；正在执行的轮次不会被中途换模，切换作用于下一轮对话。
+- 模型选择按 Session 持久保存，并同步到 Runtime 与进程内 `/local` Agent；正在执行的轮次不会被中途换模，切换作用于下一轮对话。轮次进行中也可以直接 `/model <名>` 或从列表里选：先记下，本轮结束时再切（同一轮里换多次以最后一次为准）。
 - 若 Provider 不支持模型列表接口或接口暂时不可用，仍可使用 `/model <模型名>` 直接指定。
 
 ### 切换审批模式
