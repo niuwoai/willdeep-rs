@@ -151,6 +151,9 @@ pub enum ToolError {
 pub struct ToolRegistry {
     workspace: PathBuf,
     approval_mode: SharedApprovalMode,
+    /// 子 Agent 专用：父会话的档位句柄。父会话处于 `full-access` 时，本注册表也按
+    /// `full-access` 判定（实时跟随，切回即失效）；其余档位用本工种自己的档位。
+    parent_approval_mode: Option<SharedApprovalMode>,
     approver: Arc<dyn Approver>,
     skills: Arc<SkillCatalog>,
     mcp: Arc<McpRegistry>,
@@ -226,6 +229,7 @@ impl ToolRegistry {
             ),
             workspace,
             approval_mode: SharedApprovalMode::new(approval_mode),
+            parent_approval_mode: None,
             approver: Arc::new(DenyApprover),
             skills: Arc::new(SkillCatalog::default()),
             mcp: Arc::new(McpRegistry::default()),
@@ -1807,7 +1811,9 @@ impl ToolRegistry {
                 "this subagent may only run its declared verifier command verbatim ({allowed_list}), not: {command}"
             )));
         }
-        if self.reviewed_subagent_shell {
+        // 父会话在 full-access：子 Agent 跟着免审。上面那几道收窄（只许跑 verifier、
+        // 只读 git）是工种的职责边界，照旧生效；这里跳过的只是「请判官 / 请人」。
+        if self.reviewed_subagent_shell && !self.inherits_full_access() {
             if child_command_is_sensitive(trimmed) {
                 return Err(reviewed_subagent_denial(
                     command,

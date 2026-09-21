@@ -761,6 +761,8 @@ pub(crate) async fn build(
     let approval_handle = runtime_approval_handle
         .unwrap_or_else(|| willdeep_core::SharedApprovalMode::new(approval_mode));
     approval_handle.set(approval_mode);
+    // 子 Agent 要跟随父会话的 full-access，拿同一个句柄——切档是实时的。
+    let parent_approval_handle = approval_handle.clone();
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_shared_approval_mode(approval_handle)
         .with_output_store(&home.join("tool-outputs"))
@@ -910,6 +912,8 @@ pub(crate) async fn build(
         .map_err(anyhow::Error::msg)?;
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
         .with_sandbox(sandbox)
+        // 父会话在 full-access 时 Worker 跟着免审（rocky 2026-09-21 决定）。
+        .with_parent_approval_mode(parent_approval_handle)
         .with_worktree_root(home.join("worktrees").join("subagents"))
         // Task packets may name a skill; the runtime inlines its body so the
         // worker never spends turns fetching its own instructions.

@@ -1547,3 +1547,77 @@ fn multiline_or_spaced_commands_are_not_mistaken_for_credentials() {
     ));
     assert!(child_command_is_sensitive("API_KEY=secret-value-123 ./run"));
 }
+
+/// 子 Agent 跟随父会话的 full-access（rocky 2026-09-21 决定）：实时跟随，切回即失效；
+/// 工种自己的收窄（只许跑 verifier）不因此放宽。
+#[tokio::test]
+async fn a_child_follows_the_parent_into_full_access_and_back_out() {
+    let root = workspace("child-inherits-full-access");
+    let parent = SharedApprovalMode::new(ApprovalMode::Smart);
+    // 没有判官：原本判官判不了的命令只能被拒，正好看得出免审有没有生效。
+    let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+        .expect("registry")
+        .with_reviewed_subagent_shell(true)
+        .with_parent_approval_mode(parent.clone());
+    let run = |command: &str| {
+        let registry = &registry;
+        let command = command.to_owned();
+        async move {
+            registry
+                .run_command(CommandArgs {
+                    command,
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                    network: None,
+                })
+                .await
+        }
+    };
+    let undecidable = "echo \"$(printf inherited)\" > inherited.txt";
+
+    assert_eq!(registry.approval_mode(), ApprovalMode::Smart);
+    assert!(matches!(
+        run(undecidable).await,
+        Err(ToolError::ApprovalDenied(_))
+    ));
+
+    parent.set(ApprovalMode::FullAccess);
+    assert_eq!(registry.approval_mode(), ApprovalMode::FullAccess);
+    assert!(
+        !registry.effective_sandbox().policy.is_enforcing(),
+        "full access drops the fence, as for the main agent"
+    );
+    run(undecidable)
+        .await
+        .expect("full access: no review, no card");
+
+    parent.set(ApprovalMode::Smart);
+    assert_eq!(registry.approval_mode(), ApprovalMode::Smart);
+    assert!(
+        matches!(run(undecidable).await, Err(ToolError::ApprovalDenied(_))),
+        "switching the parent back re-arms review"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[tokio::test]
+async fn full_access_does_not_widen_a_verifier_only_child() {
+    let root = workspace("child-full-access-allowlist");
+    let parent = SharedApprovalMode::new(ApprovalMode::FullAccess);
+    let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+        .expect("registry")
+        .with_command_allowlist(Some(HashSet::from(["echo verified".to_owned()])))
+        .with_parent_approval_mode(parent);
+    let other = registry
+        .run_command(CommandArgs {
+            command: "echo something else".to_owned(),
+            timeout_seconds: None,
+            label: None,
+            run_in_background: None,
+            network: None,
+        })
+        .await;
+    assert!(matches!(other, Err(ToolError::ApprovalDenied(_))));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
