@@ -2118,7 +2118,11 @@ fn command_signature(command: &str) -> Option<String> {
 /// paths recognise the same shapes and cannot drift apart. `command` must
 /// already be whitespace-normalized, since the redactor normalizes too.
 fn command_carries_credentials(command: &str) -> bool {
-    crate::judge::redact_credentials(command) != command
+    // `redact_credentials` 按空白切词再用单个空格拼回去，只拿它和原文比，
+    // 任何多行命令（`python -c "…多行…"`）或带连续空格的命令都会被当成
+    // 「脱敏改动了它」，从而误判为带凭据、连判官都不送。先用同一把尺子规范化原文。
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::judge::redact_credentials(command) != normalized
 }
 
 pub(crate) fn child_command_is_sensitive(command: &str) -> bool {
