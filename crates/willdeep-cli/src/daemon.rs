@@ -190,6 +190,12 @@ fn tool_may_modify_workspace(name: &str) -> bool {
 #[async_trait]
 impl willdeep_core::EventSink for RuntimeEventSink {
     async fn emit(&self, event: willdeep_core::AgentEvent) {
+        self.emit_sequenced(event).await;
+    }
+
+    /// 返回事件在 `events.ndjson` 里的序号：用量账本的实时行据此填
+    /// `event_sequence`，回填才认得出哪些调用已经记过。
+    async fn emit_sequenced(&self, event: willdeep_core::AgentEvent) -> Option<u64> {
         if let Err(error) = tool_store::observe(
             &self.tools,
             self.session_id,
@@ -207,11 +213,12 @@ impl willdeep_core::EventSink for RuntimeEventSink {
             .apply_harness_event(self.task_id, &line)
             .is_err()
         {
-            return;
+            return None;
         }
-        let _ = self
-            .events
-            .append("task.output", format!("task_id={} {line}", self.task_id));
+        self.events
+            .append("task.output", format!("task_id={} {line}", self.task_id))
+            .ok()
+            .map(|event| event.sequence)
     }
 }
 
@@ -700,6 +707,12 @@ pub(crate) struct RuntimeConnection {
     url: String,
     token: String,
     task_id: uuid::Uuid,
+}
+
+impl RuntimeConnection {
+    pub(crate) fn task_id(&self) -> uuid::Uuid {
+        self.task_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1858,6 +1871,12 @@ async fn run(home: &Path) -> Result<()> {
     };
     let lock_heartbeat = spawn_lock_heartbeat(paths.lock.clone(), cleanup.lock_token.clone());
     let (shutdown_signal, shutdown_receiver) = watch::channel(false);
+    // 接任务之前把旧 Runtime 的用量补进账本（仅一次，有标记即跳过；失败只警告）。
+    let backfill_home = home.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::usage_cmd::backfill_on_daemon_start(&backfill_home)
+    })
+    .await;
     let events = Arc::new(EventLog::open(paths.events.clone())?);
     let agents = Arc::new(AgentStore::open(paths.agents.clone())?);
     let agent_commands = Arc::new(AgentCommandStore::open(paths.agent_commands.clone())?);

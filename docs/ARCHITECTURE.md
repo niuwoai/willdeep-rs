@@ -152,6 +152,15 @@ postMessage 到父窗口，而父窗口只接受清单里声明过的命令 ID�
 `networkDomains` 而不是权限位；插件页面跑命令另有一层比主 Agent 更严的硬地板，
 因为插件页上的确认框给不了用户判断所需的上下文。
 
+### 本机用量账本
+
+每次模型调用在 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl` 记一行（`willdeep.usage-ledger.v1`，
+canonical 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`）。写入口在 Core 的
+`usage_ledger`：有界通道 + 单个写线程，`O_APPEND` 单次写整行，IO 失败只警告。主回合、
+子 Agent 与压缩由 `Agent` 在收到 usage 的同一处记账，并经 `EventSink::emit_sequenced`
+拿到 daemon `events.ndjson` 的序号；辅助请求由 harness 用 `LedgeredProvider` 在构造处包好。
+Mac 只读这份账本，rs 不读 Mac 的任何数据。细节与字段映射见 [本机用量账本](USAGE_LEDGER.md)。
+
 ## 尚未满足的长期架构要求
 
 阶段 0 文档要求的 ACP 双轨验证、crate 级复用清单、协议 Schema 与跨客户端会话均尚未完成。当前实现是原生 Harness 起点，不能视为完整阶段 0 或阶段 1 产品。

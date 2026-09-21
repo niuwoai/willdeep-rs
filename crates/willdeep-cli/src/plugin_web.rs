@@ -1005,6 +1005,9 @@ async fn ai_complete(
 
     let provider = build_provider(provider_config)
         .map_err(|_| PluginWebError::BadRequest("unavailable".to_owned()))?;
+    // 插件页的 AI 请求同样进本机用量账本（辅助请求）。
+    let provider =
+        crate::harness::standalone_usage_ledger(&state.home, None, None).auxiliary(provider);
 
     if request.skills.len() > MAX_AI_SKILLS {
         return Err(PluginWebError::BadRequest("tooManySkills".to_owned()));

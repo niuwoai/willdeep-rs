@@ -1720,8 +1720,17 @@ async fn predict_session_input(state: &WebState, id: uuid::Uuid) -> Option<Strin
         .unwrap_or(true);
     let profile = session.profile.clone().or_else(|| state.profile.clone());
     let model = session.model.clone();
+    let ledger =
+        crate::harness::standalone_usage_ledger(&state.home, Some(id), Some(&session.workspace));
     suggest_for_session(&session.messages, running, || {
-        crate::harness::input_suggestion_providers(&loaded, profile.as_deref(), model)
+        crate::harness::input_suggestion_providers(&loaded, profile.as_deref(), model).map(
+            |providers| {
+                providers
+                    .into_iter()
+                    .map(|provider| ledger.auxiliary(provider))
+                    .collect()
+            },
+        )
     })
     .await
 }

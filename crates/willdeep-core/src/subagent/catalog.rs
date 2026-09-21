@@ -86,6 +86,8 @@ pub struct SubagentCatalog {
     /// `stop_agent` 只认这份名单：注册表可能被别的入口共用，名单外的 id 一律
     /// 当作找不到。
     pub(super) owned_background_agents: Arc<Mutex<BTreeSet<uuid::Uuid>>>,
+    /// 父会话的用量账本；Worker 派生出自己的句柄记 `subagent` 行。
+    usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
 }
 
 /// 一个档位兑现出来的模型。
@@ -135,7 +137,14 @@ impl SubagentCatalog {
             sandbox: crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::Off, []),
             parent_approval_mode: None,
             owned_background_agents: Arc::new(Mutex::new(BTreeSet::new())),
+            usage_ledger: None,
         }
+    }
+
+    /// 让 Worker 的模型调用进父会话的用量账本。
+    pub fn with_usage_ledger(mut self, scope: crate::usage_ledger::UsageLedgerScope) -> Self {
+        self.usage_ledger = Some(scope);
+        self
     }
 
     /// Workers and unattended verifiers inherit the parent's OS boundary.
@@ -705,6 +714,7 @@ impl SubagentCatalog {
             always_allow_store: self.always_allow_store.clone(),
             state_home: self.state_home.clone(),
             parent_approval_mode: self.parent_approval_mode.clone(),
+            usage_ledger: self.usage_ledger.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();

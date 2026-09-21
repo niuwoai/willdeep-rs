@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.81.0-rc1] - 2026-09-21
+
+### Added
+- **本机用量账本：每次模型调用一行。** 以前 CLI 的用量只进内存事件和运行级累计，Mac 的 Token 活动一条都看不到（9 月 21 日 CLI 跑了 700 多次模型调用、约 3300 万 Token，桌面那格只有 32 万）。现在主回合、子 Agent、上下文压缩，以及标题、下一句预测、路由分类、安全判官、看图兜底、子 Agent 大文件摘要、Web 端预测和插件页 AI 请求，每次调用都在 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl` 记一行 `willdeep.usage-ledger.v1`：时间、前端（cli / tui / mobile / unknown）、执行位置（daemon / 进程内）、类别、会话 / 回合 / 任务 / Agent、工作区、Provider 与模型、是否本地模型、输入（含缓存命中）/ 缓存命中 / 输出 / 合计 Token、耗时、结局。只记数不记内容；协议没报的 Token 留 `null`，不估算；失败、被抢占、中途取消的请求也记。daemon 回合带上对应 usage 事件在 `events.ndjson` 里的序号。写入走有界通道 + 单个后台写线程，`O_APPEND` 一次写整行，并发写不交错；任何 IO 错误只警告一次，不让回合失败或变慢。
+- **`willdeep usage backfill [--dry-run]`：** 从 `runtime/events.ndjson` 回填账本上线前的 daemon 用量（按 `task_id` 连 `tasks.json` 补会话、回合、工作区、前端，模型取任务 → Runtime 会话 → `agents.json`）。回填 id 由事件序号确定（UUIDv5），已在账本的 id、实时记过的序号、还没结束的任务一律跳过，反复跑结果逐字节不变。`--dry-run` 按本机时区逐日列调用数与 Token，不写文件。daemon 启动时、接任务之前自动回填一次，以 `usage/.backfill-v1.done` 为标记；失败只警告。本机实测 dry-run：2282 次调用，其中 9 月 21 日 720 次（子 Agent 126 次）、输入 3296 万（缓存命中 2919 万）、输出 68 万，与直接数事件日志一致。进程内回合在账本上线前的历史没有时间戳，无法回填，如实缺失。
+- 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`（双端 canonical），rs 侧落地与字段映射见新增的 `docs/USAGE_LEDGER.md`；`docs/README.md`、`docs/CLI_REFERENCE.md`、`docs/ARCHITECTURE.md`、`PRODUCT_OVERVIEW.md` 同步。
+- `Provider` 新增 `ledger_identity()`（三种协议实现从配置取 Provider 名、模型与是否本地），`EventSink` 新增带默认实现的 `emit_sequenced()`（daemon 的事件宿主返回事件序号，子 Agent 的转发 sink 透传）。
+- 测试：账本键集恰为规范 23 个且不含内容字段；16 线程 × 1000 行追加同一文件得 16000 行可解析、id 不重复、权限 0600；账本目录不可写时回合照常完成、只计失败；Agent 一次请求一行（进程内与 daemon 两种执行位置），子 Agent / 压缩 / 辅助请求分类正确；被丢弃的调用记 `cancelled`；回填夹具字段、两次逐字节相同、与实时序号重叠跳过、未结束任务跳过、daemon 只自动回填一次；Agent 经真实 `RuntimeEventSink` 跑一轮后账本序号与事件日志逐一对应、回填一条不补。
+
 ## [0.80.0-rc2] - 2026-09-21
 
 ### Fixed
