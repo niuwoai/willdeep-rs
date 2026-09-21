@@ -1,0 +1,15 @@
+{
+  "id": "zh-task-closed",
+  "language": "zh",
+  "expect": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "把 README 里的错别字改一下"
+    },
+    {
+      "role": "assistant",
+      "content": "已改完 3 处错别字并提交（a1b2c3d），PR #41 已合并。这件事到这里就结束了。"
+    }
+  ]
+}

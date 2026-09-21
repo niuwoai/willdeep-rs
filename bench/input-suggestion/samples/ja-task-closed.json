@@ -1,0 +1,15 @@
+{
+  "id": "ja-task-closed",
+  "language": "ja",
+  "expect": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "タイポを直してプッシュして"
+    },
+    {
+      "role": "assistant",
+      "content": "タイポを 2 か所修正してプッシュしました。CI も通っています。作業はこれで完了です。"
+    }
+  ]
+}

@@ -2813,7 +2813,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "willdeep"
-version = "0.78.0-rc28"
+version = "0.81.0-rc1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2851,7 +2851,7 @@ dependencies = [
 
 [[package]]
 name = "willdeep-core"
-version = "0.78.0-rc28"
+version = "0.81.0-rc1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2865,6 +2865,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
@@ -2875,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "willdeep-runtime-client"
-version = "0.78.0-rc28"
+version = "0.81.0-rc1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2890,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "willdeep-runtime-protocol"
-version = "0.78.0-rc28"
+version = "0.81.0-rc1"
 dependencies = [
  "http",
  "serde",

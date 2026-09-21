@@ -1522,3 +1522,102 @@ async fn verification_retains_start_revision_but_invalidates_changed_files() {
     assert!(records[0].summary.contains("verification-invalidated"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn write_denial_hint_names_the_two_real_ways_out_and_rules_out_asking() {
+    let spec = SandboxSpec::new(SandboxPolicy::WorkspaceWrite, [std::env::temp_dir()]);
+    let hint = sandbox_denial_hint(&spec, false);
+    assert!(hint.contains("full-access"), "{hint}");
+    assert!(hint.contains("Shift+Tab"), "{hint}");
+    assert!(hint.contains("agent.sandbox_writable_roots"), "{hint}");
+    assert!(hint.contains("重启会话"), "{hint}");
+    assert!(hint.contains("ask_user"), "{hint}");
+    // 不再给「放宽工作区策略」这种没有落点的说法，模型会拿它去问一个改不了围栏的问题。
+    assert!(!hint.contains("放宽工作区策略"), "{hint}");
+}
+
+#[test]
+fn multiline_or_spaced_commands_are_not_mistaken_for_credentials() {
+    let multiline = "cd sdk && .venv/bin/python -c \"\nimport pathlib\nassert pathlib.Path('README.md').exists()\nprint('ok')\n\"";
+    assert!(!child_command_is_sensitive(multiline));
+    assert!(!child_command_is_sensitive("pytest  -q\t tests/"));
+    // 真带凭据的照旧拦下，多行也一样。
+    assert!(child_command_is_sensitive(
+        "curl \\\n  --token sk-abcdefghijklmnop0123 https://example.com"
+    ));
+    assert!(child_command_is_sensitive("API_KEY=secret-value-123 ./run"));
+}
+
+/// 子 Agent 跟随父会话的 full-access（rocky 2026-09-21 决定）：实时跟随，切回即失效；
+/// 工种自己的收窄（只许跑 verifier）不因此放宽。
+#[tokio::test]
+async fn a_child_follows_the_parent_into_full_access_and_back_out() {
+    let root = workspace("child-inherits-full-access");
+    let parent = SharedApprovalMode::new(ApprovalMode::Smart);
+    // 没有判官：原本判官判不了的命令只能被拒，正好看得出免审有没有生效。
+    let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+        .expect("registry")
+        .with_reviewed_subagent_shell(true)
+        .with_parent_approval_mode(parent.clone());
+    let run = |command: &str| {
+        let registry = &registry;
+        let command = command.to_owned();
+        async move {
+            registry
+                .run_command(CommandArgs {
+                    command,
+                    timeout_seconds: None,
+                    label: None,
+                    run_in_background: None,
+                    network: None,
+                })
+                .await
+        }
+    };
+    let undecidable = "echo \"$(printf inherited)\" > inherited.txt";
+
+    assert_eq!(registry.approval_mode(), ApprovalMode::Smart);
+    assert!(matches!(
+        run(undecidable).await,
+        Err(ToolError::ApprovalDenied(_))
+    ));
+
+    parent.set(ApprovalMode::FullAccess);
+    assert_eq!(registry.approval_mode(), ApprovalMode::FullAccess);
+    assert!(
+        !registry.effective_sandbox().policy.is_enforcing(),
+        "full access drops the fence, as for the main agent"
+    );
+    run(undecidable)
+        .await
+        .expect("full access: no review, no card");
+
+    parent.set(ApprovalMode::Smart);
+    assert_eq!(registry.approval_mode(), ApprovalMode::Smart);
+    assert!(
+        matches!(run(undecidable).await, Err(ToolError::ApprovalDenied(_))),
+        "switching the parent back re-arms review"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[tokio::test]
+async fn full_access_does_not_widen_a_verifier_only_child() {
+    let root = workspace("child-full-access-allowlist");
+    let parent = SharedApprovalMode::new(ApprovalMode::FullAccess);
+    let registry = ToolRegistry::new(&root, ApprovalMode::Smart)
+        .expect("registry")
+        .with_command_allowlist(Some(HashSet::from(["echo verified".to_owned()])))
+        .with_parent_approval_mode(parent);
+    let other = registry
+        .run_command(CommandArgs {
+            command: "echo something else".to_owned(),
+            timeout_seconds: None,
+            label: None,
+            run_in_background: None,
+            network: None,
+        })
+        .await;
+    assert!(matches!(other, Err(ToolError::ApprovalDenied(_))));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}

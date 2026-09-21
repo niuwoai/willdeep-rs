@@ -1,0 +1,15 @@
+{
+  "id": "en-done-uncommitted",
+  "language": "en",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "fix the failing date parser test"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed: `parse_date` treated two-digit years as 19xx. It now uses a 50-year pivot. `cargo test -p dates` passes (31 tests). The change is in `src/parse.rs` and is not committed yet."
+    }
+  ]
+}

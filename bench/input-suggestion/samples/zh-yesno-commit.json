@@ -1,0 +1,15 @@
+{
+  "id": "zh-yesno-commit",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "把 parser 模块的单元测试修好"
+    },
+    {
+      "role": "assistant",
+      "content": "已修复 `parse_header` 对空行的处理，`cargo test -p parser` 全部通过（42 个）。改动在 src/header.rs 两处。要不要我提交并开 PR？"
+    }
+  ]
+}

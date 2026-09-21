@@ -15,6 +15,7 @@ node scripts/web_runtime_retry_fixture.mjs
 ```sh
 node scripts/web_runtime_retry_test.cjs
 node scripts/web_chat_stop_test.cjs
+node scripts/web_input_suggestion_test.cjs
 ```
 
 测试完成后用 Ctrl+C 停止夹具。测试操作仅改变夹具内存状态。
@@ -26,6 +27,7 @@ node scripts/web_chat_stop_test.cjs
 - 服务端阶段转为运行后，真实两秒轮询使等待标记消失。
 - 等待中点击停止，真实 App 发送一次带正确 workspace 的 stop 请求。
 - 停止后重载保持取消状态，停止入口消失、重试入口可见。
+- 轮次收尾后空输入框出现灰字预测；`Tab` 只填入、不发 `/api/chat/stream`；打字与 `Esc` 放弃后不复现；刷新不复现；服务端回 `null` 时不显示；英日两语提示正确。
 - 浏览器无未处理页面异常。
 
 结果位于 `target/web-runtime-retry/report.json` 和 `report.md`；截图为 `waiting-after-refresh.png`、`stopped-after-refresh.png`。

@@ -30,6 +30,7 @@
 | [检查点回退](CHECKPOINT_REWIND.md) | `/rewind` 回到第 N 步：每轮开始前的工作树快照存哪、回退时发生什么 |
 | [双端共享模型目录](SHARED_MODEL_CATALOG.md) | Xedit / rs 共用 Provider、模型事实、候选池与凭据引用契约 |
 | [审批与自动化](APPROVALS.md) | 三档审批模式、Always Allow 边界、CI 用法、`ask_user` |
+| [本机用量账本](USAGE_LEDGER.md) | 每次模型调用一行的 `usage/YYYY-MM.jsonl`、字段来源、`willdeep usage backfill`（canonical 在 Xedit 仓库） |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |
 | [插件系统](PLUGINS.md) | 与 macOS 版共享插件包、三种页面运行时、页面桥与沙箱边界 |
 | [手机中继](MOBILE.md) | `/mobile` 二维码配对与凭据安全 |
@@ -61,6 +62,7 @@
 | [Xedit 联动现状与路径](XEDIT_INTEROP_STATUS.md) | 文件层/契约层/运行时层三段式现状、漂移清单、建议路径（2026-08-21） |
 | [竞争力分析](COMPETITIVE_LANDSCAPE.md) | vs pi / Claude Code / Codex / dsh，护城河与短板排序（2026-08-21） |
 | [Herdr 研究与集成方案](HERDR_RESEARCH_AND_INTEGRATION.md) | 终端复用器集成的取舍与边界 |
+| [需求单：rc29 收尾](decisions/2026-09-21-input-suggestion-followups.md) | 发布 rc29、Web 端下一句预测、README 演示 GIF、预测质量实弹、英文 README（待实现，给新会话开工用） |
 
 ## 文档约定
 
@@ -68,3 +70,4 @@
 - 本目录面向"怎么用、为什么这么设计"，是唯一的详细事实来源；
 - 根目录 [PRODUCT_OVERVIEW.md](../PRODUCT_OVERVIEW.md) 是产品功能台账，同时被 WillDeep 自己作为项目上下文加载；
 - 涉及安全边界的描述必须与实现一致。宁可写"当前不支持"，也不写模糊的承诺。
+- README 首屏的 GIF 由 [`media/readme-demo.tape`](media/readme-demo.tape) 经 `ruby scripts/record_readme_demo.rb` 生成（真跑模型、临时演示仓库、≤ 3 MB）。改了 TUI 手感就重录。

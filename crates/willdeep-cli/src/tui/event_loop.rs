@@ -252,6 +252,18 @@ pub(super) async fn event_loop(
                 }
             }
         }
+        // 本轮里收下的 `/model` 在这里真正切：放在排队提示词之前，它们用的就是新模型。
+        if !app.running
+            && let Some(model) = app.pending_model.take()
+        {
+            match switch_model(&model, &mut app, session, store, runtime, &agent).await {
+                Ok(message) => app.append_transcript(format!("System: {message}")),
+                Err(error) => app.append_transcript(format!(
+                    "Error: {}: {error}",
+                    language.text("切换模型失败", "Model switch failed", "モデル切替に失敗")
+                )),
+            }
+        }
         // 排队的提示词在这里续上：本轮正常结束、被 Esc 中断、或 Runtime 报失败，
         // 都会走到这，不必在每个终态各写一遍。**待投递的运行时事件优先**——
         // 用户排在后面的那句话，很可能正是基于还没看到的后台结果说的。
@@ -374,11 +386,20 @@ pub(super) async fn event_loop(
                 app.runtime_tools=snapshot.tools;
                 app.runtime_artifacts=snapshot.artifacts;
                 app.observe_runtime_version(snapshot.runtime_version);
+                if app.runtime_auto_upgrade_pending && !app.running {
+                    app.runtime_auto_upgrade_pending=false;
+                    app.runtime_auto_upgrade_tried=true;
+                    daemon_commands::auto_upgrade(runtime.home.clone(),language,runtime.tx.clone());
+                }
                 if runtime_ui::surface_pending_gates(&mut app,&runtime.home,&runtime.tx){
                     execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
                 }
             },
-            Some(events)=runtime_event_rx.recv()=>runtime_ui::apply_runtime_events(&mut app,events,session,store)?,
+            Some(events)=runtime_event_rx.recv()=>{
+                runtime_ui::apply_runtime_events(&mut app,events,session,store)?;
+                // Runtime 轮次正常收尾后会话已从磁盘刷新，此时的消息就是预测要看的那份。
+                if app.take_runtime_turn_settled() { dispatch_input_suggestion(&app,session,&agent,&runtime.tx); }
+            },
             Some(request)=media_resize_rx.recv()=>{
                 let tx=runtime.tx.clone();
                 tokio::spawn(async move {
@@ -431,7 +452,7 @@ pub(super) async fn event_loop(
                             MouseEventKind::ScrollDown=>app.model_picker_scroll(1),
                             MouseEventKind::Down(MouseButton::Left)=>{
                                 if let Some(model)=app.activate_model_picker_at(mouse.column,mouse.row) {
-                                    match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                         Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
                                         Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                     }
@@ -506,23 +527,32 @@ pub(super) async fn event_loop(
                 }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if app.native_selection_mode {
+                        // 复制键留给终端自己的选区：放行的话 Ctrl+C 会直接退出程序。
+                        if is_selection_copy_key(key)||(key.code==KeyCode::Char('c')&&key.modifiers.contains(KeyModifiers::CONTROL)) {
+                            continue;
+                        }
+                        execute!(term.backend_mut(), EnableMouseCapture)?;
                         if selection_mode_exit_key(key) {
-                            execute!(term.backend_mut(), EnableMouseCapture)?;
                             app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复 WillDeep 鼠标操作","WillDeep mouse controls restored","WillDeep のマウス操作を復元しました").to_owned());
+                            continue;
                         }
-                        continue;
-                    }
-                    if app.selection_mode {
+                        // 其它键：退出原生选区，这个键照常处理（打字就进输入框）。
+                        app.release_selection_for_key(key);
+                    } else if app.selection_mode {
                         if is_selection_copy_key(key) {
                             app.copy_chat_selection();
+                            continue;
                         } else if key.code==KeyCode::Char('q')&&!key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER|KeyModifiers::ALT) {
                             app.quote_chat_selection();
+                            continue;
                         } else if selection_mode_exit_key(key) {
                             app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
+                            continue;
                         }
-                        continue;
+                        // 以前这里把其余按键一律吞掉，选过字就打不了字、也没有任何提示。
+                        app.release_selection_for_key(key);
                     }
                     if app.routing_settings.is_none()&&key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
                         execute!(term.backend_mut(), DisableMouseCapture)?;
@@ -780,7 +810,7 @@ pub(super) async fn event_loop(
                             ModelPickerAction::None=>{},
                             ModelPickerAction::Close=>app.model_picker=None,
                             ModelPickerAction::Select(model)=>{
-                                match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                     Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
                                     Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                 }
@@ -966,6 +996,10 @@ pub(super) async fn event_loop(
                         }
                         continue;
                     }
+                    // 空输入框里的灰字预测：Tab 采用（只填入不发送），Esc 放弃。
+                    // 命令 / 技能候选层的 Tab 与这里互不相干——那两层只在输入框非空时存在。
+                    if key.code==KeyCode::Tab&&key.modifiers.is_empty()&&app.accept_input_suggestion() { continue; }
+                    if key.code==KeyCode::Esc&&app.dismiss_input_suggestion() { continue; }
                     if let Some(action) = prompt_line_navigation_for_key(key) {
                         match action {
                             PromptLineNavigation::Start => app.edit_input(|input| input.home()),
@@ -1099,7 +1133,7 @@ pub(super) async fn event_loop(
                                         let current=session.model.clone().unwrap_or_else(||runtime.provider_config.model.clone());
                                         request_model_list(&mut app,runtime,current);
                                     },
-                                    ModelCommand::Switch(model)=>match switch_model(&model,&mut app,session,store,runtime,&agent).await {
+                                    ModelCommand::Switch(model)=>match switch_or_defer_model(&model,&mut app,session,store,runtime,&agent).await {
                                         Ok(message)=>app.append_transcript(format!("System: {message}")),
                                         Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                     },
@@ -1215,11 +1249,12 @@ pub(super) async fn event_loop(
                 UiMessage::Agent(AgentEvent::GoalBudgetLimited{reason})=>app.record_progress(format!("{} · {reason:?}",language.text("目标预算耗尽 · 转入收尾","Goal budget exhausted · wrapping up","目標の予算を使い切りました · まとめに移ります"))),
                 UiMessage::Approval(v,a,s)=>{let detail=v.clone();if app.enqueue_approval((v,a,s)){runtime.notifier.attention_required(RuntimeStatus::WaitingApproval,"tool_approval",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
                 UiMessage::Question(request,sender)=>{let checked=vec![false;request.options.len()];let detail=request.question.clone();if app.enqueue_question(AskDialog{request,selected:0,checked,answer:PromptEditor::default(),sender}){runtime.notifier.attention_required(RuntimeStatus::WaitingAnswer,"ask_user",detail);execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;}},
-                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);runtime.notifier.task_stopped(&outcome);app.note_reply(&outcome.final_text);app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;persist_turn_result(session,store)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();requeue_undelivered_steering(&mut app,&agent);wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;},
+                UiMessage::Finished(Ok(mut outcome), ownership)=>{crate::harness::present_partial_outcome(&mut outcome, language);runtime.notifier.task_stopped(&outcome);app.note_reply(&outcome.final_text);app.append_turn_stats(Some(&outcome));store.refresh_execution(session)?;session.messages=outcome.messages;persist_turn_result(session,store)?;drop(ownership);dispatch_retitle(session,&agent,&runtime.tx,false);app.finish_turn();requeue_undelivered_steering(&mut app,&agent);wake_for_kernel_events(&mut app,session,store,&agent,runtime)?;dispatch_input_suggestion(&app,session,&agent,&runtime.tx);},
                 UiMessage::Finished(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: {e}"));app.finish_turn();},
                 UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);persist_turn_result(session,store)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
+                UiMessage::RuntimeResult(message)=>{app.append_transcript(message.clone());app.notice=Some(message);},
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
                 UiMessage::MediaLoaded{target,result}=>app.media.finish_load(target,result),
                 UiMessage::MediaResized(result)=>{
@@ -1229,6 +1264,7 @@ pub(super) async fn event_loop(
                 },
                 // 摘要失败是静默的：列表里还留着 L1 派生的标题，为一行装饰
                 // 文字往聊天区塞报错不划算。改成功了才说一句。
+                UiMessage::InputSuggested{suggestion,epoch}=>{app.adopt_input_suggestion(suggestion,epoch);},
                 UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
             },
             Some(prompt)=mobile_rx.recv()=>{

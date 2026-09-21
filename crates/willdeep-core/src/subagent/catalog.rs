@@ -80,10 +80,14 @@ pub struct SubagentCatalog {
     /// 谁也没指定的模型。
     tier_bindings: BTreeMap<crate::WorkerTier, TierBinding>,
     sandbox: crate::sandbox::SandboxSpec,
+    /// 父会话的档位句柄；父会话在 full-access 时 Worker 跟着免审。
+    parent_approval_mode: Option<crate::tools::SharedApprovalMode>,
     /// 这个目录（即这个父会话）起过的后台子 Agent。`send_agent_message` /
     /// `stop_agent` 只认这份名单：注册表可能被别的入口共用，名单外的 id 一律
     /// 当作找不到。
     pub(super) owned_background_agents: Arc<Mutex<BTreeSet<uuid::Uuid>>>,
+    /// 父会话的用量账本；Worker 派生出自己的句柄记 `subagent` 行。
+    usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
 }
 
 /// 一个档位兑现出来的模型。
@@ -131,11 +135,25 @@ impl SubagentCatalog {
             parent_session: None,
             tier_bindings: BTreeMap::new(),
             sandbox: crate::sandbox::SandboxSpec::new(crate::sandbox::SandboxPolicy::Off, []),
+            parent_approval_mode: None,
             owned_background_agents: Arc::new(Mutex::new(BTreeSet::new())),
+            usage_ledger: None,
         }
     }
 
+    /// 让 Worker 的模型调用进父会话的用量账本。
+    pub fn with_usage_ledger(mut self, scope: crate::usage_ledger::UsageLedgerScope) -> Self {
+        self.usage_ledger = Some(scope);
+        self
+    }
+
     /// Workers and unattended verifiers inherit the parent's OS boundary.
+    /// Worker 跟随父会话的 full-access（实时）。见 [`crate::ToolRegistry::with_parent_approval_mode`]。
+    pub fn with_parent_approval_mode(mut self, parent: crate::tools::SharedApprovalMode) -> Self {
+        self.parent_approval_mode = Some(parent);
+        self
+    }
+
     pub fn with_sandbox(mut self, sandbox: crate::sandbox::SandboxSpec) -> Self {
         self.sandbox = sandbox;
         self
@@ -695,6 +713,8 @@ impl SubagentCatalog {
                 .flatten(),
             always_allow_store: self.always_allow_store.clone(),
             state_home: self.state_home.clone(),
+            parent_approval_mode: self.parent_approval_mode.clone(),
+            usage_ledger: self.usage_ledger.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -884,6 +904,20 @@ impl SubagentCatalog {
             return Err(AgentError::Subagent(
                 "verifier.command cannot be empty".to_owned(),
             ));
+        }
+        // 父会话在 full-access：不请判官，照跑；只有破坏性形状仍然拒绝——Worker 没有
+        // 审批卡，这类命令在主 Agent 那里也不会被 full-access 放过去。
+        if self
+            .parent_approval_mode
+            .as_ref()
+            .is_some_and(|parent| parent.get() == crate::ApprovalMode::FullAccess)
+        {
+            if crate::safety::classify(command) == CommandSafety::AlwaysDangerous {
+                return Err(AgentError::Subagent(format!(
+                    "verifier command has a destructive shape and will not be run unattended: {command}"
+                )));
+            }
+            return Ok(verifier);
         }
         if crate::tools::child_command_is_sensitive(command) {
             return Err(AgentError::Subagent(format!(
@@ -1382,6 +1416,34 @@ mod tests {
         assert!(
             error.to_string().contains("no safety judge is configured"),
             "the refusal must say why, got: {error}"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// 父会话在 full-access：verifier 不请判官直接放行（sso 那次派工就是卡在这）；
+    /// 破坏性形状照样拒绝——派工这一刻没有审批卡可弹。
+    #[tokio::test]
+    async fn full_access_parent_skips_verifier_review_but_not_the_denylist() {
+        let (catalog, root) = fixture();
+        let parent = crate::tools::SharedApprovalMode::new(crate::ApprovalMode::FullAccess);
+        let catalog = catalog.with_parent_approval_mode(parent.clone());
+        let undecidable = TaskVerifier {
+            command: ".venv/bin/python .wd_readme_probe.py".to_owned(),
+            expected_exit_code: None,
+        };
+        catalog
+            .gate_verifier_command(undecidable.clone())
+            .await
+            .expect("full access: no judge needed");
+        let destructive = TaskVerifier {
+            command: "rm -rf /".to_owned(),
+            expected_exit_code: None,
+        };
+        assert!(catalog.gate_verifier_command(destructive).await.is_err());
+        parent.set(crate::ApprovalMode::Smart);
+        assert!(
+            catalog.gate_verifier_command(undecidable).await.is_err(),
+            "back in smart with no judge, the verifier needs review again"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

@@ -8,6 +8,9 @@ pub mod detached_job;
 mod execution;
 pub mod goal;
 pub mod hooks;
+pub mod input_suggestion;
+#[cfg(test)]
+mod input_suggestion_livefire;
 pub mod judge;
 pub mod kernel;
 pub mod kernel_ingress;
@@ -32,6 +35,7 @@ mod subagent_worktree;
 pub mod tool_output;
 pub mod tools;
 pub mod types;
+pub mod usage_ledger;
 pub mod worker_tier;
 
 pub use agent::{

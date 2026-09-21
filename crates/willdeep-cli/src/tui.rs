@@ -69,11 +69,14 @@ use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
 use command_catalog::{command_candidates, help_text};
 use diff_review_ui::*;
-use dispatch::{dispatch_compress, dispatch_prompt, dispatch_retitle, wake_for_kernel_events};
+use dispatch::{
+    dispatch_compress, dispatch_input_suggestion, dispatch_prompt, dispatch_retitle,
+    wake_for_kernel_events,
+};
 use media_ui::{MediaAction, MediaState, render_media_overlay};
 use model_commands::{
     ModelCommand, ModelPickerAction, ModelPickerState, render_model_picker, request_model_list,
-    switch_model,
+    switch_model, switch_or_defer_model,
 };
 use narration::StreamKind;
 use permission_commands::{
@@ -109,6 +112,9 @@ pub enum UiMessage {
         willdeep_core::checkpoint::ClaimedSessionCheckpointSink,
     ),
     RuntimeNotice(String),
+    /// Runtime 操作的最终结果：同时进聊天记录与状态行。只进状态行的话，下一条
+    /// 提示一来就被覆盖，用户看到的只剩「操作已提交」。
+    RuntimeResult(String),
     ModelsLoaded(std::result::Result<Vec<String>, String>),
     MediaLoaded {
         target: String,
@@ -124,6 +130,12 @@ pub enum UiMessage {
     Retitled {
         title: Option<String>,
         requested: bool,
+    },
+    /// 轮次结束后的下一句预测回来了。`epoch` 是发起时输入框的世代号：用户已经
+    /// 开始打字、或新一轮已经开始，世代号就翻页了，晚到的结果原地丢弃。
+    InputSuggested {
+        suggestion: Option<String>,
+        epoch: u64,
     },
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
@@ -222,12 +234,22 @@ struct App {
     prompt_scroll: usize,
     composer_expanded: bool,
     notice: Option<String>,
+    /// 轮次结束后预测的「你可能想说的下一句」。只在空闲且输入框为空时以灰字显示，
+    /// Tab 采用（只填入，不发送），打字 / Esc / 新一轮开始即清掉。只活在内存里。
+    input_suggestion: Option<String>,
+    /// 输入框世代号：每次清预测就加一。在途的预测带着旧世代号回来时对不上号，丢弃。
+    input_suggestion_epoch: u64,
+    /// Runtime 轮次刚正常收尾（completed / partial）。事件循环据此发起一次预测；
+    /// 失败与中断的收尾不置位。
+    runtime_turn_settled: bool,
     goal: Option<String>,
     mobile_gateway: Option<RelayGateway>,
     mobile_qr: Option<String>,
     /// 本轮在跑时收到的提示词。键盘和手机共用一条队列，本轮一结束就按顺序发出去；
     /// 中断当前轮次同样会让队列立刻续上。
     queued_prompts: VecDeque<QueuedPrompt>,
+    /// 本轮进行中收到的 `/model`：本轮结束、排队的提示词发出之前切过去。
+    pending_model: Option<String>,
     /// 进程内 Harness 当前轮次的句柄。Runtime 轮次由 Daemon 停，本地轮次只能靠
     /// 掐这个 Task——没有它，`/local` 跑飞了就只剩退出 TUI 一条路。
     local_turn: Option<tokio::task::JoinHandle<()>>,
@@ -263,6 +285,9 @@ struct App {
     /// A version mismatch is announced once in the transcript; the sidebar
     /// warning then stays up on its own.
     runtime_version_warned: bool,
+    /// Runtime 比客户端旧、本会话还没试过自动升级：事件循环据此发起一次。
+    runtime_auto_upgrade_pending: bool,
+    runtime_auto_upgrade_tried: bool,
     /// Runtime interactions already turned into a dialog, so a snapshot that
     /// still lists them does not reopen the same card every second.
     surfaced_gates: BTreeSet<uuid::Uuid>,
@@ -449,6 +474,9 @@ fn busy_input(prompt: &str) -> BusyInput {
         // 切档正是为了处理「这一轮在跑、又不停地弹审批」，必须当场生效。
         "/help" | "/version" | "/clear" | "/sidebar" | "/skills" | "/history" | "/permissions"
         | "/permission-mode" => BusyInput::RunNow,
+        // 换模型本来就只作用于下一轮，没有理由让用户等到本轮结束再敲一遍：当场收下，
+        // 记成待切换，本轮结束时再真正切（见 `switch_or_defer_model`）。
+        "/model" => BusyInput::RunNow,
         "/session" => match value.split_whitespace().nth(1) {
             Some("search") => BusyInput::RunNow,
             _ => BusyInput::Refuse,
@@ -1544,8 +1572,24 @@ fn draw(
         let visible = areas[3].height.saturating_sub(2).max(1) as usize;
         app.prompt_scroll = row.saturating_sub(visible - 1);
         let wrapped_input = app.input.wrapped_text(width);
-        f.render_widget(
-            Paragraph::new(wrapped_input)
+        // 空输入框里的灰字预测：顶替正文而不是叠加，「Tab 采用」的提示跟在后面。
+        let suggestion_visible = app.visible_input_suggestion().is_some();
+        let composer_body = match app.visible_input_suggestion() {
+            Some(suggestion) => Text::from(Line::from(vec![
+                Span::styled(suggestion.to_owned(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(
+                        "  {}",
+                        app.language.text("Tab 采用", "Tab to accept", "Tab で採用")
+                    ),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ])),
+            None => Text::from(wrapped_input),
+        };
+        let composer = Paragraph::new(composer_body)
                 .block(
                     Block::default()
                         .title(Line::from(vec![
@@ -1596,9 +1640,14 @@ fn draw(
                 // typing and what you already said read as one voice instead of
                 // falling back to the terminal's default foreground.
                 .style(Style::default().fg(Color::Cyan))
-                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0)),
-            areas[3],
-        );
+                .scroll((app.prompt_scroll.min(u16::MAX as usize) as u16, 0));
+        // 正文由编辑器按宽度预先折行；灰字预测没走编辑器，交给 Paragraph 折。
+        let composer = if suggestion_visible {
+            composer.wrap(Wrap { trim: false })
+        } else {
+            composer
+        };
+        f.render_widget(composer, areas[3]);
         let cursor_y = areas[3].y + 1 + (row.saturating_sub(app.prompt_scroll) as u16);
         let cursor_x = areas[3].x + 1 + (col.min(width.saturating_sub(1)) as u16);
         if app.focus == FocusPane::Prompt && !app.help_visible && app.task_detail.is_none() {
@@ -2324,10 +2373,19 @@ fn question_lines(dialog: &AskDialog, content: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// 弹窗与文字选区的底色和字色。
+///
+/// 故意用 256 色色立方里的固定色，而不是 ANSI 的 `Blue` / `White`：后者是调色板
+/// 0–15 号，会被终端主题改写。Catppuccin Mocha 把 Blue 设成浅蓝 #89B4FA、White
+/// 设成浅灰，审批弹窗成了浅灰字压浅蓝底，几乎读不出来。16–231 号几乎所有终端
+/// 都不改：24 号 #005f87 深蓝配 231 号纯白，对比度约 6.9:1，与主题无关。
+pub(crate) const MODAL_BG: Color = Color::Indexed(24);
+pub(crate) const MODAL_FG: Color = Color::Indexed(231);
+
 /// The panel colours shared by the approval and question modals. One identity
 /// for both — they are the same class of thing, a gate waiting on the human —
 /// with the accent left to the caller.
-const MODAL_PANEL: Style = Style::new().bg(Color::Blue).fg(Color::White);
+const MODAL_PANEL: Style = Style::new().bg(MODAL_BG).fg(MODAL_FG);
 
 /// How wide a modal gets. Deliberately most of the terminal: a narrow centered
 /// popup leaves transcript text sitting to either side on the same rows, which
@@ -2377,7 +2435,7 @@ fn seal_modal_background(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
         for x in area.x..area.x.saturating_add(area.width) {
             let cell = &mut buffer[(x, y)];
             if cell.bg == Color::Reset {
-                cell.bg = Color::Blue;
+                cell.bg = MODAL_BG;
             }
         }
     }

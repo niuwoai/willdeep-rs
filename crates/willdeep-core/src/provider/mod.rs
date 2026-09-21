@@ -119,6 +119,39 @@ pub fn is_loopback_base_url(url: &Url) -> bool {
     }
 }
 
+/// The usage ledger's view of a Provider: a display label, the model and
+/// whether the endpoint is a local model. Carries no credentials or URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderIdentity {
+    /// `some.im`, `anthropic`, or the endpoint host for OpenAI-compatible
+    /// profiles (`api.deepseek.com`, `localhost`).
+    pub provider: String,
+    pub model: String,
+    /// A loopback endpoint, or the explicitly configured unauthenticated
+    /// auxiliary model (Ollama / LM Studio on the LAN).
+    pub local: bool,
+}
+
+impl ProviderIdentity {
+    pub fn from_config(config: &ProviderConfig) -> Self {
+        let url = Url::parse(config.base_url.trim()).ok();
+        let local = config.allow_unauthenticated || url.as_ref().is_some_and(is_loopback_base_url);
+        let provider = match config.kind {
+            ProviderKind::SomeIm => "some.im".to_owned(),
+            ProviderKind::Anthropic => "anthropic".to_owned(),
+            ProviderKind::OpenAiCompatible => url
+                .as_ref()
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                .unwrap_or_else(|| "openai-compatible".to_owned()),
+        };
+        Self {
+            provider,
+            model: config.model.clone(),
+            local,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("API key is required")]
@@ -188,6 +221,13 @@ impl ProviderEventSink for NoopProviderEvents {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Who answers this Provider's requests, for the local usage ledger.
+    /// Test doubles and wrappers that do not know leave it `None`; the ledger
+    /// then records `provider`/`model` as null instead of guessing.
+    fn ledger_identity(&self) -> Option<ProviderIdentity> {
+        None
+    }
+
     fn with_model(&self, _model: &str) -> Result<Arc<dyn Provider>, ProviderError> {
         Err(ProviderError::InvalidResponse(
             "provider does not support model reconfiguration".to_owned(),

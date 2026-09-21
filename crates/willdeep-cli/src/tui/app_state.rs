@@ -25,10 +25,14 @@ impl App {
             prompt_scroll: 0,
             composer_expanded: false,
             notice: None,
+            input_suggestion: None,
+            input_suggestion_epoch: 0,
+            runtime_turn_settled: false,
             goal: None,
             mobile_gateway: None,
             mobile_qr: None,
             queued_prompts: VecDeque::new(),
+            pending_model: None,
             local_turn: None,
             latest_usage: Usage::default(),
             turn_input_tokens: 0,
@@ -49,6 +53,8 @@ impl App {
             runtime_gates: Vec::new(),
             runtime_version: None,
             runtime_version_warned: false,
+            runtime_auto_upgrade_pending: false,
+            runtime_auto_upgrade_tried: false,
             surfaced_gates: BTreeSet::new(),
             runtime_agents: Vec::new(),
             runtime_tools: Vec::new(),
@@ -722,6 +728,10 @@ impl App {
     }
     pub(super) fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
+        // 开始打字就放弃预测：灰字只在空输入框里有意义，删光了也不回来。
+        if !self.input.is_empty() && self.input_suggestion.is_some() {
+            self.clear_input_suggestion();
+        }
         self.skill_selected = 0;
         self.skill_menu_dismissed = false;
         self.command_selected = 0;
@@ -969,7 +979,66 @@ impl App {
         self.bell_pending = true;
     }
 
+    /// 把预测清掉并翻世代：在途的结果回来时对不上号，自然丢弃。
+    pub(super) fn clear_input_suggestion(&mut self) {
+        self.input_suggestion = None;
+        self.input_suggestion_epoch = self.input_suggestion_epoch.wrapping_add(1);
+    }
+
+    /// 预测结果落地前复核：世代号没变、还空闲、输入框还是空的、没有附件。
+    /// 任一不满足就静默丢弃——晚到的建议比没有建议更碍事。
+    pub(super) fn adopt_input_suggestion(
+        &mut self,
+        suggestion: Option<String>,
+        epoch: u64,
+    ) -> bool {
+        if epoch != self.input_suggestion_epoch
+            || self.running
+            || !self.input.is_empty()
+            || !self.attachments.is_empty()
+        {
+            return false;
+        }
+        let Some(suggestion) = suggestion else {
+            return false;
+        };
+        self.input_suggestion = Some(suggestion);
+        true
+    }
+
+    /// 灰字只在空闲且输入框为空时存在；其余时候当它不存在。
+    pub(super) fn visible_input_suggestion(&self) -> Option<&str> {
+        if self.running || !self.input.is_empty() {
+            return None;
+        }
+        self.input_suggestion.as_deref()
+    }
+
+    /// Tab：把灰字填进输入框，**不发送**。输入框非空时 Tab 不归这里管。
+    pub(super) fn accept_input_suggestion(&mut self) -> bool {
+        let Some(suggestion) = self.visible_input_suggestion().map(str::to_owned) else {
+            return false;
+        };
+        self.edit_input(|input| input.insert(&suggestion));
+        true
+    }
+
+    /// Esc：放弃这条预测。没有可放弃的就返回 `false`，让 Esc 走它原来的路。
+    pub(super) fn dismiss_input_suggestion(&mut self) -> bool {
+        if self.visible_input_suggestion().is_none() {
+            return false;
+        }
+        self.clear_input_suggestion();
+        true
+    }
+
+    pub(super) fn take_runtime_turn_settled(&mut self) -> bool {
+        std::mem::take(&mut self.runtime_turn_settled)
+    }
+
     pub(super) fn begin_turn(&mut self, runtime_turn: bool, initial_progress: String) {
+        // 新一轮开始，上一轮的预测作废；在途的结果回来也对不上世代号。
+        self.clear_input_suggestion();
         let now = Instant::now();
         self.running = true;
         self.runtime_turn = runtime_turn;
@@ -1071,6 +1140,10 @@ impl App {
             return;
         }
         self.runtime_version_warned = true;
+        // 只升不降：Runtime 比客户端旧才考虑自动升级，每个客户端进程只试一次。
+        if !self.runtime_auto_upgrade_tried && version_is_older(&stale, willdeep_core::VERSION) {
+            self.runtime_auto_upgrade_pending = true;
+        }
         let message = self
             .language
             .text(
@@ -1464,7 +1537,13 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(point) = self.transcript_selection_point(mouse.column, mouse.row, false)
                 else {
-                    return self.selection_mode;
+                    // 点在聊天区外（通常是输入框）：退出选区，让这一下照常去切焦点。
+                    // 以前这里原样返回 `selection_mode`，选过字之后点输入框会被整个
+                    // 吃掉，焦点切不过去、键盘也还锁在选区模式里。
+                    if self.selection_mode {
+                        self.exit_selection_mode();
+                    }
+                    return false;
                 };
                 self.chat_selection = Some(ChatSelection {
                     anchor: point,
@@ -1529,6 +1608,22 @@ impl App {
         self.native_selection_mode = true;
         self.chat_selection = None;
         self.focus = FocusPane::Chat;
+    }
+
+    /// 选区模式里按了一个不属于选区的键：退出选区，把这个键交还给正常处理。
+    /// 能打进输入框的键顺带把焦点切到输入框——用户是想打字，不是想被锁住。
+    pub(super) fn release_selection_for_key(&mut self, key: KeyEvent) {
+        self.exit_selection_mode();
+        let typing = match key.code {
+            KeyCode::Char(_) => !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER),
+            KeyCode::Backspace | KeyCode::Enter | KeyCode::Delete => true,
+            _ => false,
+        };
+        if typing {
+            self.focus = FocusPane::Prompt;
+        }
     }
 
     pub(super) fn exit_selection_mode(&mut self) {
@@ -1907,4 +2002,23 @@ impl App {
             format!("{}\n\n{prompt}", blocks.join("\n\n"))
         }
     }
+}
+
+/// `a` 是否严格早于 `b`。认 `MAJOR.MINOR.PATCH` 与可选的 `-rcN`，正式版晚于同号 rc。
+/// 解析不了就返回 false——拿不准就不自动升级。
+pub(super) fn version_is_older(a: &str, b: &str) -> bool {
+    fn parse(value: &str) -> Option<(u64, u64, u64, Option<u64>)> {
+        let (core, pre) = match value.trim().split_once('-') {
+            Some((core, pre)) => (core, Some(pre.strip_prefix("rc")?.parse().ok()?)),
+            None => (value.trim(), None),
+        };
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+        let parsed = (parts.next()??, parts.next()??, parts.next()??, pre);
+        parts.next().is_none().then_some(parsed)
+    }
+    let (Some(a), Some(b)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    let rank = |pre: Option<u64>| pre.map_or((1, 0), |rc| (0, rc));
+    (a.0, a.1, a.2, rank(a.3)) < (b.0, b.1, b.2, rank(b.3))
 }

@@ -1,5 +1,104 @@
 # Changelog
 
+## [0.81.0-rc1] - 2026-09-21
+
+### Added
+- **本机用量账本：每次模型调用一行。** 以前 CLI 的用量只进内存事件和运行级累计，Mac 的 Token 活动一条都看不到（9 月 21 日 CLI 跑了 700 多次模型调用、约 3300 万 Token，桌面那格只有 32 万）。现在主回合、子 Agent、上下文压缩，以及标题、下一句预测、路由分类、安全判官、看图兜底、子 Agent 大文件摘要、Web 端预测和插件页 AI 请求，每次调用都在 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl` 记一行 `willdeep.usage-ledger.v1`：时间、前端（cli / tui / mobile / unknown）、执行位置（daemon / 进程内）、类别、会话 / 回合 / 任务 / Agent、工作区、Provider 与模型、是否本地模型、输入（含缓存命中）/ 缓存命中 / 输出 / 合计 Token、耗时、结局。只记数不记内容；协议没报的 Token 留 `null`，不估算；失败、被抢占、中途取消的请求也记。daemon 回合带上对应 usage 事件在 `events.ndjson` 里的序号。写入走有界通道 + 单个后台写线程，`O_APPEND` 一次写整行，并发写不交错；任何 IO 错误只警告一次，不让回合失败或变慢。
+- **`willdeep usage backfill [--dry-run]`：** 从 `runtime/events.ndjson` 回填账本上线前的 daemon 用量（按 `task_id` 连 `tasks.json` 补会话、回合、工作区、前端，模型取任务 → Runtime 会话 → `agents.json`）。回填 id 由事件序号确定（UUIDv5），已在账本的 id、实时记过的序号、还没结束的任务一律跳过，反复跑结果逐字节不变。`--dry-run` 按本机时区逐日列调用数与 Token，不写文件。daemon 启动时、接任务之前自动回填一次，以 `usage/.backfill-v1.done` 为标记；失败只警告。本机实测 dry-run：2282 次调用，其中 9 月 21 日 720 次（子 Agent 126 次）、输入 3296 万（缓存命中 2919 万）、输出 68 万，与直接数事件日志一致。进程内回合在账本上线前的历史没有时间戳，无法回填，如实缺失。
+- 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`（双端 canonical），rs 侧落地与字段映射见新增的 `docs/USAGE_LEDGER.md`；`docs/README.md`、`docs/CLI_REFERENCE.md`、`docs/ARCHITECTURE.md`、`PRODUCT_OVERVIEW.md` 同步。
+- `Provider` 新增 `ledger_identity()`（三种协议实现从配置取 Provider 名、模型与是否本地），`EventSink` 新增带默认实现的 `emit_sequenced()`（daemon 的事件宿主返回事件序号，子 Agent 的转发 sink 透传）。
+- 测试：账本键集恰为规范 23 个且不含内容字段；16 线程 × 1000 行追加同一文件得 16000 行可解析、id 不重复、权限 0600；账本目录不可写时回合照常完成、只计失败；Agent 一次请求一行（进程内与 daemon 两种执行位置），子 Agent / 压缩 / 辅助请求分类正确；被丢弃的调用记 `cancelled`；回填夹具字段、两次逐字节相同、与实时序号重叠跳过、未结束任务跳过、daemon 只自动回填一次；Agent 经真实 `RuntimeEventSink` 跑一轮后账本序号与事件日志逐一对应、回填一条不补。
+
+## [0.80.0-rc2] - 2026-09-21
+
+### Fixed
+**CI 工作流重新起 job。** rc23 加的「CI samples parse」步骤把 `ruby -e '... YAML.safe_load_file(path, aliases: true) ...'` 写成了 YAML 普通标量，其中 `aliases: ` 被解析成映射键，整份 `ci.yml` 解析失败——此后每次 push / PR 都是 0 秒失败、0 个 job（「workflow file issue」），`release.yml` 不受影响所以没人察觉。改为 `run: |` 块标量，`actionlint` 通过。
+- 注：CI 重新起 job 之后暴露出停跑期间积下的失败，与本修复无关、另行处理：`crates/willdeep-cli/tests/headless_runtime.rs` 3015 行超过 3000 行上限（文件行数检查失败）；`willdeep-runtime-client` 的 Unix socket 测试在交叉编译容器里 panic。
+
+## [0.80.0-rc1] - 2026-09-21
+
+### Changed
+- **子 Agent 跟随父会话的「完全访问」。** 以前 Worker 的审批档位只由工种决定，主会话切到完全访问后，Worker 遇到静态规则判不了、判官也没放行的命令照样弹卡（例如一条带 `$(...)` 和管道的环境检查），与用户「已明确允许不审批」的选择相悖。现在父会话处于 `full-access` 时，Worker 的命令免审放行、写入围栏摘掉、派工 verifier 不再请判官——与主 Agent 在完全访问下一致；跟随是实时的，父会话切回别的档位，Worker 从下一次工具调用起回到本工种策略（子 Agent 注册表挂父会话的同一个档位句柄）。不随之放宽的是工种职责边界：工具面、声明的写集合、「只许跑 verifier」与只读 git 的收窄；破坏性形状仍和主 Agent 一样弹卡问人，派工那一刻没有审批卡可弹的 verifier 则直接拒绝。rocky 2026-09-21 决定。`docs/SUBAGENTS.md`、`docs/APPROVALS.md` 同步。
+- 测试：子 Agent 进出完全访问时档位、围栏、免审实时切换；完全访问不放宽只许跑 verifier 的 Worker；派工 verifier 在完全访问下免判官、破坏性形状仍拒绝、切回后重新需要审查。
+
+## [0.79.0-rc3] - 2026-09-21
+
+### Fixed
+- **README「适合谁」把私有化基线写成了「32K 和 128K 两档」。** 0.78.0-rc29 重排 README 时，把部署基线 S 档（32K）和 Worker 基础档的托管默认预算（128K）拼在了一起；而 `docs/MODEL_TIERS.md` 的部署基线 M 档是 256K，`implementer` 路由也按 256K 判断。原句等于向私有化用户承诺「只有 128K 模型也能完整跑」，这没有验证过。改为与设计文档一致的「32K–64K 和 128K–256K 两段模型」。
+
+### Docs
+- 新增 `docs/decisions/2026-09-21-m-tier-128k-eval.md`：M 档从 256K 降到 128K 还能不能完整可用，此前从未单独比过。ADR 定下评测设计（只改窗口一个变量、关闭 L 档模拟 air-gapped、新增按材料量分段的多文件任务集）和跑之前就定死的判定标准；结论出来后回写 `MODEL_TIERS.md` 与 README。
+
+## [0.79.0-rc2] - 2026-09-21
+
+### Fixed
+- **`docs/TUI_GUIDE.md` 对「升级时等审批的任务」的说法与实现相反。** 文档写「若有任务正等待人工审批，Runtime 不会退出」，实际自 0.54.0-rc3 起等人的任务不拦 drain：旧 Runtime 只等排队 / 执行中 / 取消中的任务收尾就退出，新 Runtime 启动时把等审批 / 等回答的任务标成 `Interrupted`，待处理的审批按拒绝作废、提问按未回答作废，那一轮不会自动续上（`drain_does_not_wait_on_tasks_that_are_waiting_on_a_human`、`task_recovery_interrupts_waiting_task_and_cancels_its_interaction` 两条测试钉着）。文档改为如实说明，并提示升级前先处理待审批。
+- **TUI `/daemon upgrade` 的过程提示改为写进对话。** 升级前那句「这些等你处理的任务会被这次交接丢掉」以前只进状态行，一闪就被下一条覆盖，看不到就丢了一个待审批。
+
+## [0.79.0-rc1] - 2026-09-21
+
+### Added
+- **轮次进行中可以直接 `/model`。** 以前本轮在跑时 `/model` 与 `/compress`、`/diff` 等一起被拒绝，只能等本轮结束或 Esc 中断再敲一遍。换模型本来就只作用于下一轮，现在当场收下：`/model <名>` 或从 `/model` 列表里选，状态行提示「本轮结束后切换到 X，下一轮起生效」，本轮结束（正常、中断或失败）时、在排队的提示词发出之前真正切过去；同一轮里换多次以最后一次为准。不在轮次中途真切，是因为进程内 `/local` 轮次的下一次调模型会立刻换掉，且会话文件正由运行中的轮次写着。`docs/TUI_GUIDE.md` 同步。
+- **Runtime 比客户端旧且空闲时，TUI 自动升级它。** 以前每次装了新版都要看到「版本不一致」警告再手动 `/daemon upgrade`。现在满足三个条件就自动升级一次、在对话里写一行结果：Runtime 严格早于客户端（按 `MAJOR.MINOR.PATCH[-rcN]` 比较，解析不了就不升）；当前 TUI 没有在跑的轮次；Runtime 里所有工作区都没有未终结的任务——包括等人审批 / 回答的，交接会把它们一起丢掉，而它们可能在别的工作区。条件不满足时说明原因、保留警告；Runtime 比客户端新时绝不降级；每个 TUI 进程只试一次。不做成 Agent 可调用的工具：Agent 这一轮本身跑在 Runtime 里，且让受审批约束的一方替换执行审批的一方不合适。
+- `/daemon upgrade` 等 Runtime 操作的最终结果改为写进对话（新增 `UiMessage::RuntimeResult`）；以前只进状态行，下一条提示一来就被覆盖，看到的只剩「操作已提交」。
+
+### Fixed
+- **提升到 0.79.0-rc1 后整个工作区编译失败。** 根 `Cargo.toml` 里 `willdeep-runtime-protocol` / `willdeep-runtime-client` 的版本要求还是 `0.78.0-rc1`，`^0.78.0-rc1` 匹配不了 0.79.0-rc1。两处跟上工作区版本，并新增 `crates/willdeep-cli/tests/workspace_versions.rs` 钉住「内部依赖版本要求 = `[workspace.package] version`」。
+
+## [0.78.0-rc33] - 2026-09-21
+
+### Fixed
+- **在聊天区选过文字后，点输入框切不过去、也打不了字。** 拖选会进入内部选区模式，而这个模式有两处死胡同：点在聊天区外的鼠标按下被原样吞掉（代码返回 `selection_mode` 本身），切焦点的正常处理根本没机会运行；键盘上除了复制（`Y` / `Cmd/Ctrl+C`）、引用（`Q`）和 `Esc` 以外的键也一律吞掉，没有任何提示。现在点在聊天区外会退出选区、照常切焦点；其余按键退出选区后照常处理，能打进输入框的键顺带把焦点切到输入框。`Ctrl+S` 原生选择模式同理：直接打字即退出并进输入框，但复制键和 `Ctrl+C` 仍留给终端，免得想复制却把程序退了。`docs/TUI_GUIDE.md`「鼠标」同步。
+
+## [0.78.0-rc32] - 2026-09-21
+
+### Fixed
+- **审批 / 提问弹窗与文字选区在部分终端主题下看不清。** 原先用 ANSI 调色板里的 `Blue` 底、`White` 字，而这两个是 0–15 号色，会被主题改写：Catppuccin Mocha 下成了浅灰字压浅蓝底。改用 256 色色立方里的固定色（24 号 #005f87 深蓝 + 231 号纯白，对比度约 6.9:1），与主题无关；测试钉住这两个颜色不得落回 0–15 号。
+
+## [0.78.0-rc31] - 2026-09-21
+
+### Fixed
+- **日文「では、…」「はい、では…」不再被当成助手口吻。** rc30 只去掉了光秃秃的「はい、」，名单里还留着同类的「では、」「はい、では」，用户说「では、PRを作って」（那就开个 PR）照样被拦。两个都去掉，名单与 Xedit 1.394.0-rc3 一致。
+
+## [0.78.0-rc30] - 2026-09-21
+
+### Added
+- **Web 端也会在轮次结束后预测你的下一句（体验基线第 19 项两端到位）。** 与 TUI 同一契约：一轮正常收尾后空 Composer 里灰字显示一句预测，后面带小一号的「Tab 采用」；`Tab` 只填入不发送，打字 / `Esc` / 新一轮 / 换会话即清，清掉不回来；回包带世代号，晚到丢弃；刷新页面即无。受同一个 `[agent] input_suggestions` 开关管，三种语言。
+- 新端点 `POST /api/sessions/{id}/input-suggestion`（`{ turn_id? }` → `{ suggestion, turn_id }`）：从会话文件读最近消息，用与 TUI 同一组候选（本地模型 `prefer_for_titles` 优先、`title_model` 兜底）调一次预测。不挂进聊天 SSE——流在 `completed` 后就关了；开关关、会话不在白名单、会话仍在跑、组不出正文、所有候选失败一律 200 + `null`，只读不写，不经 Runtime 协议。
+- 测试：web 端点单测钉住首个答复的候选胜出且失败的只问一次、全部失败与装不出 Provider 回 `null`、会话在跑与缺正文时一次都不问模型、开关关与未知会话 200 + `null` 且 `$WILLDEEP_HOME` 前后文件与 mtime 不变；新增浏览器回归 `scripts/web_input_suggestion_test.cjs`（灰字出现、Tab 不发请求、打字与 Esc 放弃不复现、刷新不复现、`null` 不显示、英日两语提示）；`web_runtime_retry_fixture.mjs` 加 `complete` 模式与预测假回包。
+- 下一句预测实弹评测：`bench/input-suggestion/`（16 条中英日样本、每轮归档与 `history.jsonl`）、`willdeep-core` 的 `#[ignore]` 实弹测试 `input_suggestion_live_fire` 与进常规测试的样本自检、驱动脚本 `scripts/input_suggestion_eval.rb`（`--rescore` 人工判定后重算）。首批四轮：修复前 none 命中 50% / 75%、日文 suggest 全灭；修复后两模型 reject / none / suggest 均 100%，凭据泄漏 0。凭据读取抽到 `scripts/lib/willdeep_credentials.rb`，靶场脚本同用。
+
+- README 首屏加一张真实 TUI 演示 GIF（`docs/media/readme-demo.gif`，0.95 MB / 24 秒）：找到缺陷、改一行、裸跑测试验证、收尾后灰字预测下一句。由 `docs/media/readme-demo.tape` 经 `scripts/record_readme_demo.rb` 生成：真跑模型，演示仓库与 `WILLDEEP_HOME` 都在 `/tmp/willdeep-demo` 现建现删，key 只走环境变量；vhs 0.12 在本机合成视频会静默失败，改为只出 PNG 帧、由脚本用 ffmpeg 叠层、倍速、调色板压缩；没录到灰字预测时自动重录（最多 3 次）。提示词在 README 原句后加了「改完我先看看」——不加时模型会去 `git commit` 并停在审批卡上。
+### Changed
+- `harness` 抽出 `resolve_parent_provider_config` 与 `auxiliary_providers`：会话主 Provider 与标题 / 预测候选的装配从 `build` 里拿出来，TUI 与 Web 共用一段，免得两处在某个档案上悄悄分叉。行为不变。
+- `willdeep-core` 新增 `input_suggestion::predict_first`（按顺序问候选、失败才换下一家），`Agent::suggest_next_input` 改为调它。
+- `docs/WEB_GUIDE.md`「Composer」与「JSON API」、`docs/WEB_RUNTIME_RETRY_QA.md`、`docs/EXPERIENCE_BASELINE.md` 第 19 项、`PRODUCT_OVERVIEW.md` 同步。
+
+### Fixed
+- **Python 项目的测试跑过了却被判「缺少有效的通过验证记录」。** 完成验证只认一张测试命令白名单，里面没有 `python -m unittest`，也认不出按路径调用的解释器（`.venv/bin/python -m pytest`、`venv/bin/python3.12 -m unittest`）。于是测试明明 exit 0 也记不成证据，宿主再要求验证三遍，最后以「⚠ 任务仅部分完成」收尾——白跑三轮、结论还是错的。现在 `python` / `python3` / `python3.N` 无论裸调还是带路径都归一识别，并补上 `unittest`；`python2`、`pythonista`、`-m http.server` 之类仍不算。录 README 演示时撞见。
+- **多行命令不再被误判为「带凭据」。** 凭据检测拿脱敏结果与原文比较，而脱敏会按空白切词再用单空格拼回，于是任何多行命令（如 `python -c "…多行…"`）或带连续空格的命令都被当成带凭据：子 Agent 的 verifier 直接被拒、连安全判官都不送。现在先用同一把尺子规范化原文再比较；真带凭据的多行命令照旧拦下。
+- **宿主要求补验证时，说清楚哪种形式算数。** 完成验证只认单条前台测试命令，管道、`;`、重定向、`echo $?` 包装一律不算（管道会吞掉退出码——录演示时就撞见测试 FAIL 而 `| tail` 返回 0）。但宿主的补验证提示只说「对当前文件跑适用的检查」，模型于是一遍遍给命令套上 `; echo EXIT=$?` 来自证，每次都不算，三轮后以「⚠ 任务仅部分完成」收尾。现在两条提示都点明：单条前台命令、举例 `cargo test` / `pytest -q` / `python3 -m unittest -v` / `npm test`，包装形式不算。
+- **做完但没收口时仍预测下一步。** 本版早先给提示词加的「助手报告完成且没提问就答 NONE」太宽，把「修好了、测试全绿、还没提交」这种有明显下一步的收尾也压没了——录 README 演示时三次都录不到灰字预测才发现，评测样本也漏了这一类。现在只有已提交 / 合并 / 发布或对话结束才 `NONE`，完成的工作照常预测「提交」「开 PR」之类；客套话仍一律不给。评测补 3 条「做完未提交」样本（共 19 条），两模型 suggest 给出 100%、人工判定 12/12 合理。
+- **`docs/CI_INTEGRATION.md` 的源码安装命令在干净机器上装不上。** `cargo install --git … willdeep` 取到的源码里没有 `web/dist`（不入库、由 `yarn build` 生成），rust-embed 在 release 构建时直接编译失败——2026-09-21 在干净检出里实测复现。改为先 clone、`yarn build`、再 `cargo install --locked --path crates/willdeep-cli`，同样在干净 clone 里跑通。
+- **日文的「是」不再被当成助手口吻拦掉。** 清洗规则里光秃秃的「はい、」把「はい、そのままコミットして」这类用户回答一并误杀——实弹评测里两个模型的日文 suggest 样本全军覆没。改为只拦「はい、承知」「はい、かしこまり」「はい、では」这类助手才会接的开头。
+- **任务已收口时不再预测客套话。** 提示词加一条：助手报告完成且没有提问时答 `NONE`，不要用「谢谢 / 明天见」填空。实弹评测里 none 命中原为 50%（deepseek-v4-flash）与 75%（glm-5）。
+
+## [0.78.0-rc29] - 2026-09-21
+
+### Added
+- **回合结束后，TUI 输入框里预测你的下一句（体验基线第 19 项，与 macOS 版 1.385.0-rc1 同一契约）。** Agent 回复完，空输入框里以灰字显示一句最可能的下一条消息（如「提交并合回 develop」），后面带「Tab 采用」提示；`Tab` 填入输入框**不自动发送**，直接打字或 `Esc` 即放弃，放弃了不回来。预测是轮次收尾后额外一次独立小请求，走标题摘要那一档模型候选（本地优先、`title_model` 兜底），只发最近两条用户原话（各 400 字）与助手回复尾部 1500 字，成本与对话长度无关；本地轮次与 Runtime 轮次（`task.completed` / `task.partial`）两条收尾路径都触发，失败、中断、输入框已有内容或附件、还有排队提示词时不请求。结果带发起时的输入框世代号回来，用户已开始打字、新一轮已开始、或模型答 `NONE` 时静默丢弃。输出先清洗再上屏：只取一行，剥引号与 `User:` / `下一句：` 导语，超过 120 字、助手口吻（「好的，我来…」「Sure, I'll…」）、疑似凭据一律不显示。预测只活在内存里，不进会话文件、不经 Runtime 协议。`[agent] input_suggestions = false` 关掉，与 `auto_title` 互不影响。`willdeep-core` 新增 `input_suggestion` 模块（`payload` / `sanitize` / `predict`），`Agent::with_input_suggesters` / `suggest_next_input`。
+- 测试：core 钉住 payload 只取最近两条用户原话与助手尾部、缺任一边为空、宿主指令不算用户原话，清洗的剥导语 / 剥包裹 / 拒 `NONE` / 拒超长 / 拒助手口吻 / 拒凭据；TUI 钉住 Tab 采用只填入不发送、打字与 Esc 放弃且不回来、世代号翻页后晚到结果丢弃、在跑 / 已打字 / `None` 不落地；`config.rs` 钉住 `input_suggestions` 解析与缺省。
+
+### Changed
+- **README 重排，面向「三秒知道是什么、三十秒跑起来」。** 第一屏改成一句话定位 + 英文摘要 + CI / Release / License 徽章 + 一条命令；「30 秒上手」前置并改为下载发行包（`releases/latest/download/...`）而不是先编译，源码构建挪到「参与开发」；新增「适合谁 / 不适合」表与 Runtime 拓扑示意；六个差异点从长段落压成可扫读的要点并逐条链接到对应文档，hooks 给真实 TOML 片段；文档区按「想做什么」分组；`range` / `agent-metrics` 两对注入标记原样保留，线上快照折进 `<details>`。内容口径不变，只动结构。
+- `docs/TUI_GUIDE.md` 输入快捷键表加 `Tab`（空输入框）一行并新增「轮次结束后的下一句预测」小节；`docs/CONFIGURATION.md`、`config.example.toml` 加 `input_suggestions`；`docs/EXPERIENCE_BASELINE.md` 第 19 项。
+- 新增需求单 `docs/decisions/2026-09-21-input-suggestion-followups.md`：发布 rc29、Runtime 升级、Web 端下一句预测（rc30）、README 演示 GIF、预测质量实弹、英文 README 与 `cargo install --git` 核实，每项带验收标准；`docs/README.md` 索引加行。
+
+### Fixed
+- **围栏开着时，子模块 / `git worktree` / 仓库子目录里的会话提交不了代码。** 这几种场景的 git 目录在工作区外（子模块在父仓库 `.git/modules/<name>`，worktree 在主仓库 `.git/worktrees/<name>` 与 common dir），commit、fetch、改 ref 全被内核拦下。启动时跑一次 `git rev-parse --git-dir --git-common-dir`，落在工作区外的结果自动加进可写根；不在仓库里或没装 git 时不加。
+- **围栏拦截提示不再说「请用户放宽工作区策略」。** 这句话没有落点，模型会用 `ask_user` 问一句「要不要放宽」，用户同意后围栏照旧——问答改不了档位。现在提示明确只有两条路：切到 `full-access`（TUI 里 Shift+Tab，立即生效），或把路径加进 `agent.sandbox_writable_roots` 后重启会话，并写明 `ask_user` 征得同意不会改变围栏。`docs/SANDBOX.md` 同步。
+- 测试：harness 钉住普通仓库不加根、子模块拿到父仓库 `.git/modules/<name>`、worktree 拿到自己的与 common 的 git 目录、子目录拿到上层 `.git`；core 钉住拦截提示点名 full-access / `sandbox_writable_roots` / 重启、排除 `ask_user`、不再出现「放宽工作区策略」。
+
 ## [0.78.0-rc28] - 2026-09-21
 
 ### Added
@@ -11,6 +110,8 @@
 
 ### Changed
 - README「边界」不再写「无 checkpoint / rewind」；`docs/EXPERIENCE_BASELINE.md` 第 11 项两端到位。
+
+
 
 ## [0.78.0-rc27] - 2026-09-21
 

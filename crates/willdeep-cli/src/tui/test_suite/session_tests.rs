@@ -1370,7 +1370,7 @@ fn modal_panel_renders_opaque_over_whatever_was_underneath() {
         for x in halo.x..halo.x + halo.width {
             assert_eq!(
                 buffer[(x, y)].bg,
-                Color::Blue,
+                MODAL_BG,
                 "cell ({x},{y}) is not part of an opaque panel"
             );
         }
@@ -1417,7 +1417,7 @@ fn styled_chat_wrap_and_selection_highlight_share_visual_rows() {
     let highlighted = wrapped.lines[0]
         .spans
         .iter()
-        .filter(|span| span.style.bg == Some(Color::Blue))
+        .filter(|span| span.style.bg == Some(MODAL_BG))
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert_eq!(highlighted, "中");
@@ -1820,6 +1820,9 @@ fn a_running_turn_no_longer_swallows_every_enter() {
         "/sidebar off",
         "/skills",
         "/history 登录",
+        // 换模型只作用于下一轮：当场收下，本轮结束再切。
+        "/model",
+        "/model qwen3-coder",
     ] {
         assert_eq!(busy_input(command), BusyInput::RunNow, "{command}");
     }
@@ -1829,12 +1832,7 @@ fn a_running_turn_no_longer_swallows_every_enter() {
     for prompt in ["继续重构这个模块", "/local 跑一下测试", "/runtime 修一下"] {
         assert_eq!(busy_input(prompt), BusyInput::Queue, "{prompt}");
     }
-    for command in [
-        "/model qwen3-coder",
-        "/compress",
-        "/daemon upgrade",
-        "/diff",
-    ] {
+    for command in ["/compress", "/daemon upgrade", "/diff"] {
         assert_eq!(busy_input(command), BusyInput::Refuse, "{command}");
     }
 }
@@ -2204,4 +2202,116 @@ fn runtime_compression_events_reach_the_status_bar_and_the_progress_line() {
         app.progress_log
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn modal_colours_do_not_come_from_the_theme_palette() {
+    // 0–15 号会被终端主题改写；弹窗与选区必须用色立方里的固定色。
+    for colour in [MODAL_BG, MODAL_FG] {
+        match colour {
+            Color::Indexed(index) => assert!(index >= 16, "{colour:?} is a theme palette slot"),
+            other => panic!("{other:?} is not a fixed 256-colour index"),
+        }
+    }
+}
+
+#[test]
+fn clicking_outside_the_chat_after_selecting_releases_the_click_for_focus() {
+    let mut app = App::new(vec!["hello world".to_owned()], Language::En);
+    app.transcript_rect = Rect::new(0, 0, 20, 6);
+    app.transcript_rows = vec!["hello world".to_owned()];
+    app.transcript_render_offset = 0;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 5),
+        (MouseEventKind::Up(MouseButton::Left), 5),
+    ] {
+        app.handle_chat_selection_mouse(MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    assert!(app.selection_mode);
+
+    // 点在聊天区下方（输入框的位置）：不能被选区吞掉，得交给正常的点击处理去切焦点。
+    let consumed = app.handle_chat_selection_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!consumed);
+    assert!(!app.selection_mode);
+    assert!(app.chat_selection.is_none());
+}
+
+#[test]
+fn typing_in_selection_mode_releases_it_and_moves_focus_to_the_prompt() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.enter_native_selection_mode();
+    app.release_selection_for_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(!app.selection_mode && !app.native_selection_mode);
+    assert_eq!(app.focus, FocusPane::Prompt);
+
+    // 翻页这类非输入键只退出选区，不抢焦点。
+    app.enter_native_selection_mode();
+    app.release_selection_for_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert!(!app.selection_mode);
+    assert_eq!(app.focus, FocusPane::Chat);
+}
+
+#[test]
+fn model_switch_during_a_turn_is_recorded_not_applied() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.running = true;
+    let message = super::model_commands::defer_model_switch(&mut app, " glm-5 ").unwrap();
+    assert_eq!(app.pending_model.as_deref(), Some("glm-5"));
+    assert!(message.contains("glm-5"), "{message}");
+    // 同一轮里再换一次，以最后一次为准。
+    super::model_commands::defer_model_switch(&mut app, "deepseek-v4-flash").unwrap();
+    assert_eq!(app.pending_model.as_deref(), Some("deepseek-v4-flash"));
+    assert!(super::model_commands::defer_model_switch(&mut app, "  ").is_err());
+    assert_eq!(app.pending_model.as_deref(), Some("deepseek-v4-flash"));
+}
+
+#[test]
+fn runtime_versions_compare_with_release_candidates() {
+    use super::app_state::version_is_older;
+    assert!(version_is_older("0.78.0-rc28", "0.78.0-rc29"));
+    assert!(
+        version_is_older("0.78.0-rc9", "0.78.0-rc10"),
+        "rc 按数字比，不按字符串"
+    );
+    assert!(version_is_older("0.78.0-rc33", "0.79.0-rc1"));
+    assert!(
+        version_is_older("0.78.0-rc33", "0.78.0"),
+        "正式版晚于同号 rc"
+    );
+    assert!(!version_is_older("0.79.0-rc1", "0.78.0-rc33"));
+    assert!(!version_is_older("0.79.0-rc1", "0.79.0-rc1"));
+    // 拿不准就不升。
+    assert!(!version_is_older("dev", "0.79.0-rc1"));
+    assert!(!version_is_older("0.78.0-beta1", "0.79.0-rc1"));
+    assert!(!version_is_older("0.78", "0.79.0-rc1"));
+}
+
+#[test]
+fn only_an_older_runtime_is_queued_for_one_automatic_upgrade() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.observe_runtime_version(Some("0.21.0-rc62".to_owned()));
+    assert!(app.runtime_auto_upgrade_pending, "older Runtime → try once");
+
+    // 事件循环发起后标记已试；同一进程再见到旧 Runtime 不再重试。
+    app.runtime_auto_upgrade_pending = false;
+    app.runtime_auto_upgrade_tried = true;
+    app.observe_runtime_version(Some("0.21.0-rc65".to_owned()));
+    assert!(!app.runtime_auto_upgrade_pending);
+
+    // 比客户端新的 Runtime 只警告，绝不降级。
+    let mut app = App::new(Vec::new(), Language::En);
+    app.observe_runtime_version(Some("999.0.0".to_owned()));
+    assert!(app.stale_runtime_version().is_some());
+    assert!(!app.runtime_auto_upgrade_pending);
 }

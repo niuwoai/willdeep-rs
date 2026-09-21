@@ -90,6 +90,7 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | `max_deep_calls_per_harness` | 每个 Harness 允许的 1M Deep 升级次数，`0..16`，默认 `1` |
 | `auto_title` | 自动整理会话标题；默认 `true`。关掉后标题停在第一条提示词的确定性派生，见 [会话标题](TUI_GUIDE.md#会话标题怎么来的) |
 | `title_model` | 标题摘要模型；默认取会话模型。请求只发一问一答各 800 字，与对话长度无关 |
+| `input_suggestions` | 轮次结束后在空输入框里灰字预测你的下一句，`Tab` 采用；默认 `true`。用与标题摘要相同的模型候选，开关独立于 `auto_title`，见 [下一句预测](TUI_GUIDE.md#轮次结束后的下一句预测) |
 
 ## `[local_model]` 段
 

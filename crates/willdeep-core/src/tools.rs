@@ -151,6 +151,9 @@ pub enum ToolError {
 pub struct ToolRegistry {
     workspace: PathBuf,
     approval_mode: SharedApprovalMode,
+    /// 子 Agent 专用：父会话的档位句柄。父会话处于 `full-access` 时，本注册表也按
+    /// `full-access` 判定（实时跟随，切回即失效）；其余档位用本工种自己的档位。
+    parent_approval_mode: Option<SharedApprovalMode>,
     approver: Arc<dyn Approver>,
     skills: Arc<SkillCatalog>,
     mcp: Arc<McpRegistry>,
@@ -226,6 +229,7 @@ impl ToolRegistry {
             ),
             workspace,
             approval_mode: SharedApprovalMode::new(approval_mode),
+            parent_approval_mode: None,
             approver: Arc::new(DenyApprover),
             skills: Arc::new(SkillCatalog::default()),
             mcp: Arc::new(McpRegistry::default()),
@@ -1807,7 +1811,9 @@ impl ToolRegistry {
                 "this subagent may only run its declared verifier command verbatim ({allowed_list}), not: {command}"
             )));
         }
-        if self.reviewed_subagent_shell {
+        // 父会话在 full-access：子 Agent 跟着免审。上面那几道收窄（只许跑 verifier、
+        // 只读 git）是工种的职责边界，照旧生效；这里跳过的只是「请判官 / 请人」。
+        if self.reviewed_subagent_shell && !self.inherits_full_access() {
             if child_command_is_sensitive(trimmed) {
                 return Err(reviewed_subagent_denial(
                     command,
@@ -2118,7 +2124,11 @@ fn command_signature(command: &str) -> Option<String> {
 /// paths recognise the same shapes and cannot drift apart. `command` must
 /// already be whitespace-normalized, since the redactor normalizes too.
 fn command_carries_credentials(command: &str) -> bool {
-    crate::judge::redact_credentials(command) != command
+    // `redact_credentials` 按空白切词再用单个空格拼回去，只拿它和原文比，
+    // 任何多行命令（`python -c "…多行…"`）或带连续空格的命令都会被当成
+    // 「脱敏改动了它」，从而误判为带凭据、连判官都不送。先用同一把尺子规范化原文。
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::judge::redact_credentials(command) != normalized
 }
 
 pub(crate) fn child_command_is_sensitive(command: &str) -> bool {
@@ -2546,7 +2556,10 @@ fn sandbox_denial_hint(sandbox: &SandboxSpec, network: bool) -> String {
     format!(
         "\n\n<sandbox-denied>\n这条命令看起来是被 OS 级写入围栏拦下的，不是命令本身写错了。\n\
 当前档位只允许写入：{roots}\n\
-把写入目标改到允许范围内，或请用户放宽工作区策略后重试。\n</sandbox-denied>"
+优先把写入目标改到允许范围内。确实必须写别处时，如实告诉用户被拦的路径，并说明只有两条路：\n\
+1. 用户把审批档位切到 full-access（TUI 里 Shift+Tab），这一档不套围栏，立即生效；\n\
+2. 用户把该路径加进配置 agent.sandbox_writable_roots，重启会话后生效。\n\
+用 ask_user 征得同意不会改变围栏——用户选完档位或改完配置之前，同一条命令重试仍会被拦。\n</sandbox-denied>"
     )
 }
 

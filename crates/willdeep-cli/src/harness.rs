@@ -183,7 +183,68 @@ pub(crate) enum HarnessFrontend {
         instruction_inbox: Option<Arc<willdeep_core::AgentInstructionInbox>>,
         allowed_skills: Vec<String>,
         allowed_mcp_servers: Vec<String>,
+        /// 这一轮在用量账本上的出处：在哪执行、谁提交、哪个回合。
+        usage_origin: UsageOrigin,
     },
+}
+
+/// 不起 Agent 的零散模型调用（Web 端下一句预测、插件页的 AI 请求）的记账
+/// 句柄：进程内执行，前端记 `unknown`，全部按辅助请求记。
+pub(crate) fn standalone_usage_ledger(
+    home: &Path,
+    session_id: Option<uuid::Uuid>,
+    workspace: Option<&Path>,
+) -> willdeep_core::usage_ledger::UsageLedgerScope {
+    use willdeep_core::usage_ledger::{
+        ClientKind, Execution, UsageLedgerContext, UsageLedgerScope, ledger_dir, shared_sink,
+    };
+    let mut context = UsageLedgerContext::new(ClientKind::Unknown, Execution::InProcess);
+    context.session_id = session_id;
+    context.workspace = workspace.map(Path::to_path_buf);
+    UsageLedgerScope::new(shared_sink(&ledger_dir(home)), context)
+}
+
+/// Runtime 前端在用量账本上的出处。
+#[derive(Clone, Debug)]
+pub(crate) struct UsageOrigin {
+    pub execution: willdeep_core::usage_ledger::Execution,
+    /// `tui:<uuid>` / `cli:<uuid>` / `mobile:<uuid>`，见 `RuntimeTask::origin_client`。
+    pub origin_client: Option<String>,
+    pub turn_id: Option<uuid::Uuid>,
+}
+
+/// 这次 harness 的记账上下文。进程内前端按界面定 `client`，Runtime 前端按
+/// 提交方的 `origin_client`。
+fn usage_ledger_context(
+    frontend: &HarnessFrontend,
+    session_id: uuid::Uuid,
+    workspace: &Path,
+) -> willdeep_core::usage_ledger::UsageLedgerContext {
+    use willdeep_core::usage_ledger::{ClientKind, Execution, UsageLedgerContext};
+    let mut context = match frontend {
+        HarnessFrontend::Terminal { .. } => {
+            UsageLedgerContext::new(ClientKind::Cli, Execution::InProcess)
+        }
+        HarnessFrontend::Tui { .. } => {
+            UsageLedgerContext::new(ClientKind::Tui, Execution::InProcess)
+        }
+        HarnessFrontend::Runtime {
+            connection,
+            usage_origin,
+            ..
+        } => {
+            let (client, instance) =
+                ClientKind::parse_origin(usage_origin.origin_client.as_deref());
+            let mut context = UsageLedgerContext::new(client, usage_origin.execution);
+            context.client_instance = instance;
+            context.turn_id = usage_origin.turn_id.map(|id| id.to_string());
+            context.task_id = Some(connection.task_id().to_string());
+            context
+        }
+    };
+    context.session_id = Some(session_id);
+    context.workspace = Some(workspace.to_path_buf());
+    context
 }
 
 /// 因为有待处理的运行时事件而开的那一轮，用它当提示词。
@@ -307,6 +368,11 @@ pub(crate) async fn execute_runtime(
             instruction_inbox: request.instruction_inbox.clone(),
             allowed_skills: request.workspace_skills.unwrap_or_default(),
             allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
+            usage_origin: UsageOrigin {
+                execution: willdeep_core::usage_ledger::Execution::Daemon,
+                origin_client: request.origin_client.clone(),
+                turn_id: request.turn_id,
+            },
         },
     )
     .await?;
@@ -596,28 +662,11 @@ pub(crate) async fn build(
     let session_id = resumed
         .map(|session| session.id)
         .unwrap_or_else(uuid::Uuid::new_v4);
-    let selected_profile_name = cli.profile.as_deref().or_else(|| {
-        resumed
-            .as_ref()
-            .and_then(|session| session.profile.as_deref())
-    });
-    let profile = loaded.select_provider(selected_profile_name)?;
-    let profile_provider = profile
-        .and_then(|provider| provider.provider.as_deref())
-        .map(parse_provider)
-        .transpose()?;
-    // 没有任何 Provider 配置时，按环境里有哪把钥匙推断，零配置也能开工。
-    let selected_provider = cli
-        .provider
-        .or(profile_provider)
-        .or_else(|| profile.is_none().then(crate::provider_from_env).flatten());
-    let base = resolve_base(cli, profile, selected_provider)?;
-    let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
-    let profile_api = profile
-        .and_then(|provider| provider.api.as_deref())
-        .map(parse_api)
-        .transpose()?;
-    let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
+    let resumed_profile = resumed.and_then(|session| session.profile.as_deref());
+    let profile = loaded.select_provider(cli.profile.as_deref().or(resumed_profile))?;
+    let provider_config = resolve_parent_provider_config(cli, loaded, resumed_profile)?;
+    let kind = provider_config.kind;
+    let model = provider_config.model.clone();
     // 缺省值与上限见 config.rs：命令行、配置、缺省三级取值，同一把尺子校验。
     let max_turns = cli
         .max_turns
@@ -630,22 +679,17 @@ pub(crate) async fn build(
         );
     }
     let workspace = resolve_workspace(cli, resumed)?;
-    let api_key = resolve_api_key(cli, profile, kind)?;
-    let model = cli
-        .model
-        .clone()
-        .or_else(|| profile.and_then(|provider| provider.model.clone()))
-        .or_else(|| crate::default_model(kind).map(str::to_owned))
-        .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
+    // 本机用量账本（docs/USAGE_LEDGER.md）。主回合、子 Agent、压缩由 Agent 在
+    // 主循环里记；这里只把辅助用途的 Provider 包上按调用记账——被主循环用的
+    // Provider 不能再包，否则同一次调用会记两行。
+    let usage_ledger = willdeep_core::usage_ledger::UsageLedgerScope::new(
+        willdeep_core::usage_ledger::shared_sink(&willdeep_core::usage_ledger::ledger_dir(home)),
+        usage_ledger_context(&frontend, session_id, &workspace),
+    );
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
-        some_im_base_url: base.clone(),
-        api_key: api_key.clone(),
+        some_im_base_url: provider_config.base_url.clone(),
+        api_key: provider_config.api_key.clone(),
     });
-    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model.clone());
-    provider_config.max_output_tokens = cli
-        .max_output_tokens
-        .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
-        .unwrap_or(16_384);
     let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
         let vision_model = profile
             .and_then(|value| value.vision_model.clone())
@@ -654,7 +698,9 @@ pub(crate) async fn build(
         vision_config.dialect = ApiDialect::ChatCompletions;
         vision_config.model = vision_model.clone();
         Some((
-            build_provider(vision_config).context("initialize some.im vision fallback")?,
+            usage_ledger.auxiliary(
+                build_provider(vision_config).context("initialize some.im vision fallback")?,
+            ),
             vision_model,
         ))
     } else {
@@ -771,7 +817,9 @@ pub(crate) async fn build(
         let mut judge_config = parent_provider_config.clone();
         judge_config.model = judge_model.clone();
         Some(Arc::new(ProviderSafetyJudge::new(
-            build_provider(judge_config).context("initialize safety judge provider")?,
+            usage_ledger.auxiliary(
+                build_provider(judge_config).context("initialize safety judge provider")?,
+            ),
             judge_model,
         )) as Arc<dyn SafetyJudge>)
     } else {
@@ -790,6 +838,8 @@ pub(crate) async fn build(
     let approval_handle = runtime_approval_handle
         .unwrap_or_else(|| willdeep_core::SharedApprovalMode::new(approval_mode));
     approval_handle.set(approval_mode);
+    // 子 Agent 要跟随父会话的 full-access，拿同一个句柄——切档是实时的。
+    let parent_approval_handle = approval_handle.clone();
     let mut tools = ToolRegistry::new(&workspace, approval_mode)?
         .with_shared_approval_mode(approval_handle)
         .with_output_store(&home.join("tool-outputs"))
@@ -939,6 +989,8 @@ pub(crate) async fn build(
         .map_err(anyhow::Error::msg)?;
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
         .with_sandbox(sandbox)
+        // 父会话在 full-access 时 Worker 跟着免审（rocky 2026-09-21 决定）。
+        .with_parent_approval_mode(parent_approval_handle)
         .with_worktree_root(home.join("worktrees").join("subagents"))
         // Task packets may name a skill; the runtime inlines its body so the
         // worker never spends turns fetching its own instructions.
@@ -950,7 +1002,8 @@ pub(crate) async fn build(
         .with_state_home(home.join("workers"))
         .with_parent_session(session_id)
         .with_always_allow_store(home.join("always-allow.json"))
-        .with_event_sink(sink.clone());
+        .with_event_sink(sink.clone())
+        .with_usage_ledger(usage_ledger.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in
         resolve_tier_bindings(&loaded.file, &parent_provider_config, kind, context_window)?
@@ -998,7 +1051,8 @@ pub(crate) async fn build(
     .with_subagents(subagents)
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone())
-    .with_event_kernel(kernel.clone());
+    .with_event_kernel(kernel.clone())
+    .with_usage_ledger(usage_ledger.clone());
     // Runtime 任务的收件箱由任务管理器持有另一半；进程内轮次用 Agent 自带的那个。
     if let Some(inbox) = runtime_inbox {
         agent = agent.with_instruction_inbox(inbox);
@@ -1013,8 +1067,10 @@ pub(crate) async fn build(
             && let Some(local_config) = local_auxiliary_config.clone()
         {
             routing = routing.with_classifiers(vec![
-                build_provider(local_config).context("initialize local routing model")?,
-                provider.clone(),
+                usage_ledger.auxiliary(
+                    build_provider(local_config).context("initialize local routing model")?,
+                ),
+                usage_ledger.auxiliary(provider.clone()),
             ]);
         }
         agent = agent.with_routing_guard(Arc::new(routing));
@@ -1053,22 +1109,21 @@ pub(crate) async fn build(
     agent = agent.with_compressors(compressors);
 
     // 标题同样本地优先、会话 Provider 兜底；请求仍只带一问一答各 800 字。
-    if loaded.file.agent.auto_title.unwrap_or(true) {
-        let mut titlers = Vec::new();
-        if loaded.file.local_model.enabled
-            && loaded.file.local_model.prefer_for_titles
-            && let Some(local_config) = local_auxiliary_config
-        {
-            titlers.push(
-                build_provider(local_config).context("initialize local session title model")?,
-            );
+    // 轮次结束后的「下一句预测」用同一档模型候选，但开关各管各的：关掉自动标题
+    // 不该顺手把预测也关了，反过来也一样。
+    let auto_title = loaded.file.agent.auto_title.unwrap_or(true);
+    let input_suggestions = loaded.file.agent.input_suggestions.unwrap_or(true);
+    if auto_title || input_suggestions {
+        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config)?
+            .into_iter()
+            .map(|provider| usage_ledger.auxiliary(provider))
+            .collect::<Vec<_>>();
+        if auto_title {
+            agent = agent.with_titlers(auxiliaries.clone());
         }
-        let mut title_config = parent_provider_config.clone();
-        if let Some(title_model) = loaded.file.agent.title_model.clone() {
-            title_config.model = title_model;
+        if input_suggestions {
+            agent = agent.with_input_suggesters(auxiliaries);
         }
-        titlers.push(build_provider(title_config).context("initialize session title provider")?);
-        agent = agent.with_titlers(titlers);
     }
     let notifier = crate::notify::Notifier::new(&loaded.file.notifications);
     Ok(BuiltHarness {
@@ -1085,6 +1140,81 @@ pub(crate) async fn build(
         notifier,
         _command_watcher: command_watcher,
     })
+}
+
+/// 会话主 Provider 的配置：命令行 > 所选档案 > 环境里的钥匙 > 缺省。
+///
+/// Web 的下一句预测也从这里取，免得两处各算一遍、在某个档案上悄悄分叉。
+pub(crate) fn resolve_parent_provider_config(
+    cli: &Cli,
+    loaded: &LoadedConfig,
+    resumed_profile: Option<&str>,
+) -> Result<ProviderConfig> {
+    let profile = loaded.select_provider(cli.profile.as_deref().or(resumed_profile))?;
+    let profile_provider = profile
+        .and_then(|provider| provider.provider.as_deref())
+        .map(parse_provider)
+        .transpose()?;
+    // 没有任何 Provider 配置时，按环境里有哪把钥匙推断，零配置也能开工。
+    let selected_provider = cli
+        .provider
+        .or(profile_provider)
+        .or_else(|| profile.is_none().then(crate::provider_from_env).flatten());
+    let base = resolve_base(cli, profile, selected_provider)?;
+    let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
+    let profile_api = profile
+        .and_then(|provider| provider.api.as_deref())
+        .map(parse_api)
+        .transpose()?;
+    let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
+    let api_key = resolve_api_key(cli, profile, kind)?;
+    let model = cli
+        .model
+        .clone()
+        .or_else(|| profile.and_then(|provider| provider.model.clone()))
+        .or_else(|| crate::default_model(kind).map(str::to_owned))
+        .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
+    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model);
+    provider_config.max_output_tokens = cli
+        .max_output_tokens
+        .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
+        .unwrap_or(16_384);
+    Ok(provider_config)
+}
+
+/// 标题与下一句预测共用的小模型候选：本地模型（`prefer_for_titles`）优先，
+/// 会话 Provider 换成 `title_model` 兜底。按顺序试，前一家请求失败才问下一家。
+pub(crate) fn auxiliary_providers(
+    loaded: &LoadedConfig,
+    parent: &ProviderConfig,
+) -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>> {
+    let mut auxiliaries = Vec::new();
+    if loaded.file.local_model.prefer_for_titles
+        && let Some(local_config) = local_auxiliary_provider_config(&loaded.file.local_model)
+    {
+        auxiliaries
+            .push(build_provider(local_config).context("initialize local session title model")?);
+    }
+    let mut title_config = parent.clone();
+    if let Some(title_model) = loaded.file.agent.title_model.clone() {
+        title_config.model = title_model;
+    }
+    auxiliaries.push(build_provider(title_config).context("initialize session title provider")?);
+    Ok(auxiliaries)
+}
+
+/// Web 端的下一句预测用：不起 Agent，只按配置与会话当时的档案、模型装出
+/// 与 TUI 同一组候选 Provider。命令行参数一律取缺省——Web 没有命令行。
+pub(crate) fn input_suggestion_providers(
+    loaded: &LoadedConfig,
+    profile: Option<&str>,
+    model: Option<String>,
+) -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>> {
+    let mut cli = <Cli as clap::Parser>::try_parse_from(["willdeep"])
+        .context("build default CLI settings")?;
+    cli.model = model;
+    let parent = resolve_parent_provider_config(&cli, loaded, profile)?;
+    auxiliary_providers(loaded, &parent)
 }
 
 fn local_auxiliary_provider_config(
@@ -1219,6 +1349,7 @@ fn sandbox_roots(
                 .map(|root| expand_home(std::path::Path::new(root))),
         );
     }
+    roots.extend(external_git_dirs(workspace));
     roots.extend(
         agent
             .sandbox_writable_roots
@@ -1226,6 +1357,48 @@ fn sandbox_roots(
             .map(|root| expand_home(root)),
     );
     roots
+}
+
+/// 工作区所属仓库落在工作区外的 git 目录。
+///
+/// 子模块的 `.git` 是个文件，指向父仓库的 `.git/modules/<name>`；`git worktree`
+/// 指向主仓库的 `.git/worktrees/<name>`，对象库还在 common dir；在仓库子目录里
+/// 开会话时 `.git` 在上层。这几种情况下 commit、fetch、改 ref 全写在工作区外，
+/// 不放行的话围栏开着就提交不了代码。放行的只是「这个工作区自己的仓库元数据」，
+/// 普通仓库的 `.git` 本来就在工作区里可写，不多出新的风险面。
+/// 不在仓库里、没装 git、git 报错时返回空——这是锦上添花，不该挡住启动。
+fn external_git_dirs(workspace: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--git-dir", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // 两个输出都可能是相对 `-C` 目录的路径。
+        let Ok(dir) = workspace.join(line).canonicalize() else {
+            continue;
+        };
+        if !dir.starts_with(&workspace) && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
 }
 
 /// 各档位的网络围栏。`read-only` 永远断；`workspace-write` 不请判官，「命令留在
@@ -1449,6 +1622,131 @@ mod tests {
                     "workspace-write cuts the network by default"
                 );
             }
+        }
+
+        /// 临时目录里的一组 git 仓库；drop 时清掉。
+        struct GitScratch(std::path::PathBuf);
+
+        impl GitScratch {
+            fn new(tag: &str) -> Self {
+                let root = std::env::temp_dir().join(format!(
+                    "willdeep-gitdirs-{tag}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&root).unwrap();
+                Self(root.canonicalize().unwrap())
+            }
+
+            fn git(&self, dir: &std::path::Path, args: &[&str]) {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args([
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "user.email=t@t",
+                        "-c",
+                        "init.defaultBranch=main",
+                        "-c",
+                        "protocol.file.allow=always",
+                    ])
+                    .args(args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .expect("run git");
+                assert!(status.success(), "git {args:?} in {}", dir.display());
+            }
+
+            fn repo(&self, name: &str) -> std::path::PathBuf {
+                let dir = self.0.join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                self.git(&dir, &["init", "-q"]);
+                self.git(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+                dir
+            }
+        }
+
+        impl Drop for GitScratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn git_available() -> bool {
+            std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        }
+
+        #[test]
+        fn a_plain_repo_adds_no_git_roots_because_its_git_dir_is_inside() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("plain");
+            let repo = scratch.repo("plain");
+            assert!(external_git_dirs(&repo).is_empty());
+            assert!(external_git_dirs(&scratch.0).is_empty(), "not a repo");
+        }
+
+        #[test]
+        fn a_submodule_workspace_gets_its_git_dir_under_the_parent() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("submodule");
+            let upstream = scratch.repo("upstream");
+            let parent = scratch.repo("parent");
+            scratch.git(
+                &parent,
+                &[
+                    "submodule",
+                    "add",
+                    "-q",
+                    upstream.to_str().unwrap(),
+                    "sdk/python",
+                ],
+            );
+            let module = parent.join("sdk/python");
+            let dirs = external_git_dirs(&module);
+            assert_eq!(dirs, vec![parent.join(".git/modules/sdk/python")]);
+            let roots = sandbox_roots(&crate::config::AgentSettings::default(), &module);
+            assert!(roots.contains(&parent.join(".git/modules/sdk/python")));
+        }
+
+        #[test]
+        fn a_worktree_workspace_gets_its_own_and_the_common_git_dir() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("worktree");
+            let main = scratch.repo("main");
+            let tree = scratch.0.join("tree");
+            scratch.git(&main, &["worktree", "add", "-q", tree.to_str().unwrap()]);
+            let dirs = external_git_dirs(&tree);
+            assert_eq!(
+                dirs,
+                vec![main.join(".git/worktrees/tree"), main.join(".git")]
+            );
+        }
+
+        #[test]
+        fn a_subdirectory_workspace_gets_the_repo_git_dir_above_it() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("subdir");
+            let repo = scratch.repo("repo");
+            let sub = repo.join("crates/a");
+            std::fs::create_dir_all(&sub).unwrap();
+            assert_eq!(external_git_dirs(&sub), vec![repo.join(".git")]);
         }
     }
 

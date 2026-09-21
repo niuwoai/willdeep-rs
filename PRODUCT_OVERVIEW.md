@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-21 | 当前版本：v0.78.0-rc28（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-21 | 当前版本：v0.81.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -8,6 +8,9 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 
 ## 核心功能
 
+- 本机用量账本 `willdeep.usage-ledger.v1`：主回合、子 Agent、上下文压缩与辅助请求（标题、预测、路由、判官、看图兜底）的**每次模型调用**写一行到 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl`，daemon 与进程内回合同一写入口，只记数不记内容，写失败不影响回合；daemon 回合带 `events.ndjson` 序号。`willdeep usage backfill [--dry-run]` 从 daemon 事件日志回填账本上线前的用量，daemon 首次启动自动跑一次。WillDeep for macOS 只读合并进 Token 活动。canonical 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`，rs 侧见 docs/USAGE_LEDGER.md。
+
+- TUI 与 Web 轮次结束后预测下一句：空输入框里灰字显示最可能的下一条消息，`Tab` 采用（只填入不发送），打字 / `Esc` / 新一轮开始即清掉；走标题摘要那一档模型的独立小请求，只看最近两条用户原话与助手回复尾部，结果晚到按世代号丢弃；不落盘、不进 Runtime 协议，`[agent] input_suggestions = false` 两端一起关。Web 走独立端点 `POST /api/sessions/{id}/input-suggestion`，不挂进聊天流。详见 docs/TUI_GUIDE.md「轮次结束后的下一句预测」、docs/WEB_GUIDE.md「Composer」。
 - OS 级围栏默认开（macOS Seatbelt / Linux bubblewrap）：主 Agent 与子 Agent 的命令、后台任务、监视器、verifier 只能往工作区、临时目录和工具链缓存里写；网络按档位断通（`workspace-write` / `read-only` 断），断网的命令由模型带 `network: true` 重试、由人放行；`willdeep doctor` 报围栏状态。详见 docs/SANDBOX.md。
 - Runtime 控制面可作为平台对外：`willdeep-runtime-client`（Rust SDK）与 `willdeep-runtime-protocol` 发布就绪，README、crate 文档与可运行示例齐全；`willdeep run` 进 CI 的做法与样例见 docs/CI_INTEGRATION.md、examples/ci/。
 - `willdeep audit export` 把一个会话（或一个工作区一段时间）里的审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚汇成一份 Markdown / JSON 审计报告；只读本地状态文件，不需要 Runtime 在跑，报告里没有提示词、模型正文和凭据。详见 docs/AUDIT_EXPORT.md。

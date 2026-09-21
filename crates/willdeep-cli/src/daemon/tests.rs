@@ -1474,3 +1474,130 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     assert!(manager.pending_interactions().await.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// daemon 回合端到端：Agent 经 Runtime 事件宿主跑一轮，每次模型调用在账本
+/// 上恰好一行 `execution=daemon`，`event_sequence` 就是 events.ndjson 里那条
+/// usage 事件的序号；之后的回填据此一条都不重复记。
+#[tokio::test]
+async fn daemon_turns_link_ledger_lines_to_their_usage_events() {
+    use willdeep_core::usage_ledger::{
+        ClientKind, Execution, UsageLedgerContext, UsageLedgerScope, UsageLedgerSink, ledger_dir,
+    };
+
+    struct TwoCalls(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl willdeep_core::provider::Provider for TwoCalls {
+        async fn complete(
+            &self,
+            _: &[willdeep_core::Message],
+            _: &[willdeep_core::types::ToolDefinition],
+        ) -> Result<willdeep_core::types::Completion, willdeep_core::provider::ProviderError>
+        {
+            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool_calls = if call == 0 {
+                vec![willdeep_core::ToolCall {
+                    id: "list".to_owned(),
+                    name: "list_directory".to_owned(),
+                    arguments: r#"{"path":"."}"#.to_owned(),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(willdeep_core::types::Completion {
+                reasoning: None,
+                content: if call == 0 {
+                    String::new()
+                } else {
+                    "done".to_owned()
+                },
+                tool_calls,
+                usage: Some(willdeep_core::types::Usage {
+                    input_tokens: Some(1_000 + call as u64),
+                    output_tokens: Some(20),
+                    total_tokens: Some(1_020 + call as u64),
+                    cache_read_tokens: Some(512),
+                }),
+                finish_reason: Some("stop".to_owned()),
+            })
+        }
+    }
+
+    let home =
+        std::env::temp_dir().join(format!("willdeep-ledger-daemon-{}", uuid::Uuid::new_v4()));
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(home.join("runtime")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v4();
+    let events = Arc::new(EventLog::open(home.join("runtime/events.ndjson")).unwrap());
+    let sink = Arc::new(RuntimeEventSink {
+        task_id,
+        session_id: Some(session_id),
+        turn_id: None,
+        root_agent_id: uuid::Uuid::new_v4(),
+        home: home.clone(),
+        workspace: workspace.clone(),
+        events: events.clone(),
+        agents: test_agent_store(&home.join("runtime")),
+        tools: Arc::new(tool_store::ToolStore::open(home.join("runtime/tools.json")).unwrap()),
+        diff_baselines: AsyncMutex::new(HashMap::new()),
+        child_workspaces: AsyncMutex::new(HashMap::new()),
+    });
+    let ledger = UsageLedgerSink::spawn(ledger_dir(&home));
+    let mut context = UsageLedgerContext::new(ClientKind::Tui, Execution::Daemon);
+    context.session_id = Some(session_id);
+    context.task_id = Some(task_id.to_string());
+    let agent = willdeep_core::Agent::new(
+        Arc::new(TwoCalls(std::sync::atomic::AtomicUsize::new(0))),
+        willdeep_core::ToolRegistry::new(&workspace, willdeep_core::ApprovalMode::ReadOnly)
+            .unwrap(),
+        willdeep_core::AgentConfig {
+            max_turns: 4,
+            system_prompt: String::new(),
+            context_window: 32_000,
+            token_budget: None,
+        },
+    )
+    .with_event_sink(sink)
+    .with_usage_ledger(UsageLedgerScope::new(ledger.clone(), context));
+    assert_eq!(
+        agent.run("list, then finish").await.unwrap().final_text,
+        "done"
+    );
+    assert!(ledger.flush(Duration::from_secs(10)));
+
+    let usage_sequences = events
+        .read_after(0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.message.contains(r#""type":"usage""#))
+        .map(|event| event.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(usage_sequences.len(), 2);
+    let lines = std::fs::read_dir(ledger_dir(&home))
+        .unwrap()
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "one ledger line per provider request");
+    for (line, sequence) in lines.iter().zip(&usage_sequences) {
+        assert_eq!(line["execution"], "daemon");
+        assert_eq!(line["client"], "tui");
+        assert_eq!(line["event_sequence"], *sequence);
+    }
+
+    // 任务结束后跑回填：两条用量都已实时记过，一条都不补。
+    let task = serde_json::json!([{ "id": task_id, "status": "completed" }]);
+    std::fs::write(home.join("runtime/tasks.json"), task.to_string()).unwrap();
+    let plan = crate::usage_cmd::plan_backfill(&home).unwrap();
+    assert_eq!(plan.usage_events, 2);
+    assert_eq!(plan.recorded_live, 2);
+    assert!(plan.records.is_empty());
+    drop(ledger);
+    std::fs::remove_dir_all(home).unwrap();
+}

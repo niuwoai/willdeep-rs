@@ -252,6 +252,16 @@ pub enum SubagentLifecycleStatus {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: AgentEvent);
+
+    /// Emit an event and return the sequence number a host durably recorded
+    /// it under, if the host keeps one. The Runtime daemon returns the
+    /// `events.ndjson` sequence so the usage ledger can link a live record
+    /// to the event a later backfill would read; everyone else keeps the
+    /// default and returns `None`. Forwarding sinks must forward this too.
+    async fn emit_sequenced(&self, event: AgentEvent) -> Option<u64> {
+        self.emit(event).await;
+        None
+    }
 }
 
 struct NoopSink;
@@ -355,6 +365,8 @@ pub struct Agent {
     compressors: Vec<(Arc<dyn Provider>, bool)>,
     /// 会话标题摘要的专用 Provider。没绑就没有 L2 润色，列表停在 L1 派生标题。
     titlers: Vec<Arc<dyn Provider>>,
+    /// 轮次结束后预测用户下一句的 Provider，与标题同一档。没绑就不预测。
+    input_suggesters: Vec<Arc<dyn Provider>>,
     subagents: Option<Arc<SubagentCatalog>>,
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
@@ -362,6 +374,8 @@ pub struct Agent {
     routing: Option<Arc<RoutingGuard>>,
     /// 宿主事件内核。不挂等于本改动前的行为：没有边界投递，也没有抢占。
     kernel: Option<crate::kernel::EventKernel>,
+    /// 本机用量账本。不挂就不记账，其余行为完全不变。
+    usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
 }
 
 impl Agent {
@@ -374,6 +388,7 @@ impl Agent {
             image_fallback: None,
             compressors: Vec::new(),
             titlers: Vec::new(),
+            input_suggesters: Vec::new(),
             subagents: None,
             // 根 Agent 也带收件箱：用户在本轮进行中说的话由此送达，不必等轮次结束。
             instruction_inbox: Some(Arc::new(AgentInstructionInbox::default())),
@@ -381,7 +396,57 @@ impl Agent {
             background_tasks: None,
             routing: None,
             kernel: None,
+            usage_ledger: None,
         }
+    }
+
+    /// 挂上本机用量账本：主循环与上下文压缩的每次模型调用各记一行。
+    ///
+    /// 辅助用途的 Provider（标题、预测、看图兜底……）不在这里记，由宿主用
+    /// [`crate::usage_ledger::UsageLedgerScope::auxiliary`] 包好再交进来。
+    pub fn with_usage_ledger(mut self, scope: crate::usage_ledger::UsageLedgerScope) -> Self {
+        self.usage_ledger = Some(scope);
+        self
+    }
+
+    pub(crate) fn begin_model_call(
+        &self,
+        kind: crate::usage_ledger::UsageKind,
+        provider: &dyn Provider,
+    ) -> crate::usage_ledger::ModelCall {
+        match &self.usage_ledger {
+            Some(scope) => scope.begin(kind, provider.ledger_identity()),
+            None => crate::usage_ledger::ModelCall::inert(),
+        }
+    }
+
+    /// 主循环请求在账本上记哪一类：根 Agent 是 `main`，子 Agent 是 `subagent`。
+    pub(crate) fn loop_usage_kind(&self) -> crate::usage_ledger::UsageKind {
+        self.usage_ledger
+            .as_ref()
+            .map_or(crate::usage_ledger::UsageKind::Main, |scope| {
+                scope.loop_kind()
+            })
+    }
+
+    /// 一次模型调用收尾：有 usage 就发 `AgentEvent::Usage`（行为与以前相同），
+    /// 再用事件宿主给的序号落账。没有 usage 的调用照样记一行，只是不发事件。
+    pub(crate) async fn settle_model_call(
+        &self,
+        mut call: crate::usage_ledger::ModelCall,
+        usage: Option<&Usage>,
+        outcome: crate::usage_ledger::Outcome,
+    ) {
+        call.settle(usage, outcome);
+        let sequence = match usage {
+            Some(usage) => {
+                self.sink
+                    .emit_sequenced(AgentEvent::Usage(usage.clone()))
+                    .await
+            }
+            None => None,
+        };
+        call.finish(sequence);
     }
 
     /// 主 Agent 工具注册表的审批档位句柄。前端改它，下一次工具调用即生效。
@@ -451,6 +516,24 @@ impl Agent {
     pub fn with_titlers(mut self, providers: Vec<Arc<dyn Provider>>) -> Self {
         self.titlers = providers;
         self
+    }
+
+    /// Bind the candidates that predict the user's next message after a turn,
+    /// in preference order. Unbound means the feature is off for this agent.
+    pub fn with_input_suggesters(mut self, providers: Vec<Arc<dyn Provider>>) -> Self {
+        self.input_suggesters = providers;
+        self
+    }
+
+    pub fn input_suggestions_enabled(&self) -> bool {
+        !self.input_suggesters.is_empty()
+    }
+
+    /// 预测用户的下一句。`payload` 来自 [`crate::input_suggestion::payload`]。
+    /// 按候选顺序试，**第一个请求成功的就定案**——哪怕它说没有明显的下一步，
+    /// 也不再换下一家重问：预测是装饰，不值得为它多花一次钱。
+    pub async fn suggest_next_input(&self, payload: &str) -> Option<String> {
+        crate::input_suggestion::predict_first(&self.input_suggesters, payload).await
     }
 
     /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回
@@ -687,6 +770,11 @@ impl Agent {
                     return Err(error);
                 }
             };
+            // 账本上的一行从这里开始计时；无论这次请求怎么收场都恰好落一行。
+            let mut model_call = Some(match self.provider() {
+                Ok(provider) => self.begin_model_call(self.loop_usage_kind(), provider.as_ref()),
+                Err(_) => crate::usage_ledger::ModelCall::inert(),
+            });
             let stream = streaming::StreamEvents::new(
                 checkpoint,
                 self.sink.as_ref(),
@@ -737,8 +825,17 @@ impl Agent {
                                 .unwrap_or(0)
                                 .saturating_add(usage.output_tokens.unwrap_or(0))
                         }));
-                    self.sink.emit(AgentEvent::Usage(usage.clone())).await;
                 }
+                let outcome = if matches!(&response, Ok(None)) {
+                    crate::usage_ledger::Outcome::Cancelled
+                } else {
+                    crate::usage_ledger::Outcome::Error
+                };
+                let call = model_call
+                    .take()
+                    .unwrap_or_else(crate::usage_ledger::ModelCall::inert);
+                self.settle_model_call(call, partial.usage.as_ref(), outcome)
+                    .await;
                 checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
             }
             let completion = match response {
@@ -784,7 +881,11 @@ impl Agent {
                         .unwrap_or(0)
                         .saturating_add(usage.output_tokens.unwrap_or(0))
                 }));
-                self.sink.emit(AgentEvent::Usage(usage)).await;
+                let call = model_call
+                    .take()
+                    .unwrap_or_else(crate::usage_ledger::ModelCall::inert);
+                self.settle_model_call(call, Some(&usage), crate::usage_ledger::Outcome::Ok)
+                    .await;
                 let mut partial_history = messages.clone();
                 if !completion.content.is_empty() {
                     partial_history.push(Message::assistant(&completion.content, Vec::new()));
@@ -801,6 +902,10 @@ impl Agent {
                         used: used_tokens,
                     });
                 }
+            } else if let Some(call) = model_call.take() {
+                // 协议没报 usage：照样记一次调用，Token 留空，不估算。
+                self.settle_model_call(call, None, crate::usage_ledger::Outcome::Ok)
+                    .await;
             }
             let content = completion.content.trim().to_owned();
             if !content.is_empty() {

@@ -1,0 +1,15 @@
+{
+  "id": "zh-deploy-question",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "rc12 构建好了吗"
+    },
+    {
+      "role": "assistant",
+      "content": "构建好了，产物在 dist/rc12，四个平台都签名完毕，本地冒烟测试通过。是否现在部署到 staging？"
+    }
+  ]
+}

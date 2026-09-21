@@ -39,6 +39,12 @@ struct ChildEventSink {
 #[async_trait::async_trait]
 impl EventSink for ChildEventSink {
     async fn emit(&self, event: AgentEvent) {
+        self.emit_sequenced(event).await;
+    }
+
+    /// 子 Agent 的 usage 以 `SubagentUsage` 进父级宿主；宿主给的事件序号原样
+    /// 带回，子 Agent 的账本行据此与 daemon 事件日志对上。
+    async fn emit_sequenced(&self, event: AgentEvent) -> Option<u64> {
         let event = match event {
             AgentEvent::TurnStarted { turn } => {
                 Some(AgentEvent::SubagentTurnStarted { id: self.id, turn })
@@ -71,8 +77,9 @@ impl EventSink for ChildEventSink {
             }),
             _ => None,
         };
-        if let Some(event) = event {
-            self.parent.emit(event).await;
+        match event {
+            Some(event) => self.parent.emit_sequenced(event).await,
+            None => None,
         }
     }
 }
@@ -161,6 +168,10 @@ pub(super) struct SubagentRun {
     /// [`SubagentCatalog::with_always_allow_store`](super::catalog::SubagentCatalog::with_always_allow_store)。
     pub(super) always_allow_store: Option<PathBuf>,
     pub(super) state_home: Option<PathBuf>,
+    /// 父会话的档位句柄：父会话在 full-access 时 Worker 跟着免审（实时）。
+    pub(super) parent_approval_mode: Option<crate::tools::SharedApprovalMode>,
+    /// 父会话的用量账本。Worker 的每次模型调用以 `subagent` 记一行。
+    pub(super) usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
 }
 
 /// Run a worker to a verdict.
@@ -194,7 +205,10 @@ pub(super) async fn run_subagent(
         mcp,
         always_allow_store,
         state_home,
+        parent_approval_mode,
+        usage_ledger,
     } = run;
+    let usage_ledger = usage_ledger.map(|scope| scope.for_subagent(agent_id));
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
         None => None,
@@ -219,11 +233,20 @@ pub(super) async fn run_subagent(
             claims_unverifiable: audit.unverifiable.len(),
         }
     };
+    // 大文件摘要直接调 Worker 的 Provider，不经过 Agent 主循环，按辅助请求记账。
+    let brief_profile = match &usage_ledger {
+        Some(scope) => {
+            let mut brief_profile = profile.clone();
+            brief_profile.provider = scope.auxiliary(profile.provider.clone());
+            brief_profile
+        }
+        None => profile.clone(),
+    };
     let mut brief = compose_brief(
         &prompt,
         task.as_ref(),
         &workspace,
-        &profile,
+        &brief_profile,
         skills.as_deref(),
     )
     .await;
@@ -259,6 +282,8 @@ pub(super) async fn run_subagent(
             always_allow_store.clone(),
             &sandbox,
             state_home.as_deref(),
+            parent_approval_mode.as_ref(),
+            usage_ledger.as_ref(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -345,6 +370,8 @@ async fn run_once(
     always_allow_store: Option<PathBuf>,
     sandbox: &crate::sandbox::SandboxSpec,
     state_home: Option<&Path>,
+    parent_approval_mode: Option<&crate::tools::SharedApprovalMode>,
+    usage_ledger: Option<&crate::usage_ledger::UsageLedgerScope>,
 ) -> Result<String, AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
@@ -372,6 +399,9 @@ async fn run_once(
         .with_write_targets(approved_targets.clone());
     if let Some(home) = state_home {
         tools = tools.with_output_store(&home.join("tool-outputs"));
+    }
+    if let Some(parent) = parent_approval_mode {
+        tools = tools.with_parent_approval_mode(parent.clone());
     }
     if let Some(path) = always_allow_store {
         // 坏掉的规则文件不该让一次派工失败：Worker 退回「什么都要批」，而它
@@ -448,6 +478,9 @@ async fn run_once(
     }));
     if let Some(inbox) = instruction_inbox {
         agent = agent.with_instruction_inbox(inbox);
+    }
+    if let Some(scope) = usage_ledger {
+        agent = agent.with_usage_ledger(scope.clone());
     }
     let run = Box::pin(async {
         if let Some(home) = state_home {
