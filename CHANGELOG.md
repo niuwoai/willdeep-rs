@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.79.0-rc2] - 2026-09-21
+
+### Fixed
+- **`docs/TUI_GUIDE.md` 对「升级时等审批的任务」的说法与实现相反。** 文档写「若有任务正等待人工审批，Runtime 不会退出」，实际自 0.54.0-rc3 起等人的任务不拦 drain：旧 Runtime 只等排队 / 执行中 / 取消中的任务收尾就退出，新 Runtime 启动时把等审批 / 等回答的任务标成 `Interrupted`，待处理的审批按拒绝作废、提问按未回答作废，那一轮不会自动续上（`drain_does_not_wait_on_tasks_that_are_waiting_on_a_human`、`task_recovery_interrupts_waiting_task_and_cancels_its_interaction` 两条测试钉着）。文档改为如实说明，并提示升级前先处理待审批。
+- **TUI `/daemon upgrade` 的过程提示改为写进对话。** 升级前那句「这些等你处理的任务会被这次交接丢掉」以前只进状态行，一闪就被下一条覆盖，看不到就丢了一个待审批。
+
 ## [0.79.0-rc1] - 2026-09-21
 
 ### Added
