@@ -5,6 +5,9 @@
 ### Added
 - **轮次进行中可以直接 `/model`。** 以前本轮在跑时 `/model` 与 `/compress`、`/diff` 等一起被拒绝，只能等本轮结束或 Esc 中断再敲一遍。换模型本来就只作用于下一轮，现在当场收下：`/model <名>` 或从 `/model` 列表里选，状态行提示「本轮结束后切换到 X，下一轮起生效」，本轮结束（正常、中断或失败）时、在排队的提示词发出之前真正切过去；同一轮里换多次以最后一次为准。不在轮次中途真切，是因为进程内 `/local` 轮次的下一次调模型会立刻换掉，且会话文件正由运行中的轮次写着。`docs/TUI_GUIDE.md` 同步。
 
+### Fixed
+- **提升到 0.79.0-rc1 后整个工作区编译失败。** 根 `Cargo.toml` 里 `willdeep-runtime-protocol` / `willdeep-runtime-client` 的版本要求还是 `0.78.0-rc1`，`^0.78.0-rc1` 匹配不了 0.79.0-rc1。两处跟上工作区版本，并新增 `crates/willdeep-cli/tests/workspace_versions.rs` 钉住「内部依赖版本要求 = `[workspace.package] version`」。
+
 ## [0.78.0-rc33] - 2026-09-21
 
 ### Fixed
