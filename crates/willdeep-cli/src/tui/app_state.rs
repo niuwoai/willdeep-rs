@@ -1530,7 +1530,13 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(point) = self.transcript_selection_point(mouse.column, mouse.row, false)
                 else {
-                    return self.selection_mode;
+                    // 点在聊天区外（通常是输入框）：退出选区，让这一下照常去切焦点。
+                    // 以前这里原样返回 `selection_mode`，选过字之后点输入框会被整个
+                    // 吃掉，焦点切不过去、键盘也还锁在选区模式里。
+                    if self.selection_mode {
+                        self.exit_selection_mode();
+                    }
+                    return false;
                 };
                 self.chat_selection = Some(ChatSelection {
                     anchor: point,
@@ -1595,6 +1601,22 @@ impl App {
         self.native_selection_mode = true;
         self.chat_selection = None;
         self.focus = FocusPane::Chat;
+    }
+
+    /// 选区模式里按了一个不属于选区的键：退出选区，把这个键交还给正常处理。
+    /// 能打进输入框的键顺带把焦点切到输入框——用户是想打字，不是想被锁住。
+    pub(super) fn release_selection_for_key(&mut self, key: KeyEvent) {
+        self.exit_selection_mode();
+        let typing = match key.code {
+            KeyCode::Char(_) => !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER),
+            KeyCode::Backspace | KeyCode::Enter | KeyCode::Delete => true,
+            _ => false,
+        };
+        if typing {
+            self.focus = FocusPane::Prompt;
+        }
     }
 
     pub(super) fn exit_selection_mode(&mut self) {
