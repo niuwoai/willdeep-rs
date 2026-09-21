@@ -1,0 +1,15 @@
+{
+  "id": "ja-offer-continue",
+  "language": "ja",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "APIのレスポンスが遅い原因を調べて"
+    },
+    {
+      "role": "assistant",
+      "content": "原因は N+1 クエリでした。ユーザー一覧を取得するたびに所属チームを 1 件ずつ引いています。preload に変えれば 1 クエリにまとまります。修正に進みますか？"
+    }
+  ]
+}

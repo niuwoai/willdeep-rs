@@ -1,0 +1,15 @@
+{
+  "id": "en-yesno-merge",
+  "language": "en",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "fix the flaky websocket test"
+    },
+    {
+      "role": "assistant",
+      "content": "The flake came from a fixed 100ms sleep racing the server startup. I replaced it with a readiness probe; the test passed 200 times in a row locally. Want me to open a PR against main?"
+    }
+  ]
+}

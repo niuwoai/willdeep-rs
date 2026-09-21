@@ -1,0 +1,15 @@
+{
+  "id": "zh-offer-continue",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "帮我看看登录接口为什么偶尔 500"
+    },
+    {
+      "role": "assistant",
+      "content": "原因找到了：token 刷新和登出并发时，`session_store.remove` 会删掉正在被读的条目，导致 unwrap panic。我可以改成先标记失效再异步清理，或者直接加一把读写锁。你倾向哪种？"
+    }
+  ]
+}

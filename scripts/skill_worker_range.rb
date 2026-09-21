@@ -25,6 +25,7 @@ require 'fileutils'
 require 'optparse'
 
 require_relative 'lib/range_report'
+require_relative 'lib/willdeep_credentials'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 
@@ -56,28 +57,6 @@ rescue SystemCallError
   nil
 end
 
-# 只认默认 provider 那一段的 api_base / api_key。配置里可能有多个 provider，
-# 猜错一个就是拿错凭据打错端点，还不如报错。
-def provider_credentials(path)
-  raise "配置文件不存在：#{path}" unless File.exist?(path)
-
-  # 配置里有中文注释，默认外部编码可能是 US-ASCII，读进来就炸。
-  text = File.read(path, encoding: 'UTF-8')
-  default = text[/^\s*default_provider\s*=\s*"([^"]+)"/, 1]
-  raise "#{path} 里没有 default_provider" unless default
-
-  section = text[/^\s*\[providers\.#{Regexp.escape(default)}\]\s*$(.*?)(?=^\s*\[|\z)/m, 1]
-  raise "#{path} 里没有 [providers.#{default}] 段" unless section
-
-  base = section[/^\s*api_base\s*=\s*"([^"]+)"/, 1]
-  key = section[/^\s*api_key\s*=\s*"([^"]+)"/, 1]
-  key ||= ENV[section[/^\s*api_key_env\s*=\s*"([^"]+)"/, 1].to_s]
-  raise "provider #{default} 缺 api_base" unless base
-  raise "provider #{default} 缺 api_key（或 api_key_env 指向的环境变量为空）" if key.to_s.strip.empty?
-
-  [default, base, key]
-end
-
 # cargo test 的工作目录是 crate 目录，不是仓库根：相对路径会把报告丢到
 # crates/willdeep-core/target 下面，Ruby 再也找不回来。
 options[:out] = File.expand_path(options[:out])
@@ -86,7 +65,7 @@ json_path = File.join(options[:out], 'range.json')
 md_path = File.join(options[:out], 'range.md')
 
 unless options[:report_only]
-  provider_name, api_base, api_key = provider_credentials(options[:config])
+  provider_name, api_base, api_key = WilldeepCredentials.default_provider(options[:config])
   puts "provider: #{provider_name} (#{api_base})"
   puts "model:    #{options[:model]}"
   puts "cases:    #{options[:cases] || 'all'}"

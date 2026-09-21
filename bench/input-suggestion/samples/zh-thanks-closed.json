@@ -1,0 +1,15 @@
+{
+  "id": "zh-thanks-closed",
+  "language": "zh",
+  "expect": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "好了，今天就到这儿，谢谢"
+    },
+    {
+      "role": "assistant",
+      "content": "不客气，今天的改动都已经提交并推送，工作区是干净的。"
+    }
+  ]
+}
