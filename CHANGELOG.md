@@ -9,6 +9,13 @@
 - **插件页面的 `colorScheme` 恒为 `"dark"`。** `web/src/PluginPage.tsx` 把目的地上下文里的配色写死成深色，浅色主题下插件也被告知「深色」。现在传宿主界面实际生效的明暗：固定档直接用；跟随系统时用 `matchMedia('(prefers-color-scheme: light)')` 解析，系统切换或主题设置变化都会重新推 context（桥消息与 MCP Apps 的 `ui/notifications/host-context-changed`）。`DestinationContext.colorScheme` 类型收窄为 `"light" | "dark"`。已有插件里「只信显式 light、否则看系统」的兜底写法（如 willdeep-config 的 `resolveScheme`）行为不变。
 - 测试：配色白名单（含注入尝试）只认两个值；两套配色都带齐 macOS 宿主注入的全部变量；带初始配色时首帧钉住、不带时跟随系统；注入顺序为宿主配色 → 桥 → 页面自身样式。`docs/PLUGINS.md` 新增「宿主配色」一节。
 
+## [0.81.0-rc3] - 2026-09-21
+
+### Fixed
+- **插件多版本并存时认不出更新的 rc。** `discover()` 和 `installed_versions()` 用 `release_triple` 排版本目录，它只看正式版本三段，`0.2.0-rc1` 与 `0.2.0-rc2` 被当成相等，最终谁被加载取决于目录遍历顺序。实际表现：在 0.2.0-rc1 旁边 `willdeep plugin install` 了 0.2.0-rc2，`willdeep plugin info willdeep-config` 仍报加载的是 rc1；同版本又不许重装，rc 修复发不出去。改为按 SemVer 优先级比较：`1.2.3-rc1 < 1.2.3-rc2 < 1.2.3-rc10 < 1.2.3`，rc 号按数值比（SemVer 原文按字典序会让 rc9 赢过 rc10），`+` 构建元数据不参与；版本完全相同时按目录名兜底，结果不再依赖遍历顺序。`plugin info` / `plugin remove` 列出的版本顺序随之修正。
+- `minimumWillDeepVersion` 宿主版本校验不变，仍有意忽略 rc 后缀。Xedit 侧已核对：它用 `AppVersion` 比较，本来就区分 rc，与修复后的 rs 一致，无需改动。`docs/PLUGINS.md` 补一段多版本选择规则。
+- 测试：rc1/rc2 并存加载 rc2；rc2/rc9/rc10 加载 rc10；正式版赢过自己的 rc12；SemVer 优先级用例表（正反两个方向都断言）。
+
 ## [0.81.0-rc1] - 2026-09-21
 
 ### Added

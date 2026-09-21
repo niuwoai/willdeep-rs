@@ -201,6 +201,62 @@ fn release_triple(value: &str) -> (u64, u64, u64) {
     )
 }
 
+/// 预发布标识里的一段：`rc10` 拆成 `Text("rc")`、`Num(10)`。
+/// 变体顺序即比较顺序——SemVer 规定数字标识低于字母标识。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PrereleaseSegment {
+    Num(u64),
+    Text(String),
+}
+
+/// 变体顺序即比较顺序：同一正式版本下，任何预发布都低于正式版。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PrereleaseRank {
+    Prerelease(Vec<Vec<PrereleaseSegment>>),
+    Release,
+}
+
+/// 选"最新已装版本"用的排序键。与 `release_triple` 不同，它区分预发布：
+/// `1.2.3-rc1 < 1.2.3-rc2 < 1.2.3-rc10 < 1.2.3`。标识内的数字段按数值比
+/// （SemVer 原文按字典序比 `rc10`/`rc9`，那样 rc10 会输给 rc9），`+` 后的
+/// 构建元数据不参与。
+fn version_order(value: &str) -> ((u64, u64, u64), PrereleaseRank) {
+    let without_build = value.split('+').next().unwrap_or(value);
+    let rank = match without_build.split_once('-') {
+        None => PrereleaseRank::Release,
+        Some((_, prerelease)) => {
+            PrereleaseRank::Prerelease(prerelease.split('.').map(prerelease_segments).collect())
+        }
+    };
+    (release_triple(without_build), rank)
+}
+
+fn prerelease_segments(identifier: &str) -> Vec<PrereleaseSegment> {
+    let mut segments = Vec::new();
+    let mut rest = identifier;
+    while let Some(first) = rest.chars().next() {
+        let is_digit = first.is_ascii_digit();
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != is_digit)
+            .unwrap_or(rest.len());
+        let (chunk, tail) = rest.split_at(end);
+        segments.push(match chunk.parse::<u64>() {
+            Ok(number) if is_digit => PrereleaseSegment::Num(number),
+            _ => PrereleaseSegment::Text(chunk.to_owned()),
+        });
+        rest = tail;
+    }
+    segments
+}
+
+/// 版本目录名比较：先按 `version_order`，完全相同时按名字兜底，
+/// 保证结果与目录遍历顺序无关。
+fn compare_version_names(left: &str, right: &str) -> std::cmp::Ordering {
+    version_order(left)
+        .cmp(&version_order(right))
+        .then_with(|| left.cmp(right))
+}
+
 /// 把一个包内相对路径解析成绝对路径，拒绝一切逃逸。
 ///
 /// 三道关缺一不可：先在**词法上**拒掉 `..` 与绝对路径，再对存在的父目录做
@@ -591,11 +647,14 @@ pub fn discover(root: &Path, source: PluginSource) -> Vec<Result<PluginPackage, 
             .map(|entry| entry.path())
             .filter(|path| path.join(".codex-plugin").join("plugin.json").is_file())
             .collect();
-        candidates.sort_by_key(|path| {
+        let version_name = |path: &PathBuf| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .map(release_triple)
                 .unwrap_or_default()
+                .to_owned()
+        };
+        candidates.sort_by(|left, right| {
+            compare_version_names(&version_name(left), &version_name(right))
         });
         if let Some(latest) = candidates.last() {
             found.push(load_package(latest, source));
@@ -619,7 +678,7 @@ pub fn installed_versions(root: &Path, plugin_id: &str) -> Vec<String> {
         })
         .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
         .collect();
-    versions.sort_by_key(|value| std::cmp::Reverse(release_triple(value)));
+    versions.sort_by(|left, right| compare_version_names(right, left));
     versions
 }
 
@@ -804,5 +863,95 @@ mod tests {
             installed_versions(&root, "demo"),
             vec!["1.10.0", "1.2.0", "1.0.0"]
         );
+    }
+
+    fn install_versions(root: &Path, id: &str, versions: &[&str]) {
+        for version in versions {
+            let package_root = root.join(id).join(version);
+            fixture(&package_root);
+            write(
+                &package_root.join(".codex-plugin/plugin.json"),
+                &format!(r#"{{"name":"{id}","version":"{version}"}}"#),
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_prefers_the_newest_release_candidate() {
+        // 复现：0.2.0-rc1 旁边装上 0.2.0-rc2 之后，加载的仍是 rc1。
+        let root = scratch("discovery-rc");
+        install_versions(&root, "demo", &["0.2.0-rc2", "0.2.0-rc1", "0.1.0"]);
+        let package = discover(&root, PluginSource::Shared)
+            .into_iter()
+            .next()
+            .expect("one")
+            .expect("loads");
+        assert_eq!(package.version, "0.2.0-rc2");
+        assert_eq!(
+            installed_versions(&root, "demo"),
+            vec!["0.2.0-rc2", "0.2.0-rc1", "0.1.0"]
+        );
+    }
+
+    #[test]
+    fn discovery_compares_release_candidate_numbers_numerically() {
+        let root = scratch("discovery-rc10");
+        install_versions(&root, "demo", &["0.2.0-rc9", "0.2.0-rc10", "0.2.0-rc2"]);
+        let package = discover(&root, PluginSource::Shared)
+            .into_iter()
+            .next()
+            .expect("one")
+            .expect("loads");
+        assert_eq!(package.version, "0.2.0-rc10");
+        assert_eq!(
+            installed_versions(&root, "demo"),
+            vec!["0.2.0-rc10", "0.2.0-rc9", "0.2.0-rc2"]
+        );
+    }
+
+    #[test]
+    fn discovery_prefers_a_release_over_its_release_candidates() {
+        let root = scratch("discovery-release");
+        install_versions(&root, "demo", &["1.2.3-rc5", "1.2.3", "1.2.3-rc12"]);
+        let package = discover(&root, PluginSource::Shared)
+            .into_iter()
+            .next()
+            .expect("one")
+            .expect("loads");
+        assert_eq!(package.version, "1.2.3");
+        assert_eq!(
+            installed_versions(&root, "demo"),
+            vec!["1.2.3", "1.2.3-rc12", "1.2.3-rc5"]
+        );
+    }
+
+    #[test]
+    fn version_order_follows_semver_precedence() {
+        use std::cmp::Ordering::{Greater, Less};
+        let cases = [
+            ("1.2.3-rc2", "1.2.3-rc1", Greater),
+            ("1.2.3-rc10", "1.2.3-rc9", Greater),
+            ("1.2.3", "1.2.3-rc99", Greater),
+            ("1.2.4-rc1", "1.2.3", Greater),
+            ("1.10.0-rc1", "1.9.0", Greater),
+            ("1.2.3-alpha", "1.2.3-beta", Less),
+            ("1.2.3-rc", "1.2.3-rc1", Less),
+            ("1.2.3-1", "1.2.3-rc1", Less),
+            ("1.2.3-rc.2", "1.2.3-rc.10", Less),
+            ("1.2.3-rc1.1", "1.2.3-rc1", Greater),
+            ("1.2.3+build5", "1.2.3-rc1", Greater),
+        ];
+        for (left, right, expected) in cases {
+            assert_eq!(
+                compare_version_names(left, right),
+                expected,
+                "{left} vs {right}"
+            );
+            assert_eq!(
+                compare_version_names(right, left),
+                expected.reverse(),
+                "{right} vs {left}"
+            );
+        }
     }
 }

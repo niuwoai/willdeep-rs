@@ -21,6 +21,11 @@
 | 启用状态 | ❌ 各存各的 | — |
 | 权限审批 | ❌ 各存各的 | 两个宿主的沙箱边界不是一回事：这边是 opaque-origin iframe + CSP，那边是每插件独立持久化仓的 WKWebView + 自定义协议。跨宿主复用审批，等于替另一个宿主替用户点了头 |
 
+同一插件装了多个版本时，加载版本号最大的那个，旧版本留着供回滚。比较规则按
+SemVer 优先级：`0.2.0-rc1 < 0.2.0-rc2 < 0.2.0-rc10 < 0.2.0`，rc 号按数值比，
+`+` 后的构建元数据不参与。这与 Xedit（`AppVersion`）选版本的结果一致。
+注意 `minimumWillDeepVersion` 的宿主版本校验是另一回事，**有意**忽略 rc 后缀。
+
 rs 侧的运行状态在 `~/.willdeep/plugin-registry.web.json`（0600，group/other 位
 一旦松掉就拒绝整个存储）。文件名里的 `web` 是提醒：这不是 Xedit 那份。
 
