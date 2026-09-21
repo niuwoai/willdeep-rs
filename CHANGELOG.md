@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.82.0-rc1] - 2026-09-21
+
+### Added
+- **插件页面注入宿主配色变量，与 macOS 宿主同名。** Web 宿主给插件页面（`localWeb` 与 `mcpApp`）的 `<head>` 最前面注入 `:root { --willdeep-bg; --willdeep-fg; --willdeep-secondary; --willdeep-accent; --willdeep-body-font-size; color-scheme }` 和同一份基础规则（`html, body` 背景 / 前景 / 字号，表单控件与链接取强调色），与 Xedit `AgentPluginPageHost.composedHTML` 一一对应，值取 `web/src/theme.css` 的 `--bg-page` / `--text` / `--text-dim` / `--accent`。两套配色一次注入，由 `<html data-willdeep-color-scheme>` 选择：首帧取 iframe 地址上的 `?colorScheme=`（白名单只认 `light` / `dark`），没有时跟随 `prefers-color-scheme`；之后桥在收到 context 时改这个属性，切主题不重载页面。插件自己的样式写在后面、同特异性，照样能覆盖。新模块 `crates/willdeep-cli/src/plugin_theme.rs`。
+
+### Fixed
+- **插件页面的 `colorScheme` 恒为 `"dark"`。** `web/src/PluginPage.tsx` 把目的地上下文里的配色写死成深色，浅色主题下插件也被告知「深色」。现在传宿主界面实际生效的明暗：固定档直接用；跟随系统时用 `matchMedia('(prefers-color-scheme: light)')` 解析，系统切换或主题设置变化都会重新推 context（桥消息与 MCP Apps 的 `ui/notifications/host-context-changed`）。`DestinationContext.colorScheme` 类型收窄为 `"light" | "dark"`。已有插件里「只信显式 light、否则看系统」的兜底写法（如 willdeep-config 的 `resolveScheme`）行为不变。
+- 测试：配色白名单（含注入尝试）只认两个值；两套配色都带齐 macOS 宿主注入的全部变量；带初始配色时首帧钉住、不带时跟随系统；注入顺序为宿主配色 → 桥 → 页面自身样式。`docs/PLUGINS.md` 新增「宿主配色」一节。
+
 ## [0.81.0-rc3] - 2026-09-21
 
 ### Fixed

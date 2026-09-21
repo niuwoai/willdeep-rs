@@ -6,7 +6,7 @@ import { Markdown } from "./Markdown";
 import { ConversationCard, type ConversationItem, type Plan } from "./ConversationCard";
 import { SidebarSettings } from "./SidebarSettings";
 import { QuickSettings } from "./QuickSettings";
-import { applyThemeMode, storedThemeMode, type ThemeMode } from "./theme";
+import { applyThemeMode, storedThemeMode, useResolvedColorScheme, type ThemeMode } from "./theme";
 import { PluginCenter } from "./PluginCenter";
 import { PluginPage } from "./PluginPage";
 import { PluginRail, type RailSelection } from "./PluginRail";
@@ -256,6 +256,8 @@ export function App() {
   // 主题写在根元素上，样式表按 data-theme 取变量；跟随系统那档不写属性，交给
   // prefers-color-scheme。
   useEffect(() => { applyThemeMode(theme); }, [theme]);
+  // 插件页面要的是解析后的明暗，不是「跟随系统」这个选项本身。
+  const colorScheme = useResolvedColorScheme(theme);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
   const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
@@ -973,7 +975,7 @@ export function App() {
         event.preventDefault();
         setPopup({ entries, x: event.clientX, y: event.clientY, args: { item: componentId } });
       }} />}
-      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} busy={busy} onChatText={(text, sendNow) => {
+      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} colorScheme={colorScheme} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} busy={busy} onChatText={(text, sendNow) => {
         setRail({ kind: "conversation" });
         if (sendNow) void send(text); else setPrompt(text);
       }} onOpenSession={(id) => { setRail({ kind: "conversation" }); void loadSessionRef.current(id); }} />

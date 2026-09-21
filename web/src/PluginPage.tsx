@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Text } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
+import type { ColorScheme } from "./theme";
 import { SfIcon } from "./sfSymbols";
 import {
   callPluginTool,
@@ -41,6 +42,8 @@ type Props = {
   destination: PluginDestinationView;
   messages: Messages;
   locale: string;
+  /** 宿主界面此刻实际的明暗（「跟随系统」已解析）。 */
+  colorScheme: ColorScheme;
   workspace: string | null;
   sessionId: string | null;
   selectedItemId: string | null;
@@ -136,6 +139,7 @@ export function PluginPage({
   destination,
   messages,
   locale,
+  colorScheme,
   workspace,
   sessionId,
   selectedItemId,
@@ -157,7 +161,19 @@ export function PluginPage({
   // 与 resources/read。乱序的页面应该拿到明确的 -32002，而不是一个能用的结果。
   const initialized = useRef(false);
 
-  const url = useMemo(() => pageUrl(plugin, destination), [plugin, destination]);
+  // 首帧配色随地址带给 Rust 侧，由它把页面钉在这一套 --willdeep-* 上，免得
+  // 先按系统画一帧再翻色。只在挂页面时取一次：配色放进依赖会让每次切主题都
+  // 换 src、整页重载；之后的切换由 context 消息里的 colorScheme 实时推过去。
+  const initialScheme = useRef(colorScheme);
+  useEffect(() => {
+    initialScheme.current = colorScheme;
+  }, [colorScheme]);
+  const url = useMemo(() => {
+    const base = pageUrl(plugin, destination);
+    if (!base) return null;
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}colorScheme=${initialScheme.current}`;
+  }, [plugin, destination]);
 
   // 权限决定上下文里有什么。这里只组装，实际的字段裁剪在 Rust 侧按清单做过，
   // 这一层再按 permissions 挡一次，免得前端把不该给的引用塞进去。
@@ -170,9 +186,9 @@ export function PluginPage({
       workspaceReference: canReadWorkspace ? workspace : null,
       sessionReference: permissions.has("conversation.read") ? sessionId : null,
       locale,
-      colorScheme: "dark",
+      colorScheme,
     };
-  }, [plugin.permissions, destination.qualified_id, selectedItemId, workspace, sessionId, locale]);
+  }, [plugin.permissions, destination.qualified_id, selectedItemId, workspace, sessionId, locale, colorScheme]);
 
   const post = useCallback((payload: unknown) => {
     frameRef.current?.contentWindow?.postMessage(payload, "*");

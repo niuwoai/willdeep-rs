@@ -47,6 +47,7 @@ socket 连上本机 Runtime 并读出结构化状态，写方向与事件流仍�
 | 插件清单 schema | 同一份契约，两端各自实现校验；**认不出的词汇两端都降级照装**（0.73.0-rc1 起，rs 与 `unsupportedItems` 同口径） | `plugin/manifest.rs`（含菜单位置白名单往返测试） | `docs/plugin-schema/willdeep-plugin.schema.json`、`AgentPluginPackageLoader.unsupportedItems` |
 | 插件页面桥 `window.willdeep.*` | 桥 **2.5.0** 逐方法对齐（0.73.0-rc1 起），传输层各异；rs 缺 `ai.reasoning`（无流式思考增量），故不在其 `capabilities` 里 | `plugin_bridge.js`（postMessage）+ `plugin_capabilities.rs` | `AgentPluginPageHost.swift`（WKWebView messageHandlers）、`AgentPluginPageBridgeVersion.swift` |
 | 插件「选文件」 | **语义相同，落地不同**：Xedit 由插件自己弹原生框；rs Web 由宿主接管为浏览器选 + 上传，回同样形状的服务端路径 | `plugin_web.rs` `FILE_PICKER_TOOLS` | 插件 MCP 服务内的 `osascript` |
+| 插件页面配色 | **同名变量**（0.82.0-rc1 起）：context `colorScheme` 为宿主实际明暗；`<head>` 注入 `--willdeep-bg/fg/secondary/accent/body-font-size` 与 `color-scheme`。rs 两套一次注入、按 `data-willdeep-color-scheme` 切换不重载 | `plugin_theme.rs`、`plugin_bridge.js`、`web/src/PluginPage.tsx` | `AgentPluginPageHost.swift` `composedHTML` |
 | `always-allow.json` 审批规则 | 双向读写（2026-08-21 起），共享精确命令 | `tools.rs` `with_always_allow_store` + 跨语言契约测试 | `AgentSharedAlwaysAllowStore.swift` + 8 项契约测试 |
 | `model-catalog.v1.json` 模型目录 | **canonical 契约已定，代码未接入** | `docs/SHARED_MODEL_CATALOG.md` + JSON Schema/示例 | 计划由 `AgentProviderLibrary` / some.im public model catalog 迁移；真实凭据只存 `credential_ref` |
 | 命令安全分类器 | rs 移植自 Xedit | `safety.rs:1-19` 头注释 | — |

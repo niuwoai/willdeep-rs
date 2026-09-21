@@ -192,6 +192,34 @@ SecurityError，而插件在原生宿主里本来是有存储可用的（经典�
 一例）。宿主注入一个垫片：读走随页面下发的快照，写回 `~/.willdeep/plugin-web-storage/<id>.json`，
 每插件隔离，上限 256 KiB。这不是给插件加新能力，是补回它在另一个宿主本来就有的那份。
 
+## 宿主配色
+
+插件页面的配色有两路来源，两端一致：
+
+- **`getContext().colorScheme`**：`"light"` 或 `"dark"`，是宿主界面**此刻实际**的明暗。
+  用户选「跟随系统」时由宿主先用 `prefers-color-scheme` 解析好，插件拿不到第三个值。
+  系统明暗或主题设置变了，宿主重推 context（`willdeep:context-changed`，MCP Apps 页面
+  另收 `ui/notifications/host-context-changed`）。0.82.0-rc1 之前 Web 宿主这里恒为 `"dark"`。
+- **CSS 变量**：宿主在页面 `<head>` 最前面注入，与 macOS 宿主 `composedHTML` 同名：
+
+  | 变量 | 含义 | Web 宿主取值（深 / 浅） |
+  |---|---|---|
+  | `--willdeep-bg` | 页面背景 | `#080d12` / `#f4f7fb`（`--bg-page`） |
+  | `--willdeep-fg` | 正文 | `#e7edf4` / `#1b2632`（`--text`） |
+  | `--willdeep-secondary` | 次要文字 | `#8b99aa` / `#5d6b7c`（`--text-dim`） |
+  | `--willdeep-accent` | 强调色 | `#78a9ff` / `#1f6feb`（`--accent`） |
+  | `--willdeep-body-font-size` | 正文字号 | `14px`（macOS 取聊天字号设置） |
+  | `color-scheme` | 原生控件明暗 | `dark` / `light` |
+
+  同时注入与 macOS 相同的基础规则：`html, body` 用上面的背景、前景、字号，表单控件
+  `accent-color` 与链接颜色取强调色。只用元素选择器，插件自己的样式在后面，照样盖得住。
+
+Web 宿主与 macOS 的做法差一点：macOS 换配色时重新合成整页；Web 宿主把两套变量一次
+注入，由 `<html data-willdeep-color-scheme="light|dark">` 选一套——首帧取 iframe 地址上的
+`?colorScheme=`，桥收到 context 时改这个属性，**切主题不重载页面**。没有这个属性时跟随
+`prefers-color-scheme`。插件直接用变量即可，不必自己监听；要在 JS 里分支就读
+`getContext().colorScheme` 并监听 `willdeep:context-changed`。
+
 ## 认不出的东西一律降级，不拒装
 
 三张词汇表（权限、host action、菜单挂载点）两端各自实现校验，一侧先支持的
@@ -278,6 +306,7 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | 运行时与每插件 MCP 隔离 | `crates/willdeep-core/src/plugin/host.rs` |
 | MCP `resources/*` | `crates/willdeep-core/src/mcp.rs` |
 | Web API、CSP、资源服务 | `crates/willdeep-cli/src/plugin_web.rs` |
+| 页面宿主配色注入 | `crates/willdeep-cli/src/plugin_theme.rs` |
 | 页面能力（fs / process / net / storage / skills / 生图 / 宿主动作） | `crates/willdeep-cli/src/plugin_capabilities.rs` |
 | 注入页面的宿主桥 | `crates/willdeep-cli/src/plugin_bridge.js` |
 | CLI 子命令 | `crates/willdeep-cli/src/plugin_cmd.rs` |
