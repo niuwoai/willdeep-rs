@@ -12,6 +12,10 @@
 - `willdeep-core` 新增 `input_suggestion::predict_first`（按顺序问候选、失败才换下一家），`Agent::suggest_next_input` 改为调它。
 - `docs/WEB_GUIDE.md`「Composer」与「JSON API」、`docs/WEB_RUNTIME_RETRY_QA.md`、`docs/EXPERIENCE_BASELINE.md` 第 19 项、`PRODUCT_OVERVIEW.md` 同步。
 
+### Fixed
+- **日文的「是」不再被当成助手口吻拦掉。** 清洗规则里光秃秃的「はい、」把「はい、そのままコミットして」这类用户回答一并误杀——实弹评测里两个模型的日文 suggest 样本全军覆没。改为只拦「はい、承知」「はい、かしこまり」「はい、では」这类助手才会接的开头。
+- **任务已收口时不再预测客套话。** 提示词加一条：助手报告完成且没有提问时答 `NONE`，不要用「谢谢 / 明天见」填空。实弹评测里 none 命中原为 50%（deepseek-v4-flash）与 75%（glm-5）。
+
 ## [0.78.0-rc29] - 2026-09-21
 
 ### Added

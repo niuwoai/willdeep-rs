@@ -34,6 +34,8 @@ Rules:
 - No quotes, no \"User:\" prefix, no explanation, no markdown.
 - If the assistant asked a yes/no question or offered to continue, answer it the way this user would.
 - Never speak as the assistant. Never start with \"Sure\", \"I'll\", \"Let me\" or the like.
+- If the assistant reports the work is done and asks nothing, output exactly: NONE.
+  Do not fill the gap with thanks, greetings or goodbyes.
 - If there is no obvious next step, output exactly: NONE";
 
 /// 模型返回的那一行被判定为「助手口吻」的开头。用户不会这样开口，模型会。
@@ -59,7 +61,11 @@ const ASSISTANT_VOICE_PREFIXES: &[&str] = &[
     "let me",
     "here's",
     "here is",
-    "はい、",
+    // 不收光秃秃的「はい、」：日文里用户答「是」就这么开口（「はい、コミットして」），
+    // 2026-09-21 实弹评测里它把日文样本全部误杀。只收助手才会接的那半句。
+    "はい、承知",
+    "はい、かしこまり",
+    "はい、では",
     "承知しました",
     "かしこまりました",
     "了解しました",
@@ -273,6 +279,18 @@ mod tests {
     }
 
     #[test]
+    fn japanese_yes_is_the_user_answering_not_the_assistant_speaking() {
+        assert_eq!(
+            sanitize("はい、そのままコミットして").as_deref(),
+            Some("はい、そのままコミットして")
+        );
+        assert_eq!(
+            sanitize("はい、preloadに修正して").as_deref(),
+            Some("はい、preloadに修正して")
+        );
+    }
+
+    #[test]
     fn sanitize_rejects_non_suggestions() {
         assert!(sanitize("NONE").is_none());
         assert!(sanitize("none.").is_none());
@@ -281,6 +299,7 @@ mod tests {
         assert!(sanitize(&"很".repeat(MAX_SUGGESTION_CHARS + 1)).is_none());
         assert!(sanitize("好的，我来修复这个问题").is_none());
         assert!(sanitize("Sure, I'll run the tests").is_none());
+        assert!(sanitize("はい、承知しました。修正します").is_none());
         assert!(sanitize("Let me check the logs").is_none());
         assert!(sanitize("承知しました。すぐ直します").is_none());
         assert!(sanitize("use api_key sk-abcdef123456").is_none());
