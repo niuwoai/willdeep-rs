@@ -2362,10 +2362,19 @@ fn question_lines(dialog: &AskDialog, content: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// 弹窗与文字选区的底色和字色。
+///
+/// 故意用 256 色色立方里的固定色，而不是 ANSI 的 `Blue` / `White`：后者是调色板
+/// 0–15 号，会被终端主题改写。Catppuccin Mocha 把 Blue 设成浅蓝 #89B4FA、White
+/// 设成浅灰，审批弹窗成了浅灰字压浅蓝底，几乎读不出来。16–231 号几乎所有终端
+/// 都不改：24 号 #005f87 深蓝配 231 号纯白，对比度约 6.9:1，与主题无关。
+pub(crate) const MODAL_BG: Color = Color::Indexed(24);
+pub(crate) const MODAL_FG: Color = Color::Indexed(231);
+
 /// The panel colours shared by the approval and question modals. One identity
 /// for both — they are the same class of thing, a gate waiting on the human —
 /// with the accent left to the caller.
-const MODAL_PANEL: Style = Style::new().bg(Color::Blue).fg(Color::White);
+const MODAL_PANEL: Style = Style::new().bg(MODAL_BG).fg(MODAL_FG);
 
 /// How wide a modal gets. Deliberately most of the terminal: a narrow centered
 /// popup leaves transcript text sitting to either side on the same rows, which
@@ -2415,7 +2424,7 @@ fn seal_modal_background(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
         for x in area.x..area.x.saturating_add(area.width) {
             let cell = &mut buffer[(x, y)];
             if cell.bg == Color::Reset {
-                cell.bg = Color::Blue;
+                cell.bg = MODAL_BG;
             }
         }
     }
