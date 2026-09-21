@@ -34,6 +34,10 @@ impl Provider for AnthropicMessagesProvider {
         streaming::complete(self, messages, tools, events).await
     }
 
+    fn ledger_identity(&self) -> Option<super::ProviderIdentity> {
+        Some(super::ProviderIdentity::from_config(&self.config))
+    }
+
     fn with_model(&self, model: &str) -> Result<std::sync::Arc<dyn Provider>, ProviderError> {
         let mut config = self.config.clone();
         config.model = model.to_owned();

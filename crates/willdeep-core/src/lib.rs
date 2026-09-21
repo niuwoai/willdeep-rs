@@ -35,6 +35,7 @@ mod subagent_worktree;
 pub mod tool_output;
 pub mod tools;
 pub mod types;
+pub mod usage_ledger;
 pub mod worker_tier;
 
 pub use agent::{

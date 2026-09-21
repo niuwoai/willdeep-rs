@@ -39,6 +39,7 @@ mod projects;
 mod telemetry;
 mod titling;
 mod tui;
+mod usage_cmd;
 mod web;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};
@@ -252,6 +253,11 @@ enum CliCommand {
         #[command(subcommand)]
         action: audit_cmd::AuditAction,
     },
+    /// Maintain the local per-model-call usage ledger ($WILLDEEP_HOME/usage).
+    Usage {
+        #[command(subcommand)]
+        action: usage_cmd::UsageAction,
+    },
     /// Diagnose local configuration and runtime readiness without contacting a Provider.
     Doctor {
         /// Emit one stable JSON report.
@@ -336,6 +342,8 @@ async fn main() {
     // 遥测在唯一的出口 flush：run() 有几十个 return 点，逐个挂 flush 只会
     // 漏掉其中几个。没装过句柄（或被关掉）时这里是空操作。
     telemetry::flush_before_exit().await;
+    // 同理：用量账本的写线程在这里排空，进程内回合的最后几行不丢。
+    willdeep_core::usage_ledger::flush_all(willdeep_core::usage_ledger::EXIT_FLUSH_TIMEOUT);
     if let Err(error) = result {
         eprintln!("error: {error:#}");
         std::process::exit(stable_exit_code(&error));
@@ -573,6 +581,7 @@ async fn run() -> Result<()> {
                 let language = administrative_language(&cli)?;
                 audit_cmd::run(action, &willdeep_home()?, language)
             }
+            CliCommand::Usage { action } => usage_cmd::run(action, &willdeep_home()?),
             CliCommand::Mcp { action } => {
                 let language = administrative_language(&cli)?;
                 mcp_cmd::run(action, &willdeep_home()?, cli.config.as_deref(), language).await
@@ -763,6 +772,12 @@ async fn run() -> Result<()> {
                 instruction_inbox: None,
                 allowed_skills: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
+                // Web 桥接子进程：自己调模型，不经过 daemon 的执行器。
+                usage_origin: harness::UsageOrigin {
+                    execution: willdeep_core::usage_ledger::Execution::InProcess,
+                    origin_client: None,
+                    turn_id: None,
+                },
             }
         } else if interactive_tui {
             harness::HarnessFrontend::Tui {

@@ -183,7 +183,68 @@ pub(crate) enum HarnessFrontend {
         instruction_inbox: Option<Arc<willdeep_core::AgentInstructionInbox>>,
         allowed_skills: Vec<String>,
         allowed_mcp_servers: Vec<String>,
+        /// 这一轮在用量账本上的出处：在哪执行、谁提交、哪个回合。
+        usage_origin: UsageOrigin,
     },
+}
+
+/// 不起 Agent 的零散模型调用（Web 端下一句预测、插件页的 AI 请求）的记账
+/// 句柄：进程内执行，前端记 `unknown`，全部按辅助请求记。
+pub(crate) fn standalone_usage_ledger(
+    home: &Path,
+    session_id: Option<uuid::Uuid>,
+    workspace: Option<&Path>,
+) -> willdeep_core::usage_ledger::UsageLedgerScope {
+    use willdeep_core::usage_ledger::{
+        ClientKind, Execution, UsageLedgerContext, UsageLedgerScope, ledger_dir, shared_sink,
+    };
+    let mut context = UsageLedgerContext::new(ClientKind::Unknown, Execution::InProcess);
+    context.session_id = session_id;
+    context.workspace = workspace.map(Path::to_path_buf);
+    UsageLedgerScope::new(shared_sink(&ledger_dir(home)), context)
+}
+
+/// Runtime 前端在用量账本上的出处。
+#[derive(Clone, Debug)]
+pub(crate) struct UsageOrigin {
+    pub execution: willdeep_core::usage_ledger::Execution,
+    /// `tui:<uuid>` / `cli:<uuid>` / `mobile:<uuid>`，见 `RuntimeTask::origin_client`。
+    pub origin_client: Option<String>,
+    pub turn_id: Option<uuid::Uuid>,
+}
+
+/// 这次 harness 的记账上下文。进程内前端按界面定 `client`，Runtime 前端按
+/// 提交方的 `origin_client`。
+fn usage_ledger_context(
+    frontend: &HarnessFrontend,
+    session_id: uuid::Uuid,
+    workspace: &Path,
+) -> willdeep_core::usage_ledger::UsageLedgerContext {
+    use willdeep_core::usage_ledger::{ClientKind, Execution, UsageLedgerContext};
+    let mut context = match frontend {
+        HarnessFrontend::Terminal { .. } => {
+            UsageLedgerContext::new(ClientKind::Cli, Execution::InProcess)
+        }
+        HarnessFrontend::Tui { .. } => {
+            UsageLedgerContext::new(ClientKind::Tui, Execution::InProcess)
+        }
+        HarnessFrontend::Runtime {
+            connection,
+            usage_origin,
+            ..
+        } => {
+            let (client, instance) =
+                ClientKind::parse_origin(usage_origin.origin_client.as_deref());
+            let mut context = UsageLedgerContext::new(client, usage_origin.execution);
+            context.client_instance = instance;
+            context.turn_id = usage_origin.turn_id.map(|id| id.to_string());
+            context.task_id = Some(connection.task_id().to_string());
+            context
+        }
+    };
+    context.session_id = Some(session_id);
+    context.workspace = Some(workspace.to_path_buf());
+    context
 }
 
 /// 因为有待处理的运行时事件而开的那一轮，用它当提示词。
@@ -307,6 +368,11 @@ pub(crate) async fn execute_runtime(
             instruction_inbox: request.instruction_inbox.clone(),
             allowed_skills: request.workspace_skills.unwrap_or_default(),
             allowed_mcp_servers: request.workspace_mcp_servers.unwrap_or_default(),
+            usage_origin: UsageOrigin {
+                execution: willdeep_core::usage_ledger::Execution::Daemon,
+                origin_client: request.origin_client.clone(),
+                turn_id: request.turn_id,
+            },
         },
     )
     .await?;
@@ -613,6 +679,13 @@ pub(crate) async fn build(
         );
     }
     let workspace = resolve_workspace(cli, resumed)?;
+    // 本机用量账本（docs/USAGE_LEDGER.md）。主回合、子 Agent、压缩由 Agent 在
+    // 主循环里记；这里只把辅助用途的 Provider 包上按调用记账——被主循环用的
+    // Provider 不能再包，否则同一次调用会记两行。
+    let usage_ledger = willdeep_core::usage_ledger::UsageLedgerScope::new(
+        willdeep_core::usage_ledger::shared_sink(&willdeep_core::usage_ledger::ledger_dir(home)),
+        usage_ledger_context(&frontend, session_id, &workspace),
+    );
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: provider_config.base_url.clone(),
         api_key: provider_config.api_key.clone(),
@@ -625,7 +698,9 @@ pub(crate) async fn build(
         vision_config.dialect = ApiDialect::ChatCompletions;
         vision_config.model = vision_model.clone();
         Some((
-            build_provider(vision_config).context("initialize some.im vision fallback")?,
+            usage_ledger.auxiliary(
+                build_provider(vision_config).context("initialize some.im vision fallback")?,
+            ),
             vision_model,
         ))
     } else {
@@ -742,7 +817,9 @@ pub(crate) async fn build(
         let mut judge_config = parent_provider_config.clone();
         judge_config.model = judge_model.clone();
         Some(Arc::new(ProviderSafetyJudge::new(
-            build_provider(judge_config).context("initialize safety judge provider")?,
+            usage_ledger.auxiliary(
+                build_provider(judge_config).context("initialize safety judge provider")?,
+            ),
             judge_model,
         )) as Arc<dyn SafetyJudge>)
     } else {
@@ -925,7 +1002,8 @@ pub(crate) async fn build(
         .with_state_home(home.join("workers"))
         .with_parent_session(session_id)
         .with_always_allow_store(home.join("always-allow.json"))
-        .with_event_sink(sink.clone());
+        .with_event_sink(sink.clone())
+        .with_usage_ledger(usage_ledger.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in
         resolve_tier_bindings(&loaded.file, &parent_provider_config, kind, context_window)?
@@ -973,7 +1051,8 @@ pub(crate) async fn build(
     .with_subagents(subagents)
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone())
-    .with_event_kernel(kernel.clone());
+    .with_event_kernel(kernel.clone())
+    .with_usage_ledger(usage_ledger.clone());
     // Runtime 任务的收件箱由任务管理器持有另一半；进程内轮次用 Agent 自带的那个。
     if let Some(inbox) = runtime_inbox {
         agent = agent.with_instruction_inbox(inbox);
@@ -988,8 +1067,10 @@ pub(crate) async fn build(
             && let Some(local_config) = local_auxiliary_config.clone()
         {
             routing = routing.with_classifiers(vec![
-                build_provider(local_config).context("initialize local routing model")?,
-                provider.clone(),
+                usage_ledger.auxiliary(
+                    build_provider(local_config).context("initialize local routing model")?,
+                ),
+                usage_ledger.auxiliary(provider.clone()),
             ]);
         }
         agent = agent.with_routing_guard(Arc::new(routing));
@@ -1033,7 +1114,10 @@ pub(crate) async fn build(
     let auto_title = loaded.file.agent.auto_title.unwrap_or(true);
     let input_suggestions = loaded.file.agent.input_suggestions.unwrap_or(true);
     if auto_title || input_suggestions {
-        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config)?;
+        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config)?
+            .into_iter()
+            .map(|provider| usage_ledger.auxiliary(provider))
+            .collect::<Vec<_>>();
         if auto_title {
             agent = agent.with_titlers(auxiliaries.clone());
         }

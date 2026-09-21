@@ -20,6 +20,7 @@ willdeep [OPTIONS] [PROMPT]... [COMMAND]
 | `event` | 查看运行时事件内核：来了什么、哪些还等着人 |
 | `job` | 查看脱离父进程的后台作业：跑完没有、退出码、输出 |
 | `audit` | 导出一个会话（或一个工作区一段时间）的审计报告：审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚 |
+| `usage` | 维护本机用量账本：`usage backfill [--dry-run]` 从 daemon 事件日志回填账本上线前的用量，见 [USAGE_LEDGER.md](USAGE_LEDGER.md) |
 | `mcp` | 查看配置里的 MCP 服务、给远程服务做 OAuth 登录 / 登出、连上去列工具 |
 | `handoff` | 接住 WillDeep for macOS 用 `/handoff` 推来的会话：列出、接手续跑、轮询等待 |
 | `integrations` | 查看和管理可选外部集成 |

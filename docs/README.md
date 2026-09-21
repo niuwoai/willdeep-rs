@@ -30,6 +30,7 @@
 | [检查点回退](CHECKPOINT_REWIND.md) | `/rewind` 回到第 N 步：每轮开始前的工作树快照存哪、回退时发生什么 |
 | [双端共享模型目录](SHARED_MODEL_CATALOG.md) | Xedit / rs 共用 Provider、模型事实、候选池与凭据引用契约 |
 | [审批与自动化](APPROVALS.md) | 三档审批模式、Always Allow 边界、CI 用法、`ask_user` |
+| [本机用量账本](USAGE_LEDGER.md) | 每次模型调用一行的 `usage/YYYY-MM.jsonl`、字段来源、`willdeep usage backfill`（canonical 在 Xedit 仓库） |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |
 | [插件系统](PLUGINS.md) | 与 macOS 版共享插件包、三种页面运行时、页面桥与沙箱边界 |
 | [手机中继](MOBILE.md) | `/mobile` 二维码配对与凭据安全 |
