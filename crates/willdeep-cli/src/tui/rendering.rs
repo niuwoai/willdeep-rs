@@ -280,9 +280,10 @@ pub(super) fn highlight_text_selection(
     if start >= end {
         return;
     }
+    // 与弹窗同一对固定色：调色板里的 Blue / White 在浅色系主题下对比度很低。
     let selection_style = Style::default()
-        .fg(Color::White)
-        .bg(Color::Blue)
+        .fg(super::MODAL_FG)
+        .bg(super::MODAL_BG)
         .add_modifier(Modifier::BOLD);
     for (row, line) in text.lines.iter_mut().enumerate() {
         if row < start.0 || row > end.0 {

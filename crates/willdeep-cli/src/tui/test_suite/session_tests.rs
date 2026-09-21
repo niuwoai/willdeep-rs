@@ -1370,7 +1370,7 @@ fn modal_panel_renders_opaque_over_whatever_was_underneath() {
         for x in halo.x..halo.x + halo.width {
             assert_eq!(
                 buffer[(x, y)].bg,
-                Color::Blue,
+                MODAL_BG,
                 "cell ({x},{y}) is not part of an opaque panel"
             );
         }
@@ -1417,7 +1417,7 @@ fn styled_chat_wrap_and_selection_highlight_share_visual_rows() {
     let highlighted = wrapped.lines[0]
         .spans
         .iter()
-        .filter(|span| span.style.bg == Some(Color::Blue))
+        .filter(|span| span.style.bg == Some(MODAL_BG))
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert_eq!(highlighted, "中");
@@ -2204,4 +2204,15 @@ fn runtime_compression_events_reach_the_status_bar_and_the_progress_line() {
         app.progress_log
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn modal_colours_do_not_come_from_the_theme_palette() {
+    // 0–15 号会被终端主题改写；弹窗与选区必须用色立方里的固定色。
+    for colour in [MODAL_BG, MODAL_FG] {
+        match colour {
+            Color::Indexed(index) => assert!(index >= 16, "{colour:?} is a theme palette slot"),
+            other => panic!("{other:?} is not a fixed 256-colour index"),
+        }
+    }
 }
