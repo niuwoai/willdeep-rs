@@ -50,4 +50,6 @@ ruby scripts/input_suggestion_eval.rb --rescore bench/input-suggestion/runs/<run
 | 2026-09-21 | `25abdb4` | deepseek-v4-flash | 100% | 100% | 100% | 9/9 | 修清洗规则与提示词后 |
 | 2026-09-21 | `25abdb4` | glm-5 | 100% | 100% | 100% | 9/9 | 同上；平均 3.0s，deepseek 0.7s |
 
+首批四轮的 `c4fe242` / `25abdb4` 是合并前分支上的提交，由存档 tag `bench/input-suggestion-2026-09-21` 保住可达，`git checkout` 那个 SHA 即可回放。
+
 人工判定由 Claude 先手填，待人复核；16 条样本对「每条都对」这个结论来说仍然偏少，加样本比再跑一遍更有价值。
