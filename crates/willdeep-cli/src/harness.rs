@@ -596,28 +596,11 @@ pub(crate) async fn build(
     let session_id = resumed
         .map(|session| session.id)
         .unwrap_or_else(uuid::Uuid::new_v4);
-    let selected_profile_name = cli.profile.as_deref().or_else(|| {
-        resumed
-            .as_ref()
-            .and_then(|session| session.profile.as_deref())
-    });
-    let profile = loaded.select_provider(selected_profile_name)?;
-    let profile_provider = profile
-        .and_then(|provider| provider.provider.as_deref())
-        .map(parse_provider)
-        .transpose()?;
-    // 没有任何 Provider 配置时，按环境里有哪把钥匙推断，零配置也能开工。
-    let selected_provider = cli
-        .provider
-        .or(profile_provider)
-        .or_else(|| profile.is_none().then(crate::provider_from_env).flatten());
-    let base = resolve_base(cli, profile, selected_provider)?;
-    let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
-    let profile_api = profile
-        .and_then(|provider| provider.api.as_deref())
-        .map(parse_api)
-        .transpose()?;
-    let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
+    let resumed_profile = resumed.and_then(|session| session.profile.as_deref());
+    let profile = loaded.select_provider(cli.profile.as_deref().or(resumed_profile))?;
+    let provider_config = resolve_parent_provider_config(cli, loaded, resumed_profile)?;
+    let kind = provider_config.kind;
+    let model = provider_config.model.clone();
     // 缺省值与上限见 config.rs：命令行、配置、缺省三级取值，同一把尺子校验。
     let max_turns = cli
         .max_turns
@@ -630,22 +613,10 @@ pub(crate) async fn build(
         );
     }
     let workspace = resolve_workspace(cli, resumed)?;
-    let api_key = resolve_api_key(cli, profile, kind)?;
-    let model = cli
-        .model
-        .clone()
-        .or_else(|| profile.and_then(|provider| provider.model.clone()))
-        .or_else(|| crate::default_model(kind).map(str::to_owned))
-        .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
-        some_im_base_url: base.clone(),
-        api_key: api_key.clone(),
+        some_im_base_url: provider_config.base_url.clone(),
+        api_key: provider_config.api_key.clone(),
     });
-    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model.clone());
-    provider_config.max_output_tokens = cli
-        .max_output_tokens
-        .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
-        .unwrap_or(16_384);
     let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
         let vision_model = profile
             .and_then(|value| value.vision_model.clone())
@@ -1058,21 +1029,7 @@ pub(crate) async fn build(
     let auto_title = loaded.file.agent.auto_title.unwrap_or(true);
     let input_suggestions = loaded.file.agent.input_suggestions.unwrap_or(true);
     if auto_title || input_suggestions {
-        let mut auxiliaries = Vec::new();
-        if loaded.file.local_model.enabled
-            && loaded.file.local_model.prefer_for_titles
-            && let Some(local_config) = local_auxiliary_config
-        {
-            auxiliaries.push(
-                build_provider(local_config).context("initialize local session title model")?,
-            );
-        }
-        let mut title_config = parent_provider_config.clone();
-        if let Some(title_model) = loaded.file.agent.title_model.clone() {
-            title_config.model = title_model;
-        }
-        auxiliaries
-            .push(build_provider(title_config).context("initialize session title provider")?);
+        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config)?;
         if auto_title {
             agent = agent.with_titlers(auxiliaries.clone());
         }
@@ -1095,6 +1052,81 @@ pub(crate) async fn build(
         notifier,
         _command_watcher: command_watcher,
     })
+}
+
+/// 会话主 Provider 的配置：命令行 > 所选档案 > 环境里的钥匙 > 缺省。
+///
+/// Web 的下一句预测也从这里取，免得两处各算一遍、在某个档案上悄悄分叉。
+pub(crate) fn resolve_parent_provider_config(
+    cli: &Cli,
+    loaded: &LoadedConfig,
+    resumed_profile: Option<&str>,
+) -> Result<ProviderConfig> {
+    let profile = loaded.select_provider(cli.profile.as_deref().or(resumed_profile))?;
+    let profile_provider = profile
+        .and_then(|provider| provider.provider.as_deref())
+        .map(parse_provider)
+        .transpose()?;
+    // 没有任何 Provider 配置时，按环境里有哪把钥匙推断，零配置也能开工。
+    let selected_provider = cli
+        .provider
+        .or(profile_provider)
+        .or_else(|| profile.is_none().then(crate::provider_from_env).flatten());
+    let base = resolve_base(cli, profile, selected_provider)?;
+    let kind = resolve_provider(selected_provider.unwrap_or(ProviderArg::Auto), &base);
+    let profile_api = profile
+        .and_then(|provider| provider.api.as_deref())
+        .map(parse_api)
+        .transpose()?;
+    let dialect = resolve_dialect(cli.api.or(profile_api).unwrap_or(ApiArg::Auto), kind);
+    let api_key = resolve_api_key(cli, profile, kind)?;
+    let model = cli
+        .model
+        .clone()
+        .or_else(|| profile.and_then(|provider| provider.model.clone()))
+        .or_else(|| crate::default_model(kind).map(str::to_owned))
+        .context("model is required; set it in the provider profile, WILLDEEP_MODEL, or --model")?;
+    let mut provider_config = ProviderConfig::new(kind, dialect, base, api_key, model);
+    provider_config.max_output_tokens = cli
+        .max_output_tokens
+        .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
+        .unwrap_or(16_384);
+    Ok(provider_config)
+}
+
+/// 标题与下一句预测共用的小模型候选：本地模型（`prefer_for_titles`）优先，
+/// 会话 Provider 换成 `title_model` 兜底。按顺序试，前一家请求失败才问下一家。
+pub(crate) fn auxiliary_providers(
+    loaded: &LoadedConfig,
+    parent: &ProviderConfig,
+) -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>> {
+    let mut auxiliaries = Vec::new();
+    if loaded.file.local_model.prefer_for_titles
+        && let Some(local_config) = local_auxiliary_provider_config(&loaded.file.local_model)
+    {
+        auxiliaries
+            .push(build_provider(local_config).context("initialize local session title model")?);
+    }
+    let mut title_config = parent.clone();
+    if let Some(title_model) = loaded.file.agent.title_model.clone() {
+        title_config.model = title_model;
+    }
+    auxiliaries.push(build_provider(title_config).context("initialize session title provider")?);
+    Ok(auxiliaries)
+}
+
+/// Web 端的下一句预测用：不起 Agent，只按配置与会话当时的档案、模型装出
+/// 与 TUI 同一组候选 Provider。命令行参数一律取缺省——Web 没有命令行。
+pub(crate) fn input_suggestion_providers(
+    loaded: &LoadedConfig,
+    profile: Option<&str>,
+    model: Option<String>,
+) -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>> {
+    let mut cli = <Cli as clap::Parser>::try_parse_from(["willdeep"])
+        .context("build default CLI settings")?;
+    cli.model = model;
+    let parent = resolve_parent_provider_config(&cli, loaded, profile)?;
+    auxiliary_providers(loaded, &parent)
 }
 
 fn local_auxiliary_provider_config(

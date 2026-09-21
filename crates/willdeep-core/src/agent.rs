@@ -471,14 +471,7 @@ impl Agent {
     /// 按候选顺序试，**第一个请求成功的就定案**——哪怕它说没有明显的下一步，
     /// 也不再换下一家重问：预测是装饰，不值得为它多花一次钱。
     pub async fn suggest_next_input(&self, payload: &str) -> Option<String> {
-        for provider in &self.input_suggesters {
-            if let Ok(suggestion) =
-                crate::input_suggestion::predict(provider.clone(), payload).await
-            {
-                return suggestion;
-            }
-        }
-        None
+        crate::input_suggestion::predict_first(&self.input_suggesters, payload).await
     }
 
     /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回

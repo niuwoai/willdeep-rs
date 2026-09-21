@@ -90,8 +90,16 @@ TUI 中可以用 `/webapp` 拉起一个 Web 子进程：
 | 粘贴长文本 | 含换行或超过 200 字符时自动转为 `.txt` 附件，不塞进输入框 |
 | `/` | 命令候选，最多 6 条 |
 | `$` | 技能候选，最多 8 条；候选层内另有独立技能搜索框 |
+| `Tab`（输入框为空且有灰字预测时） | 把预测填进输入框，**不发送** |
+| `Esc`（有灰字预测时） | 丢掉预测 |
 
 附件条支持逐个删除。归档会话下发送被禁用。
+
+**轮次结束后的下一句预测**：一轮正常收尾（`completed` / `partial`）且输入框为空、没有附件时，前端调一次
+`POST /api/sessions/{id}/input-suggestion`，把返回的一句话以灰字放进空输入框，后面带小一号的「Tab 采用」。
+`Tab` 只填入不发送；打字、`Esc`、新一轮开始、换会话都会清掉，清掉了不回来。回包带发起时的世代号，
+用户已经开始打字或新一轮已经开始时晚到的结果直接丢弃。预测只在浏览器内存里：刷新页面即无，也不写进会话。
+与 TUI 同一契约、同一档模型候选，受同一个 `[agent] input_suggestions` 开关管，见 TUI_GUIDE.md「轮次结束后的下一句预测」。
 
 Web 端的 `/` 命令是前端拦截的：`/clear` 清空显示、`/help` 打印帮助、`/skills` 列出技能、`/goal <文本>` 开启目标模式、`/goal off` 关闭。
 
@@ -256,6 +264,7 @@ ssh -L 9847:127.0.0.1:9847 user@remote
 | POST | `/api/sessions/{id}/rename` | 重命名 |
 | POST | `/api/sessions/{id}/fork` | Fork |
 | GET | `/api/sessions/{id}/rewind-points` | 还能回到的步骤（步号、提示词首行、有无文件检查点） |
+| POST | `/api/sessions/{id}/input-suggestion` | 下一句预测：`{ turn_id? }` → `{ suggestion: string \| null, turn_id }`；开关关、会话在跑、组不出正文、模型失败一律 200 + `null`，只读不写 |
 | POST | `/api/sessions/{id}/rewind` | 回到第 N 步：`{ through_turn_id?, restore_workspace }`，返回 `RewindSessionResult` |
 | POST | `/api/sessions/{id}/archive` · `/unarchive` | 归档 / 取消归档 |
 | POST | `/api/sessions/{id}/pin` · `/unpin` | 置顶 / 取消置顶 |

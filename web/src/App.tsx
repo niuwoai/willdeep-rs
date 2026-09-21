@@ -15,6 +15,7 @@ import { fetchPlugins, orderedDestinations, type PluginFailureView, type PluginV
 import { PluginCommandPalette, PluginMenuPopup } from "./PluginMenus";
 import { menuEntries, useChatSelection, usePluginCommandRunner, type MenuEntry } from "./pluginMenuModel";
 import { SfIcon } from "./sfSymbols";
+import { useInputSuggestion } from "./inputSuggestion";
 
 type WorkspaceAccess = "read_only" | "strict" | "smart" | "workspace_write" | "full_access";
 type Workspace = { id: string; path: string; name: string; active: boolean; access: WorkspaceAccess };
@@ -274,6 +275,14 @@ export function App() {
   const [composer, setComposer] = useState<ComposerData>({ commands: defaultCommands, skills: [] });
   const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivity>({ tools: [], artifacts: [], agents: [], tasks: [], gates: [], attention_count: 0 });
   const [busy, setBusy] = useState(false); const [activity, setActivity] = useState(""); const [error, setError] = useState("");
+  const inputSuggestion = useInputSuggestion();
+  // 预测回包时要看「此刻」输入框空不空、有没有新一轮，闭包里的值是发起时的旧值。
+  const composerEmptyRef = useRef(true);
+  const composerIdleRef = useRef(true);
+  useEffect(() => {
+    composerEmptyRef.current = !prompt && !attachments.length;
+    composerIdleRef.current = composerEmptyRef.current && !busy;
+  }, [prompt, attachments.length, busy]);
   const abortRef = useRef<AbortController | null>(null); const endRef = useRef<HTMLDivElement | null>(null);
   const activeRunRef = useRef<string | null>(null);
   const activeTurnRef = useRef<string | null>(null);
@@ -436,6 +445,7 @@ export function App() {
     };
   }, [sessions, workspace, sessionSearch]);
   const selectedSession = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId]);
+  const ghostSuggestion = inputSuggestion.suggestion && inputSuggestion.suggestion.sessionId === sessionId && !prompt && !attachments.length && !busy ? inputSuggestion.suggestion.text : null;
   const commandMatches = useMemo(() => prompt.startsWith("/") ? composer.commands.filter((item) => item.startsWith(prompt.split(/\s/)[0])).slice(0, 6) : [], [prompt, composer.commands]);
   const skillQuery = prompt.match(/(?:^|\s)\$([\w-]*)$/)?.[1]?.toLowerCase();
   const skillMatches = useMemo(() => {
@@ -554,6 +564,13 @@ export function App() {
     }
   }
 
+  // 轮次正常收尾（completed / partial）后发一次预测；输入框已有内容或附件就不发。
+  function requestInputSuggestion(targetSessionId: string, turnId: string | null) {
+    // 读 ref 而不是闭包：send() 的闭包里 prompt 还是刚发出去的那句。
+    if (!targetSessionId || !composerEmptyRef.current) return;
+    void inputSuggestion.request(targetSessionId, turnId, () => composerIdleRef.current && sessionIdRef.current === targetSessionId);
+  }
+
   async function resumeTurn(id: string, turnId: string) {
     if (busy || abortRef.current) return;
     const controller = new AbortController();
@@ -619,6 +636,7 @@ export function App() {
         applySessionDetail(detail);
         setChat((current) => [...current, divider]);
         if (terminalError) setError(`${t.requestFailed}: ${terminalError}`);
+        else if (terminal) requestInputSuggestion(detail.id, turnId);
       }
       await refreshSessions();
     } finally {
@@ -635,6 +653,7 @@ export function App() {
 
   async function loadSession(id: string, activeTurnId: string | null = null) {
     if (busy) return;
+    inputSuggestion.clear();
     setError("");
     try {
       const detail = await json<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`);
@@ -883,15 +902,18 @@ export function App() {
     activeRunRef.current = runId;
     followBottomRef.current = true;
     setPrompt(""); setAttachments([]); setError(""); setActivity(t.thinking); setBusy(true);
+    inputSuggestion.clear();
     setChat((current) => [...current, { id: nextId("user"), role: "user", content: `${content}${outgoingAttachments.length ? `\n[${outgoingAttachments.length} ${t.attachmentCount}]` : ""}` }, { id: runId, role: "activity", content: "", steps: [] }]);
     let terminalFailure = false;
     try {
       const response = await fetch("/api/chat/stream", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json", accept: "text/event-stream" }, body: JSON.stringify({ prompt: harnessPrompt, session_id: sessionId || null, workspace, language, attachments: outgoingAttachments }) });
       let answer = "";
       let completedSessionId = sessionId;
+      let completedTurnId: string | null = null;
       let terminal = false;
       await readSse(response, async (event) => {
         if (event.session_id) completedSessionId = event.session_id;
+        if (event.turn_id) completedTurnId = event.turn_id;
         const result = await applyStreamEvent(event, runId);
         if (result.terminal && result.error) {
           terminalFailure = Boolean(event.turn_id);
@@ -911,6 +933,7 @@ export function App() {
         applySessionDetail(detail);
       }
       setChat((current) => [...current, divider]);
+      requestInputSuggestion(completedSessionId, completedTurnId);
       refreshSessions().catch(() => undefined);
     } catch (reason) {
       const recoverSessionId = activeSessionRef.current;
@@ -1080,7 +1103,12 @@ export function App() {
         {commandMatches.length > 0 && <Box className="suggestions"><Text className="suggestion-title">{t.commands}</Text>{commandMatches.map((command) => <button key={command} type="button" onMouseDown={(event) => { event.preventDefault(); setPrompt(command); }}>{command}</button>)}</Box>}
         {skillQuery !== undefined && <Box className="suggestions"><Text className="suggestion-title">{t.skills}</Text><Input className="skill-search" size="sm" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t.searchSkills} aria-label={t.searchSkills} />{skillMatches.length ? skillMatches.map((skill) => <button key={skill.identifier} type="button" onMouseDown={(event) => { event.preventDefault(); setSkillSearch(""); setPrompt((current) => current.replace(/\$[\w-]*$/, `$${skill.identifier} `)); }}><strong>${skill.identifier}</strong><small>{skill.name} · {skill.description}</small></button>) : <Text className="suggestion-empty">{t.noSkills}</Text>}</Box>}
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
-        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={busy ? t.steerPlaceholder : t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
+        {ghostSuggestion && <Box className="input-suggestion" aria-hidden="true" pt={attachments.length ? "2" : "4"}><Text as="span">{ghostSuggestion}</Text><Text as="span" className="input-suggestion-hint">{t.inputSuggestionAccept}</Text></Box>}
+        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => { if (event.target.value) inputSuggestion.clear(); setPrompt(event.target.value); }} onKeyDown={(event) => {
+          if (event.key === "Tab" && !event.shiftKey && ghostSuggestion) { event.preventDefault(); setPrompt(ghostSuggestion); inputSuggestion.clear(); return; }
+          if (event.key === "Escape" && ghostSuggestion) { event.preventDefault(); inputSuggestion.clear(); return; }
+          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
+        }} aria-description={ghostSuggestion ? `${ghostSuggestion} · ${t.inputSuggestionAccept}` : undefined} placeholder={ghostSuggestion ? "" : busy ? t.steerPlaceholder : t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
         {composerEntries.length > 0 && (
           <button
             type="button"

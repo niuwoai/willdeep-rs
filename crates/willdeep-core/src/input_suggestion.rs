@@ -130,6 +130,17 @@ pub async fn predict(
     Ok(sanitize(&completion.content))
 }
 
+/// 按顺序问一组候选 Provider：前一家请求失败才换下一家；有一家答了（哪怕是
+/// `None`）就到此为止。TUI 的 Agent 与 Web 端点共用这一段，候选顺序由宿主定。
+pub async fn predict_first(providers: &[Arc<dyn Provider>], payload: &str) -> Option<String> {
+    for provider in providers {
+        if let Ok(suggestion) = predict(provider.clone(), payload).await {
+            return suggestion;
+        }
+    }
+    None
+}
+
 /// 清洗模型返回的那一行。空、`NONE`、超长、助手口吻、疑似凭据一律 `None`。
 pub fn sanitize(raw: &str) -> Option<String> {
     let mut text = raw
