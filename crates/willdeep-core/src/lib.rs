@@ -9,6 +9,8 @@ mod execution;
 pub mod goal;
 pub mod hooks;
 pub mod input_suggestion;
+#[cfg(test)]
+mod input_suggestion_livefire;
 pub mod judge;
 pub mod kernel;
 pub mod kernel_ingress;

@@ -1,0 +1,19 @@
+{
+  "id": "zh-next-step-plan",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "第一步先把配置解析抽出来"
+    },
+    {
+      "role": "user",
+      "content": "好，继续"
+    },
+    {
+      "role": "assistant",
+      "content": "配置解析已经抽到 `config/loader.rs`，原来的 main.rs 少了 180 行，测试全绿。下一步是把环境变量覆盖逻辑也挪进去，还是先把这一步提交？"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "zh-review-findings",
+  "language": "zh",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "review 一下这个 PR"
+    },
+    {
+      "role": "assistant",
+      "content": "看完了，三个问题：\n1. `retry_count` 没有上限，网络抖动时会无限重试；\n2. 新增的 SQL 用了字符串拼接，有注入风险；\n3. CHANGELOG 没更新。\n其他部分没问题。需要我直接帮你改这三处吗？"
+    }
+  ]
+}

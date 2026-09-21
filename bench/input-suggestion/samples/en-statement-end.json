@@ -1,0 +1,15 @@
+{
+  "id": "en-statement-end",
+  "language": "en",
+  "expect": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "bump the version and tag the release"
+    },
+    {
+      "role": "assistant",
+      "content": "Version bumped to 2.4.1, CHANGELOG updated, tag v2.4.1 pushed, and the release workflow finished successfully. All done."
+    }
+  ]
+}

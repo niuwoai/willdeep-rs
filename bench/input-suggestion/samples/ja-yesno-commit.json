@@ -1,0 +1,15 @@
+{
+  "id": "ja-yesno-commit",
+  "language": "ja",
+  "expect": "suggest",
+  "messages": [
+    {
+      "role": "user",
+      "content": "ログイン画面のバリデーションを直して"
+    },
+    {
+      "role": "assistant",
+      "content": "メールアドレスの正規表現を修正し、空欄時のエラーメッセージも追加しました。テストは全部通っています。このままコミットしてもいいですか？"
+    }
+  ]
+}
