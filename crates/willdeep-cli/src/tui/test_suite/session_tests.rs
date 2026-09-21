@@ -2216,3 +2216,50 @@ fn modal_colours_do_not_come_from_the_theme_palette() {
         }
     }
 }
+
+#[test]
+fn clicking_outside_the_chat_after_selecting_releases_the_click_for_focus() {
+    let mut app = App::new(vec!["hello world".to_owned()], Language::En);
+    app.transcript_rect = Rect::new(0, 0, 20, 6);
+    app.transcript_rows = vec!["hello world".to_owned()];
+    app.transcript_render_offset = 0;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 5),
+        (MouseEventKind::Up(MouseButton::Left), 5),
+    ] {
+        app.handle_chat_selection_mouse(MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    assert!(app.selection_mode);
+
+    // 点在聊天区下方（输入框的位置）：不能被选区吞掉，得交给正常的点击处理去切焦点。
+    let consumed = app.handle_chat_selection_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!consumed);
+    assert!(!app.selection_mode);
+    assert!(app.chat_selection.is_none());
+}
+
+#[test]
+fn typing_in_selection_mode_releases_it_and_moves_focus_to_the_prompt() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.enter_native_selection_mode();
+    app.release_selection_for_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(!app.selection_mode && !app.native_selection_mode);
+    assert_eq!(app.focus, FocusPane::Prompt);
+
+    // 翻页这类非输入键只退出选区，不抢焦点。
+    app.enter_native_selection_mode();
+    app.release_selection_for_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert!(!app.selection_mode);
+    assert_eq!(app.focus, FocusPane::Chat);
+}

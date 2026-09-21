@@ -510,23 +510,32 @@ pub(super) async fn event_loop(
                 }},
                 Event::Key(key) if key.kind==KeyEventKind::Press=>{
                     if app.native_selection_mode {
+                        // 复制键留给终端自己的选区：放行的话 Ctrl+C 会直接退出程序。
+                        if is_selection_copy_key(key)||(key.code==KeyCode::Char('c')&&key.modifiers.contains(KeyModifiers::CONTROL)) {
+                            continue;
+                        }
+                        execute!(term.backend_mut(), EnableMouseCapture)?;
                         if selection_mode_exit_key(key) {
-                            execute!(term.backend_mut(), EnableMouseCapture)?;
                             app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复 WillDeep 鼠标操作","WillDeep mouse controls restored","WillDeep のマウス操作を復元しました").to_owned());
+                            continue;
                         }
-                        continue;
-                    }
-                    if app.selection_mode {
+                        // 其它键：退出原生选区，这个键照常处理（打字就进输入框）。
+                        app.release_selection_for_key(key);
+                    } else if app.selection_mode {
                         if is_selection_copy_key(key) {
                             app.copy_chat_selection();
+                            continue;
                         } else if key.code==KeyCode::Char('q')&&!key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::SUPER|KeyModifiers::ALT) {
                             app.quote_chat_selection();
+                            continue;
                         } else if selection_mode_exit_key(key) {
                             app.exit_selection_mode();
                             app.notice=Some(language.text("已恢复鼠标滚动和点击","Mouse scrolling and clicks restored","マウス操作を復元しました").to_owned());
+                            continue;
                         }
-                        continue;
+                        // 以前这里把其余按键一律吞掉，选过字就打不了字、也没有任何提示。
+                        app.release_selection_for_key(key);
                     }
                     if app.routing_settings.is_none()&&key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('s'){
                         execute!(term.backend_mut(), DisableMouseCapture)?;
