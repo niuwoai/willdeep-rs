@@ -386,6 +386,11 @@ pub(super) async fn event_loop(
                 app.runtime_tools=snapshot.tools;
                 app.runtime_artifacts=snapshot.artifacts;
                 app.observe_runtime_version(snapshot.runtime_version);
+                if app.runtime_auto_upgrade_pending && !app.running {
+                    app.runtime_auto_upgrade_pending=false;
+                    app.runtime_auto_upgrade_tried=true;
+                    daemon_commands::auto_upgrade(runtime.home.clone(),language,runtime.tx.clone());
+                }
                 if runtime_ui::surface_pending_gates(&mut app,&runtime.home,&runtime.tx){
                     execute!(term.backend_mut(),crossterm::style::Print("\x07"))?;
                 }
@@ -1249,6 +1254,7 @@ pub(super) async fn event_loop(
                 UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);persist_turn_result(session,store)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
+                UiMessage::RuntimeResult(message)=>{app.append_transcript(message.clone());app.notice=Some(message);},
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
                 UiMessage::MediaLoaded{target,result}=>app.media.finish_load(target,result),
                 UiMessage::MediaResized(result)=>{

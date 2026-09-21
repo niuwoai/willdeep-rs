@@ -2275,3 +2275,43 @@ fn model_switch_during_a_turn_is_recorded_not_applied() {
     assert!(super::model_commands::defer_model_switch(&mut app, "  ").is_err());
     assert_eq!(app.pending_model.as_deref(), Some("deepseek-v4-flash"));
 }
+
+#[test]
+fn runtime_versions_compare_with_release_candidates() {
+    use super::app_state::version_is_older;
+    assert!(version_is_older("0.78.0-rc28", "0.78.0-rc29"));
+    assert!(
+        version_is_older("0.78.0-rc9", "0.78.0-rc10"),
+        "rc 按数字比，不按字符串"
+    );
+    assert!(version_is_older("0.78.0-rc33", "0.79.0-rc1"));
+    assert!(
+        version_is_older("0.78.0-rc33", "0.78.0"),
+        "正式版晚于同号 rc"
+    );
+    assert!(!version_is_older("0.79.0-rc1", "0.78.0-rc33"));
+    assert!(!version_is_older("0.79.0-rc1", "0.79.0-rc1"));
+    // 拿不准就不升。
+    assert!(!version_is_older("dev", "0.79.0-rc1"));
+    assert!(!version_is_older("0.78.0-beta1", "0.79.0-rc1"));
+    assert!(!version_is_older("0.78", "0.79.0-rc1"));
+}
+
+#[test]
+fn only_an_older_runtime_is_queued_for_one_automatic_upgrade() {
+    let mut app = App::new(Vec::new(), Language::En);
+    app.observe_runtime_version(Some("0.21.0-rc62".to_owned()));
+    assert!(app.runtime_auto_upgrade_pending, "older Runtime → try once");
+
+    // 事件循环发起后标记已试；同一进程再见到旧 Runtime 不再重试。
+    app.runtime_auto_upgrade_pending = false;
+    app.runtime_auto_upgrade_tried = true;
+    app.observe_runtime_version(Some("0.21.0-rc65".to_owned()));
+    assert!(!app.runtime_auto_upgrade_pending);
+
+    // 比客户端新的 Runtime 只警告，绝不降级。
+    let mut app = App::new(Vec::new(), Language::En);
+    app.observe_runtime_version(Some("999.0.0".to_owned()));
+    assert!(app.stale_runtime_version().is_some());
+    assert!(!app.runtime_auto_upgrade_pending);
+}

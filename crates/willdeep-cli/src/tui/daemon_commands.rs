@@ -74,7 +74,62 @@ pub(super) fn dispatch(
                 )
             ),
         };
-        let _ = ui.send(UiMessage::RuntimeNotice(message));
+        let _ = ui.send(UiMessage::RuntimeResult(message));
+    });
+}
+
+/// Runtime 比客户端旧时自动升级一次。前提：Runtime 里没有任何未终结的任务。
+/// 有的话不动它，说明原因，版本不一致的警告照旧留着让人决定。
+pub(super) fn auto_upgrade(
+    home: PathBuf,
+    language: Language,
+    ui: mpsc::UnboundedSender<UiMessage>,
+) {
+    tokio::spawn(async move {
+        let message = match crate::daemon::runtime_unfinished_task_count(&home).await {
+            Ok(0) => {
+                let report = |_line: String| {};
+                match crate::daemon::runtime_upgrade(&home, UPGRADE_TIMEOUT_SECONDS, &report).await {
+                    Ok(_) => format!(
+                        "System: {}",
+                        language
+                            .text(
+                                "Runtime 比客户端旧，且没有进行中的任务，已自动升级到 {version}。",
+                                "The Runtime was older than this client and idle, so it was upgraded to {version}.",
+                                "Runtime がクライアントより古く待機中だったため、{version} へ自動アップグレードしました。",
+                            )
+                            .replace("{version}", willdeep_core::VERSION)
+                    ),
+                    Err(error) => format!(
+                        "Error: {}: {error}",
+                        language.text(
+                            "自动升级 Runtime 失败，请手动 `/daemon upgrade`",
+                            "Automatic Runtime upgrade failed; run `/daemon upgrade`",
+                            "Runtime の自動アップグレードに失敗しました。`/daemon upgrade` を実行してください",
+                        )
+                    ),
+                }
+            }
+            Ok(count) => format!(
+                "System: {}",
+                language
+                    .text(
+                        "Runtime 里还有 {n} 个任务在进行或等你处理，未自动升级（升级会丢掉等人的任务）。处理完后 `/daemon upgrade`。",
+                        "{n} Runtime task(s) are still running or waiting on you, so no automatic upgrade (it would drop waiting tasks). Run `/daemon upgrade` once they finish.",
+                        "Runtime に進行中または確認待ちのタスクが {n} 件あるため自動アップグレードしません。完了後に `/daemon upgrade` を実行してください。",
+                    )
+                    .replace("{n}", &count.to_string())
+            ),
+            Err(error) => format!(
+                "System: {}: {error}",
+                language.text(
+                    "查不到 Runtime 任务列表，未自动升级",
+                    "Could not list Runtime tasks; no automatic upgrade",
+                    "Runtime のタスク一覧を取得できず、自動アップグレードしません",
+                )
+            ),
+        };
+        let _ = ui.send(UiMessage::RuntimeResult(message));
     });
 }
 

@@ -1475,6 +1475,32 @@ pub(crate) async fn runtime_stop(home: &Path) -> Result<String> {
     stop(home).await
 }
 
+/// Runtime 里还没终结的任务数（含等人审批、等人回答的）。自动升级只在它为 0 时
+/// 进行：交接会把等人的任务一起丢掉，而它们可能在别的工作区、用户此刻看不到。
+pub(crate) async fn runtime_unfinished_task_count(home: &Path) -> Result<usize> {
+    use willdeep_runtime_protocol::TaskStatus;
+    let state = load_state(&DaemonPaths::new(home).state)?;
+    let tasks = runtime_client(&state)?
+        .tasks()
+        .await
+        .context("list Runtime tasks")?
+        .into_result()
+        .map_err(|error| anyhow::anyhow!("list Runtime tasks: {error:?}"))?;
+    Ok(tasks
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.status,
+                TaskStatus::Completed
+                    | TaskStatus::Partial
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Interrupted
+            )
+        })
+        .count())
+}
+
 pub(crate) async fn runtime_upgrade(
     home: &Path,
     timeout_seconds: u64,
