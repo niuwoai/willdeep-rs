@@ -12,12 +12,14 @@
     "none_hit_rate": 100.0,
     "suggest_given_rate": 91.7,
     "sanitize_reject_rate": 7.1,
-    "judged": 0,
-    "plausible_rate": null,
+    "judged": 11,
+    "plausible_rate": 100.0,
     "wrong_voice": 0,
     "avg_elapsed_ms": 791,
     "avg_input_tokens": 318,
-    "avg_output_tokens": 51
+    "avg_output_tokens": 51,
+    "rescored_from": "20260921T050657Z-deepseek-v4-flash.json",
+    "rescored_at": "2026-09-21T05:10:14Z"
   },
   "model": "deepseek-v4-flash",
   "cases": [
@@ -31,7 +33,7 @@
       "language": "en",
       "output_tokens": 79,
       "raw": "sccache first, let's see how far that gets us",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "commit it",
@@ -43,7 +45,7 @@
       "language": "en",
       "output_tokens": 18,
       "raw": "commit it",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": null,
@@ -77,7 +79,7 @@
       "language": "en",
       "output_tokens": 44,
       "raw": "yes, open the PR against main",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "コミットしてPR作って",
@@ -89,7 +91,7 @@
       "language": "ja",
       "output_tokens": 7,
       "raw": "コミットしてPR作って",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "はい、preload に修正して",
@@ -101,7 +103,7 @@
       "language": "ja",
       "output_tokens": 53,
       "raw": "はい、preload に修正して",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "うん、.envに書いて",
@@ -135,7 +137,7 @@
       "language": "ja",
       "output_tokens": 60,
       "raw": "はい、コミットしてください",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "部署到 staging 吧",
@@ -147,7 +149,7 @@
       "language": "zh",
       "output_tokens": 44,
       "raw": "部署到 staging 吧",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": null,
@@ -171,7 +173,7 @@
       "language": "zh",
       "output_tokens": 71,
       "raw": "先提交这一步吧",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "先加读写锁吧，改完顺便跑下并发测试",
@@ -183,7 +185,7 @@
       "language": "zh",
       "output_tokens": 14,
       "raw": "先加读写锁吧，改完顺便跑下并发测试",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "好，直接改吧",
@@ -195,7 +197,7 @@
       "language": "zh",
       "output_tokens": 35,
       "raw": "好，直接改吧",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "写进 .env.local 吧",
@@ -240,7 +242,8 @@
       "language": "zh",
       "output_tokens": 18,
       "raw": "提交并开 PR",
-      "judged": null
+      "judged": "plausible"
     }
-  ]
+  ],
+  "judged_by": "Claude Opus 5 先手填（2026-09-21），待 rocky 复核；清洗后为空的样本界面上什么都不显示，不判"
 }

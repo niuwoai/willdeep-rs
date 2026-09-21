@@ -31,7 +31,7 @@
       "language": "en",
       "output_tokens": 38,
       "raw": "sccache first",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": null,
@@ -77,7 +77,7 @@
       "language": "en",
       "output_tokens": 27,
       "raw": "yes, open the PR",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "コミットして",
@@ -89,7 +89,7 @@
       "language": "ja",
       "output_tokens": 48,
       "raw": "コミットして",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "はい、修正して",
@@ -101,7 +101,7 @@
       "language": "ja",
       "output_tokens": 45,
       "raw": "はい、修正して",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "はい、.envに書き込んでおいて",
@@ -135,7 +135,7 @@
       "language": "ja",
       "output_tokens": 62,
       "raw": "はい、コミットしてください",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "部署吧",
@@ -147,7 +147,7 @@
       "language": "zh",
       "output_tokens": 3,
       "raw": "部署吧",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": null,
@@ -171,7 +171,7 @@
       "language": "zh",
       "output_tokens": 35,
       "raw": "先把这一步提交",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "先标记失效再异步清理",
@@ -183,7 +183,7 @@
       "language": "zh",
       "output_tokens": 44,
       "raw": "先标记失效再异步清理",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "改吧，三处都帮我改了",
@@ -195,7 +195,7 @@
       "language": "zh",
       "output_tokens": 85,
       "raw": "改吧，三处都帮我改了",
-      "judged": null
+      "judged": "plausible"
     },
     {
       "cleaned": "好的，写进 .env.local 吧",
@@ -240,7 +240,8 @@
       "language": "zh",
       "output_tokens": 59,
       "raw": "提交吧，顺便开个 PR",
-      "judged": null
+      "judged": "plausible"
     }
-  ]
+  ],
+  "judged_by": "Claude Opus 5 先手填（2026-09-21），待 rocky 复核；清洗后为空的样本界面上什么都不显示，不判"
 }
