@@ -2716,6 +2716,7 @@ enum MockMode {
     /// 第一轮起一条 `run_in_background` 命令，之后正常收尾。
     BackgroundJobThenSuccess,
     /// 第一轮起一个 `monitor`，之后正常收尾。
+    #[cfg_attr(not(unix), allow(dead_code))]
     MonitorThenSuccess,
 }
 

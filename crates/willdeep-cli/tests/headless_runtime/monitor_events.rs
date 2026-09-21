@@ -2,6 +2,7 @@ use super::*;
 
 /// 结束通知的框架（请求 JSON 里换行被转义）。工具描述里也提到 `<monitor-ended>`，
 /// 只认框架本身才不会假阳性。
+#[cfg(unix)]
 const ENDED_FRAME: &str = "<monitor-ended>\\n  id: mon_";
 
 /// 第一轮起一个 monitor，其余请求正常收尾。安全裁判的请求按内容识别。
@@ -29,6 +30,9 @@ pub(super) fn response(body: &[u8], request_index: usize) -> String {
 
 /// 无头运行里，monitor 的事件在命令还没结束时就交给模型，结束事件随后也到；
 /// 进程在两者都投递之后才退出。
+/// 仅 Unix：monitor 的命令是 POSIX shell（`for` 循环加 `grep --line-buffered`），Windows 上
+/// Shell 工具走 PowerShell；monitor 自己的单元测试同样只在 Unix 上跑。
+#[cfg(unix)]
 #[test]
 fn local_run_delivers_monitor_events_before_the_command_exits() {
     let _serial = process_test_guard();
