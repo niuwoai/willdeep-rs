@@ -161,6 +161,8 @@ pub(super) struct SubagentRun {
     /// [`SubagentCatalog::with_always_allow_store`](super::catalog::SubagentCatalog::with_always_allow_store)。
     pub(super) always_allow_store: Option<PathBuf>,
     pub(super) state_home: Option<PathBuf>,
+    /// 父会话的档位句柄：父会话在 full-access 时 Worker 跟着免审（实时）。
+    pub(super) parent_approval_mode: Option<crate::tools::SharedApprovalMode>,
 }
 
 /// Run a worker to a verdict.
@@ -194,6 +196,7 @@ pub(super) async fn run_subagent(
         mcp,
         always_allow_store,
         state_home,
+        parent_approval_mode,
     } = run;
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
@@ -259,6 +262,7 @@ pub(super) async fn run_subagent(
             always_allow_store.clone(),
             &sandbox,
             state_home.as_deref(),
+            parent_approval_mode.as_ref(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -345,6 +349,7 @@ async fn run_once(
     always_allow_store: Option<PathBuf>,
     sandbox: &crate::sandbox::SandboxSpec,
     state_home: Option<&Path>,
+    parent_approval_mode: Option<&crate::tools::SharedApprovalMode>,
 ) -> Result<String, AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
@@ -372,6 +377,9 @@ async fn run_once(
         .with_write_targets(approved_targets.clone());
     if let Some(home) = state_home {
         tools = tools.with_output_store(&home.join("tool-outputs"));
+    }
+    if let Some(parent) = parent_approval_mode {
+        tools = tools.with_parent_approval_mode(parent.clone());
     }
     if let Some(path) = always_allow_store {
         // 坏掉的规则文件不该让一次派工失败：Worker 退回「什么都要批」，而它

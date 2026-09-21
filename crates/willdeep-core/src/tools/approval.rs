@@ -174,7 +174,25 @@ impl SharedApprovalMode {
 
 impl ToolRegistry {
     pub fn approval_mode(&self) -> ApprovalMode {
+        if self.inherits_full_access() {
+            return ApprovalMode::FullAccess;
+        }
         self.approval_mode.get()
+    }
+
+    /// 父会话此刻是否处于 `full-access`。只对挂了父档位句柄的子 Agent 注册表有意义。
+    pub(crate) fn inherits_full_access(&self) -> bool {
+        self.parent_approval_mode
+            .as_ref()
+            .is_some_and(|parent| parent.get() == ApprovalMode::FullAccess)
+    }
+
+    /// 子 Agent 跟随父会话的 `full-access`：用户已经明确允许不审批，Worker 再弹
+    /// 审批卡只会打断人。跟随是实时的——父会话切回别的档位，下一次工具调用起
+    /// Worker 就回到自己工种的档位。
+    pub fn with_parent_approval_mode(mut self, parent: SharedApprovalMode) -> Self {
+        self.parent_approval_mode = Some(parent);
+        self
     }
 
     /// 与本注册表共享的档位句柄。前端拿它切档，不必重建 Agent。

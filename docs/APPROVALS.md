@@ -32,6 +32,7 @@
 - 写入围栏摘掉（用户已允许工作区外写入）；文件工具 `create_file` / `edit_file` 仍按工作区路径解析，工作区外的文件经 Shell 访问；
 - `ask_user` 提问、「效果未知的中断调用重放」仍需要人；
 - 放行记审计来源 `full-access`。
+- **子 Agent 跟着免审**：父会话处于 `full-access` 时，Worker 的命令与派工 verifier 同样免审、围栏摘掉；切回别的档位即时失效。工种自己的工具面、写集合、「只许跑 verifier」等职责边界不放宽。见 [子 Agent](SUBAGENTS.md#父会话在-full-access-时)。
 
 ## 在终端里切换
 
