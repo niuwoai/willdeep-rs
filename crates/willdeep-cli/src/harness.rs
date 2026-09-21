@@ -1229,6 +1229,7 @@ fn sandbox_roots(
                 .map(|root| expand_home(std::path::Path::new(root))),
         );
     }
+    roots.extend(external_git_dirs(workspace));
     roots.extend(
         agent
             .sandbox_writable_roots
@@ -1236,6 +1237,48 @@ fn sandbox_roots(
             .map(|root| expand_home(root)),
     );
     roots
+}
+
+/// 工作区所属仓库落在工作区外的 git 目录。
+///
+/// 子模块的 `.git` 是个文件，指向父仓库的 `.git/modules/<name>`；`git worktree`
+/// 指向主仓库的 `.git/worktrees/<name>`，对象库还在 common dir；在仓库子目录里
+/// 开会话时 `.git` 在上层。这几种情况下 commit、fetch、改 ref 全写在工作区外，
+/// 不放行的话围栏开着就提交不了代码。放行的只是「这个工作区自己的仓库元数据」，
+/// 普通仓库的 `.git` 本来就在工作区里可写，不多出新的风险面。
+/// 不在仓库里、没装 git、git 报错时返回空——这是锦上添花，不该挡住启动。
+fn external_git_dirs(workspace: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--git-dir", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // 两个输出都可能是相对 `-C` 目录的路径。
+        let Ok(dir) = workspace.join(line).canonicalize() else {
+            continue;
+        };
+        if !dir.starts_with(&workspace) && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
 }
 
 /// 各档位的网络围栏。`read-only` 永远断；`workspace-write` 不请判官，「命令留在
@@ -1459,6 +1502,131 @@ mod tests {
                     "workspace-write cuts the network by default"
                 );
             }
+        }
+
+        /// 临时目录里的一组 git 仓库；drop 时清掉。
+        struct GitScratch(std::path::PathBuf);
+
+        impl GitScratch {
+            fn new(tag: &str) -> Self {
+                let root = std::env::temp_dir().join(format!(
+                    "willdeep-gitdirs-{tag}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&root).unwrap();
+                Self(root.canonicalize().unwrap())
+            }
+
+            fn git(&self, dir: &std::path::Path, args: &[&str]) {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args([
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "user.email=t@t",
+                        "-c",
+                        "init.defaultBranch=main",
+                        "-c",
+                        "protocol.file.allow=always",
+                    ])
+                    .args(args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .expect("run git");
+                assert!(status.success(), "git {args:?} in {}", dir.display());
+            }
+
+            fn repo(&self, name: &str) -> std::path::PathBuf {
+                let dir = self.0.join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                self.git(&dir, &["init", "-q"]);
+                self.git(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+                dir
+            }
+        }
+
+        impl Drop for GitScratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn git_available() -> bool {
+            std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        }
+
+        #[test]
+        fn a_plain_repo_adds_no_git_roots_because_its_git_dir_is_inside() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("plain");
+            let repo = scratch.repo("plain");
+            assert!(external_git_dirs(&repo).is_empty());
+            assert!(external_git_dirs(&scratch.0).is_empty(), "not a repo");
+        }
+
+        #[test]
+        fn a_submodule_workspace_gets_its_git_dir_under_the_parent() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("submodule");
+            let upstream = scratch.repo("upstream");
+            let parent = scratch.repo("parent");
+            scratch.git(
+                &parent,
+                &[
+                    "submodule",
+                    "add",
+                    "-q",
+                    upstream.to_str().unwrap(),
+                    "sdk/python",
+                ],
+            );
+            let module = parent.join("sdk/python");
+            let dirs = external_git_dirs(&module);
+            assert_eq!(dirs, vec![parent.join(".git/modules/sdk/python")]);
+            let roots = sandbox_roots(&crate::config::AgentSettings::default(), &module);
+            assert!(roots.contains(&parent.join(".git/modules/sdk/python")));
+        }
+
+        #[test]
+        fn a_worktree_workspace_gets_its_own_and_the_common_git_dir() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("worktree");
+            let main = scratch.repo("main");
+            let tree = scratch.0.join("tree");
+            scratch.git(&main, &["worktree", "add", "-q", tree.to_str().unwrap()]);
+            let dirs = external_git_dirs(&tree);
+            assert_eq!(
+                dirs,
+                vec![main.join(".git/worktrees/tree"), main.join(".git")]
+            );
+        }
+
+        #[test]
+        fn a_subdirectory_workspace_gets_the_repo_git_dir_above_it() {
+            if !git_available() {
+                return;
+            }
+            let scratch = GitScratch::new("subdir");
+            let repo = scratch.repo("repo");
+            let sub = repo.join("crates/a");
+            std::fs::create_dir_all(&sub).unwrap();
+            assert_eq!(external_git_dirs(&sub), vec![repo.join(".git")]);
         }
     }
 

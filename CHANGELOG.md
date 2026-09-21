@@ -11,6 +11,11 @@
 - `docs/TUI_GUIDE.md` 输入快捷键表加 `Tab`（空输入框）一行并新增「轮次结束后的下一句预测」小节；`docs/CONFIGURATION.md`、`config.example.toml` 加 `input_suggestions`；`docs/EXPERIENCE_BASELINE.md` 第 19 项。
 - 新增需求单 `docs/decisions/2026-09-21-input-suggestion-followups.md`：发布 rc29、Runtime 升级、Web 端下一句预测（rc30）、README 演示 GIF、预测质量实弹、英文 README 与 `cargo install --git` 核实，每项带验收标准；`docs/README.md` 索引加行。
 
+### Fixed
+- **围栏开着时，子模块 / `git worktree` / 仓库子目录里的会话提交不了代码。** 这几种场景的 git 目录在工作区外（子模块在父仓库 `.git/modules/<name>`，worktree 在主仓库 `.git/worktrees/<name>` 与 common dir），commit、fetch、改 ref 全被内核拦下。启动时跑一次 `git rev-parse --git-dir --git-common-dir`，落在工作区外的结果自动加进可写根；不在仓库里或没装 git 时不加。
+- **围栏拦截提示不再说「请用户放宽工作区策略」。** 这句话没有落点，模型会用 `ask_user` 问一句「要不要放宽」，用户同意后围栏照旧——问答改不了档位。现在提示明确只有两条路：切到 `full-access`（TUI 里 Shift+Tab，立即生效），或把路径加进 `agent.sandbox_writable_roots` 后重启会话，并写明 `ask_user` 征得同意不会改变围栏。`docs/SANDBOX.md` 同步。
+- 测试：harness 钉住普通仓库不加根、子模块拿到父仓库 `.git/modules/<name>`、worktree 拿到自己的与 common 的 git 目录、子目录拿到上层 `.git`；core 钉住拦截提示点名 full-access / `sandbox_writable_roots` / 重启、排除 `ask_user`、不再出现「放宽工作区策略」。
+
 ## [0.78.0-rc28] - 2026-09-21
 
 ### Added

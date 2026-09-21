@@ -1522,3 +1522,16 @@ async fn verification_retains_start_revision_but_invalidates_changed_files() {
     assert!(records[0].summary.contains("verification-invalidated"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn write_denial_hint_names_the_two_real_ways_out_and_rules_out_asking() {
+    let spec = SandboxSpec::new(SandboxPolicy::WorkspaceWrite, [std::env::temp_dir()]);
+    let hint = sandbox_denial_hint(&spec, false);
+    assert!(hint.contains("full-access"), "{hint}");
+    assert!(hint.contains("Shift+Tab"), "{hint}");
+    assert!(hint.contains("agent.sandbox_writable_roots"), "{hint}");
+    assert!(hint.contains("重启会话"), "{hint}");
+    assert!(hint.contains("ask_user"), "{hint}");
+    // 不再给「放宽工作区策略」这种没有落点的说法，模型会拿它去问一个改不了围栏的问题。
+    assert!(!hint.contains("放宽工作区策略"), "{hint}");
+}
