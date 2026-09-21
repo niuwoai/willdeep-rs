@@ -2546,7 +2546,10 @@ fn sandbox_denial_hint(sandbox: &SandboxSpec, network: bool) -> String {
     format!(
         "\n\n<sandbox-denied>\n这条命令看起来是被 OS 级写入围栏拦下的，不是命令本身写错了。\n\
 当前档位只允许写入：{roots}\n\
-把写入目标改到允许范围内，或请用户放宽工作区策略后重试。\n</sandbox-denied>"
+优先把写入目标改到允许范围内。确实必须写别处时，如实告诉用户被拦的路径，并说明只有两条路：\n\
+1. 用户把审批档位切到 full-access（TUI 里 Shift+Tab），这一档不套围栏，立即生效；\n\
+2. 用户把该路径加进配置 agent.sandbox_writable_roots，重启会话后生效。\n\
+用 ask_user 征得同意不会改变围栏——用户选完档位或改完配置之前，同一条命令重试仍会被拦。\n</sandbox-denied>"
     )
 }
 
