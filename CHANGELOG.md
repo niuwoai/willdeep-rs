@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.78.0-rc30] - 2026-09-21
+
+### Added
+- **Web 端也会在轮次结束后预测你的下一句（体验基线第 19 项两端到位）。** 与 TUI 同一契约：一轮正常收尾后空 Composer 里灰字显示一句预测，后面带小一号的「Tab 采用」；`Tab` 只填入不发送，打字 / `Esc` / 新一轮 / 换会话即清，清掉不回来；回包带世代号，晚到丢弃；刷新页面即无。受同一个 `[agent] input_suggestions` 开关管，三种语言。
+- 新端点 `POST /api/sessions/{id}/input-suggestion`（`{ turn_id? }` → `{ suggestion, turn_id }`）：从会话文件读最近消息，用与 TUI 同一组候选（本地模型 `prefer_for_titles` 优先、`title_model` 兜底）调一次预测。不挂进聊天 SSE——流在 `completed` 后就关了；开关关、会话不在白名单、会话仍在跑、组不出正文、所有候选失败一律 200 + `null`，只读不写，不经 Runtime 协议。
+- 测试：web 端点单测钉住首个答复的候选胜出且失败的只问一次、全部失败与装不出 Provider 回 `null`、会话在跑与缺正文时一次都不问模型、开关关与未知会话 200 + `null` 且 `$WILLDEEP_HOME` 前后文件与 mtime 不变；新增浏览器回归 `scripts/web_input_suggestion_test.cjs`（灰字出现、Tab 不发请求、打字与 Esc 放弃不复现、刷新不复现、`null` 不显示、英日两语提示）；`web_runtime_retry_fixture.mjs` 加 `complete` 模式与预测假回包。
+
+### Changed
+- `harness` 抽出 `resolve_parent_provider_config` 与 `auxiliary_providers`：会话主 Provider 与标题 / 预测候选的装配从 `build` 里拿出来，TUI 与 Web 共用一段，免得两处在某个档案上悄悄分叉。行为不变。
+- `willdeep-core` 新增 `input_suggestion::predict_first`（按顺序问候选、失败才换下一家），`Agent::suggest_next_input` 改为调它。
+- `docs/WEB_GUIDE.md`「Composer」与「JSON API」、`docs/WEB_RUNTIME_RETRY_QA.md`、`docs/EXPERIENCE_BASELINE.md` 第 19 项、`PRODUCT_OVERVIEW.md` 同步。
+
 ## [0.78.0-rc29] - 2026-09-21
 
 ### Added

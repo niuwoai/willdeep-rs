@@ -363,6 +363,10 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/rewind-points", get(rewind_points))
         .route("/api/sessions/{id}/rewind", post(rewind_session))
+        .route(
+            "/api/sessions/{id}/input-suggestion",
+            post(input_suggestion),
+        )
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/unarchive", post(unarchive_session))
         .route("/api/sessions/{id}/pin", post(pin_session))
@@ -1666,6 +1670,76 @@ fn event_uuid(message: &str, key: &str) -> Option<uuid::Uuid> {
     })
 }
 
+#[derive(Deserialize)]
+struct InputSuggestionRequest {
+    /// 前端发起时看到的那一轮；原样带回去，前端据此丢弃晚到的结果。
+    #[serde(default)]
+    turn_id: Option<uuid::Uuid>,
+}
+
+#[derive(Serialize)]
+struct InputSuggestionResponse {
+    suggestion: Option<String>,
+    turn_id: Option<uuid::Uuid>,
+}
+
+/// 轮次收尾后预测用户的下一句（与 TUI 同一契约，见 `input_suggestion` 模块）。
+///
+/// 预测是装饰：会话不存在、不在白名单、开关关着、会话还在跑、组不出正文、所有
+/// 候选 Provider 都失败——一律 200 + `null`，不许 5xx。只读会话文件，不写任何
+/// 东西，也不经 Runtime 协议；刷新页面后自然没有，这是有意的。
+async fn input_suggestion(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<InputSuggestionRequest>,
+) -> Json<InputSuggestionResponse> {
+    Json(InputSuggestionResponse {
+        suggestion: predict_session_input(&state, id).await,
+        turn_id: request.turn_id,
+    })
+}
+
+async fn predict_session_input(state: &WebState, id: uuid::Uuid) -> Option<String> {
+    let loaded = crate::config::LoadedConfig::load(Some(&state.config_path)).ok()?;
+    // 开关先看：关着就连会话文件和 Runtime 都不碰。
+    if !loaded.file.agent.input_suggestions.unwrap_or(true) {
+        return None;
+    }
+    let session = SessionStore::new(&state.home).load(id).ok()?;
+    if !workspace_allowed(state, &session.workspace).await.ok()? {
+        return None;
+    }
+    // 查不到 Runtime 状态时按「在跑」处理：宁可少一句预测，也不在轮次中途冒出来。
+    let running = crate::daemon::remote_session_states(&state.home)
+        .await
+        .map(|sessions| {
+            sessions
+                .iter()
+                .any(|entry| entry.id == id && entry.active_turn_id.is_some())
+        })
+        .unwrap_or(true);
+    let profile = session.profile.clone().or_else(|| state.profile.clone());
+    let model = session.model.clone();
+    suggest_for_session(&session.messages, running, || {
+        crate::harness::input_suggestion_providers(&loaded, profile.as_deref(), model)
+    })
+    .await
+}
+
+/// 与 I/O 无关的那一半，单测直接喂假 Provider。
+async fn suggest_for_session(
+    messages: &[willdeep_core::Message],
+    running: bool,
+    providers: impl FnOnce() -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>>,
+) -> Option<String> {
+    if running {
+        return None;
+    }
+    let payload = willdeep_core::input_suggestion::payload(messages)?;
+    let providers = providers().ok()?;
+    willdeep_core::input_suggestion::predict_first(&providers, &payload).await
+}
+
 fn latest_assistant_text(home: &std::path::Path, session_id: uuid::Uuid) -> Option<String> {
     SessionStore::new(home)
         .load(session_id)
@@ -2531,5 +2605,167 @@ mod tests {
         );
         let payload = runtime_output_payload(&output).unwrap();
         assert_eq!(payload["text"], "hello");
+    }
+
+    /// 下一句预测用的假 Provider：按脚本回答或失败，并数自己被问了几次。
+    struct ScriptedProvider {
+        reply: Option<&'static str>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl willdeep_core::provider::Provider for ScriptedProvider {
+        async fn complete(
+            &self,
+            _: &[willdeep_core::Message],
+            _: &[willdeep_core::types::ToolDefinition],
+        ) -> std::result::Result<
+            willdeep_core::types::Completion,
+            willdeep_core::provider::ProviderError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.reply {
+                Some(text) => Ok(willdeep_core::types::Completion {
+                    content: text.to_owned(),
+                    ..Default::default()
+                }),
+                None => Err(willdeep_core::provider::ProviderError::InvalidResponse(
+                    "scripted failure".to_owned(),
+                )),
+            }
+        }
+    }
+
+    fn scripted(
+        reply: Option<&'static str>,
+    ) -> (
+        Arc<dyn willdeep_core::provider::Provider>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Arc::new(ScriptedProvider {
+                reply,
+                calls: calls.clone(),
+            }),
+            calls,
+        )
+    }
+
+    fn finished_turn() -> Vec<willdeep_core::Message> {
+        vec![
+            willdeep_core::Message::user("把测试修好"),
+            willdeep_core::Message::assistant("测试已全部通过。要不要我提交？", Vec::new()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn suggestion_comes_from_the_first_provider_that_answers() {
+        let (failing, failing_calls) = scripted(None);
+        let (answering, _) = scripted(Some("提交并合回 develop"));
+        let suggestion =
+            suggest_for_session(&finished_turn(), false, || Ok(vec![failing, answering])).await;
+        assert_eq!(suggestion.as_deref(), Some("提交并合回 develop"));
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn every_provider_failing_is_a_quiet_null() {
+        let (first, _) = scripted(None);
+        let (second, _) = scripted(None);
+        let suggestion =
+            suggest_for_session(&finished_turn(), false, || Ok(vec![first, second])).await;
+        assert_eq!(suggestion, None);
+        // 装不出 Provider 也一样安静。
+        let suggestion = suggest_for_session(&finished_turn(), false, || {
+            Err(anyhow::anyhow!("no provider configured"))
+        })
+        .await;
+        assert_eq!(suggestion, None);
+    }
+
+    #[tokio::test]
+    async fn a_running_session_or_an_empty_payload_never_asks_a_provider() {
+        let (provider, calls) = scripted(Some("继续"));
+        let running =
+            suggest_for_session(&finished_turn(), true, || Ok(vec![provider.clone()])).await;
+        assert_eq!(running, None);
+        let only_user = vec![willdeep_core::Message::user("你好")];
+        let empty = suggest_for_session(&only_user, false, || Ok(vec![provider.clone()])).await;
+        assert_eq!(empty, None);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn suggestion_state(tag: &str, config: &str) -> (Arc<WebState>, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "willdeep-web-suggestion-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let config_path = root.join("config.toml");
+        std::fs::write(&config_path, config).unwrap();
+        let state = Arc::new(WebState {
+            config_path,
+            profile: None,
+            workspaces: Arc::new(std::sync::RwLock::new(Vec::new())),
+            home,
+            language: Language::default(),
+            harness_slots: Arc::new(Semaphore::new(1)),
+            settings_writable: false,
+            settings_write_lock: Mutex::new(()),
+        });
+        (state, root)
+    }
+
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(PathBuf, std::time::SystemTime)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                let modified = entry.metadata().unwrap().modified().unwrap();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                entries.push((path, modified));
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    #[tokio::test]
+    async fn the_endpoint_answers_null_with_200_and_writes_nothing_when_switched_off() {
+        let (state, root) = suggestion_state("off", "[agent]\ninput_suggestions = false\n");
+        let before = tree_snapshot(&root);
+        let turn_id = uuid::Uuid::new_v4();
+        let Json(response) = input_suggestion(
+            State(state),
+            Path(uuid::Uuid::new_v4()),
+            Json(InputSuggestionRequest {
+                turn_id: Some(turn_id),
+            }),
+        )
+        .await;
+        assert_eq!(response.suggestion, None);
+        assert_eq!(response.turn_id, Some(turn_id), "turn_id 原样带回");
+        assert_eq!(tree_snapshot(&root), before, "预测不落盘");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_session_is_null_not_an_error_and_writes_nothing() {
+        let (state, root) = suggestion_state("unknown", "");
+        let before = tree_snapshot(&root);
+        let Json(response) = input_suggestion(
+            State(state),
+            Path(uuid::Uuid::new_v4()),
+            Json(InputSuggestionRequest { turn_id: None }),
+        )
+        .await;
+        assert_eq!(response.suggestion, None);
+        assert_eq!(tree_snapshot(&root), before, "预测不落盘");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
