@@ -32,6 +32,8 @@ use willdeep_core::plugin::{
 };
 use willdeep_core::{Message, build_provider};
 
+use crate::plugin_theme::{PageColorScheme, theme_head};
+
 /// 插件自己的浏览器存储上限。游戏最高分、界面偏好这类东西，
 /// 256 KiB 绰绰有余；再大就该走插件自己的 MCP 服务落盘。
 const MAX_STORAGE_BYTES: usize = 256 * 1024;
@@ -1209,6 +1211,20 @@ struct StorageWrite {
     json: Option<Value>,
 }
 
+/// 页面地址上的查询参数。`colorScheme` 是父页面挂 iframe 时解析出的配色，
+/// 只决定首帧；之后的切换走桥里的 context 消息，不重载页面。
+#[derive(Deserialize)]
+struct PageQuery {
+    #[serde(default, rename = "colorScheme")]
+    color_scheme: Option<String>,
+}
+
+impl PageQuery {
+    fn scheme(&self) -> Option<PageColorScheme> {
+        PageColorScheme::parse(self.color_scheme.as_deref())
+    }
+}
+
 #[derive(Deserialize)]
 struct StorageQuery {
     #[serde(default)]
@@ -1532,9 +1548,16 @@ fn apply_sandbox_cors(response: &mut Response, headers: &HeaderMap) {
     }
 }
 
-/// 把宿主桥注入页面的 `<head>`。找不到 `<head>` 就自己包一层——
+/// 把宿主配色与宿主桥注入页面的 `<head>`。找不到 `<head>` 就自己包一层——
 /// 插件页面不一定是完整文档，MCP App 资源尤其常是个片段。
-fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
+///
+/// 配色排在最前面：页面自己的样式在后面，同特异性下后写的赢，插件想覆盖
+/// 宿主的基础规则照样覆盖得了。
+fn compose_page(
+    source: &str,
+    storage: &BTreeMap<String, String>,
+    scheme: Option<PageColorScheme>,
+) -> String {
     // 只把垫片自己的键注进快照：结构化存储走异步 API，塞进 localStorage
     // 快照只会让同名的两份数据互相打架。
     let shim: BTreeMap<&str, &str> = storage
@@ -1543,8 +1566,9 @@ fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     let storage_json = serde_json::to_string(&shim).unwrap_or_else(|_| "{}".to_owned());
+    let theme = theme_head(scheme);
     let bootstrap = format!(
-        "<script>window.__WILLDEEP_STORAGE__ = {storage_json};</script>\n<script>{BRIDGE_SCRIPT}</script>"
+        "{theme}\n<script>window.__WILLDEEP_STORAGE__ = {storage_json};</script>\n<script>{BRIDGE_SCRIPT}</script>"
     );
     let lowered = source.to_ascii_lowercase();
     if let Some(start) = lowered.find("<head")
@@ -1560,17 +1584,22 @@ fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
 async fn serve_plugin_page(
     State(state): State<Arc<PluginWebState>>,
     Path((plugin, page)): Path<(String, String)>,
+    Query(query): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Response, PluginWebError> {
     let source = state.host.read_page_resource(&plugin, &page).await?;
     let storage = read_storage(&state.home, &plugin);
-    Ok(html_response(compose_page(&source, &storage), &headers))
+    Ok(html_response(
+        compose_page(&source, &storage, query.scheme()),
+        &headers,
+    ))
 }
 
 /// localWeb 页面与它的包内资源。
 async fn serve_plugin_asset(
     State(state): State<Arc<PluginWebState>>,
     Path((plugin, path)): Path<(String, String)>,
+    Query(query): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Response, PluginWebError> {
     // 停用的插件连静态资源都不给：一个被停掉的插件不该还能在页面里活着。
@@ -1586,7 +1615,10 @@ async fn serve_plugin_asset(
         let source = String::from_utf8(bytes)
             .map_err(|_| PluginWebError::BadRequest("page is not valid UTF-8".to_owned()))?;
         let storage = read_storage(&state.home, &plugin);
-        return Ok(html_response(compose_page(&source, &storage), &headers));
+        return Ok(html_response(
+            compose_page(&source, &storage, query.scheme()),
+            &headers,
+        ));
     }
     let mut response = (
         StatusCode::OK,
@@ -1703,7 +1735,7 @@ mod tests {
     #[test]
     fn bootstrap_lands_inside_an_existing_head() {
         let page = "<!doctype html><html><head><title>x</title></head><body>hi</body></html>";
-        let composed = compose_page(page, &BTreeMap::new());
+        let composed = compose_page(page, &BTreeMap::new(), None);
         let head = composed.find("<head>").expect("head");
         let title = composed.find("<title>").expect("title");
         let bridge = composed.find("window.willdeep").expect("bridge");
@@ -1714,8 +1746,22 @@ mod tests {
     }
 
     #[test]
+    fn host_theme_lands_before_the_bridge_and_the_page_styles() {
+        let page = "<html><head><style>body{background:red}</style></head><body></body></html>";
+        let composed = compose_page(page, &BTreeMap::new(), Some(PageColorScheme::Light));
+        let theme = composed.find("willdeep-host-theme").expect("theme");
+        let bridge = composed.find("window.willdeep").expect("bridge");
+        let own = composed.find("background:red").expect("page style");
+        assert!(
+            theme < bridge && bridge < own,
+            "host theme must precede page styles"
+        );
+        assert!(composed.contains("setAttribute('data-willdeep-color-scheme', 'light')"));
+    }
+
+    #[test]
     fn fragments_without_a_head_are_wrapped() {
-        let composed = compose_page("<div>fragment</div>", &BTreeMap::new());
+        let composed = compose_page("<div>fragment</div>", &BTreeMap::new(), None);
         assert!(composed.starts_with("<!doctype html>"));
         assert!(composed.contains("window.willdeep"));
         assert!(composed.contains("<div>fragment</div>"));
@@ -1725,7 +1771,7 @@ mod tests {
     fn storage_snapshot_is_injected_for_the_shim() {
         let mut storage = BTreeMap::new();
         storage.insert("arcade.best.tetris".to_owned(), "4200".to_owned());
-        let composed = compose_page("<html><head></head><body></body></html>", &storage);
+        let composed = compose_page("<html><head></head><body></body></html>", &storage, None);
         assert!(composed.contains("__WILLDEEP_STORAGE__"));
         assert!(composed.contains("arcade.best.tetris"));
     }

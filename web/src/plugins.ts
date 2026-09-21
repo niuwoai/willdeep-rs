@@ -102,7 +102,7 @@ export type DestinationContext = {
   workspaceReference: string | null;
   sessionReference: string | null;
   locale: string;
-  colorScheme: string;
+  colorScheme: "light" | "dark";
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {

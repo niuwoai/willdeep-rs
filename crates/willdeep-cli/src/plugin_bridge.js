@@ -282,6 +282,12 @@
         break;
       case 'context':
         window.__WILLDEEP_CONTEXT__ = data.context || {};
+        // 宿主注入的两套 --willdeep-* 变量由这个属性选一套。切主题只改属性，
+        // 不重载页面——插件里填了一半的表单不该因为换了个配色就丢掉。
+        var scheme = window.__WILLDEEP_CONTEXT__.colorScheme;
+        if (scheme === 'light' || scheme === 'dark') {
+          document.documentElement.setAttribute('data-willdeep-color-scheme', scheme);
+        }
         window.dispatchEvent(
           new CustomEvent('willdeep:context-changed', { detail: window.__WILLDEEP_CONTEXT__ })
         );
