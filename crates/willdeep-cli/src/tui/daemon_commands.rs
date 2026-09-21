@@ -59,8 +59,10 @@ pub(super) fn dispatch(
 ) {
     tokio::spawn(async move {
         let progress_ui = ui.clone();
+        // 过程提示也进对话：升级前那句「这些等你处理的任务会被丢掉」只进状态行的话，
+        // 一闪就被下一条覆盖，等于没说。
         let report = move |line: String| {
-            let _ = progress_ui.send(UiMessage::RuntimeNotice(format!("System: {line}")));
+            let _ = progress_ui.send(UiMessage::RuntimeResult(format!("System: {line}")));
         };
         let result = run(command, &home, &report).await;
         let message = match result {
