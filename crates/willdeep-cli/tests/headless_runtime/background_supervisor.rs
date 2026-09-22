@@ -55,10 +55,8 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
             "timeout_seconds": 60
         }),
     );
-    // 20 秒是给 Windows PowerShell 冷启动（外层再嵌一个 powershell.exe）留的余量；
-    // 真正要钉的「断开后 5 秒内收掉」在下面单独断言。等不到时带上 supervisor 的输出，
-    // 分得清是慢还是命令本身出错。
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    // 等不到 PID 文件时带上 supervisor 的输出，分得清是慢还是命令本身出错。
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !child_pid_path.exists() {
         if std::time::Instant::now() >= deadline {
             drop(disconnected_liveness);
@@ -66,7 +64,7 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
                 .wait_with_output()
                 .expect("collect background supervisor output");
             panic!(
-                "supervised command wrote no PID file within 20s; supervisor exited {:?}\nstdout:\n{}\nstderr:\n{}",
+                "supervised command wrote no PID file within 5s; supervisor exited {:?}\nstdout:\n{}\nstderr:\n{}",
                 output.status.code(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -168,7 +166,7 @@ fn supervisor_wait_command() -> &'static str {
 
 #[cfg(windows)]
 fn supervisor_wait_command() -> &'static str {
-    "$child = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Set-Content -NoNewline supervisor-child.pid $child.Id; Wait-Process -Id $child.Id"
+    "$child = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Set-Content -Path supervisor-child.pid -Value $child.Id -NoNewline; Wait-Process -Id $child.Id"
 }
 
 #[cfg(unix)]
