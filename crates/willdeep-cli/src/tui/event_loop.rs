@@ -186,6 +186,37 @@ pub(super) async fn event_loop(
     );
     let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
+        // 面板里选中的工作区在这里才真正切：切换要动会话、Runtime 与事件跟随器，
+        // 按键分支里做不完，也不该在一次按键里做。
+        if let Some(id) = app.pending_workspace_switch.take() {
+            let previous_workspace = runtime.runtime_submit.workspace.clone();
+            match workspace_commands::switch(&mut app, session, store, runtime, &id.to_string())
+                .await
+            {
+                Ok(message) => {
+                    app.append_transcript(format!("System: {message}"));
+                    if runtime.runtime_submit.workspace != previous_workspace {
+                        while runtime_event_rx.try_recv().is_ok() {}
+                        _runtime_event_follower = crate::daemon::start_runtime_event_follower(
+                            runtime.home.clone(),
+                            app.runtime_event_cursor,
+                            runtime.runtime_submit.workspace.clone(),
+                            runtime_event_tx.clone(),
+                        );
+                    }
+                }
+                Err(error) => {
+                    app.notice = Some(format!(
+                        "{}: {error}",
+                        language.text(
+                            "切换工作区失败",
+                            "Workspace switch failed",
+                            "ワークスペースの切り替えに失敗"
+                        )
+                    ));
+                }
+            }
+        }
         if let Some(target) = app.pending_session_switch.take() {
             if app.running {
                 app.notice = Some(
@@ -417,6 +448,9 @@ pub(super) async fn event_loop(
                     } else if let Some(picker)=app.model_picker.as_mut() {
                         picker.editor.insert(&value);
                         app.refresh_model_picker_matches();
+                    } else if let Some(picker)=app.workspace_picker.as_mut() {
+                        picker.editor.insert(&value);
+                        app.refresh_workspace_picker_matches();
                     } else if let Some(picker)=app.session_picker.as_mut() {
                         picker.editor.insert(&value);
                         refresh_session_picker(&mut app,runtime,session).await;
@@ -456,6 +490,20 @@ pub(super) async fn event_loop(
                                         Ok(message)=>{app.model_picker=None;app.append_transcript(format!("System: {message}"));},
                                         Err(error)=>app.notice=Some(format!("{}: {error}",language.text("切换模型失败","Model switch failed","モデル切替に失敗"))),
                                     }
+                                }
+                            },
+                            _=>{},
+                        }
+                        continue;
+                    }
+                    if app.workspace_picker.is_some() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp=>app.workspace_picker_scroll(-1),
+                            MouseEventKind::ScrollDown=>app.workspace_picker_scroll(1),
+                            MouseEventKind::Down(MouseButton::Left)=>{
+                                if let Some(id)=app.activate_workspace_picker_at(mouse.column,mouse.row) {
+                                    app.workspace_picker=None;
+                                    app.pending_workspace_switch=Some(id);
                                 }
                             },
                             _=>{},
@@ -818,6 +866,17 @@ pub(super) async fn event_loop(
                         }
                         continue;
                     }
+                    if app.workspace_picker.is_some(){
+                        match app.handle_workspace_picker_key(key) {
+                            WorkspacePickerAction::None=>{},
+                            WorkspacePickerAction::Close=>app.workspace_picker=None,
+                            WorkspacePickerAction::Select(id)=>{
+                                app.workspace_picker=None;
+                                app.pending_workspace_switch=Some(id);
+                            },
+                        }
+                        continue;
+                    }
                     if app.session_picker.is_some(){
                         match app.handle_session_picker_key(key) {
                             SessionPickerAction::None=>{},
@@ -1093,6 +1152,11 @@ pub(super) async fn event_loop(
                                 },
                                 Ok(None)=>{},
                                 Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("打开历史会话面板失败","Open Session history panel failed","履歴セッションパネルを開けませんでした")));continue;},
+                            }
+                            match handle_new_session_command(&prompt,&mut app,session,store,runtime).await {
+                                Ok(true)=>continue,
+                                Ok(false)=>{},
+                                Err(error)=>{app.append_transcript(format!("Error: {}: {error}",language.text("开始新会话失败","Start new Session failed","新しいセッションの開始に失敗しました")));continue;},
                             }
                             // `/session retitle` 要 agent 与 UI 通道，落在这里而不是
                             // handle_session_command 里——摘要是网络往返，必须扔进后台任务。

@@ -469,9 +469,11 @@ fn write_from_checkpoint(
         std::fs::remove_file(&destination)?;
     }
     if mode == "120000" {
-        let target = PathBuf::from(String::from_utf8_lossy(&bytes).into_owned());
         #[cfg(unix)]
-        std::os::unix::fs::symlink(target, &destination)?;
+        std::os::unix::fs::symlink(
+            PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()),
+            &destination,
+        )?;
         #[cfg(not(unix))]
         std::fs::write(&destination, bytes)?;
         return Ok(true);

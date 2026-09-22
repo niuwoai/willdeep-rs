@@ -119,12 +119,16 @@ impl App {
             model_picker: None,
             model_picker_rect: Rect::default(),
             model_picker_hits: Vec::new(),
+            workspace_picker: None,
+            workspace_picker_rect: Rect::default(),
+            workspace_picker_hits: Vec::new(),
             permission_picker: None,
             approval_mode: willdeep_core::ApprovalMode::Smart,
             approval_synced_session: None,
             routing_settings: None,
             routing_settings_rect: Rect::default(),
             pending_session_switch: None,
+            pending_workspace_switch: None,
             transcript_rect: Rect::default(),
             command_rect: Rect::default(),
             command_hits: Vec::new(),
@@ -181,6 +185,7 @@ impl App {
         self.session_picker = None;
         self.rewind_picker = None;
         self.model_picker = None;
+        self.workspace_picker = None;
         self.pending_session_switch = None;
         self.attention_read = session.attention_read.clone();
         self.workspace = Some(session.workspace.clone());
@@ -1836,6 +1841,7 @@ impl App {
                 | "/local"
                 | "/mobile"
                 | "/model"
+                | "/new"
                 | "/routing"
                 | "/runtime"
                 | "/session"

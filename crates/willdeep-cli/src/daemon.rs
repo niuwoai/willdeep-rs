@@ -34,6 +34,7 @@ mod agent_store;
 pub(crate) use agent_store::{RuntimeAgent as StoredAgent, load_agents};
 mod approval_modes;
 mod control_api;
+mod detached_spawn;
 pub(crate) mod diff_review;
 mod event_stream;
 mod headless;
@@ -1578,7 +1579,7 @@ async fn start(home: &Path, announce: bool, report: DaemonProgress<'_>) -> Resul
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .env("WILLDEEP_DAEMON_LOCK_TOKEN", &lock.token);
-    configure_detached(&mut command);
+    detached_spawn::configure_detached(&mut command)?;
     let child = command.spawn().context("start Runtime Daemon")?;
 
     for _ in 0..50 {
@@ -2881,20 +2882,6 @@ fn private_options(options: &mut OpenOptions) {
 
 #[cfg(not(unix))]
 fn private_options(_options: &mut OpenOptions) {}
-
-#[cfg(unix)]
-fn configure_detached(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(windows)]
-fn configure_detached(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-}
 
 fn remove_stale_state(path: &Path) -> Result<()> {
     if path.exists() {

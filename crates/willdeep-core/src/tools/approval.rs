@@ -673,8 +673,14 @@ mod tests {
                 .expect("registry")
                 .with_safety_judge(Arc::new(CountingJudge(judged.clone()))),
         );
+        // Windows PowerShell 5.1 的 `>` 写出 UTF-16；这里要的只是「一条没归类的写命令」。
+        let write = if cfg!(windows) {
+            "Set-Content -Path out.txt -Value hi -NoNewline"
+        } else {
+            "printf hi > out.txt"
+        };
         registry
-            .execute(&command("printf hi > out.txt"))
+            .execute(&command(write))
             .await
             .expect("unclassified command runs without asking");
         assert_eq!(std::fs::read_to_string(root.join("out.txt")).unwrap(), "hi");

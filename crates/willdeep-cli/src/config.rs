@@ -920,9 +920,15 @@ context_window = 400000
 
     #[test]
     fn sandbox_settings_parse_and_relative_roots_are_rejected() {
-        let parsed: ConfigFile = toml::from_str(
-            "[agent]\nsandbox_network = \"deny\"\nsandbox_toolchain_caches = false\nsandbox_writable_roots = [\"~/.pyenv\", \"/opt/cache\"]\n",
-        )
+        // TOML 基本字符串里的反斜杠要转义；`/opt/cache` 在 Windows 上不算绝对路径。
+        let absolute_root = if cfg!(windows) {
+            r"C:\\opt\\cache"
+        } else {
+            "/opt/cache"
+        };
+        let parsed: ConfigFile = toml::from_str(&format!(
+            "[agent]\nsandbox_network = \"deny\"\nsandbox_toolchain_caches = false\nsandbox_writable_roots = [\"~/.pyenv\", \"{absolute_root}\"]\n",
+        ))
         .expect("parse sandbox keys");
         assert_eq!(parsed.agent.sandbox_network, Some(SandboxNetwork::Deny));
         assert_eq!(parsed.agent.sandbox_toolchain_caches, Some(false));

@@ -88,8 +88,9 @@ Workspace 策略由 Runtime 在任务入队时**覆盖客户端输入**。会话
 TUI 中：
 
 ```text
-/workspace list
-/workspace switch <WORKSPACE_ID>
+/workspace                       # 打开工作区面板：输入即过滤，↑/↓ 选，Enter 切换
+/workspace list                  # 打印注册表（含 Workspace ID）
+/workspace switch <WORKSPACE_ID|名称|路径>
 ```
 
 切换会保存当前 Session 的 Inbox 与事件游标，恢复目标 Workspace 的最近 Session（没有则创建），重启该 Workspace 的事件跟随并清空旧的右栏瞬态。Daemon 中旧 Workspace 的任务不受影响，继续运行。

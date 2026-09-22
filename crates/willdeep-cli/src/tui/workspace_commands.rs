@@ -14,21 +14,51 @@ pub(super) async fn handle_workspace_command(
     let arguments = value.strip_prefix("/workspace").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let result = match action {
-        "" | "list" if rest.trim().is_empty() => list(app, runtime).await?,
+        // 光秃秃的 `/workspace` 开面板。以前它打印一串 UUID，切换要人把 ID
+        // 从聊天记录里抄回输入框——列表不是选择，选中才是。
+        "" => return open_picker(app, session, runtime).await.map(|()| true),
+        "list" if rest.trim().is_empty() => list(app, runtime).await?,
         "switch" if !rest.trim().is_empty() => {
             switch(app, session, store, runtime, rest.trim()).await?
         }
         _ => app
             .language
             .text(
-                "用法：/workspace list | switch <工作区ID>",
-                "Usage: /workspace list | switch <workspace-id>",
-                "使用法：/workspace list | switch <ワークスペースID>",
+                "用法：/workspace（打开面板） | list | switch <工作区ID|名称|路径>",
+                "Usage: /workspace (opens the panel) | list | switch <workspace-id|name|path>",
+                "使用法：/workspace（パネルを開く） | list | switch <ワークスペースID|名前|パス>",
             )
             .to_owned(),
     };
     app.append_transcript(format!("System: {result}"));
     Ok(true)
+}
+
+/// 拉一次工作区清单并把面板支起来。拉取失败要说清楚，别开一个空面板让人
+/// 以为一个工作区都没注册。
+pub(super) async fn open_picker(
+    app: &mut App,
+    session: &Session,
+    runtime: &TuiRuntime,
+) -> Result<()> {
+    let workspaces = crate::daemon::remote_workspaces(&runtime.home).await?;
+    if workspaces.is_empty() {
+        app.append_transcript(format!(
+            "System: {}",
+            app.language.text(
+                "尚未注册工作区",
+                "No Workspaces are registered",
+                "ワークスペースはまだ登録されていません",
+            )
+        ));
+        return Ok(());
+    }
+    let current_root = session
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| session.workspace.clone());
+    app.open_workspace_picker(workspaces, current_root);
+    Ok(())
 }
 
 async fn list(app: &App, runtime: &TuiRuntime) -> Result<String> {
@@ -59,7 +89,7 @@ async fn list(app: &App, runtime: &TuiRuntime) -> Result<String> {
         .join("\n"))
 }
 
-async fn switch(
+pub(super) async fn switch(
     app: &mut App,
     session: &mut Session,
     store: &SessionStore,
@@ -69,12 +99,22 @@ async fn switch(
     if app.running {
         bail!("cannot switch Workspace while a turn is running");
     }
-    let id = uuid::Uuid::parse_str(id).context("invalid Workspace ID")?;
-    let workspace = crate::daemon::remote_workspaces(&runtime.home)
-        .await?
-        .into_iter()
-        .find(|workspace| workspace.id == id)
+    // ID、名称、路径都认。手敲的时候人记得住的是名字，ID 是面板和日志用的。
+    let workspaces = crate::daemon::remote_workspaces(&runtime.home).await?;
+    let parsed = uuid::Uuid::parse_str(id).ok();
+    let workspace = workspaces
+        .iter()
+        .find(|workspace| match parsed {
+            Some(parsed) => workspace.id == parsed,
+            None => {
+                workspace.name == id
+                    || workspace.root == std::path::Path::new(id)
+                    || workspace.root.to_string_lossy() == id
+            }
+        })
+        .cloned()
         .context("Runtime Workspace not found")?;
+    let id = workspace.id;
     if workspace.root == session.workspace.canonicalize()? {
         crate::daemon::activate_remote_workspace(&runtime.home, id).await?;
         return Ok(app

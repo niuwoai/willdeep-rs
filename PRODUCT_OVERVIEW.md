@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-21 | 当前版本：v0.81.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-22 | 当前版本：v0.81.0-rc5（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -117,6 +117,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 全局快捷键帮助、Prompt/聊天/活动/状态栏焦点高亮与状态行焦点提示；
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
+- TUI `/new`（别名 `/session new`）在当前工作区开一条不带历史的新会话：沿用当前 Provider、模型与配置，事件游标从 Runtime 事件流当前位置起读，旧会话留在磁盘上可经 `/history` 回去；`/clear` 仍只清空聊天显示，不动会话与上下文；
 - TUI 在轮次运行中不再吞掉回车：`/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` 立即执行，提示词与 `/local`、`/runtime` 连同附件排队并在本轮结束后按序发出，会改会话或 Runtime 状态的命令给出明确原因；`Esc` 中断当前轮次（Runtime 轮次交给 Daemon 排空，`/local` 轮次掐进程内 Harness），中断后队列立即续上；手机中继与键盘共用同一条队列；
 - TUI 审批与提问对话框按会话归属弹出：同一工作区开多个 TUI 时，别的会话的审批不再在这里弹出、也无法被就地解掉；无会话归属的任务（headless 提交）仍对所有客户端可解，Web 工作区视图维持原口径；记了发起端的审批弹回发起端，发起端退出后，同一种界面重开同一个会话也能接住，终端与浏览器之间互不代签；
 - Runtime 失败工具的原始参数与输出摘要经本机 `task.diagnostics` 提供，TUI Attention Inbox 详情直接显示退出码、失败域、失败原因、失败命令与输出；公共事件流（Web 桥接、手机中继）仍按原规则脱敏，写入日志前凭据打码且输出截断为有界首尾摘要；
@@ -178,7 +179,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Runtime 持久维护多 Workspace 注册表，提供注册、更新、列表、激活和保守移除 API/CLI；每项独立保存规范化根目录、访问策略、默认 Provider、Skill 与 MCP 允许列表，切换默认项不影响旧 Workspace 任务；
 - 审批档位与 macOS 版逐档对齐：`strict`、`smart`（默认，静态规则 + AI 判官）、`workspace-write`（工作区内写入与内核围栏内、不出工作区的命令免审，不请 AI）、`full-access`（除破坏性命令黑名单外免审）；TUI 用 `/permissions`（确认页防误开完全访问）或 Shift+Tab（只循环前三档）随时切换，对正在跑的 Runtime 轮次立即生效，`/permissions default` 写回配置，每次切换记审计；
 - Runtime 在任务入队时以服务端注册表覆盖客户端 Workspace 策略，会话选过的审批档位优先、`read_only` 工作区为硬上限；只读 Workspace 在审批前阻止 Shell、文件写入、Worktree、MCP 与 Editor 子 Agent，默认 Provider 和非空 Skill/MCP 允许列表进入同一 Harness；
-- TUI `/workspace list|switch <id>` 接入 Runtime 注册表；切换保存/恢复 Workspace 专属 Session 与事件游标，重启事件订阅、状态和 Skill 视图，不取消旧 Workspace 后台任务；启动时绑定旧路径的 `/local` 在跨 Workspace 后保守禁用；
+- TUI `/workspace` 打开工作区面板：一行一个工作区（名称与路径在前，ID 不占版面），当前工作区高亮且默认选中，输入即过滤（名称/路径/ID），↑/↓/PgUp/PgDn 选择，Enter 或鼠标点击原地切换，Esc 或点面板外关闭；`/workspace list` 仍输出含 ID 的文本清单，`/workspace switch <id|名称|路径>` 接入 Runtime 注册表；切换保存/恢复 Workspace 专属 Session 与事件游标，重启事件订阅、状态和 Skill 视图，不取消旧 Workspace 后台任务；启动时绑定旧路径的 `/local` 在跨 Workspace 后保守禁用；
 - Web 工作区 API/选择器改读 Runtime 注册表，并与服务启动时的路径白名单取交集；展示当前项与 read-only/smart/workspace-write 模式，Composer Skills 使用 Workspace 允许列表；默认 Workspace 内文件写入免审，Shell/MCP/网络仍按审批策略执行；
 - 内置 Editor 子 Agent 默认创建 `willdeep/agent-<id>` 专属 Git Worktree；已审批目标按根工作区相对路径映射，Runtime 持久显示实际目录、根目录和分支，Diff 归因在 Child Worktree 内采集，任务结束后保留供审查；
 - 子 Agent 完成报告结构化回流有界 Worktree 状态；Runtime/CLI/TUI 提供两阶段 Worktree Review 与显式合并，Review ID 同时绑定 Child/Root 快照和二进制补丁，任一侧变化即拒绝陈旧操作，同文件冲突、未跟踪内容、未解决冲突和超大补丁均阻断；

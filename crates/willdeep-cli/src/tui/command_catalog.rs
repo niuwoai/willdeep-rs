@@ -38,7 +38,7 @@ pub(super) fn help_text(language: Language) -> String {
 }
 
 /// 每条命令的用法签名。占位符随语言走，中文用户不该对着 `<task>` 猜要填什么。
-fn command_usages(language: Language) -> [(&'static str, &'static str); 24] {
+fn command_usages(language: Language) -> [(&'static str, &'static str); 25] {
     let descriptions = command_candidates(language);
     let usages = match language {
         Language::ZhCn => [
@@ -59,7 +59,8 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 24] {
             "/local <任务>",
             "/session <操作>",
             "/history [关键词]",
-            "/workspace list|switch <id>",
+            "/new",
+            "/workspace [list|switch <id>]",
             "/agent instruct <id> <文本>",
             "/diff",
             "/rewind",
@@ -85,7 +86,8 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 24] {
             "/local <task>",
             "/session <action>",
             "/history [query]",
-            "/workspace list|switch <id>",
+            "/new",
+            "/workspace [list|switch <id>]",
             "/agent instruct <id> <text>",
             "/diff",
             "/rewind",
@@ -111,7 +113,8 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 24] {
             "/local <タスク>",
             "/session <操作>",
             "/history [検索語]",
-            "/workspace list|switch <id>",
+            "/new",
+            "/workspace [list|switch <id>]",
             "/agent instruct <id> <テキスト>",
             "/diff",
             "/rewind",
@@ -134,7 +137,7 @@ fn command_usages(language: Language) -> [(&'static str, &'static str); 24] {
     std::array::from_fn(|index| (usages[index], descriptions[index].1))
 }
 
-pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 24] {
+pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static str); 25] {
     [
         (
             "/help",
@@ -266,11 +269,19 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
             ),
         ),
         (
+            "/new",
+            language.text(
+                "开始一条不带历史的新会话",
+                "Start a fresh Session with no history",
+                "履歴を引き継がない新しいセッションを開始",
+            ),
+        ),
+        (
             "/workspace",
             language.text(
-                "列出或切换 Runtime 工作区",
-                "List or switch Runtime Workspaces",
-                "Runtime ワークスペースの一覧・切替",
+                "打开工作区面板，选中即切换",
+                "Open the Workspace panel and switch by selecting",
+                "ワークスペースパネルを開き、選んで切替",
             ),
         ),
         (
@@ -307,7 +318,11 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         ),
         (
             "/clear",
-            language.text("清空聊天显示", "Clear chat display", "チャット表示を消去"),
+            language.text(
+                "清空聊天显示（历史仍在，换会话用 /new）",
+                "Clear the chat display (history stays; /new starts a Session)",
+                "チャット表示を消去（履歴は残る。新規は /new）",
+            ),
         ),
         (
             "/exit",
