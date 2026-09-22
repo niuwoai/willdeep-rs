@@ -14,7 +14,7 @@ use std::sync::{
 fn append_call(id: &str) -> ToolCall {
     ToolCall {
         id: id.into(), name: "run_command".into(),
-        arguments: serde_json::json!({"command": "ruby -e 'File.open(\"writes.log\", \"a\") { |f| f.write(\"once\\n\") }'"}).to_string(),
+        arguments: serde_json::json!({"command": "ruby -e 'File.open(%q(writes.log), %q(a)) { |f| f.write(%Q(once\\n)) }'"}).to_string(),
     }
 }
 

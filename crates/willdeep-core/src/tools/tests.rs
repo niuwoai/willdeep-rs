@@ -269,7 +269,15 @@ async fn an_observer_hook_sees_the_call_without_blocking_it() {
         .with_hooks(crate::hooks::HookRegistry::new(vec![crate::hooks::Hook {
             name: "audit".to_owned(),
             event: crate::hooks::HookEvent::PreTool,
-            command: format!("cat >> {}", log.display()),
+            // Windows 上 hook 走 PowerShell，那里的 `cat` 是 Get-Content，不读 stdin。
+            command: if cfg!(windows) {
+                format!(
+                    "[IO.File]::AppendAllText('{}', [Console]::In.ReadToEnd())",
+                    log.display()
+                )
+            } else {
+                format!("cat >> {}", log.display())
+            },
             blocking: false,
             timeout: std::time::Duration::from_secs(5),
             on_error: crate::hooks::HookFailure::Deny,
@@ -1469,11 +1477,18 @@ async fn a_successful_shell_wrapper_cannot_hide_a_failed_test() {
         .with_verification_reporter(move |record| sink.lock().unwrap().push(record));
     let baseline = tools.verification_baseline();
     std::fs::write(root.join("revision"), "after").unwrap();
+    // Windows PowerShell 5.1 没有 `||`；`; exit 0` 同样吞掉失败的退出码，也同样是带
+    // shell 运算符、不算测试证据的形状。
+    let masked = if cfg!(windows) {
+        "ruby test; exit 0"
+    } else {
+        "ruby test || true"
+    };
     tools
         .execute(&ToolCall {
             id: "masked-test".into(),
             name: "run_command".into(),
-            arguments: serde_json::json!({"command":"ruby test || true"}).to_string(),
+            arguments: serde_json::json!({ "command": masked }).to_string(),
         })
         .await
         .unwrap();

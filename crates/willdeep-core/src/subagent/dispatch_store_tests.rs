@@ -109,7 +109,7 @@ async fn foreground_recovery_tools_resume_once_then_return_cached_verified_repor
         .with_safety_judge(Arc::new(super::super::test_support::AllowingJudge))
     };
     let original = make();
-    let verifier = "ruby -e 'File.open(\"verified\", \"a\") { |file| file.write(\"x\") }'";
+    let verifier = "ruby -e 'File.open(%q(verified), %q(a)) { |file| file.write(%q(x)) }'";
     let mut execution = Box::pin(original.run(
         SpawnAgentArgs {
             profile: Some("implementer".into()),
