@@ -763,6 +763,14 @@ impl ClientError {
 mod tests {
     use super::*;
 
+    /// Unix socket 路径受 `sun_path` 长度限制（macOS 104 字节），macOS 的 `$TMPDIR`
+    /// 太长不能用；`/private/tmp` 又只在 macOS 存在。`/tmp` 两边都有且足够短。
+    #[cfg(unix)]
+    fn socket_test_root() -> std::path::PathBuf {
+        std::path::Path::new("/tmp")
+            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()))
+    }
+
     #[test]
     fn exposes_http_status_for_transport_diagnostics() {
         let invalid = ClientError::InvalidResponse {
@@ -779,8 +787,7 @@ mod tests {
     async fn sends_http_requests_over_a_unix_socket() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let root = std::path::Path::new("/private/tmp")
-            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        let root = socket_test_root();
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("control.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -858,8 +865,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         }
 
-        let root = std::path::Path::new("/private/tmp")
-            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        let root = socket_test_root();
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("control.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -990,8 +996,7 @@ mod tests {
     async fn typed_tool_list_uses_the_stable_operation_and_decodes_dto() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let root = std::path::Path::new("/private/tmp")
-            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        let root = socket_test_root();
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("control.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -1078,8 +1083,7 @@ mod tests {
     async fn typed_tool_get_decodes_a_direct_object_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let root = std::path::Path::new("/private/tmp")
-            .join(format!("willdeep-runtime-client-{}", uuid::Uuid::new_v4()));
+        let root = socket_test_root();
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("control.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();

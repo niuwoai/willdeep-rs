@@ -53,6 +53,9 @@ pub(super) async fn response(
     axum::Json(value).into_response()
 }
 
+/// 仅 Unix：中断控制器 `agent_eval_process.rb` 依赖 POSIX 进程组，见
+/// `local_interrupted_write_resumes_without_replay`。
+#[cfg(unix)]
 #[test]
 fn interrupted_foreground_child_is_discovered_resumed_and_reported_without_replay() {
     let _serial = process_test_guard();

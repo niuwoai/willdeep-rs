@@ -10,9 +10,13 @@ permissions:
 jobs:
   test:
     strategy:
+      # 各平台独立出结果：一个平台失败不连带取消其余平台，否则看不到它们各自的问题。
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # 卡住的测试 1 小时内失败，不空等 GitHub 缺省的 6 小时。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,6 +41,12 @@ jobs:
       - name: Hand-maintained file size boundary
         if: runner.os == 'Linux'
         run: ruby scripts/check_source_size.rb
+      - name: Keep Git line endings byte-exact on Windows
+        # runner 镜像沿用 Git for Windows 的缺省 core.autocrlf=true：测试建的仓库（以及
+        # handoff 由产品代码 clone 出的接收端）检出时 LF 被改成 CRLF，逐字节比对恢复
+        # 结果的断言就失败。测试要的是不改行尾的 git，在这里给出这个环境。
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - name: Test
         run: cargo test --workspace
       - name: Clippy
@@ -58,10 +68,18 @@ jobs:
 
   linux-architectures:
     name: Linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    # 每个架构跑在同架构的原生 runner 上。aarch64 以前在 x86 上走 cross 容器（Ubuntu 16.04，
+    # git 2.7），不认 `git init -b`、`git status --porcelain=v1`，测试环境比产品要求的 git 还老。
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

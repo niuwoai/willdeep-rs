@@ -61,10 +61,32 @@ pub(super) fn remove_if_owned(path: &Path) {
 #[cfg(windows)]
 pub(super) fn remove_if_owned(_path: &Path) {}
 
+/// 同时挂着等连接的管道实例数。
+///
+/// Named Pipe 的每个实例只服务一个客户端。客户端连上时如果没有空闲实例，拿到的是
+/// `ERROR_PIPE_BUSY`，reqwest 的 Named Pipe 连接器不重试，直接报「error sending
+/// request」。以前只挂一个实例、等它被连上后才建下一个，中间那段空窗里的并发连接
+/// （事件流 + 状态查询 + 正在跑的 turn）就会随机失败。始终预留几个等待中的实例，
+/// 一个被占用时其余的还能接住，同时补建一个。
+#[cfg(windows)]
+const PIPE_INSTANCE_BACKLOG: usize = 4;
+
+#[cfg(windows)]
+type PendingPipe = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    tokio::net::windows::named_pipe::NamedPipeServer,
+                    std::io::Result<()>,
+                ),
+            > + Send,
+    >,
+>;
+
 #[cfg(windows)]
 pub(super) struct WindowsNamedPipeListener {
     name: std::ffi::OsString,
-    server: tokio::net::windows::named_pipe::NamedPipeServer,
+    pending: futures_util::stream::FuturesUnordered<PendingPipe>,
 }
 
 #[cfg(windows)]
@@ -73,21 +95,38 @@ impl WindowsNamedPipeListener {
         use tokio::net::windows::named_pipe::ServerOptions;
 
         let name = name.into();
-        let server = ServerOptions::new()
+        // 第一个实例带 first_pipe_instance：同名管道已被别人占着时直接失败，不和它共用。
+        let first = ServerOptions::new()
             .first_pipe_instance(true)
             .reject_remote_clients(true)
             .create(&name)?;
-        Ok(Self { name, server })
+        let mut listener = Self {
+            name,
+            pending: futures_util::stream::FuturesUnordered::new(),
+        };
+        listener.pending.push(Self::wait_for_client(first));
+        listener.refill()?;
+        Ok(listener)
     }
 
-    fn next(
-        name: &std::ffi::OsStr,
-    ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    fn wait_for_client(server: tokio::net::windows::named_pipe::NamedPipeServer) -> PendingPipe {
+        Box::pin(async move {
+            let connected = server.connect().await;
+            (server, connected)
+        })
+    }
+
+    /// 把等待中的实例补回 [`PIPE_INSTANCE_BACKLOG`] 个。
+    fn refill(&mut self) -> std::io::Result<()> {
         use tokio::net::windows::named_pipe::ServerOptions;
 
-        ServerOptions::new()
-            .reject_remote_clients(true)
-            .create(name)
+        while self.pending.len() < PIPE_INSTANCE_BACKLOG {
+            let server = ServerOptions::new()
+                .reject_remote_clients(true)
+                .create(&self.name)?;
+            self.pending.push(Self::wait_for_client(server));
+        }
+        Ok(())
     }
 }
 
@@ -97,20 +136,30 @@ impl axum::serve::Listener for WindowsNamedPipeListener {
     type Addr = String;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        use futures_util::StreamExt;
+
         loop {
-            if let Err(error) = self.server.connect().await {
-                eprintln!("accept Runtime Named Pipe connection: {error}");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
+            if let Err(error) = self.refill() {
+                eprintln!("create Runtime Named Pipe instance: {error}");
+                if self.pending.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
             }
-            match Self::next(&self.name) {
-                Ok(next) => {
-                    let connected = std::mem::replace(&mut self.server, next);
-                    return (connected, self.name.to_string_lossy().into_owned());
+            let Some((server, connected)) = self.pending.next().await else {
+                continue;
+            };
+            match connected {
+                Ok(()) => {
+                    // 先补一个新实例，再把这个交出去：交出之后到下一次 accept 之间，
+                    // 等待中的实例数不低于 backlog - 1。
+                    if let Err(error) = self.refill() {
+                        eprintln!("create Runtime Named Pipe instance: {error}");
+                    }
+                    return (server, self.name.to_string_lossy().into_owned());
                 }
                 Err(error) => {
-                    eprintln!("create next Runtime Named Pipe instance: {error}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    eprintln!("accept Runtime Named Pipe connection: {error}");
                 }
             }
         }

@@ -11,6 +11,8 @@ use futures_util::StreamExt;
 
 #[path = "headless_runtime/automatic_compression.rs"]
 mod automatic_compression;
+#[path = "headless_runtime/background_supervisor.rs"]
+mod background_supervisor;
 #[path = "headless_runtime/detached_background.rs"]
 mod detached_background;
 #[path = "headless_runtime/foreground_recovery.rs"]
@@ -1386,6 +1388,9 @@ fn local_compression_bridge_preserves_seeded_constraint_then_resumes() {
     );
 }
 
+/// 中断控制器是 `scripts/lib/agent_eval_process.rb`：进程组、fd 3/4 私有管道、
+/// 按组 KILL 都只有 POSIX 有，评测脚本本身也只在 Linux 上跑。
+#[cfg(unix)]
 #[test]
 fn local_interrupted_write_resumes_without_replay() {
     let _serial = process_test_guard();
@@ -1862,168 +1867,6 @@ fn daemon_restart_recovers_persisted_execution_resources_exactly_once() {
         );
     }
     guard.stop_daemon();
-}
-
-#[test]
-fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
-    let _serial = process_test_guard();
-    let root = temporary_root();
-    let home = root.join("home");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&home).expect("create test home");
-    std::fs::create_dir_all(&workspace).expect("create test Workspace");
-
-    let rejected = willdeep(&home)
-        .args(["daemon", "background-supervisor"])
-        .env_remove("WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR")
-        .output()
-        .expect("invoke untrusted background supervisor");
-    assert!(!rejected.status.success());
-    assert!(
-        String::from_utf8_lossy(&rejected.stderr)
-            .contains("background supervisor is an internal command")
-    );
-
-    let mut completed = spawn_background_supervisor(&home);
-    let completed_liveness = send_supervisor_request(
-        &mut completed,
-        serde_json::json!({
-            "command": supervisor_print_command(),
-            "sandbox": { "policy": "Off", "writable_roots": [] },
-            "workspace": workspace,
-            "timeout_seconds": 10
-        }),
-    );
-    let completed = completed
-        .wait_with_output()
-        .expect("wait for completed background supervisor");
-    drop(completed_liveness);
-    assert_success(&completed, "completed background supervisor");
-    let completed: serde_json::Value =
-        serde_json::from_slice(&completed.stdout).expect("parse completed supervisor result");
-    assert_eq!(completed["status"], "completed");
-    assert!(
-        completed["output"]
-            .as_str()
-            .is_some_and(|value| value.contains("supervisor-ok"))
-    );
-
-    let mut disconnected = spawn_background_supervisor(&home);
-    let child_pid_path = workspace.join("supervisor-child.pid");
-    let disconnected_liveness = send_supervisor_request(
-        &mut disconnected,
-        serde_json::json!({
-            "command": supervisor_wait_command(),
-            "sandbox": { "policy": "Off", "writable_roots": [] },
-            "workspace": workspace,
-            "timeout_seconds": 60
-        }),
-    );
-    wait_until(Duration::from_secs(5), || child_pid_path.exists());
-    let child_pid = std::fs::read_to_string(&child_pid_path)
-        .expect("read supervised child PID")
-        .parse::<u32>()
-        .expect("parse supervised child PID");
-    let started = std::time::Instant::now();
-    drop(disconnected_liveness);
-    let disconnected = disconnected
-        .wait_with_output()
-        .expect("wait for disconnected background supervisor");
-    assert_success(&disconnected, "disconnected background supervisor");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "parent disconnect must not wait for the 30 second Shell command"
-    );
-    let disconnected: serde_json::Value =
-        serde_json::from_slice(&disconnected.stdout).expect("parse disconnected result");
-    assert_eq!(disconnected["status"], "killed");
-    #[cfg(unix)]
-    wait_until(Duration::from_secs(5), || !process_exists(child_pid));
-    std::fs::remove_dir_all(root).expect("remove supervisor test root");
-}
-
-#[cfg(unix)]
-#[test]
-fn background_supervisor_applies_read_only_sandbox() {
-    let _serial = process_test_guard();
-    let root = temporary_root();
-    let home = root.join("home");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&workspace).unwrap();
-    let mut child = spawn_background_supervisor(&home);
-    let liveness = send_supervisor_request(
-        &mut child,
-        serde_json::json!({
-            "command": "touch sandbox-must-not-write",
-            "workspace": workspace,
-            "timeout_seconds": 10,
-            "sandbox": { "policy": "ReadOnly", "writable_roots": [] }
-        }),
-    );
-    let output = child.wait_with_output().unwrap();
-    drop(liveness);
-    assert_success(&output, "read-only supervisor result");
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_ne!(result["status"], "completed");
-    assert!(!workspace.join("sandbox-must-not-write").exists());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-fn spawn_background_supervisor(home: &Path) -> std::process::Child {
-    willdeep(home)
-        .args(["daemon", "background-supervisor"])
-        .env("WILLDEEP_INTERNAL_BACKGROUND_SUPERVISOR", "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn background supervisor")
-}
-
-fn send_supervisor_request(
-    child: &mut std::process::Child,
-    request: serde_json::Value,
-) -> std::process::ChildStdin {
-    let payload = serde_json::to_vec(&request).expect("serialize supervisor request");
-    let mut input = child.stdin.take().expect("background supervisor stdin");
-    input
-        .write_all(&u32::try_from(payload.len()).unwrap().to_be_bytes())
-        .expect("write supervisor request length");
-    input.write_all(&payload).expect("write supervisor request");
-    input.flush().expect("flush supervisor request");
-    input
-}
-
-#[cfg(unix)]
-fn supervisor_print_command() -> &'static str {
-    "printf supervisor-ok"
-}
-
-#[cfg(windows)]
-fn supervisor_print_command() -> &'static str {
-    "Write-Output 'supervisor-ok'"
-}
-
-#[cfg(unix)]
-fn supervisor_wait_command() -> &'static str {
-    "sleep 30 & child=$!; printf '%s' \"$child\" > supervisor-child.pid; wait \"$child\""
-}
-
-#[cfg(windows)]
-fn supervisor_wait_command() -> &'static str {
-    "$child = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Set-Content -NoNewline supervisor-child.pid $child.Id; Wait-Process -Id $child.Id"
-}
-
-#[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
-    std::process::Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 fn persisted_agent(
@@ -2854,8 +2697,11 @@ impl MockProvider {
 
 #[derive(Clone, Copy)]
 enum MockMode {
+    // 这两种只给经 `scripts/lib/agent_eval_process.rb` 中断的测试用，那两条仅 Unix。
+    #[cfg_attr(not(unix), allow(dead_code))]
     ForegroundRecovery,
     WaitRootsForRecoveredChild,
+    #[cfg_attr(not(unix), allow(dead_code))]
     CheckpointThenWait,
     DelegateThenSuccess,
     WaitRootThenRetryChild,
@@ -2870,6 +2716,7 @@ enum MockMode {
     /// 第一轮起一条 `run_in_background` 命令，之后正常收尾。
     BackgroundJobThenSuccess,
     /// 第一轮起一个 `monitor`，之后正常收尾。
+    #[cfg_attr(not(unix), allow(dead_code))]
     MonitorThenSuccess,
 }
 

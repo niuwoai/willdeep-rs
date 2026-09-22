@@ -458,6 +458,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 把 hook 的 stdin 原样写进 `path`。Windows 上 hook 走 PowerShell，那里的 `cat`
+    /// 是 Get-Content、不读 stdin——照搬 `cat >` 只会写出空文件，断言要么失败，要么
+    /// 像「凭据没进 hook」那样空洞地通过。
+    fn capture_stdin_command(path: &std::path::Path) -> String {
+        if cfg!(windows) {
+            format!(
+                "[IO.File]::WriteAllText('{}', [Console]::In.ReadToEnd())",
+                path.display()
+            )
+        } else {
+            format!("cat > {}", path.display())
+        }
+    }
+
     #[tokio::test]
     async fn the_payload_reaches_the_hook_on_stdin() {
         let root = std::env::temp_dir().join(format!("willdeep-hook-{}", uuid::Uuid::new_v4()));
@@ -467,7 +481,7 @@ mod tests {
         let registry = HookRegistry::new(vec![hook(
             "audit",
             HookEvent::PreTool,
-            &format!("cat > {}", captured.display()),
+            &capture_stdin_command(&captured),
         )]);
         registry.fire(HookEvent::PreTool, &payload()).await;
 
@@ -493,7 +507,7 @@ mod tests {
         let registry = HookRegistry::new(vec![hook(
             "audit",
             HookEvent::PreTool,
-            &format!("cat > {}", captured.display()),
+            &capture_stdin_command(&captured),
         )]);
         registry.fire(HookEvent::PreTool, &secret).await;
 

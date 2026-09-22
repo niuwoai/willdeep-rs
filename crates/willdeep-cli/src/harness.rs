@@ -1702,23 +1702,24 @@ mod tests {
                 return;
             }
             let scratch = GitScratch::new("submodule");
-            let upstream = scratch.repo("upstream");
+            scratch.repo("upstream");
             let parent = scratch.repo("parent");
+            // 相对路径：Windows 上 canonicalize 得到的 `\\?\` 路径 git 不认；没有 remote 时
+            // 相对 URL 按超级项目目录解析。期望路径逐段 join：verbatim 路径里 `/` 不是分隔符。
             scratch.git(
                 &parent,
-                &[
-                    "submodule",
-                    "add",
-                    "-q",
-                    upstream.to_str().unwrap(),
-                    "sdk/python",
-                ],
+                &["submodule", "add", "-q", "../upstream", "sdk/python"],
             );
-            let module = parent.join("sdk/python");
+            let module = parent.join("sdk").join("python");
+            let git_dir = parent
+                .join(".git")
+                .join("modules")
+                .join("sdk")
+                .join("python");
             let dirs = external_git_dirs(&module);
-            assert_eq!(dirs, vec![parent.join(".git/modules/sdk/python")]);
+            assert_eq!(dirs, vec![git_dir.clone()]);
             let roots = sandbox_roots(&crate::config::AgentSettings::default(), &module);
-            assert!(roots.contains(&parent.join(".git/modules/sdk/python")));
+            assert!(roots.contains(&git_dir));
         }
 
         #[test]
@@ -1729,11 +1730,15 @@ mod tests {
             let scratch = GitScratch::new("worktree");
             let main = scratch.repo("main");
             let tree = scratch.0.join("tree");
-            scratch.git(&main, &["worktree", "add", "-q", tree.to_str().unwrap()]);
+            // 相对路径与逐段 join 的原因同上一条。
+            scratch.git(&main, &["worktree", "add", "-q", "../tree"]);
             let dirs = external_git_dirs(&tree);
             assert_eq!(
                 dirs,
-                vec![main.join(".git/worktrees/tree"), main.join(".git")]
+                vec![
+                    main.join(".git").join("worktrees").join("tree"),
+                    main.join(".git")
+                ]
             );
         }
 
