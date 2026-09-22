@@ -1,12 +1,14 @@
 # Changelog
 
-## [0.81.0-rc4] - 2026-09-21
+## [0.81.0-rc5] - 2026-09-22
 
 ### Added
 - **`/new`：在当前工作区开一条不带历史的新会话。** 此前只有 `/clear`，而它只是把屏幕上的记录擦掉——会话、上下文、token 账都原封不动地留在后面，下一句话照样带着全部历史发出去；想真正从头开始，只能退出 TUI 重开。`/new` 换的是会话本身：Provider、模型与配置沿用当前会话（换的是上下文，不是设置），事件游标从 Runtime 事件流的当前位置起读（否则新会话一开就把上一条的事件重放一遍），旧会话原样留在磁盘上，`/history` 随时回得去。`/session new` 是同一条路径的别名。`/clear` 的帮助文案也改口，不再让人以为它清掉了上下文。
 
 ### Changed
 - **`/workspace` 改成面板，选中即切换。** 以前它把注册表打印成一串 `UUID · 名称 · 档位 · 路径`，要切过去得把 36 位 UUID 从聊天记录里抄回输入框再拼一条 `/workspace switch <id>`——列表不是选择。现在光秃秃的 `/workspace` 打开工作区面板：一行一个工作区，名字和路径在前（ID 不再占版面），当前工作区高亮且光标默认落在它身上，输入即过滤（名称、路径、ID 都参与匹配），↑/↓/PgUp/PgDn 选，`Enter` 原地切换，`Esc` 或点面板外关掉，鼠标点行也能选——与 `/history` 面板同一套交互。`/workspace list` 仍打印文本清单（要 ID 的场合还得靠它），`/workspace switch` 除 ID 外现在也认名称和路径。切换本身仍走原来那条路：保存当前会话、恢复或新建目标工作区的会话、重建 Runtime 事件跟随器。
+
+## [0.81.0-rc4] - 2026-09-21
 
 ### Fixed
 - **Windows 版 `willdeep run` 一进 headless 路径就栈溢出崩溃（`0xC00000FD`）。** Windows 主线程缺省栈只有 1 MiB，`#[tokio::main]` 在主线程上 `block_on` 的顶层 future 放不下；Linux / macOS 主线程是 8 MiB，所以只在 Windows 出现。以前 Windows CI 在更早的单元测试就挂了，从没跑到 `headless_runtime` 集成测试，这个问题一直没暴露。`crates/willdeep-cli/build.rs` 给 Windows 目标的可执行文件把主线程栈设为 8 MiB（msvc 用 `/STACK`，gnu 用 `--stack`），和另外两个平台对齐；交叉链接出的 exe `SizeOfStackReserve` 为 `0x800000`。
