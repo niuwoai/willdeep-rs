@@ -464,7 +464,7 @@ mod tests {
     fn capture_stdin_command(path: &std::path::Path) -> String {
         if cfg!(windows) {
             format!(
-                "[IO.File]::WriteAllText({}, [Console]::In.ReadToEnd())",
+                "[IO.File]::WriteAllText('{}', [Console]::In.ReadToEnd())",
                 path.display()
             )
         } else {
