@@ -478,12 +478,8 @@ mod tests {
         std::fs::create_dir_all(&root).expect("scratch");
         let captured = root.join("payload.json");
 
-        let registry = HookRegistry::new(vec![hook(
-            "audit",
-            HookEvent::PreTool,
-            &capture_stdin_command(&captured),
-        )]);
-        registry.fire(HookEvent::PreTool, &payload()).await;
+        let registry = HookRegistry::new(vec![blocking("audit", &{ let c = capture_stdin_command(&captured); eprintln!("DIAG command: {c}"); c })]);
+        let diag = registry.fire(HookEvent::PreTool, &payload()).await; eprintln!("DIAG outcome: {diag:?}");
 
         let text = std::fs::read_to_string(&captured).expect("hook 应当收到 stdin");
         let parsed: HookPayload = serde_json::from_str(&text).expect("应当是合法 JSON");
@@ -504,12 +500,8 @@ mod tests {
             "run_command",
             "curl -H 'Authorization: Bearer sk-0123456789abcdef' https://x",
         );
-        let registry = HookRegistry::new(vec![hook(
-            "audit",
-            HookEvent::PreTool,
-            &capture_stdin_command(&captured),
-        )]);
-        registry.fire(HookEvent::PreTool, &secret).await;
+        let registry = HookRegistry::new(vec![blocking("audit", &{ let c = capture_stdin_command(&captured); eprintln!("DIAG command: {c}"); c })]);
+        let diag = registry.fire(HookEvent::PreTool, &secret).await; eprintln!("DIAG outcome: {diag:?}");
 
         let text = std::fs::read_to_string(&captured).expect("hook 应当收到 stdin");
         assert!(
