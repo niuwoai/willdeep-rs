@@ -1,120 +1,37 @@
 name: CI
 
+# 诊断分支专用：Windows 上的 hook stdin 捕获。不合入。
+
 on:
   push:
-  pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    strategy:
-      # 各平台独立出结果：一个平台失败不连带取消其余平台，否则看不到它们各自的问题。
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    # 卡住的测试 1 小时内失败，不空等 GitHub 缺省的 6 小时。
+  windows-hooks:
+    runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: yarn
-          cache-dependency-path: web/yarn.lock
-      - name: Build embedded Web frontend
-        working-directory: web
-        run: yarn install --frozen-lockfile && yarn build
-      - name: Lint Web frontend
-        if: runner.os == 'Linux'
-        working-directory: web
-        run: yarn lint
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
-          components: rustfmt, clippy
-      - name: Format
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-      - name: Hand-maintained file size boundary
-        if: runner.os == 'Linux'
-        run: ruby scripts/check_source_size.rb
-      - name: Keep Git line endings byte-exact on Windows
-        # runner 镜像沿用 Git for Windows 的缺省 core.autocrlf=true：测试建的仓库（以及
-        # handoff 由产品代码 clone 出的接收端）检出时 LF 被改成 CRLF，逐字节比对恢复
-        # 结果的断言就失败。测试要的是不改行尾的 git，在这里给出这个环境。
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-      - name: Test
-        run: cargo test --workspace
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Model eval task set self-check
-        if: runner.os == 'Linux'
-        run: ruby scripts/test/model_eval_test.rb && ruby scripts/model_eval.rb --check-tasks
-      - name: Agent metrics publish self-check
-        if: runner.os == 'Linux'
-        run: ruby scripts/test/agent_metrics_test.rb
-      - name: CI samples parse
-        if: runner.os == 'Linux'
-        # 块标量：命令里的 `aliases: true` 放进普通标量会被 YAML 当成映射，整份工作流解析失败、一个 job 都不起。
+      - name: Probe the capture command directly
+        run: python .github/diag/hook_probe.py
+      - name: Build core tests
+        run: cargo test -p willdeep-core --lib --no-run
+      - name: Hook tests serially x3
+        continue-on-error: true
+        shell: pwsh
         run: |
-          bash -n examples/ci/run-task.sh && ruby -ryaml -e 'ARGV.each { |path| YAML.safe_load_file(path, aliases: true); puts "ok #{path}" }' examples/ci/github-actions.yml examples/ci/gitlab-ci.yml
-      - name: SDK crates package
-        if: runner.os == 'Linux'
-        run: cargo publish --dry-run --locked -p willdeep-runtime-protocol -p willdeep-runtime-client
-
-  linux-architectures:
-    name: Linux ${{ matrix.target }}
-    # 每个架构跑在同架构的原生 runner 上。aarch64 以前在 x86 上走 cross 容器（Ubuntu 16.04，
-    # git 2.7），不认 `git init -b`、`git status --porcelain=v1`，测试环境比产品要求的 git 还老。
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: yarn
-          cache-dependency-path: web/yarn.lock
-      - name: Build embedded Web frontend
-        working-directory: web
-        run: yarn install --frozen-lockfile && yarn build
-      - uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: test
-          target: ${{ matrix.target }}
-          args: --locked --workspace
-
-  wsl-smoke:
-    name: WSL ABI smoke test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: yarn
-          cache-dependency-path: web/yarn.lock
-      - name: Build embedded Web frontend
-        working-directory: web
-        run: yarn install --frozen-lockfile && yarn build
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.1
-      - name: Build the Linux x86_64 binary consumed by WSL 2
-        run: cargo build --locked --release --target x86_64-unknown-linux-gnu -p willdeep
-      - name: Smoke test executable and ELF ABI
+          foreach ($i in 1..3) {
+            cargo test -q -p willdeep-core --lib -- hooks:: an_observer_hook --test-threads=1 2>&1 | Select-String -Pattern 'test result|FAILED|panicked|hook'
+          }
+      - name: Whole core lib in parallel x2
+        continue-on-error: true
+        shell: pwsh
         run: |
-          target/x86_64-unknown-linux-gnu/release/willdeep --version
-          file target/x86_64-unknown-linux-gnu/release/willdeep | grep 'ELF 64-bit LSB'
+          foreach ($i in 1..2) {
+            cargo test -q -p willdeep-core --lib 2>&1 | Select-String -Pattern 'test result|FAILED|panicked'
+          }
