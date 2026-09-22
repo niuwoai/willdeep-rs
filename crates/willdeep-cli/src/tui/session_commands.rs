@@ -33,6 +33,74 @@ pub(super) fn parse_session_picker_command(prompt: &str) -> Result<Option<Sessio
     Ok(Some(SessionPickerRequest { query, filters }))
 }
 
+/// `/new`：在当前工作区开一条空会话。
+///
+/// 和 `/clear` 不是一回事——`/clear` 只是把屏幕上的记录擦掉，会话与上下文
+/// 原封不动地留在后面，下一句话仍然带着全部历史。这里换的是会话本身。
+pub(super) async fn handle_new_session_command(
+    prompt: &str,
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &mut TuiRuntime,
+) -> Result<bool> {
+    if prompt.trim() != "/new" {
+        return Ok(false);
+    }
+    let message = start_new(app, session, store, runtime).await?;
+    app.append_transcript(format!("System: {message}"));
+    Ok(true)
+}
+
+pub(super) async fn start_new(
+    app: &mut App,
+    session: &mut Session,
+    store: &SessionStore,
+    runtime: &mut TuiRuntime,
+) -> Result<String> {
+    if app.running {
+        bail!("cannot start a new Session while a turn is running");
+    }
+    session.attention_read = app.attention_read.clone();
+    session.runtime_event_cursor = app.runtime_event_cursor;
+    store.save(session)?;
+    // Provider、模型与配置沿用当前会话：换的是上下文，不是设置。
+    let mut target = Session::new(session.workspace.clone(), session.profile.clone(), "");
+    target.model = session.model.clone();
+    target.config = session.config.clone();
+    target.runtime_managed = true;
+    // 从事件流的当前位置起读，否则新会话一开就把上一条会话的事件重放一遍。
+    target.runtime_event_cursor = crate::daemon::runtime_event_head(&runtime.home)
+        .await
+        .unwrap_or(app.runtime_event_cursor);
+    store.save(&mut target)?;
+    crate::daemon::ensure_runtime_session(
+        &runtime.home,
+        target.id,
+        &target.workspace,
+        target.profile.clone(),
+        target.model.clone(),
+    )
+    .await?;
+    app.load_session(&target);
+    app.runtime_event_cursor = target.runtime_event_cursor;
+    // 这三份都是上一条会话的运行产物，留着只会让新会话看起来像在干活。
+    app.runtime_agents.clear();
+    app.runtime_tools.clear();
+    app.runtime_artifacts.clear();
+    runtime.relay_bridge.set_session(target.id.to_string());
+    *session = target;
+    Ok(format!(
+        "{}: {}",
+        app.language.text(
+            "已开始新会话（历史留在原会话里，/history 可以回去）",
+            "New Session started (the old one is still there; /history goes back)",
+            "新しいセッションを開始しました（前のセッションは /history から戻れます）"
+        ),
+        session.id
+    ))
+}
+
 pub(super) async fn handle_session_command(
     prompt: &str,
     app: &mut App,
@@ -47,11 +115,12 @@ pub(super) async fn handle_session_command(
     let arguments = value.strip_prefix("/session").unwrap_or_default().trim();
     let (action, rest) = arguments.split_once(' ').unwrap_or((arguments, ""));
     let usage = app.language.text(
-        "用法：/session switch <会话ID> | rename <名称> | retitle（让标题模型重算一次） | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search [关键词]（打开历史会话面板，等同 /history） | export <路径> | delete <其他会话ID>",
-        "Usage: /session switch <session-id> | rename <title> | retitle (recompute with the title model) | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search [query] (opens the Session history panel, same as /history) | export <path> | delete <other-session-id>",
-        "使用法：/session switch <セッションID> | rename <名前> | retitle（タイトルモデルで再計算） | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search [検索語]（履歴セッションパネルを開く。/history と同じ） | export <パス> | delete <別セッションID>",
+        "用法：/session new（开新会话，等同 /new） | switch <会话ID> | rename <名称> | retitle（让标题模型重算一次） | fork [--through 轮次ID] [--profile Provider] [--model 模型] [名称] | fork-turn <轮次ID> [名称] | archive | unarchive | search [关键词]（打开历史会话面板，等同 /history） | export <路径> | delete <其他会话ID>",
+        "Usage: /session new (start a fresh Session, same as /new) | switch <session-id> | rename <title> | retitle (recompute with the title model) | fork [--through turn-id] [--profile provider] [--model model] [title] | fork-turn <turn-id> [title] | archive | unarchive | search [query] (opens the Session history panel, same as /history) | export <path> | delete <other-session-id>",
+        "使用法：/session new（新しいセッション。/new と同じ） | switch <セッションID> | rename <名前> | retitle（タイトルモデルで再計算） | fork [--through ターンID] [--profile Provider] [--model モデル] [名前] | fork-turn <ターンID> [名前] | archive | unarchive | search [検索語]（履歴セッションパネルを開く。/history と同じ） | export <パス> | delete <別セッションID>",
     );
     let result = match action {
+        "new" if rest.trim().is_empty() => start_new(app, session, store, runtime).await?,
         "switch" if !rest.trim().is_empty() => switch(app, session, store, runtime, rest).await?,
         "rename" if !rest.trim().is_empty() => rename(app, session, store, runtime, rest).await?,
         "fork" => fork(app, session, runtime, rest).await?,

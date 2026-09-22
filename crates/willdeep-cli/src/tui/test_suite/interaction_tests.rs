@@ -1408,3 +1408,105 @@ fn late_input_suggestions_are_dropped_when_the_world_moved_on() {
     assert!(app.visible_input_suggestion().is_none());
     assert!(app.input_suggestion.is_none(), "cleared, not merely hidden");
 }
+
+/// `/workspace` 面板：打开时光标落在当前工作区上，输入即过滤，`Enter` 交出
+/// 选中的工作区。此前切换要人把 UUID 从聊天记录里抄回输入框。
+#[test]
+fn workspace_picker_starts_on_the_current_workspace_filters_and_selects() {
+    let current = workspace_fixture("当前项目", "/Users/rocky/Sites/willdeep-rs", true);
+    let other = workspace_fixture("tokenhub", "/Users/rocky/Sites/tokenhub", false);
+    let other_id = other.id;
+    let mut app = App::new(Vec::new(), Language::ZhCn);
+    app.open_workspace_picker(vec![other.clone(), current.clone()], current.root.clone());
+
+    // 列表里第二条才是当前工作区，光标必须落在它身上。
+    let picker = app.workspace_picker.as_ref().expect("panel is open");
+    assert_eq!(picker.selected, 1);
+    assert_eq!(picker.filtered.len(), 2);
+
+    // 按名字过滤，一条都不用记 ID。
+    for character in "token".chars() {
+        assert!(matches!(
+            app.handle_workspace_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE
+            )),
+            WorkspacePickerAction::None
+        ));
+    }
+    let picker = app.workspace_picker.as_ref().unwrap();
+    assert_eq!(picker.filtered.len(), 1);
+    assert_eq!(picker.workspaces[picker.filtered[0]].name, "tokenhub");
+
+    match app.handle_workspace_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+        WorkspacePickerAction::Select(id) => assert_eq!(id, other_id),
+        _ => panic!("expected a Workspace selection"),
+    }
+
+    // 路径也能过滤：人手上有时只有一个目录。
+    app.open_workspace_picker(vec![other, current.clone()], current.root.clone());
+    for character in "Sites/willdeep".chars() {
+        app.handle_workspace_picker_key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::NONE,
+        ));
+    }
+    let picker = app.workspace_picker.as_ref().unwrap();
+    assert_eq!(picker.filtered.len(), 1);
+    assert_eq!(picker.workspaces[picker.filtered[0]].id, current.id);
+
+    // Esc 关掉面板，不切任何东西。
+    assert!(matches!(
+        app.handle_workspace_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        WorkspacePickerAction::Close
+    ));
+}
+
+/// 面板一行里必须有名字和路径——一屏 UUID 不是列表。
+#[test]
+fn workspace_picker_line_leads_with_the_name_and_path() {
+    let workspace = workspace_fixture("tokenhub", "/Users/rocky/Sites/tokenhub", false);
+    let line = workspace_picker_ui::workspace_picker_line(&workspace, true, Language::En, true);
+    assert!(line.starts_with("▶ tokenhub"));
+    assert!(line.contains("/Users/rocky/Sites/tokenhub"));
+    assert!(line.contains("[current]"));
+    assert!(
+        !line.contains(&workspace.id.to_string()),
+        "the panel is for choosing, not for reading UUIDs: {line}"
+    );
+}
+
+fn workspace_fixture(name: &str, root: &str, active: bool) -> crate::daemon::RuntimeWorkspace {
+    crate::daemon::RuntimeWorkspace {
+        schema: 1,
+        id: uuid::Uuid::new_v4(),
+        name: name.to_owned(),
+        root: std::path::PathBuf::from(root),
+        access: crate::daemon::WorkspaceAccess::Smart,
+        provider_profile: None,
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        created_at: 0,
+        updated_at: 0,
+        active,
+    }
+}
+
+/// `/new` 不是 `/clear`：前者换会话，后者只擦屏幕。主循环接手 `/new`，
+/// 兜底处理器不能把它报成未知命令。
+#[test]
+fn new_command_passes_through_to_the_main_loop() {
+    let mut app = App::new(Vec::new(), Language::En);
+    let skills = SkillCatalog::default();
+    assert!(
+        !app.handle_slash_command("/new", &skills),
+        "/new is handled by the main loop"
+    );
+    assert!(app.transcript.is_empty());
+    assert!(
+        crate::tui::command_catalog::command_candidates(Language::En)
+            .into_iter()
+            .any(|(command, _)| command == "/new"),
+        "/new must be listed in /help and the completion menu"
+    );
+}

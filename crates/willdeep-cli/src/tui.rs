@@ -64,6 +64,7 @@ mod sidebar;
 mod webapp_commands;
 mod workspace_attention;
 mod workspace_commands;
+mod workspace_picker_ui;
 use activity::ToolActivity;
 use agent_commands::handle_agent_command;
 use agent_worktree_ui::render_agent_overlays;
@@ -89,7 +90,8 @@ use routing_settings::{RoutingSettingsAction, RoutingSettingsState, render_routi
 use runtime_ui::open_remote_gate;
 use runtime_ui::{PromptExecution, prompt_execution};
 use session_commands::{
-    SessionPickerRequest, handle_session_command, parse_session_picker_command,
+    SessionPickerRequest, handle_new_session_command, handle_session_command,
+    parse_session_picker_command,
 };
 use session_picker_ui::{
     PendingSessionSwitch, SessionPickerAction, SessionPickerState, refresh_session_picker,
@@ -98,6 +100,7 @@ use session_picker_ui::{
 use sidebar::{render_attention_detail, render_sidebar};
 use workspace_attention::workspace_attention;
 use workspace_commands::handle_workspace_command;
+use workspace_picker_ui::{WorkspacePickerAction, WorkspacePickerState, render_workspace_picker};
 
 pub enum UiMessage {
     Agent(AgentEvent),
@@ -358,6 +361,9 @@ struct App {
     model_picker: Option<ModelPickerState>,
     model_picker_rect: Rect,
     model_picker_hits: Vec<(u16, usize)>,
+    workspace_picker: Option<WorkspacePickerState>,
+    workspace_picker_rect: Rect,
+    workspace_picker_hits: Vec<(u16, usize)>,
     permission_picker: Option<PermissionPickerState>,
     /// 当前审批档位，显示在输入框标题上。真正生效的是 Agent 与 Runtime 会话
     /// 手里的句柄，这里只是界面上的镜像。
@@ -367,6 +373,8 @@ struct App {
     routing_settings: Option<RoutingSettingsState>,
     routing_settings_rect: Rect,
     pending_session_switch: Option<PendingSessionSwitch>,
+    /// 面板里选中的工作区，等主循环空出手来真正切过去。
+    pending_workspace_switch: Option<uuid::Uuid>,
     transcript_rect: Rect,
     command_rect: Rect,
     command_hits: Vec<(u16, usize)>,
@@ -1811,6 +1819,7 @@ fn draw(
         render_session_picker(f, app);
         render_rewind_picker(f, app);
         render_model_picker(f, app);
+        render_workspace_picker(f, app);
         render_permission_picker(f, app);
         render_routing_settings(f, app);
         app.search_rect = Rect::default();

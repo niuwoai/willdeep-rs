@@ -101,7 +101,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 
 - 进入前会先保存当前会话状态；目标会话若已归档，会自动取消归档再进入。
 - 当前轮次正在运行时不能切换——先等它跑完，面板会明确提示而不是静默失败。
-- 原地切换要求目标会话属于同一个工作区；跨工作区请先 `/workspace switch <ID>`。
+- 原地切换要求目标会话属于同一个工作区；跨工作区请先按 `/workspace` 在面板里选一个。
 - 带条件搜索直接写进命令：`/history 登录设计`、`/session search --status archived --model qwen3-coder 重构`。
   关键词落进面板输入框，`--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace`
   这些过滤器随每次重查一起下发，改关键词不会把过滤条件丢掉。
@@ -239,7 +239,7 @@ TUI 启动时开启鼠标捕获，退出时关闭。可用鼠标完成：
 
 在弹层边界外按下左键，等价于按 `Esc`：弹层关闭，焦点交给点中的那块面板——点输入框就落到输入框并把光标挪到点击位置，点聊天区、活动区、状态栏就切到对应焦点。这一次点击只转移焦点，不会顺手触发点中位置的动作（不会点开状态栏里的另一条 Inbox）。
 
-适用于历史会话面板（`/history`、`Ctrl+R`）、`/model` 模型面板、`/routing` 设置面板、命令面板（`Ctrl+P`）、聊天搜索（`Ctrl+F`）、快捷键帮助（`F1`）、手机配对二维码，以及 Inbox 详情、后台任务详情、Agent 详情、Worktree 审查。
+适用于历史会话面板（`/history`、`Ctrl+R`）、`/workspace` 工作区面板、`/model` 模型面板、`/routing` 设置面板、命令面板（`Ctrl+P`）、聊天搜索（`Ctrl+F`）、快捷键帮助（`F1`）、手机配对二维码，以及 Inbox 详情、后台任务详情、Agent 详情、Worktree 审查。
 
 三类弹层**不受**此规则约束，仍然只认键盘：
 
@@ -315,13 +315,14 @@ tmux set -g mouse on
 | `/local <任务>` | 仅本轮使用进程内 Harness |
 | `/session` | 管理、搜索、切换、Fork 或导出会话；`/session retitle` 让标题模型重算一次标题 |
 | `/history [关键词]` | 打开历史会话面板：最近 20 条，选中进入继续。等价于 `Ctrl+R` 和 `/session search` |
-| `/workspace` | `list` 列出注册表，`switch <ID>` 原地切换工作区 |
+| `/new` | 在当前工作区开一条不带历史的新会话（`/clear` 只擦屏幕，历史还在） |
+| `/workspace` | 不带参数打开工作区面板：输入即过滤，↑/↓ 选，Enter 原地切换。`list` 仍打印注册表（含 ID），`switch <ID\|名称\|路径>` 直接切 |
 | `/agent` | 查看或控制子 Agent，如 `/agent spawn reader\|judge <task>`；命令/写入工种与 Deep 必须由父 Agent走安全链 |
 | `/diff` | 打开 Diff Review Center |
 | `/rewind` | 回到第 N 步：列出 Runtime 跑完的轮次，Enter 确认后对话与文件一起回（`v` 只回对话），见 [检查点回退](CHECKPOINT_REWIND.md) |
 | `/skills` | 查看当前目录发现的技能 |
 | `/sidebar` | 显示或隐藏右侧状态栏（`on` / `off` 显式指定）。状态栏**默认隐藏**，`Ctrl+B` 等效 |
-| `/clear` | 清空聊天显示 |
+| `/clear` | 清空聊天显示（会话与上下文原样保留；要换上下文用 `/new`） |
 
 ### Runtime 版本不一致
 
