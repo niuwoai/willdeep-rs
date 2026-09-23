@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.81.0-rc7] - 2026-09-23
+
+### Fixed
+- **新开的会话里 `/model` 切换必定失败。** 还没发过消息的会话不在磁盘上；发消息那条路（`submit_turn`）在让 Runtime 领养会话前会先 `persist_missing_core_session` 落盘，`switch_model` 漏了这一步，Runtime 领养时读不到 Core Session 文件，报 not found。现在切换模型前同样先落盘，并补了回归测试。
+- **模型选择器里按 Enter 切换失败时「没反应」。** Runtime 那一步（`update Runtime Session model`）报错时，选择器不关，错误只写进状态栏的 `notice`——而状态栏每次渲染都会 `take()` 掉它，提示只活一帧，看上去就是按了回车什么也没发生。现在切换失败也关掉选择器，把错误写进对话记录（`Error: 切换模型失败: …`），键盘和鼠标两条路一致。
+- **切换模型失败只显示最外层上下文。** 四处切换失败的报错改用 `{error:#}` 输出完整错误链，能直接看到 Runtime 拒绝的真实原因（会话正忙、工作区不一致、Daemon 连不上等），不再只剩一句「update Runtime Session model to …」。
+- **Runtime 版本不一致的提示改指向 `/daemon upgrade`。** 提示出现在 TUI 里（对话记录、`/version` 报告、侧栏），以前让人去跑 shell 命令 `willdeep daemon upgrade`，得先退出或另开终端；TUI 里本来就有 `/daemon upgrade`，现在三处提示直接给这条。
+
 ## [0.81.0-rc6] - 2026-09-23
 
 ### Removed
