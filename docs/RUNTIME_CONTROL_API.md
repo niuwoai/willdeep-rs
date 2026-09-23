@@ -136,6 +136,16 @@ diff.revert
 
 内嵌 Web 的同源适配端点为 `POST /api/runtime/agents/spawn`。浏览器请求额外携带当前选择的 `workspace`，服务端先以启动白名单与 Runtime 注册表交叉验证 Workspace，再确认 `session_id` 属于该 Workspace 且存在活动 Turn；随后只把经过边界校验的 `session_id`、`prompt`、只读 `profile` 和可选 `label` 转交统一 `agent.spawn`。该适配层不接受 Parent ID、Task ID、Child ID、路径、工具权限或写 Profile，成功返回 HTTP `202` 与公开 Agent 摘要。
 
+`mobile.status` / `mobile.enable` / `mobile.disable`（0.82.0 起）管理 Runtime 托管的手机中继，参数都是空对象：
+
+- `mobile.status` 返回 `MobileRelayStatus`：`enabled`（持久开关）、`connected`、`phone_active`（最近 60 秒有手机请求）、`last_phone_command_at`、`relay_host`。不含 room 与 token。
+- `mobile.enable` 打开中继并落盘开关，返回 `MobileRelayEnabled { status, pairing_url }`。`pairing_url` 明文带 relay token，调用方只应渲染成二维码；Rust 类型的 `Debug` 会遮掉它。
+- `mobile.disable` 关闭中继并落盘，返回 `MobileRelayStatus`。
+
+这三个是设值语义（重复调用结果相同），因此**不进幂等缓存**：缓存会把响应体写进 `idempotency.json`，而 `mobile.enable` 的响应里有 token。凭据文件权限不对等失败会返回可照做的文案（不含本机路径），而不是笼统的 `internal Runtime error`。旧 Runtime 回 `unsupported_operation`，客户端据此提示先 `willdeep daemon upgrade`。
+
+手机中继网关本身是 Runtime 进程内的一个受限客户端：它把手机命令映射到 `session.list`、`session.get`、`session.create`、`workspace.list`、`task.list`、`task.get`、`approval.list`、`approval.resolve`、`question.list`、`question.answer`、`turn.submit`、`turn.stop` 这张**字面量**白名单，经与 HTTP handler 共用的分发入口执行，认证之外的闸门（Drain、幂等、参数校验、公共投影）一个不少。详见 [手机中继](MOBILE.md)。
+
 操作名一旦发布不得在同一协议主版本中改变语义。新增操作向后兼容；删除或改变字段含义需要提升协议主版本。
 
 `kernel.*` 读写事件内核的日志（`~/.willdeep/agent-events/`），**不碰任何一个进程的内存**：跑 Agent 的可能是别的进程，日志是两者之间唯一的共享事实，代价是结果最多落后一次刷盘（秒级）。`kernel.ignore` 只把「还等着人」这个标记摘掉，事件留在日志里，**它不批准任何操作**——审批仍然要在它被提出的地方回答。

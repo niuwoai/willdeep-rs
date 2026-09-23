@@ -236,5 +236,6 @@ mod command_tests {
     }
 }
 mod interaction_tests;
+mod mobile_tests;
 mod rewind_tests;
 mod session_tests;

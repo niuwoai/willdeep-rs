@@ -756,7 +756,6 @@ async fn run() -> Result<()> {
         .await;
     }
     let (tui_tx, tui_rx) = tui::channel();
-    let relay_bridge = mobile::RelayBridge::new();
     let frontend =
         if let Some(connection) = web_input.as_ref().and_then(|input| input.runtime.clone()) {
             harness::HarnessFrontend::Runtime {
@@ -780,10 +779,7 @@ async fn run() -> Result<()> {
                 },
             }
         } else if interactive_tui {
-            harness::HarnessFrontend::Tui {
-                tx: tui_tx.clone(),
-                relay: relay_bridge.clone(),
-            }
+            harness::HarnessFrontend::Tui { tx: tui_tx.clone() }
         } else {
             harness::HarnessFrontend::Terminal {
                 json: cli.json,
@@ -820,7 +816,6 @@ async fn run() -> Result<()> {
     if new_session && !interactive_tui {
         store.save(&mut session)?;
     }
-    relay_bridge.set_session(session.id.to_string());
     if interactive_tui {
         let runtime_profile = session.profile.clone().or_else(|| cli.profile.clone());
         return tui::run(
@@ -829,7 +824,6 @@ async fn run() -> Result<()> {
             store,
             home,
             skills,
-            relay_bridge,
             built.kernel.clone(),
             built.kernel_store.clone(),
             (
@@ -1718,6 +1712,8 @@ pub(crate) enum Surface {
     Tui,
     Web,
     Cli,
+    /// Runtime 里的手机中继网关代手机提交的轮次。
+    Mobile,
 }
 
 impl Surface {
@@ -1726,6 +1722,7 @@ impl Surface {
             Self::Tui => "tui",
             Self::Web => "web",
             Self::Cli => "cli",
+            Self::Mobile => "mobile",
         }
     }
 }
@@ -1742,10 +1739,12 @@ pub(crate) fn client_identity(surface: Surface) -> &'static str {
     static TUI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static WEB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static CLI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static MOBILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let cell = match surface {
         Surface::Tui => &TUI,
         Surface::Web => &WEB,
         Surface::Cli => &CLI,
+        Surface::Mobile => &MOBILE,
     };
     cell.get_or_init(|| format!("{}:{}", surface.prefix(), uuid::Uuid::new_v4()))
 }

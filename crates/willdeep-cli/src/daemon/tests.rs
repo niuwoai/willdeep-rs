@@ -134,7 +134,11 @@ fn unsettled_runtime_tasks_leave_attention_after_a_day() {
     use willdeep_runtime_protocol::TaskStatus;
     const DAY: u64 = 24 * 60 * 60;
     let session = uuid::Uuid::new_v4();
-    for status in [TaskStatus::Partial, TaskStatus::Failed, TaskStatus::Interrupted] {
+    for status in [
+        TaskStatus::Partial,
+        TaskStatus::Failed,
+        TaskStatus::Interrupted,
+    ] {
         let task = unsettled_task(session, status, 1, Some(100));
         assert!(tui_bridge::runtime_task_visible(&task, 100 + DAY));
         assert!(!tui_bridge::runtime_task_visible(&task, 101 + DAY));
@@ -401,6 +405,7 @@ async fn authorization_requires_exact_local_token() {
         tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
         work_gate: Arc::new(RwLock::new(false)),
         kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
+        mobile: Arc::new(mobile_gateway::MobileRelay::new(&root)),
     });
     assert!(
         runtime_capabilities(&state)

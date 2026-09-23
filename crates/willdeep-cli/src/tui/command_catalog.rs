@@ -207,9 +207,9 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         (
             "/mobile",
             language.text(
-                "管理手机中继",
-                "Manage mobile relay",
-                "モバイルリレーを管理",
+                "手机中继：由 Runtime 托管，在手机上跟进全部任务与审批",
+                "Mobile relay hosted by the Runtime: follow all work and approvals from your phone",
+                "モバイルリレー：Runtime が保持し、全タスクと承認をスマートフォンで確認",
             ),
         ),
         (

@@ -180,6 +180,18 @@ willdeep daemon answer <interaction-id> "自由输入答案"
 
 详见 [审批与自动化](APPROVALS.md)。
 
+## 手机中继
+
+手机中继挂在 Daemon 上，不属于某个终端：
+
+```bash
+willdeep daemon mobile enable    # 打开（持久）并打印配对二维码
+willdeep daemon mobile status
+willdeep daemon mobile disable
+```
+
+TUI 的 `/mobile` 做的是同一件事。开关记在 `$WILLDEEP_HOME/mobile-relay.toml`，Daemon 启动时读到开着就自动重连；`daemon upgrade` 的 Drain 期间旧进程的中继继续在线（只读与审批照常，新消息被 Drain 闸门拒绝），旧进程退出后新进程接手。手机看得到整个 Runtime 的会话与待审批，能做的写操作见 [手机中继](MOBILE.md)。
+
 ## Agent 控制
 
 ```bash
@@ -244,3 +256,4 @@ willdeep api event.stream --params-file events.json --ndjson
 - [子 Agent 与后台任务](SUBAGENTS.md)
 - [Runtime 控制 API](RUNTIME_CONTROL_API.md)
 - [进程内 Runtime Harness](IN_PROCESS_RUNTIME_HARNESS.md)
+- [手机中继](MOBILE.md)

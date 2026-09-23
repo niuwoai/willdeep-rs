@@ -19,7 +19,7 @@ willdeep --profile some-im --workspace .
 
 聊天区只显示用户消息和 AI 最终回复。轮次、Task/Agent ID、工具活动和提交状态只进入活动状态层，不污染对话记录。活动区不展示也不伪造模型的私有思维链。
 
-状态栏**默认隐藏**——它是查阅面板而非常驻面板，聊天区才是主体。`/sidebar` 或 `Ctrl+B` 随时调出；宽终端会在右侧额外显示 Agent、Mobile Relay、手机队列和工具完成情况，窄终端下改为打开覆盖层。隐藏时焦点自动回到输入框。
+状态栏**默认隐藏**——它是查阅面板而非常驻面板，聊天区才是主体。`/sidebar` 或 `Ctrl+B` 随时调出；宽终端会在右侧额外显示 Agent、待发队列、手机中继状态和工具完成情况，窄终端下改为打开覆盖层。隐藏时焦点自动回到输入框。
 
 Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 60 秒，失败/超时/被杀的保留 24 小时——那些需要人处理，但一天前失败的命令只是噪音，会把真正待办的挤出视野。运行中的任务永不回收。要复盘去任务详情与历史里找。
 
@@ -75,7 +75,8 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 按 `Esc` 中断当前轮次：Runtime 轮次交给 Daemon 排空（它知道在途工具怎么收尾），
 `/local` 轮次直接掐掉进程内 Harness。中断后队列立刻续上。
 
-手机中继来的提示词进同一条队列，侧栏「移动中继」里的「待发队列」是这条队列的长度。
+侧栏「运行状态」里的「待发队列」是这条队列的长度。手机发来的消息不进这里，直接进
+Runtime 的轮次队列（同一会话的轮次本来就严格串行）。
 
 ### 失败了要看到底怎么回事
 
@@ -308,7 +309,7 @@ tmux set -g mouse on
 | `/model [模型名]` | 查看或切换当前 Session 模型 |
 | `/permissions [档位]` | 切换审批模式（严格 / 智能审核 / 工作区可写 / 完全访问）；`default <档位>` 写入配置；Shift+Tab 快速循环前三档 |
 | `/routing` | 持久配置 Root、Worker、Deep 的 Provider、模型、上下文窗口和路由预算 |
-| `/mobile` | 管理手机中继，详见 [手机中继](MOBILE.md) |
+| `/mobile` | `show`（缺省）/ `hide` / `off`：打开 Runtime 托管的手机中继并出二维码，关终端不断，`off` 才关；详见 [手机中继](MOBILE.md) |
 | `/webapp` | `start`（缺省）/ `stop` / `status` / `127.0.0.1:PORT`，启停或查看本地 Web App |
 | `/daemon` | `status`（缺省）/ `start` / `stop` / `upgrade`，管理真正执行命令的 Runtime。`upgrade` 会排空在途工作再交接，耗时较长但不阻塞界面 |
 | `/runtime <任务>` | 提交可分离的 Runtime 任务 |
@@ -370,5 +371,5 @@ TUI 按终端能力渐进渲染常用 Markdown：标题、粗体、行内代码�
 - [Runtime Daemon 与工作区](RUNTIME_DAEMON.md) — Inbox 里的任务从哪来
 - [审批与自动化](APPROVALS.md) — 审批弹层的三种决定
 - [子 Agent 与后台任务](SUBAGENTS.md) — Agent 详情与 Worktree 合并
-- [手机中继](MOBILE.md) — `/mobile` 二维码配对
+- [手机中继](MOBILE.md) — `/mobile` 配对；手机上看整个 Runtime、批审批
 - [故障排查](TROUBLESHOOTING.md)

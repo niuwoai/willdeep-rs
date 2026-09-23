@@ -101,15 +101,23 @@ pub(super) async fn handler(
             Some(request.request_id),
         );
     }
+    execute(&state, request).await.into_response()
+}
+
+/// 控制面唯一的分发入口：HTTP handler 与进程内调用方（手机中继网关）共用。
+///
+/// 认证与协议协商留在各自的入口；Drain 闸门、幂等缓存、参数校验和公共投影
+/// 全在这里——进程内调用方不能因为「反正在同一个进程里」就绕过它们。
+pub(super) async fn execute(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
     let work_guard = if is_work_producing_operation(&request.operation) {
         let guard = state.work_gate.read().await;
         if *guard {
-            return error_response(
+            return UnifiedResponse::failure(
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::Unavailable,
                 "Runtime is draining for version handoff; retry against the replacement Runtime",
                 true,
-                Some(request.request_id),
+                request.request_id,
             );
         }
         Some(guard)
@@ -117,41 +125,41 @@ pub(super) async fn handler(
         None
     };
     let response = if is_mutating_operation(&request.operation) {
-        dispatch_idempotent(&state, request).await
+        dispatch_idempotent(state, request).await
     } else {
-        dispatch(&state, request).await.into_response()
+        dispatch(state, request).await
     };
     drop(work_guard);
     response
 }
 
-async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Response {
+async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
     let fingerprint = request_fingerprint(&request);
     let mut cache = state.idempotency.state.lock().await;
     if let Some(stored) = cache.responses.get(&request.request_id) {
         if stored.fingerprint != fingerprint {
-            return error_response(
+            return UnifiedResponse::failure(
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
                 "request_id was already used with different operation params",
                 false,
-                Some(request.request_id),
+                request.request_id,
             );
         }
         let Some(cached) = &stored.response else {
-            return error_response(
+            return UnifiedResponse::failure(
                 StatusCode::CONFLICT,
                 ErrorCode::Unavailable,
                 "request outcome is uncertain after Runtime interruption; inspect current state before using a new request_id",
                 false,
-                Some(request.request_id),
+                request.request_id,
             );
         };
-        return (
-            StatusCode::from_u16(cached.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(cached.body.clone()),
-        )
-            .into_response();
+        return UnifiedResponse {
+            status: StatusCode::from_u16(cached.status)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body: cached.body.clone(),
+        };
     }
     cache.order.push_back(request.request_id);
     cache.responses.insert(
@@ -165,12 +173,12 @@ async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Respon
         eprintln!("persist pending Runtime request idempotency record: {error:#}");
         cache.responses.remove(&request.request_id);
         cache.order.retain(|id| *id != request.request_id);
-        return error_response(
+        return UnifiedResponse::failure(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::Internal,
             "failed to persist request idempotency record",
             false,
-            Some(request.request_id),
+            request.request_id,
         );
     }
     let response = dispatch(state, request.clone()).await;
@@ -192,7 +200,7 @@ async fn dispatch_idempotent(state: &ServerState, request: ApiRequest) -> Respon
     if let Err(error) = state.idempotency.persist(&cache) {
         eprintln!("persist completed Runtime request idempotency record: {error:#}");
     }
-    response.into_response()
+    response
 }
 
 async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
@@ -516,6 +524,28 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
                 Err(error) => Err(error),
             }
         }
+        // 设值语义，重复调用结果相同，所以不进幂等缓存——缓存会把响应体落进
+        // `idempotency.json`，而 `mobile.enable` 的响应里有配对 URL（含 relay token）。
+        "mobile.status" => match params::<willdeep_runtime_protocol::EmptyParams>(&request) {
+            Ok(_) => json(state.mobile.status()),
+            Err(error) => Err(error),
+        },
+        "mobile.enable" => match params::<willdeep_runtime_protocol::EmptyParams>(&request) {
+            Ok(_) => state
+                .mobile
+                .enable()
+                .map_err(ApiFailure::mobile)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
+        "mobile.disable" => match params::<willdeep_runtime_protocol::EmptyParams>(&request) {
+            Ok(_) => state
+                .mobile
+                .disable()
+                .map_err(ApiFailure::mobile)
+                .and_then(json),
+            Err(error) => Err(error),
+        },
         _ => Err(ApiFailure {
             status: StatusCode::NOT_IMPLEMENTED,
             code: ErrorCode::UnsupportedOperation,
@@ -544,14 +574,33 @@ async fn dispatch(state: &ServerState, request: ApiRequest) -> UnifiedResponse {
     }
 }
 
-struct UnifiedResponse {
-    status: StatusCode,
-    body: ApiResponse<serde_json::Value>,
+pub(super) struct UnifiedResponse {
+    pub(super) status: StatusCode,
+    pub(super) body: ApiResponse<serde_json::Value>,
 }
 
 impl UnifiedResponse {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+
+    fn failure(
+        status: StatusCode,
+        code: ErrorCode,
+        message: impl Into<String>,
+        retryable: bool,
+        request_id: uuid::Uuid,
+    ) -> Self {
+        Self {
+            status,
+            body: ApiResponse::error(
+                code,
+                message,
+                retryable,
+                willdeep_core::VERSION,
+                Some(request_id),
+            ),
+        }
     }
 }
 
@@ -1891,6 +1940,17 @@ impl ApiFailure {
             status: StatusCode::CONFLICT,
             code: ErrorCode::Conflict,
             message: message.into(),
+            retryable: false,
+        }
+    }
+
+    /// 手机中继开关失败。文案由网关按闭集合生成（不含本机路径），原样交给调用方——
+    /// 「凭据文件权限不对，请 chmod 600」这种话被抹成 `internal Runtime error` 就没法照做了。
+    fn mobile(error: mobile_gateway::MobileRelayError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: ErrorCode::Internal,
+            message: error.to_string(),
             retryable: false,
         }
     }

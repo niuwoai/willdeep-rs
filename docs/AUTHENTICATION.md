@@ -130,18 +130,18 @@ Daemon 同时监听随机 `127.0.0.1` 端口和一个本地传输通道。客户
 
 ## 四、手机中继 Token
 
-`/mobile` 使用独立于 Swift App 的 room 与 token。
+手机中继由 Runtime Daemon 托管，使用独立于 Swift App 的 room 与 token；`/mobile` 与 `willdeep daemon mobile enable` 只是经本机控制面打开它。
 
 | 项目 | 说明 |
 |---|---|
-| 凭据文件 | `$WILLDEEP_HOME/mobile-relay.toml` |
+| 凭据文件 | `$WILLDEEP_HOME/mobile-relay.toml`（同时记着中继开关 `enabled`） |
 | 权限 | Unix `0600`；先写临时文件并设权限再 rename，无权限窗口 |
-| 校验 | 已存在时先检查 `mode & 0o077 == 0`，不合规则拒绝启动中继并提示 `chmod 600` |
-| room | `willdeep-cli-<uuid>` |
-| token | 64 位十六进制随机值 |
+| 校验 | 已存在时先检查 `mode & 0o077 == 0`，不合规则拒绝打开中继并提示 `chmod 600` |
+| room | `wd-<32 位十六进制>` |
+| token | 32 位十六进制随机值（128 位熵） |
 | 连接 | `wss://j.niuwoai.com/ws/broadcast/<room>`，`Authorization: Bearer <token>` |
 
-**配对二维码中明文携带 relay token**，扫码即等于交出该中继房间的访问权。只对自己的手机扫码，不要把二维码截图外传。CLI 端不监听任何本地端口，只主动外连中继。
+**配对二维码中明文携带 relay token**，扫码即等于交出：看整个 Runtime 的会话与待审批、给任何会话发消息、批准或拒绝审批。只对自己的手机扫码，不要把二维码截图外传。作废方式：`/mobile off` 后删除凭据文件，下次打开生成新的 room 与 token。Runtime 不监听新的本地端口，只主动外连中继。配对 URL 经本机控制面的 `mobile.enable` 返回，这个操作不进幂等缓存，token 不会落进 `idempotency.json`。
 
 详见 [手机中继](MOBILE.md)。
 

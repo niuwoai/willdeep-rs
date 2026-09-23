@@ -201,12 +201,33 @@ impl App {
     }
 }
 
-pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
-    let relay = if app.mobile_gateway.is_some() {
+/// 「移动中继」一节的两行：中继本身，以及（开着时）手机在不在。状态来自 Runtime——
+/// 中继归它所有，这个终端开没开过 `/mobile` 都一样。
+pub(super) fn mobile_relay_labels(app: &App) -> (&'static str, Option<&'static str>) {
+    let Some(status) = app.mobile_status.as_ref() else {
+        return (
+            app.language
+                .text("Runtime 未连接", "Runtime unavailable", "Runtime 未接続"),
+            None,
+        );
+    };
+    if !status.enabled {
+        return (app.language.text("关闭", "off", "オフ"), None);
+    }
+    let relay = if status.connected {
         app.language.text("已连接", "connected", "接続済み")
     } else {
-        app.language.text("关闭", "off", "オフ")
+        app.language.text("重连中", "reconnecting", "再接続中")
     };
+    let phone = if status.phone_active {
+        app.language.text("在线", "active", "オンライン")
+    } else {
+        app.language.text("未连接", "not connected", "未接続")
+    };
+    (relay, Some(phone))
+}
+
+pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     let attention = app.attention_items();
     app.attention_selected = app
         .attention_selected
@@ -391,6 +412,13 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                     app.language.text("失败", "Failed", "失敗"),
                     app.tools.failed
                 )));
+                // 本轮在跑时键盘输入排的队。手机消息不进这里，直接进 Runtime 的轮次队列。
+                lines.push(Line::raw(format!(
+                    "  {}: {}",
+                    app.language
+                        .text("待发队列", "Queued prompts", "送信待ちキュー"),
+                    app.queued_prompts.len()
+                )));
                 logical_hits.push((lines.len(), SidebarHit::NewAgent));
                 lines.push(Line::styled(
                     format!(
@@ -526,17 +554,17 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                 }
             }
             3 => {
+                let (relay, phone) = mobile_relay_labels(app);
                 lines.push(Line::raw(format!(
                     "  {}: {relay}",
                     app.language.text("中继", "Relay", "リレー")
                 )));
-                // 键盘和手机现在共用一条队列，标签不能再只说「手机」。
-                lines.push(Line::raw(format!(
-                    "  {}: {}",
-                    app.language
-                        .text("待发队列", "Queued prompts", "送信待ちキュー"),
-                    app.queued_prompts.len()
-                )));
+                if let Some(phone) = phone {
+                    lines.push(Line::raw(format!(
+                        "  {}: {phone}",
+                        app.language.text("手机", "Phone", "スマートフォン")
+                    )));
+                }
             }
             _ => {}
         }

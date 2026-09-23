@@ -88,7 +88,6 @@ pub(super) async fn start_new(
     app.runtime_agents.clear();
     app.runtime_tools.clear();
     app.runtime_artifacts.clear();
-    runtime.relay_bridge.set_session(target.id.to_string());
     *session = target;
     Ok(format!(
         "{}: {}",
@@ -289,7 +288,6 @@ pub(super) async fn switch(
     runtime.runtime_submit.config = target.config.clone();
     let _ = runtime.refresh_provider_config();
     app.load_session(&target);
-    runtime.relay_bridge.set_session(target.id.to_string());
     *session = target;
     Ok(format!(
         "{}: {} · {}",

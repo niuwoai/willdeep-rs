@@ -1,22 +1,21 @@
+//! 手机中继的共享件：凭据、配对 URL、二维码、中继连接请求。
+//!
+//! 连接本身归 Runtime Daemon（`daemon/mobile_gateway.rs`）：一台机器一个 Daemon、
+//! 一个 room。TUI 的 `/mobile` 与 `willdeep daemon mobile` 只是遥控器，用这里的
+//! 函数出二维码，不持有任何连接。
+
 use std::path::Path;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
 use http::header::HeaderValue;
 use qrcode::{EcLevel, QrCode};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use uuid::Uuid;
 
 const DEFAULT_RELAY_BASE_URL: &str = "https://j.niuwoai.com";
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const CREDENTIALS_FILE: &str = "mobile-relay.toml";
 const ROOM_PREFIX: &str = "wd-";
 /// 128 位随机 token 的十六进制长度；配对 JSON 里出现两次，是二维码尺寸的大头。
 const TOKEN_HEX_LEN: usize = 32;
@@ -31,128 +30,80 @@ const MAX_QR_WIDTH: usize = 53;
 #[cfg(test)]
 const MAX_QR_HEIGHT: usize = 27;
 
-#[derive(Clone, Debug)]
-pub struct MobilePrompt {
-    pub text: String,
+/// 凭据文件对同组或其他用户可读。单独成类型，Runtime 据此给出「chmod 600」的可操作提示，
+/// 而不是一句笼统的内部错误。
+#[derive(Debug)]
+pub(crate) struct UnsafeCredentialPermissions {
+    mode: u32,
 }
 
-#[derive(Clone)]
-pub struct RelayBridge {
-    events: broadcast::Sender<String>,
-    session_id: Arc<RwLock<Option<String>>>,
-}
-
-impl RelayBridge {
-    pub fn new() -> Self {
-        let (events, _) = broadcast::channel(256);
-        Self {
-            events,
-            session_id: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    pub fn set_session(&self, session_id: impl Into<String>) {
-        if let Ok(mut value) = self.session_id.write() {
-            *value = Some(session_id.into());
-        }
-    }
-
-    pub fn publish_assistant(&self, content: &str) {
-        let message_id = Uuid::new_v4().to_string();
-        let session_id = self.session_id.read().ok().and_then(|value| value.clone());
-        self.publish(json!({
-            "id": Uuid::new_v4(),
-            "type": "message.append",
-            "session_id": session_id,
-            "payload": {
-                "id": message_id,
-                "role": "assistant",
-                "content": content,
-                "created_at": unix_timestamp().to_string(),
-                "is_streaming": false,
-            },
-            "ts": unix_timestamp(),
-        }));
-        self.publish(json!({
-            "id": Uuid::new_v4(),
-            "type": "message.done",
-            "session_id": session_id,
-            "payload": {"message_id": message_id},
-            "ts": unix_timestamp(),
-        }));
-    }
-
-    fn publish(&self, value: Value) {
-        let _ = self.events.send(value.to_string());
+impl std::fmt::Display for UnsafeCredentialPermissions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "mobile relay credentials have permissions {:o}; run `chmod 600 $WILLDEEP_HOME/{CREDENTIALS_FILE}`",
+            self.mode
+        )
     }
 }
 
-/// 手机连上中继时能拿到的桌面状态。CLI 的中继只挂在当前这一条 TUI 会话上，
-/// 所以工作区和能力都只有「当前这一个」，由调用方在开启中继时算好。
-#[derive(Clone, Debug)]
-pub struct MobileState {
-    /// `state.snapshot` 信封，同时回应 `session.list` / `session.select`。
-    pub snapshot: Value,
-    /// `workspace.list` 的 `payload.workspaces`。
-    pub workspaces: Value,
-    /// `capabilities.updated` 的 payload（providers/models/skills/experts/plugins）。
-    pub capabilities: Value,
-}
-
-pub struct RelayGateway {
-    task: JoinHandle<()>,
-    pub qr: String,
-    pub room: String,
-}
-
-impl RelayGateway {
-    pub fn start(
-        home: &Path,
-        bridge: RelayBridge,
-        prompts: mpsc::UnboundedSender<MobilePrompt>,
-        state: MobileState,
-    ) -> Result<Self> {
-        let credentials = RelayCredentials::load_or_create(home)?;
-        let qr = render_qr(&pairing_url(&credentials)?)?;
-        let room = credentials.room.clone();
-        let task = tokio::spawn(run_relay(credentials, bridge, prompts, state));
-        Ok(Self { task, qr, room })
-    }
-}
-
-impl Drop for RelayGateway {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
+impl std::error::Error for UnsafeCredentialPermissions {}
 
 #[derive(Clone, Serialize, Deserialize)]
-struct RelayCredentials {
+pub(crate) struct RelayCredentials {
     relay_base_url: String,
     room: String,
     token: String,
+    /// 用户是否打开了中继。Daemon 启动时据此自动重连；旧版文件没有这个字段，按关闭处理。
+    #[serde(default)]
+    enabled: bool,
 }
 
 impl RelayCredentials {
-    fn load_or_create(home: &Path) -> Result<Self> {
-        let path = home.join("mobile-relay.toml");
-        if path.exists() {
-            validate_secret_permissions(&path)?;
-            let contents = std::fs::read_to_string(&path)
-                .with_context(|| format!("read relay credentials: {}", path.display()))?;
-            let existing: Self =
-                toml::from_str(&contents).context("parse mobile relay credentials")?;
-            if existing.is_compact() {
-                return Ok(existing);
-            }
+    /// 只读不建：Daemon 启动时判断要不要自动连，文件不存在就是「从没开过」。
+    pub(crate) fn load(home: &Path) -> Result<Option<Self>> {
+        let path = home.join(CREDENTIALS_FILE);
+        if !path.exists() {
+            return Ok(None);
         }
-        std::fs::create_dir_all(home)?;
+        validate_secret_permissions(&path)?;
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("read relay credentials: {}", path.display()))?;
+        let existing: Self = toml::from_str(&contents).context("parse mobile relay credentials")?;
+        Ok(existing.is_compact().then_some(existing))
+    }
+
+    pub(crate) fn load_or_create(home: &Path) -> Result<Self> {
+        if let Some(existing) = Self::load(home)? {
+            return Ok(existing);
+        }
         let credentials = Self::generate();
-        let temporary = home.join(format!(".mobile-relay-{}.tmp", Uuid::new_v4()));
-        std::fs::write(&temporary, toml::to_string_pretty(&credentials)?)?;
-        set_secret_permissions(&temporary)?;
-        std::fs::rename(&temporary, &path)?;
+        credentials.save(home)?;
         Ok(credentials)
+    }
+
+    /// 打开或关闭中继并落盘。room 与 token 不变，已配对的手机不用重新扫码。
+    pub(crate) fn save_enabled(home: &Path, enabled: bool) -> Result<Self> {
+        let mut credentials = Self::load_or_create(home)?;
+        if credentials.enabled != enabled {
+            credentials.enabled = enabled;
+            credentials.save(home)?;
+        }
+        Ok(credentials)
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 先写临时文件、设好权限再 rename，不存在权限窗口。
+    fn save(&self, home: &Path) -> Result<()> {
+        std::fs::create_dir_all(home)?;
+        let temporary = home.join(format!(".mobile-relay-{}.tmp", Uuid::new_v4()));
+        std::fs::write(&temporary, toml::to_string_pretty(self)?)?;
+        set_secret_permissions(&temporary)?;
+        std::fs::rename(&temporary, home.join(CREDENTIALS_FILE))?;
+        Ok(())
     }
 
     fn generate() -> Self {
@@ -160,6 +111,7 @@ impl RelayCredentials {
             relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
             room: format!("{ROOM_PREFIX}{}", Uuid::new_v4().simple()),
             token: random_token(),
+            enabled: false,
         }
     }
 
@@ -173,6 +125,13 @@ impl RelayCredentials {
                 .is_some_and(|id| id.len() <= ROOM_ID_HEX_LEN && !id.contains('-'))
     }
 
+    /// 中继服务的主机名，给状态展示用；不含 room 与 token。
+    pub(crate) fn relay_host(&self) -> Option<String> {
+        Url::parse(&self.relay_base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+    }
+
     fn websocket_url(&self) -> String {
         let base = self
             .relay_base_url
@@ -181,166 +140,56 @@ impl RelayCredentials {
             .replacen("http://", "ws://", 1);
         format!("{base}/ws/broadcast/{}", self.room.trim_matches('/'))
     }
-}
 
-/// `mobile-gateway.v1` 的紧凑配对 URL（手机端 `compactPairingPayloadJSON` 的输入）：
-/// `r` = relay room，`t` = relay token，`u` = relay base url（等于默认值时省略），
-/// `d` = 桌面名。协议版本不进二维码：`v` 缺省时手机按 `mobile-gateway.v1` 处理，
-/// 协议真升版时再补 `v`。手机会把这几个参数补全成完整的配对 JSON，
-/// `base_url`/`pairing_token` 由 `u`/`t` 推出，`expires_at`/`protocol_version` 取默认值——
-/// 所以这些字段没必要再进二维码。
-///
-/// 相比原先直接编码完整 JSON（437 字节、81×81 模块），这里最多 118 字节、41×41 模块。
-fn pairing_url(credentials: &RelayCredentials) -> Result<String> {
-    pairing_url_named(credentials, &desktop_name())
-}
-
-/// 桌面名由调用方给出，`pairing_url` 之外只有测试会用——桌面名长度取决于 `HOSTNAME`，
-/// 尺寸断言不能跟着环境走。
-fn pairing_url_named(credentials: &RelayCredentials, desktop_name: &str) -> Result<String> {
-    let base = credentials.relay_base_url.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/pair")).context("build mobile pairing URL")?;
-    {
-        let mut query = url.query_pairs_mut();
-        query.append_pair("r", &credentials.room);
-        query.append_pair("t", &credentials.token);
-        query.append_pair("d", desktop_name);
-        // 手机端 `u` 缺省时按 DEFAULT_RELAY_BASE_URL 处理，自建中继才需要多带这一段。
-        if base != DEFAULT_RELAY_BASE_URL {
-            query.append_pair("u", base);
-        }
+    pub(crate) fn websocket_request(
+        &self,
+    ) -> Result<http::Request<()>, tokio_tungstenite::tungstenite::Error> {
+        let mut request = self.websocket_url().into_client_request()?;
+        request.headers_mut().insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {}", self.token))?,
+        );
+        request.headers_mut().insert(
+            "X-App-Version",
+            HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
+        Ok(request)
     }
-    Ok(url.to_string())
-}
 
-async fn run_relay(
-    credentials: RelayCredentials,
-    bridge: RelayBridge,
-    prompts: mpsc::UnboundedSender<MobilePrompt>,
-    state: MobileState,
-) {
-    loop {
-        let Ok(request) = relay_request(&credentials) else {
-            tokio::time::sleep(RECONNECT_DELAY).await;
-            continue;
-        };
-        if let Ok((socket, _)) = tokio_tungstenite::connect_async(request).await {
-            let (mut output, mut input) = socket.split();
-            let mut events = bridge.events.subscribe();
-            let _ = output
-                .send(WebSocketMessage::Text(state.snapshot.to_string().into()))
-                .await;
-            loop {
-                tokio::select! {
-                    event = events.recv() => match event {
-                        Ok(value) => {
-                            if output.send(WebSocketMessage::Text(value.into())).await.is_err() { break; }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => return,
-                        _ => {}
-                    },
-                    incoming = input.next() => match incoming {
-                        Some(Ok(WebSocketMessage::Text(value))) => {
-                            if let Some(response) = handle_command(&prompts, &state, &value)
-                                && output.send(WebSocketMessage::Text(response.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(Ok(WebSocketMessage::Ping(value))) => {
-                            if output.send(WebSocketMessage::Pong(value)).await.is_err() { break; }
-                        }
-                        Some(Ok(WebSocketMessage::Close(_))) | None | Some(Err(_)) => break,
-                        _ => {}
-                    }
-                }
+    /// `mobile-gateway.v1` 的紧凑配对 URL（手机端 `compactPairingPayloadJSON` 的输入）：
+    /// `r` = relay room，`t` = relay token，`u` = relay base url（等于默认值时省略），
+    /// `d` = 桌面名。协议版本不进二维码：`v` 缺省时手机按 `mobile-gateway.v1` 处理，
+    /// 协议真升版时再补 `v`。手机会把这几个参数补全成完整的配对 JSON，
+    /// `base_url`/`pairing_token` 由 `u`/`t` 推出，`expires_at`/`protocol_version` 取默认值——
+    /// 所以这些字段没必要再进二维码。
+    ///
+    /// 相比原先直接编码完整 JSON（437 字节、81×81 模块），这里最多 118 字节、41×41 模块。
+    pub(crate) fn pairing_url(&self) -> Result<String> {
+        self.pairing_url_named(&desktop_name())
+    }
+
+    /// 桌面名由调用方给出，`pairing_url` 之外只有测试会用——桌面名长度取决于 `HOSTNAME`，
+    /// 尺寸断言不能跟着环境走。
+    fn pairing_url_named(&self, desktop_name: &str) -> Result<String> {
+        let base = self.relay_base_url.trim_end_matches('/');
+        let mut url = Url::parse(&format!("{base}/pair")).context("build mobile pairing URL")?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("r", &self.room);
+            query.append_pair("t", &self.token);
+            query.append_pair("d", desktop_name);
+            // 手机端 `u` 缺省时按 DEFAULT_RELAY_BASE_URL 处理，自建中继才需要多带这一段。
+            if base != DEFAULT_RELAY_BASE_URL {
+                query.append_pair("u", base);
             }
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
+        Ok(url.to_string())
     }
-}
-
-fn relay_request(
-    credentials: &RelayCredentials,
-) -> Result<http::Request<()>, tokio_tungstenite::tungstenite::Error> {
-    let mut request = credentials.websocket_url().into_client_request()?;
-    request.headers_mut().insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {}", credentials.token))?,
-    );
-    request.headers_mut().insert(
-        "X-App-Version",
-        HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-    );
-    Ok(request)
-}
-
-/// 手机端命令的完整清单见 Android 仓库 `docs/MOBILE_GATEWAY_REQUIREMENTS.md` 的三方对照表。
-/// CLI 只实现其中的子集；其余命令按 macOS 桌面端的口径回 `Unsupported mobile command: <type>.`，
-/// 手机端据此只把这一条命令标成失败，探测型命令（`capabilities.get`/`push.register`）静默降级。
-fn handle_command(
-    prompts: &mpsc::UnboundedSender<MobilePrompt>,
-    state: &MobileState,
-    input: &str,
-) -> Option<String> {
-    let envelope: Value = serde_json::from_str(input).ok()?;
-    let kind = envelope.get("type")?.as_str()?;
-    let id = envelope.get("id").and_then(Value::as_str);
-    match kind {
-        "message.send" => {
-            let text = envelope
-                .pointer("/payload/text")
-                .or_else(|| envelope.pointer("/payload/content"))
-                .and_then(Value::as_str)?
-                .trim();
-            if text.is_empty() {
-                return Some(error_envelope(id, "message text is empty"));
-            }
-            if prompts
-                .send(MobilePrompt {
-                    text: text.to_owned(),
-                })
-                .is_err()
-            {
-                return Some(error_envelope(id, "CLI session is unavailable"));
-            }
-            Some(ack_envelope(id, "message.send"))
-        }
-        "session.list" | "session.select" => Some(state.snapshot.to_string()),
-        "workspace.list" => Some(reply_envelope(
-            id,
-            "workspace.list",
-            json!({"workspaces": state.workspaces}),
-        )),
-        "capabilities.get" => Some(reply_envelope(
-            id,
-            "capabilities.updated",
-            state.capabilities.clone(),
-        )),
-        value if value.starts_with("state.") || value.starts_with("message.") => None,
-        _ => Some(error_envelope(
-            id,
-            &format!("Unsupported mobile command: {kind}."),
-        )),
-    }
-}
-
-fn reply_envelope(id: Option<&str>, kind: &str, payload: Value) -> String {
-    json!({"id": id, "type": kind, "payload": payload, "ts": unix_timestamp()}).to_string()
-}
-
-fn ack_envelope(id: Option<&str>, command: &str) -> String {
-    json!({"id": id, "type": "ack", "payload": {"command": command}, "ts": unix_timestamp()})
-        .to_string()
-}
-
-fn error_envelope(id: Option<&str>, message: &str) -> String {
-    json!({"id": id, "type": "error", "payload": {"message": message}, "ts": unix_timestamp()})
-        .to_string()
 }
 
 /// 终端里一个模块占一个字符格，纠错等级越高模块越多。屏幕上的二维码不会被印污或折损，
 /// L 级（7% 冗余）足够，比默认的 M 级少一到两个版本，宽度直接省掉十几列。
-fn render_qr(payload: &str) -> Result<String> {
+pub(crate) fn render_qr(payload: &str) -> Result<String> {
     let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L)
         .context("encode mobile pairing QR")?;
     Ok(code
@@ -371,13 +220,6 @@ fn random_token() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(unix)]
 fn set_secret_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -389,13 +231,9 @@ fn set_secret_permissions(path: &Path) -> Result<()> {
 fn validate_secret_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
-    anyhow::ensure!(
-        mode & 0o077 == 0,
-        "{} contains a relay token but permissions are {:o}; run `chmod 600 {}`",
-        path.display(),
-        mode,
-        path.display()
-    );
+    if mode & 0o077 != 0 {
+        return Err(UnsafeCredentialPermissions { mode }.into());
+    }
     Ok(())
 }
 
@@ -412,72 +250,28 @@ fn validate_secret_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
-    fn test_state() -> MobileState {
-        MobileState {
-            snapshot: json!({"type": "state.snapshot"}),
-            workspaces: json!([{"path": "/tmp/demo", "name": "demo", "session_count": 1, "is_current": true}]),
-            capabilities: json!({
-                "providers": [], "models": [{"id": "m1", "title": "m1", "is_active": true}],
-                "skills": [], "experts": [], "plugins": [], "active_model_id": "m1",
-            }),
+    fn temp_home() -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!("willdeep-relay-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn credentials(base: &str) -> RelayCredentials {
+        RelayCredentials {
+            relay_base_url: base.to_owned(),
+            room: "wd-test".to_owned(),
+            token: "secret".to_owned(),
+            enabled: false,
         }
-    }
-
-    fn reply(input: &str) -> Value {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        serde_json::from_str(&handle_command(&tx, &test_state(), input).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn message_send_is_forwarded() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let response = handle_command(
-            &tx,
-            &test_state(),
-            r#"{"id":"1","type":"message.send","payload":{"text":"hello"}}"#,
-        )
-        .unwrap();
-        assert!(response.contains("ack"));
-        assert_eq!(rx.try_recv().unwrap().text, "hello");
-    }
-
-    #[test]
-    fn capabilities_get_replies_with_capabilities_updated() {
-        let response = reply(r#"{"id":"c1","type":"capabilities.get"}"#);
-        assert_eq!(response["type"], "capabilities.updated");
-        assert_eq!(response["id"], "c1");
-        assert_eq!(response["payload"]["active_model_id"], "m1");
-    }
-
-    #[test]
-    fn workspace_list_replies_with_current_workspace() {
-        let response = reply(r#"{"id":"w1","type":"workspace.list"}"#);
-        assert_eq!(response["type"], "workspace.list");
-        assert_eq!(response["payload"]["workspaces"][0]["path"], "/tmp/demo");
-    }
-
-    /// 与 macOS 桌面端 `AgentMobileGatewayCommandError.unsupportedCommand` 的文案逐字一致，
-    /// 手机端靠这个前缀区分「命令不支持」和「连接出错」。
-    #[test]
-    fn unsupported_commands_use_the_mac_gateway_wording() {
-        let response = reply(r#"{"id":"t1","type":"tool.decide","payload":{"id":"x"}}"#);
-        assert_eq!(response["type"], "error");
-        assert_eq!(response["id"], "t1");
-        assert_eq!(
-            response["payload"]["message"],
-            "Unsupported mobile command: tool.decide."
-        );
     }
 
     #[test]
     fn pairing_url_matches_android_compact_contract() {
-        let credentials = RelayCredentials {
-            relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
-            room: "wd-test".to_owned(),
-            token: "secret".to_owned(),
-        };
-        let url = pairing_url(&credentials).unwrap();
+        let url = credentials(DEFAULT_RELAY_BASE_URL).pairing_url().unwrap();
         assert!(url.starts_with("https://j.niuwoai.com/pair?"), "{url}");
         assert!(url.contains("r=wd-test"), "{url}");
         assert!(url.contains("t=secret"), "{url}");
@@ -487,16 +281,19 @@ mod tests {
 
     #[test]
     fn self_hosted_relay_keeps_its_base_url_in_the_pairing_url() {
-        let credentials = RelayCredentials {
-            relay_base_url: "https://relay.example.com".to_owned(),
-            room: "wd-test".to_owned(),
-            token: "secret".to_owned(),
-        };
-        let url = pairing_url(&credentials).unwrap();
+        let url = credentials("https://relay.example.com")
+            .pairing_url()
+            .unwrap();
         assert!(
             url.contains("u=https%3A%2F%2Frelay.example.com"),
             "自建中继地址必须随二维码下发：{url}"
         );
+    }
+
+    #[test]
+    fn relay_host_names_the_server_without_room_or_token() {
+        let host = credentials("https://relay.example.com/").relay_host();
+        assert_eq!(host.as_deref(), Some("relay.example.com"));
     }
 
     /// 最坏情况：桌面名顶满 `MAX_DESKTOP_NAME_LEN` 字节，且每个字节都要百分号转义成三个字符。
@@ -505,7 +302,7 @@ mod tests {
     fn pairing_qr_fits_the_terminal_popup() {
         let credentials = RelayCredentials::generate();
         let worst_case_name = "中".repeat(MAX_DESKTOP_NAME_LEN / "中".len());
-        let payload = pairing_url_named(&credentials, &worst_case_name).unwrap();
+        let payload = credentials.pairing_url_named(&worst_case_name).unwrap();
         let (width, height) = qr_size(&payload);
         assert_eq!(
             (width, height),
@@ -515,7 +312,7 @@ mod tests {
         );
 
         // 当前环境下的真实二维码不得超过这个上界。
-        let (actual_width, actual_height) = qr_size(&pairing_url(&credentials).unwrap());
+        let (actual_width, actual_height) = qr_size(&credentials.pairing_url().unwrap());
         assert!(
             actual_width <= MAX_QR_WIDTH && actual_height <= MAX_QR_HEIGHT,
             "实际二维码 {actual_width}×{actual_height} 超出上界 {MAX_QR_WIDTH}×{MAX_QR_HEIGHT}"
@@ -534,15 +331,15 @@ mod tests {
 
     #[test]
     fn legacy_credentials_are_recompacted_on_load() {
-        let home = std::env::temp_dir().join(format!("willdeep-relay-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
+        let home = temp_home();
         let legacy = RelayCredentials {
             relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
             room: format!("willdeep-cli-{}", Uuid::new_v4()),
             token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            enabled: false,
         };
         assert!(!legacy.is_compact());
-        let path = home.join("mobile-relay.toml");
+        let path = home.join(CREDENTIALS_FILE);
         std::fs::write(&path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
         set_secret_permissions(&path).unwrap();
 
@@ -554,6 +351,60 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// 0.81 及更早写出的文件没有 `enabled`：读出来是关闭，打开后 room 与 token 不变，
+    /// 已配对的手机不用重新扫码。
+    #[test]
+    fn enabling_keeps_the_pairing_and_survives_a_reload() {
+        let home = temp_home();
+        let path = home.join(CREDENTIALS_FILE);
+        std::fs::write(
+            &path,
+            "relay_base_url = \"https://j.niuwoai.com\"\nroom = \"wd-0123456789abcdef0123456789abcdef\"\ntoken = \"0123456789abcdef0123456789abcdef\"\n",
+        )
+        .unwrap();
+        set_secret_permissions(&path).unwrap();
+
+        let before = RelayCredentials::load(&home).unwrap().unwrap();
+        assert!(!before.enabled(), "旧文件没有 enabled 字段，应按关闭处理");
+
+        let enabled = RelayCredentials::save_enabled(&home, true).unwrap();
+        assert!(enabled.enabled());
+        assert_eq!(enabled.token, before.token);
+        assert_eq!(enabled.room, before.room);
+        assert!(RelayCredentials::load(&home).unwrap().unwrap().enabled());
+
+        RelayCredentials::save_enabled(&home, false).unwrap();
+        assert!(!RelayCredentials::load(&home).unwrap().unwrap().enabled());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn missing_credentials_mean_the_relay_was_never_enabled() {
+        let home = temp_home();
+        assert!(RelayCredentials::load(&home).unwrap().is_none());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_permissions_are_reported_as_a_typed_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_home();
+        let credentials = RelayCredentials::load_or_create(&home).unwrap();
+        let path = home.join(CREDENTIALS_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = match RelayCredentials::load(&home) {
+            Err(error) => error,
+            Ok(_) => panic!("0644 的凭据文件必须被拒绝"),
+        };
+        let typed = error
+            .downcast_ref::<UnsafeCredentialPermissions>()
+            .expect("权限错误要能被识别出来");
+        assert!(typed.to_string().contains("chmod 600"));
+        assert!(!typed.to_string().contains(&credentials.token));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     #[tokio::test]
     #[ignore = "requires the public j.niuwoai.com relay"]
     async fn live_relay_broadcasts_between_two_authenticated_peers() {
@@ -561,11 +412,12 @@ mod tests {
             relay_base_url: DEFAULT_RELAY_BASE_URL.to_owned(),
             room: format!("willdeep-cli-smoke-{}", Uuid::new_v4()),
             token: random_token(),
+            enabled: true,
         };
-        let (left, _) = tokio_tungstenite::connect_async(relay_request(&credentials).unwrap())
+        let (left, _) = tokio_tungstenite::connect_async(credentials.websocket_request().unwrap())
             .await
             .unwrap();
-        let (right, _) = tokio_tungstenite::connect_async(relay_request(&credentials).unwrap())
+        let (right, _) = tokio_tungstenite::connect_async(credentials.websocket_request().unwrap())
             .await
             .unwrap();
         let (mut left_output, _) = left.split();

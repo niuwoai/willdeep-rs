@@ -184,7 +184,6 @@ pub(super) async fn event_loop(
         runtime.runtime_submit.workspace.clone(),
         runtime_event_tx.clone(),
     );
-    let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel::<MobilePrompt>();
     loop {
         // 面板里选中的工作区在这里才真正切：切换要动会话、Runtime 与事件跟随器，
         // 按键分支里做不完，也不该在一次按键里做。
@@ -304,58 +303,41 @@ pub(super) async fn event_loop(
         {
             app.attachments = queued.attachments;
             app.selected_attachment = 0;
-            if !queued.from_phone {
-                app.mark_queued_prompt_sent(&queued.text);
-            }
-            if queued.from_phone {
-                app.append_transcript(format!("Phone: {}", queued.text));
-                dispatch_prompt(
-                    &mut app,
-                    session,
-                    store,
-                    &runtime.skills,
-                    &agent,
-                    &runtime.tx,
-                    queued.text,
-                )?;
-            } else {
-                match prompt_execution(&queued.text) {
-                    PromptExecution::Local(prompt) if !prompt.is_empty() => {
-                        dispatch_prompt(
-                            &mut app,
-                            session,
-                            store,
-                            &runtime.skills,
-                            &agent,
-                            &runtime.tx,
-                            prompt,
-                        )?;
-                    }
-                    PromptExecution::Local(_) => {}
-                    PromptExecution::Runtime(prompt) => {
-                        match runtime_ui::submit_turn(&mut app, session, store, runtime, prompt)
-                            .await
-                        {
-                            Ok(()) => {
-                                app.notice = Some(
-                                    language
-                                        .text(
-                                            "队列中的提示词已发出",
-                                            "Queued prompt submitted",
-                                            "キューのプロンプトを送信しました",
-                                        )
-                                        .to_owned(),
-                                )
-                            }
-                            Err(error) => app.append_transcript(format!(
-                                "Error: {}: {error}",
-                                language.text(
-                                    "提交排队的提示词失败",
-                                    "Submitting the queued prompt failed",
-                                    "キューのプロンプト送信に失敗"
-                                )
-                            )),
+            app.mark_queued_prompt_sent(&queued.text);
+            match prompt_execution(&queued.text) {
+                PromptExecution::Local(prompt) if !prompt.is_empty() => {
+                    dispatch_prompt(
+                        &mut app,
+                        session,
+                        store,
+                        &runtime.skills,
+                        &agent,
+                        &runtime.tx,
+                        prompt,
+                    )?;
+                }
+                PromptExecution::Local(_) => {}
+                PromptExecution::Runtime(prompt) => {
+                    match runtime_ui::submit_turn(&mut app, session, store, runtime, prompt).await {
+                        Ok(()) => {
+                            app.notice = Some(
+                                language
+                                    .text(
+                                        "队列中的提示词已发出",
+                                        "Queued prompt submitted",
+                                        "キューのプロンプトを送信しました",
+                                    )
+                                    .to_owned(),
+                            )
                         }
+                        Err(error) => app.append_transcript(format!(
+                            "Error: {}: {error}",
+                            language.text(
+                                "提交排队的提示词失败",
+                                "Submitting the queued prompt failed",
+                                "キューのプロンプト送信に失敗"
+                            )
+                        )),
                     }
                 }
             }
@@ -416,6 +398,7 @@ pub(super) async fn event_loop(
                 app.runtime_agents=snapshot.agents;
                 app.runtime_tools=snapshot.tools;
                 app.runtime_artifacts=snapshot.artifacts;
+                app.mobile_status=snapshot.mobile;
                 app.observe_runtime_version(snapshot.runtime_version);
                 if app.runtime_auto_upgrade_pending && !app.running {
                     app.runtime_auto_upgrade_pending=false;
@@ -1098,7 +1081,6 @@ pub(super) async fn event_loop(
                                         app.queued_prompts.push_back(QueuedPrompt{
                                             text,
                                             attachments:std::mem::take(&mut app.attachments),
-                                            from_phone:false,
                                         });
                                         app.selected_attachment=0;
                                         app.notice=Some(format!(
@@ -1136,7 +1118,7 @@ pub(super) async fn event_loop(
                                 }
                                 continue;
                             }
-                            if app.handle_mobile_command(&prompt,&runtime.home,&runtime.relay_bridge,&mobile_tx,session){continue;}
+                            if app.handle_mobile_command(&prompt,&runtime.home,&runtime.tx){continue;}
                             match handle_agent_command(&prompt,&mut app,runtime,session.id).await {
                                 Ok(true)=>continue,
                                 Ok(false)=>{},
@@ -1318,6 +1300,7 @@ pub(super) async fn event_loop(
                 UiMessage::Compressed(Ok(messages), ownership)=>{store.refresh_execution(session)?;let changed=session.replace_with_compressed_messages(messages);persist_turn_result(session,store)?;drop(ownership);app.append_transcript(if changed{"System: Context compressed".to_owned()}else{"System: Context is too short to compress".to_owned()});app.finish_turn();},
                 UiMessage::Compressed(Err(e), ownership)=>{store.refresh_execution(session)?;drop(ownership);app.append_transcript(format!("Error: context compression failed: {e}"));app.finish_turn();},
                 UiMessage::RuntimeNotice(notice)=>app.notice=Some(notice),
+                UiMessage::MobileRelay(update)=>app.apply_mobile_relay(update),
                 UiMessage::RuntimeResult(message)=>{app.append_transcript(message.clone());app.notice=Some(message);},
                 UiMessage::ModelsLoaded(result)=>app.set_model_picker_result(result),
                 UiMessage::MediaLoaded{target,result}=>app.media.finish_load(target,result),
@@ -1330,10 +1313,6 @@ pub(super) async fn event_loop(
                 // 文字往聊天区塞报错不划算。改成功了才说一句。
                 UiMessage::InputSuggested{suggestion,epoch}=>{app.adopt_input_suggestion(suggestion,epoch);},
                 UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
-            },
-            Some(prompt)=mobile_rx.recv()=>{
-                if app.running {app.queued_prompts.push_back(QueuedPrompt{text:prompt.text,attachments:Vec::new(),from_phone:true});app.notice=Some(format!("Phone request queued · {} waiting",app.queued_prompts.len()));}
-                else {app.append_transcript(format!("Phone: {}",prompt.text));dispatch_prompt(&mut app,session,store,&runtime.skills,&agent,&runtime.tx,prompt.text)?;}
             },
             Ok(event)=background_rx.recv()=>{
                 let _=runtime.background_tasks.drain_pending();

@@ -68,7 +68,7 @@ impl EventLog {
         read_events(&self.path, after, limit)
     }
 
-    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RuntimeEvent> {
+    pub(super) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RuntimeEvent> {
         self.live.subscribe()
     }
 
