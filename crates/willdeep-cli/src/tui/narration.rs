@@ -209,7 +209,6 @@ impl App {
         self.queued_prompts.push_back(QueuedPrompt {
             text,
             attachments: Vec::new(),
-            from_phone: false,
         });
     }
 

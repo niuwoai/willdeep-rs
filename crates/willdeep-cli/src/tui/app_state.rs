@@ -29,7 +29,7 @@ impl App {
             input_suggestion_epoch: 0,
             runtime_turn_settled: false,
             goal: None,
-            mobile_gateway: None,
+            mobile_status: None,
             mobile_qr: None,
             queued_prompts: VecDeque::new(),
             pending_model: None,
@@ -56,6 +56,7 @@ impl App {
             runtime_auto_upgrade_pending: false,
             runtime_auto_upgrade_tried: false,
             surfaced_gates: BTreeSet::new(),
+            remote_gate_waiters: BTreeMap::new(),
             runtime_agents: Vec::new(),
             runtime_tools: Vec::new(),
             runtime_artifacts: Vec::new(),
@@ -1281,6 +1282,40 @@ impl App {
         self.question = self.question_queue.pop_front();
     }
 
+    /// 收起已经没人等着回答的对话框：接收端被丢掉了（gate 在手机或别的终端上
+    /// 先被答掉），这时再按一下只会得到「interaction is no longer pending」。
+    /// 返回撤回的条数。
+    pub(super) fn withdraw_abandoned_dialogs(&mut self) -> usize {
+        let before = usize::from(self.approval.is_some())
+            + self.approval_queue.len()
+            + usize::from(self.question.is_some())
+            + self.question_queue.len();
+        self.approval_queue
+            .retain(|(_, _, sender)| !sender.is_closed());
+        if self
+            .approval
+            .as_ref()
+            .is_some_and(|(_, _, sender)| sender.is_closed())
+        {
+            self.approval = self.approval_queue.pop_front();
+            self.approval_selected = 0;
+        }
+        self.question_queue
+            .retain(|dialog| !dialog.sender.is_closed());
+        if self
+            .question
+            .as_ref()
+            .is_some_and(|dialog| dialog.sender.is_closed())
+        {
+            self.promote_next_question();
+        }
+        let after = usize::from(self.approval.is_some())
+            + self.approval_queue.len()
+            + usize::from(self.question.is_some())
+            + self.question_queue.len();
+        before - after
+    }
+
     /// Answer every parked question with "no answer", visibly.
     pub(super) fn discard_pending_questions(&mut self) {
         let mut pending = Vec::new();
@@ -1930,13 +1965,13 @@ impl App {
         }
         true
     }
+    /// `/mobile` 只是遥控器：中继归 Runtime 所有。打开可能要先拉起 Runtime，
+    /// 所以放到后台去办，结果经 [`UiMessage::MobileRelay`] 回来。
     pub(super) fn handle_mobile_command(
         &mut self,
         prompt: &str,
         home: &std::path::Path,
-        bridge: &RelayBridge,
-        mobile_tx: &mpsc::UnboundedSender<MobilePrompt>,
-        session: &Session,
+        ui: &mpsc::UnboundedSender<UiMessage>,
     ) -> bool {
         let value = prompt.trim();
         if !matches!(
@@ -1945,40 +1980,92 @@ impl App {
         ) {
             return false;
         }
-        match value {
-            "/mobile off" => {
-                self.mobile_gateway = None;
-                self.mobile_qr = None;
-                self.append_transcript("System: Mobile relay disconnected".to_owned());
+        if value == "/mobile hide" {
+            self.mobile_qr = None;
+            return true;
+        }
+        let turning_off = value == "/mobile off";
+        self.notice = Some(
+            if turning_off {
+                self.language.text(
+                    "正在关闭手机中继…",
+                    "Turning the mobile relay off…",
+                    "モバイルリレーをオフにしています…",
+                )
+            } else {
+                self.language.text(
+                    "正在打开手机中继…",
+                    "Turning the mobile relay on…",
+                    "モバイルリレーをオンにしています…",
+                )
             }
-            "/mobile hide" => self.mobile_qr = None,
-            _ => {
-                if self.mobile_gateway.is_none() {
-                    match RelayGateway::start(
-                        home,
-                        bridge.clone(),
-                        mobile_tx.clone(),
-                        mobile_state(session),
-                    ) {
-                        Ok(gateway) => {
-                            self.append_transcript(format!(
-                                "System: Mobile relay connected · room {}",
-                                gateway.room
-                            ));
-                            self.mobile_gateway = Some(gateway);
-                        }
-                        Err(error) => {
-                            self.append_transcript(format!("Error: start mobile relay: {error:#}"))
-                        }
-                    }
+            .to_owned(),
+        );
+        let home = home.to_path_buf();
+        let ui = ui.clone();
+        tokio::spawn(async move {
+            let update = if turning_off {
+                match crate::daemon::mobile_disable(&home).await {
+                    Ok(()) => MobileRelayUpdate::Disabled,
+                    Err(error) => MobileRelayUpdate::Failed(format!("{error:#}")),
                 }
-                self.mobile_qr = self
-                    .mobile_gateway
-                    .as_ref()
-                    .map(|gateway| gateway.qr.clone());
+            } else {
+                let enabled = crate::daemon::mobile_enable(&home)
+                    .await
+                    .and_then(|enabled| {
+                        Ok(MobileRelayUpdate::Enabled {
+                            qr: crate::mobile::render_qr(&enabled.pairing_url)?,
+                            status: enabled.status,
+                        })
+                    });
+                enabled.unwrap_or_else(|error| MobileRelayUpdate::Failed(format!("{error:#}")))
+            };
+            let _ = ui.send(UiMessage::MobileRelay(update));
+        });
+        true
+    }
+
+    pub(super) fn apply_mobile_relay(&mut self, update: MobileRelayUpdate) {
+        match update {
+            MobileRelayUpdate::Enabled { qr, status } => {
+                self.mobile_status = Some(status);
+                self.mobile_qr = Some(qr);
+                self.notice = None;
+                self.append_transcript(format!(
+                    "System: {}",
+                    self.language.text(
+                        "手机中继已开启，由 Runtime 托管：关掉终端也不会断，/mobile off 才会关。手机上能看到整个 Runtime 的会话与待处理审批。",
+                        "Mobile relay on, hosted by the Runtime: it stays up after this terminal closes until /mobile off. The phone sees every Runtime session and pending approval.",
+                        "モバイルリレーをオンにしました。Runtime が保持するため、このターミナルを閉じても /mobile off まで切れません。スマートフォンから Runtime の全セッションと承認待ちを確認できます。",
+                    )
+                ));
+            }
+            MobileRelayUpdate::Disabled => {
+                self.mobile_qr = None;
+                self.notice = None;
+                if let Some(status) = self.mobile_status.as_mut() {
+                    status.enabled = false;
+                    status.connected = false;
+                    status.phone_active = false;
+                }
+                self.append_transcript(format!(
+                    "System: {}",
+                    self.language.text(
+                        "手机中继已关闭",
+                        "Mobile relay off",
+                        "モバイルリレーをオフにしました"
+                    )
+                ));
+            }
+            MobileRelayUpdate::Failed(error) => {
+                self.notice = None;
+                self.append_transcript(format!(
+                    "Error: {}: {error}",
+                    self.language
+                        .text("手机中继", "Mobile relay", "モバイルリレー")
+                ));
             }
         }
-        true
     }
     pub(super) fn enrich_prompt(&self, prompt: &str, skills: &SkillCatalog) -> String {
         let mut blocks = Vec::new();

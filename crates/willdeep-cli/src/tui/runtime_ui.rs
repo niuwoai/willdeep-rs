@@ -661,6 +661,20 @@ pub(super) fn surface_pending_gates(
     // Forget gates the Runtime resolved elsewhere, so a re-raised
     // interaction can surface again.
     app.surfaced_gates.retain(|id| live.contains(id));
+    // 在手机或别的终端上先被答掉的：丢掉取消信号，背后等回答的任务随即退出，
+    // 对话框在下一次快照时撤回——免得人按下去才看到「interaction is no longer pending」。
+    app.remote_gate_waiters.retain(|id, _| live.contains(id));
+    if app.withdraw_abandoned_dialogs() > 0 {
+        app.notice = Some(
+            app.language
+                .text(
+                    "这条审批已在其他端处理",
+                    "This approval was handled elsewhere",
+                    "この承認は別の端末で処理されました",
+                )
+                .to_owned(),
+        );
+    }
     let fresh = app
         .runtime_gates
         .iter()
@@ -693,8 +707,14 @@ pub(super) fn open_remote_gate(
             let language = app.language;
             let (sender, receiver) = oneshot::channel();
             let visible = app.enqueue_approval((description, always_allow_available, sender));
+            let (cancel, cancelled) = oneshot::channel::<()>();
+            app.remote_gate_waiters.insert(id, cancel);
             tokio::spawn(async move {
-                let decision = receiver.await.unwrap_or(ApprovalDecision::Deny);
+                let decision = tokio::select! {
+                    decision = receiver => decision.unwrap_or(ApprovalDecision::Deny),
+                    // 在别处答掉了：不替用户做决定，直接退出。
+                    _ = cancelled => return,
+                };
                 let result = crate::daemon::resolve_remote_approval(&home, id, decision).await;
                 let notice = match result {
                     Ok(()) => language
@@ -739,8 +759,13 @@ pub(super) fn open_remote_gate(
                 answer: PromptEditor::default(),
                 sender,
             });
+            let (cancel, cancelled) = oneshot::channel::<()>();
+            app.remote_gate_waiters.insert(id, cancel);
             tokio::spawn(async move {
-                let answer = receiver.await.unwrap_or(None);
+                let answer = tokio::select! {
+                    answer = receiver => answer.unwrap_or(None),
+                    _ = cancelled => return,
+                };
                 let result = crate::daemon::answer_remote_question(&home, id, answer).await;
                 let notice = match result {
                     Ok(()) => language

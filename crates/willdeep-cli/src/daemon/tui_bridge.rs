@@ -48,6 +48,8 @@ pub(crate) struct RuntimeSnapshot {
     /// 客户端拿它跟自己的事件游标比：序号落后于游标的快照拍摄于已经消费掉的
     /// 事件之前，它说的「任务还在跑」不能当真。
     pub event_sequence: Option<u64>,
+    /// 手机中继的状态。Runtime 不可达或版本早于中继归属 Runtime 时为 `None`。
+    pub mobile: Option<willdeep_runtime_protocol::MobileRelayStatus>,
 }
 
 #[derive(Clone)]
@@ -763,6 +765,7 @@ pub(crate) async fn runtime_snapshot(
                     artifacts: Vec::new(),
                     runtime_version: None,
                     event_sequence: None,
+                    mobile: None,
                 });
             }
         },
@@ -776,6 +779,7 @@ pub(crate) async fn runtime_snapshot(
                 artifacts: Vec::new(),
                 runtime_version: None,
                 event_sequence: None,
+                mobile: None,
             });
         }
     };
@@ -924,6 +928,12 @@ pub(crate) async fn runtime_snapshot(
             ..item
         });
     }
+    // 旧 Runtime 不认识 `mobile.status`：当成「没有中继」，不让整份快照失败。
+    let mobile = runtime_client(&state)?
+        .mobile_status()
+        .await
+        .ok()
+        .and_then(|response| response.into_result().ok());
     Ok(RuntimeSnapshot {
         attention,
         gates,
@@ -933,6 +943,7 @@ pub(crate) async fn runtime_snapshot(
         artifacts,
         runtime_version,
         event_sequence,
+        mobile,
     })
 }
 
@@ -1151,6 +1162,15 @@ fn gate_belongs_here(
         // 视图）也不该抢答：它连「这是不是我发起的」都回答不了。
         if viewer_client == Some(origin) {
             return true;
+        }
+        // 手机是遥控器，不是工作台：人回到电脑前，打开同一条会话的桌面端也得能答。
+        // 两边都弹是安全的——谁先答算谁的，另一边撤回（TUI 靠快照里 gate 消失，
+        // 手机靠 `tool.updated`）。工作区级视图（Web）仍然不抢答。
+        if origin.starts_with("mobile:") {
+            return matches!(
+                (viewer, owner_session),
+                (Some(viewer), Some(owner_session)) if viewer == *owner_session
+            );
         }
         // 客户端身份是「界面:进程随机 id」，进程一退就再也匹配不上。发起这一轮
         // 的 TUI 关掉之后，重开的 TUI 看着同一个会话，却永远弹不出那条审批，
@@ -1410,6 +1430,31 @@ mod tests {
         assert!(gate_belongs_here(None, None, Some(&legacy(Some(theirs)))));
         // 不在本工作区的任务，连看都看不到。
         assert!(!gate_belongs_here(Some(mine), None, None));
+    }
+
+    /// 手机发起的轮次：人回到电脑前，同一条会话的 TUI 也得能答；别的会话、
+    /// 工作区级视图（Web）仍然不弹。
+    #[test]
+    fn a_phone_raised_gate_also_surfaces_in_the_tui_on_the_same_session() {
+        let session = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let raised_by_phone = (Some(session), Some("mobile:relay".to_owned()));
+
+        assert!(gate_belongs_here(
+            Some(session),
+            Some("tui:desk"),
+            Some(&raised_by_phone)
+        ));
+        assert!(!gate_belongs_here(
+            Some(other),
+            Some("tui:desk"),
+            Some(&raised_by_phone)
+        ));
+        assert!(!gate_belongs_here(
+            None,
+            Some("web:1"),
+            Some(&raised_by_phone)
+        ));
     }
 
     /// 发起这一轮的 TUI 退出后，重开的 TUI 看着同一个会话，必须接得住那条审批。

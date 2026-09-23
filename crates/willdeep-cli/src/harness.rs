@@ -171,7 +171,6 @@ pub(crate) enum HarnessFrontend {
     },
     Tui {
         tx: crate::tui::TuiSender,
-        relay: crate::mobile::RelayBridge,
     },
     Runtime {
         connection: RuntimeConnection,
@@ -762,9 +761,9 @@ pub(crate) async fn build(
             Arc::new(TerminalSink { json, quiet }),
             None,
         ),
-        HarnessFrontend::Tui { tx, relay } => (
+        HarnessFrontend::Tui { tx } => (
             Arc::new(crate::tui::TuiApprover(tx.clone())),
-            Arc::new(crate::tui::TuiSink { ui: tx, relay }),
+            Arc::new(crate::tui::TuiSink { ui: tx }),
             None,
         ),
         HarnessFrontend::Runtime {

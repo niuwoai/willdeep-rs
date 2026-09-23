@@ -39,7 +39,6 @@ use willdeep_core::{
 
 use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
-use crate::mobile::{MobilePrompt, MobileState, RelayBridge, RelayGateway};
 
 mod activity;
 mod agent_commands;
@@ -140,18 +139,27 @@ pub enum UiMessage {
         suggestion: Option<String>,
         epoch: u64,
     },
+    /// `/mobile` 在 Runtime 那边办完了。打开中继可能要先拉起 Runtime，不能在
+    /// 事件循环里等。
+    MobileRelay(MobileRelayUpdate),
+}
+
+pub enum MobileRelayUpdate {
+    /// 中继已打开，带着渲染好的配对二维码。
+    Enabled {
+        qr: String,
+        status: willdeep_runtime_protocol::MobileRelayStatus,
+    },
+    Disabled,
+    Failed(String),
 }
 pub type TuiSender = mpsc::UnboundedSender<UiMessage>;
 pub struct TuiSink {
     pub ui: mpsc::UnboundedSender<UiMessage>,
-    pub relay: RelayBridge,
 }
 #[async_trait]
 impl EventSink for TuiSink {
     async fn emit(&self, event: AgentEvent) {
-        if let AgentEvent::AssistantText(value) = &event {
-            self.relay.publish_assistant(value);
-        }
         let _ = self.ui.send(UiMessage::Agent(event));
     }
 }
@@ -246,10 +254,12 @@ struct App {
     /// 失败与中断的收尾不置位。
     runtime_turn_settled: bool,
     goal: Option<String>,
-    mobile_gateway: Option<RelayGateway>,
+    /// 手机中继的状态，Runtime 快照里带回来。中继归 Runtime 所有，TUI 只是遥控器；
+    /// `None` 表示 Runtime 没在跑或版本太旧。
+    mobile_status: Option<willdeep_runtime_protocol::MobileRelayStatus>,
     mobile_qr: Option<String>,
-    /// 本轮在跑时收到的提示词。键盘和手机共用一条队列，本轮一结束就按顺序发出去；
-    /// 中断当前轮次同样会让队列立刻续上。
+    /// 本轮在跑时收到的提示词，本轮一结束就按顺序发出去；中断当前轮次同样会让
+    /// 队列立刻续上。手机发来的消息不进这里，直接进 Runtime 的轮次队列。
     queued_prompts: VecDeque<QueuedPrompt>,
     /// 本轮进行中收到的 `/model`：本轮结束、排队的提示词发出之前切过去。
     pending_model: Option<String>,
@@ -294,6 +304,10 @@ struct App {
     /// Runtime interactions already turned into a dialog, so a snapshot that
     /// still lists them does not reopen the same card every second.
     surfaced_gates: BTreeSet<uuid::Uuid>,
+    /// 每张已弹出的 Runtime 对话框背后那个等回答的任务的取消信号。gate 在别处
+    /// （手机、另一个终端）被答掉时丢掉它：任务不再等，接收端随之丢弃，对话框的
+    /// 发送端变成 closed，下一次快照据此撤回。已经答了、请求正在路上的不受影响。
+    remote_gate_waiters: BTreeMap<uuid::Uuid, oneshot::Sender<()>>,
     runtime_agents: Vec<crate::daemon::tui_bridge::RemoteAgent>,
     runtime_tools: Vec<willdeep_runtime_protocol::RuntimeTool>,
     runtime_artifacts: Vec<willdeep_runtime_protocol::RuntimeArtifact>,
@@ -425,9 +439,6 @@ struct AttentionDiagnostics {
 struct QueuedPrompt {
     text: String,
     attachments: Vec<DraftAttachment>,
-    /// 手机来的提示词走进程内 Harness（与直接收到时的行为一致），
-    /// 键盘输入按 `/local` 与 `/runtime` 的常规规则路由。
-    from_phone: bool,
 }
 
 #[derive(Default)]
@@ -539,7 +550,6 @@ pub async fn run(
     store: SessionStore,
     home: PathBuf,
     skills: Arc<SkillCatalog>,
-    relay_bridge: RelayBridge,
     kernel: willdeep_core::EventKernel,
     kernel_store: willdeep_core::kernel_store::KernelStore,
     ui: TuiRuntimeInputs,
@@ -560,7 +570,6 @@ pub async fn run(
         home,
         notifier: ui.7,
         skills,
-        relay_bridge,
         kernel,
         detached_jobs: willdeep_core::DetachedJobStore::new(&kernel_store_home),
         kernel_store,
@@ -588,7 +597,6 @@ struct TuiRuntime {
     home: PathBuf,
     notifier: crate::notify::Notifier,
     skills: Arc<SkillCatalog>,
-    relay_bridge: RelayBridge,
     /// 宿主事件内核。后台结果、入站通知都进这里，由主 Agent 在 turn 边界收走。
     kernel: willdeep_core::EventKernel,
     kernel_store: willdeep_core::kernel_store::KernelStore,
@@ -1180,67 +1188,6 @@ fn dispatch_media_action(action: MediaAction, app: &mut App, runtime: &TuiRuntim
 }
 
 mod app_state;
-
-/// 开启手机中继时的桌面状态。CLI 中继只服务当前这一条会话：工作区只有它所在的一个，
-/// 能力只报当前 Profile / 模型——手机端据此不会给出 CLI 切不过去的选项。
-fn mobile_state(session: &Session) -> MobileState {
-    let workspace_name = session
-        .workspace
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Workspace");
-    let active_option = |id: &Option<String>| match id {
-        Some(id) => serde_json::json!([{"id": id, "title": id, "is_active": true}]),
-        None => serde_json::json!([]),
-    };
-    let mut capabilities = serde_json::json!({
-        "providers": active_option(&session.profile),
-        "models": active_option(&session.model),
-        "skills": [],
-        "experts": [],
-        "plugins": [],
-    });
-    if let Some(profile) = &session.profile {
-        capabilities["active_provider_id"] = serde_json::json!(profile);
-    }
-    if let Some(model) = &session.model {
-        capabilities["active_model_id"] = serde_json::json!(model);
-    }
-    MobileState {
-        snapshot: mobile_snapshot(session),
-        workspaces: serde_json::json!([{
-            "path": session.workspace,
-            "name": workspace_name,
-            "session_count": 1,
-            "is_current": true,
-            "is_git_repo": session.workspace.join(".git").exists(),
-            "last_used_at": session.updated_at.to_string(),
-        }]),
-        capabilities,
-    }
-}
-
-fn mobile_snapshot(session: &Session) -> serde_json::Value {
-    serde_json::json!({
-        "id": uuid::Uuid::new_v4(),
-        "type": "state.snapshot",
-        "session_id": session.id,
-        "payload": {
-            "active_session_id": session.id,
-            "sessions": [{
-                "id": session.id,
-                "title": session.title,
-                "workspace_name": session.workspace.file_name().and_then(|value| value.to_str()).unwrap_or("Workspace"),
-                "workspace_path": session.workspace,
-                "message_count": session.messages.len(),
-                "is_active": true,
-                "is_responding": false,
-                "updated_at": session.updated_at,
-            }],
-            "messages": [],
-        }
-    })
-}
 
 fn clipboard_image() -> Result<DraftAttachment> {
     let image = arboard::Clipboard::new()?.get_image()?;

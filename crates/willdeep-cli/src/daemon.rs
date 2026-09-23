@@ -41,6 +41,8 @@ mod headless;
 mod herdr;
 mod internal_transport;
 mod local_transport;
+mod mobile_cli;
+mod mobile_gateway;
 mod session_store;
 mod steering;
 mod tool_store;
@@ -56,6 +58,9 @@ use agent_store::{AgentStore, RuntimeAgentStatus};
 use event_stream::EventLog;
 pub(crate) use headless::{HeadlessRuntimeRequest, HeadlessRuntimeStatus, execute_headless_turn};
 use local_transport::LocalTransportState;
+pub use mobile_cli::MobileAction;
+use mobile_cli::mobile_cli;
+pub(crate) use mobile_cli::{mobile_disable, mobile_enable};
 pub(crate) use tui_bridge::{
     RemoteGate, RemoteRuntimeEvent, RewindPoint, RuntimeSnapshot, answer_remote_question,
     cancel_remote_task, delete_remote_session, ensure_runtime_session, export_remote_session,
@@ -519,6 +524,11 @@ pub enum DaemonAction {
         #[arg(value_name = "ANSWER", num_args = 1.., trailing_var_arg = true)]
         answer: Vec<String>,
     },
+    /// Control the mobile relay that lets WillDeep Mobile follow this Runtime.
+    Mobile {
+        #[command(subcommand)]
+        action: MobileAction,
+    },
     /// Internal foreground server entry used by `daemon start`.
     #[command(hide = true)]
     Run,
@@ -588,6 +598,8 @@ struct ServerState {
     /// 别的进程，日志是两者之间唯一的共享事实。代价是最多落后一次刷盘，这一
     /// 条写在 `RUNTIME_CONTROL_API.md` 里。
     kernel_store: willdeep_core::kernel_store::KernelStore,
+    /// 手机中继。一台机器一个 Runtime、一个 room；TUI 的 `/mobile` 只是遥控它。
+    mobile: Arc<mobile_gateway::MobileRelay>,
 }
 
 type RuntimeEvent = willdeep_runtime_protocol::RuntimeEvent;
@@ -980,6 +992,7 @@ pub async fn handle(action: DaemonAction) -> Result<()> {
         DaemonAction::Pending => list_pending(&home).await,
         DaemonAction::Resolve { id, decision } => resolve_pending(&home, id, decision).await,
         DaemonAction::Answer { id, answer } => answer_pending(&home, id, answer).await,
+        DaemonAction::Mobile { action } => mobile_cli(&home, action).await,
         DaemonAction::Run => run(&home).await,
         DaemonAction::BackgroundSupervisor => {
             unreachable!("background supervisor handled before loading Runtime home")
@@ -1920,7 +1933,11 @@ async fn run(home: &Path) -> Result<()> {
         tools: tasks.tools.clone(),
         work_gate: work_gate.clone(),
         kernel_store: willdeep_core::kernel_store::KernelStore::new(home),
+        mobile: Arc::new(mobile_gateway::MobileRelay::new(home)),
     });
+    server_state.mobile.bind(&server_state);
+    // 上次开着手机中继就接着连：关掉终端、升级 Runtime 都不该让手机掉线。
+    server_state.mobile.resume();
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
         while let Some(session_id) = scheduled_sessions.recv().await {

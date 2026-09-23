@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.82.0-rc1] - 2026-09-23
+
+### Changed
+- **手机中继从 TUI 挪进 Runtime Daemon，手机上能看到整个 Runtime。** 以前中继是开 `/mobile` 的那个 TUI 进程里的一条 WebSocket：手机只看得到那一条会话、快照在开中继那一刻就定格了、关掉终端中继就断（任务却还在 Daemon 里跑），跑了几小时的 Runtime 智能体和卡在审批上的任务手机上一概看不到。现在中继由 Daemon 托管，一台机器一个 room：
+  - 手机看得到所有未归档会话（最近 50 条）、选中会话的最近 40 条消息（与 Web 端同一份历史投影，外加进行中轮次的实时回复），以及**整个 Runtime** 的待审批与待回答，带归属会话。
+  - 手机能做的写操作只有四件：发消息（可带图片，限边后转 JPEG）、在**已登记**工作区里新建会话、停止当前轮次、批准 / 拒绝审批与回答提问。审批只给「这一次允许」，「总是允许」是长期规则，只能在桌面上定。
+  - 删改会话、登记工作区、改审批档位与模型、派生子 Agent 都不开放：手机命令经**字面量**白名单映射到 12 个已有 Runtime 操作，走与 HTTP handler 共用的分发入口（`control_api::execute`），Drain 闸门、幂等缓存、参数校验、公共投影一个不少。手机信封 `id` 直接当幂等键，重发不会跑两遍。
+  - 开关持久化在 `mobile-relay.toml` 的 `enabled`：关终端、`daemon upgrade` 都不断，`/mobile off` 才关；Daemon 启动时读到开着就自动重连。room 与 token 不变，已配对的手机不用重扫。
+  - 新增 `willdeep daemon mobile enable|disable|status`，不开 TUI 也能开关中继、出二维码；控制面新增 `mobile.status` / `mobile.enable` / `mobile.disable`（设值语义，不进幂等缓存，token 不会落进 `idempotency.json`）。
+- **TUI 的 `/mobile` 变成遥控器。** 侧栏「移动中继」显示 Runtime 报的状态（关闭 / 已连接 / 重连中、手机在线与否），不再只反映这个终端开没开过 `/mobile`。手机消息不进 TUI 的键盘队列，直接进 Runtime 的轮次队列；「待发队列」挪到侧栏「运行状态」一节。
+- **手机发起的轮次，同会话的 TUI 也会弹审批。** 审批「发起端优先」只弹回发起端，但手机是遥控器不是工作台：人回到电脑前得能在终端里答。两边都弹是安全的，谁先答算谁的。
+
+### Fixed
+- **两个终端同时开 `/mobile` 会串台，还会互相刷屏。** 凭据全局共用，两个进程进同一个 room；中继是广播，A 回的 `ack` 到了 B 被当未知命令回 `error`，这条 `error` 回到 A 又被回一条 `error`，无限往返。中继挪进 Daemon 后一台机器只有一个连接；网关也只认手机命令，回声、别的桌面端的回复（包括与命令同名的 `workspace.list` 回复）一律丢弃。
+- **Android 的对话面板每 5 秒被清空一次。** Android 每 5 秒发一次 `session.list` 当心跳，拿快照整体替换对话列表，而旧快照的 `messages` 永远是空的。现在快照带着选中会话的历史与实时尾巴。
+- **审批在别处答掉后，TUI 里那张对话框还挂着，按下去才报 `Runtime interaction is no longer pending`。** 现在快照里 gate 一消失，背后等回答的任务就退出，对话框在一秒内自动收起，提示「这条审批已在其他端处理」；已经答了、请求还在路上的不受影响。
+
+### Security
+- 手机中继现在能看整个 Runtime、给任何会话发消息，token 泄露的影响面随之变大：写操作收窄到上面四件；新建会话不能顺手登记新目录；上中继前消息正文与审批描述里疑似凭据的词打码（保留换行与缩进，不把 Markdown 压扁）。中继服务端看得到明文的边界与 macOS 版相同，没有变化；端到端加密另立项。
+
+### Internal
+- 设计与取舍见 `docs/decisions/2026-09-23-daemon-mobile-relay.md`；新增 `daemon/mobile_gateway.rs`（连接与生命周期）、`mobile_gateway/commands.rs`（手机命令）、`mobile_gateway/projection.rs`（快照与事件翻译）、`daemon/mobile_cli.rs`（客户端侧）；`mobile.rs` 只剩凭据、配对 URL 与二维码。
+- 新增 31 项测试：网关 21 项（含本机假中继的端到端：鉴权、快照、审批卡推送、手机批准、关中继断开；手机不在场时不推送但实时尾巴照记），凭据开关 4 项，TUI 4 项（侧栏状态、`/mobile` 遥控、结果回显、对话框撤回），审批归属与协议 `Debug` 遮 token 各 1 项。
+- 顺带：`daemon/tests.rs` 一处 rc8 引入的未格式化代码（`cargo fmt --check` 在基线上就不过）按 rustfmt 重排。
+
 ## [0.81.0-rc9] - 2026-09-23
 
 ### Fixed

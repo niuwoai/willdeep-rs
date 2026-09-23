@@ -1155,6 +1155,43 @@ pub enum RuntimeHealth {
     Unknown,
 }
 
+/// 手机中继（`mobile.*` 操作）的连接状态。只描述连接本身，不携带 room 或 token。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MobileRelayStatus {
+    /// 用户是否打开了中继。持久化在 Runtime 里，Daemon 重启后保持。
+    pub enabled: bool,
+    /// 当前是否连在中继上。
+    pub connected: bool,
+    /// 最近一段时间内是否收到过手机命令（手机端每几秒发一次心跳）。
+    pub phone_active: bool,
+    /// 最近一次收到手机命令的 Unix 秒。
+    #[serde(default)]
+    pub last_phone_command_at: Option<u64>,
+    /// 中继服务的主机名，例如 `j.niuwoai.com`。
+    #[serde(default)]
+    pub relay_host: Option<String>,
+}
+
+/// `mobile.enable` 的结果。
+///
+/// `pairing_url` 里明文带着 relay token：调用方只应把它渲染成二维码，不要写日志。
+/// `Debug` 因此手写，打印时把它遮掉。
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MobileRelayEnabled {
+    pub status: MobileRelayStatus,
+    pub pairing_url: String,
+}
+
+impl std::fmt::Debug for MobileRelayEnabled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MobileRelayEnabled")
+            .field("status", &self.status)
+            .field("pairing_url", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     pub status: RuntimeHealth,
@@ -1295,6 +1332,9 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     "worktree.merge",
     "worktree.audit",
     "worktree.quarantine",
+    "mobile.status",
+    "mobile.enable",
+    "mobile.disable",
 ];
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1626,6 +1666,25 @@ mod tests {
             let (namespace, method) = operation.split_once('.').unwrap_or_default();
             !namespace.is_empty() && !method.is_empty()
         }));
+    }
+
+    /// 配对 URL 里是 relay token：`{:?}` 进日志时不能跟着出去。
+    #[test]
+    fn mobile_relay_enabled_debug_hides_the_pairing_url() {
+        let enabled = MobileRelayEnabled {
+            status: MobileRelayStatus {
+                enabled: true,
+                connected: false,
+                phone_active: false,
+                last_phone_command_at: None,
+                relay_host: Some("relay.example.com".to_owned()),
+            },
+            pairing_url: "https://relay.example.com/pair?r=wd-room&t=secret-token".to_owned(),
+        };
+        let printed = format!("{enabled:?}");
+        assert!(!printed.contains("secret-token"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(SUPPORTED_OPERATIONS.contains(&"mobile.enable"));
     }
 
     #[test]

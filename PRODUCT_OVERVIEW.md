@@ -1,12 +1,14 @@
 # Product Overview
 
-> 最后更新：2026-09-23 | 当前版本：v0.81.0-rc9（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-23 | 当前版本：v0.82.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
 ## 核心功能
+
+- 手机中继由 Runtime Daemon 托管：`/mobile` 或 `willdeep daemon mobile enable` 打开后持久在线，关掉终端、升级 Runtime 都不断；手机上能看到整个 Runtime 的会话、历史消息与所有待处理的审批和提问，能做的写操作只有四件——发提示词（含图片）、在已登记工作区新建会话、停止当前轮次、批准 / 拒绝审批（只给「这一次」，不给「总是允许」）与回答提问。命令走字面量白名单映射到已有 Runtime 操作，删改会话、登记工作区、改档位与模型一概不开放；手机先答掉的审批，TUI 里的对话框自动撤回。详见 docs/MOBILE.md 与 docs/decisions/2026-09-23-daemon-mobile-relay.md。
 
 - 本机用量账本 `willdeep.usage-ledger.v1`：主回合、子 Agent、上下文压缩与辅助请求（标题、预测、路由、判官、看图兜底）的**每次模型调用**写一行到 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl`，daemon 与进程内回合同一写入口，只记数不记内容，写失败不影响回合；daemon 回合带 `events.ndjson` 序号。`willdeep usage backfill [--dry-run]` 从 daemon 事件日志回填账本上线前的用量，daemon 首次启动自动跑一次。WillDeep for macOS 只读合并进 Token 活动。canonical 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`，rs 侧见 docs/USAGE_LEDGER.md。
 
@@ -118,7 +120,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TUI 聊天搜索、高亮与匹配跳转，以及可点击、可滚动的状态栏和后台任务详情；
 - TUI `/history`、`Ctrl+R` 和 `/session search` 打开同一个历史会话面板：默认列出当前 Workspace 最近 20 条会话，可按标题或消息内容改词重查并展示命中摘要，方向键选择并以 Enter 或鼠标点击原地进入继续；`/session search` 的 `--status` / `--profile` / `--model` / `--after` / `--before` / `--workspace` 过滤器随每次重查一起下发；已归档会话会先恢复，当前草稿会话状态在切换前保存；`Ctrl+P` 全局命令面板中的当前 Workspace 会话也可直接切换；
 - TUI `/new`（别名 `/session new`）在当前工作区开一条不带历史的新会话：沿用当前 Provider、模型与配置，事件游标从 Runtime 事件流当前位置起读，旧会话留在磁盘上可经 `/history` 回去；`/clear` 仍只清空聊天显示，不动会话与上下文；
-- TUI 在轮次运行中不再吞掉回车：`/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` 立即执行，提示词与 `/local`、`/runtime` 连同附件排队并在本轮结束后按序发出，会改会话或 Runtime 状态的命令给出明确原因；`Esc` 中断当前轮次（Runtime 轮次交给 Daemon 排空，`/local` 轮次掐进程内 Harness），中断后队列立即续上；手机中继与键盘共用同一条队列；
+- TUI 在轮次运行中不再吞掉回车：`/help`、`/clear`、`/sidebar`、`/skills`、`/history`、`/session search` 立即执行，提示词与 `/local`、`/runtime` 连同附件排队并在本轮结束后按序发出，会改会话或 Runtime 状态的命令给出明确原因；`Esc` 中断当前轮次（Runtime 轮次交给 Daemon 排空，`/local` 轮次掐进程内 Harness），中断后队列立即续上；手机发来的消息不进这条队列，直接进 Runtime 的轮次队列；
 - TUI 审批与提问对话框按会话归属弹出：同一工作区开多个 TUI 时，别的会话的审批不再在这里弹出、也无法被就地解掉；无会话归属的任务（headless 提交）仍对所有客户端可解，Web 工作区视图维持原口径；记了发起端的审批弹回发起端，发起端退出后，同一种界面重开同一个会话也能接住，终端与浏览器之间互不代签；
 - Runtime 失败工具的原始参数与输出摘要经本机 `task.diagnostics` 提供，TUI Attention Inbox 详情直接显示退出码、失败域、失败原因、失败命令与输出；公共事件流（Web 桥接、手机中继）仍按原规则脱敏，写入日志前凭据打码且输出截断为有界首尾摘要；
 - TUI `Ctrl+P` 全局命令面板，可模糊搜索命令、Skills、会话、Agent/任务和工作区文件；
@@ -205,7 +207,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - MCP 工具发现、注册和调用，stdio 与 Streamable HTTP 两种传输，远程服务支持静态 Bearer 与 OAuth 2.1 登录（`willdeep mcp login`）；工具 Schema 不再全量常驻每轮上下文，通过 `list_mcp_tools` 按需搜索、`call_mcp_tool` 精确调用；
 - `/goal` 命令模式和 `$skill-name` 显式技能触发；
 - 分阶段 CLI/TUI/Runtime 产品路线图与逐项验收状态；
-- `/mobile` Relay 配对二维码和手机控制当前 CLI 会话；
+- `/mobile` 出配对二维码并打开 Runtime 托管的手机中继（见本节第一条）；
 - 区分角色的 TUI 配色；
 - macOS Universal、Windows x64、Linux AMD64/ARM64 自动构建与 tag 发布。
 - `rg` 优先、内置扫描兜底的跨平台文件搜索；
@@ -265,7 +267,8 @@ SOMEIM_API_KEY='<your-key>' cargo run -p willdeep -- \
 - [ ] ACP/Codex App Server/Goose 接入；
 - [x] MCP Streamable HTTP 与 OAuth（v0.78.0-rc24；服务端主动请求与 GET 事件流未接）；
 - [ ] LSP 诊断、Hooks/插件、自动记忆与 OS 级 Shell 沙箱；当前已有结构化工具门禁、工作区边界和小模型路由，但这些仍是与 Claude Code 完整能力面的主要差距；
-- [ ] 手机端工具审批和跨设备 Patch 审核；
+- [x] 手机端工具审批与提问回答（v0.82.0-rc1，中继归 Runtime）；跨设备 Patch 审核 rs 侧没有「补丁提案」对象，写入走审批，暂不做；
+- [ ] 手机中继端到端加密：中继服务端目前看得到明文（与 macOS 版同一边界），设计见 Xedit `docs/MOBILE_GATEWAY_E2E_ENCRYPTION_DESIGN.md`；
 - [x] 平台沙箱：写入围栏默认开、网络围栏按档位断通（v0.78.0-rc25）；更强的命令风险分类仍待做；
 - [x] 小模型路线做成数据：`agent-metrics --json --since` + 每周快照发布 Deep Share / Worker Verified Success（v0.78.0-rc26，`docs/AGENT_METRICS.md`）；
 - [x] 检查点回退：每轮开始前工作树快照进私有影子 git 仓库，`/rewind` / Web ↶ / `session.rewind` 回到第 N 步，对话与文件可一起回（v0.78.0-rc28，`docs/CHECKPOINT_REWIND.md`）；

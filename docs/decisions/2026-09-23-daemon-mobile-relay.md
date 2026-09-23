@@ -158,7 +158,7 @@ TUI /mobile ──本机控制面──▶ mobile.enable / mobile.disable / mobi
 已验证：
 
 - `cargo fmt --check`、`cargo clippy --workspace --all-targets -D warnings`、`ruby scripts/check_source_size.rb`、`cargo test --workspace` 全绿（`willdeep` 二进制 540 项 + 集成测试 578 项等）。
-- 新增 30 项测试：网关 20 项（含本机假中继端到端：Bearer 鉴权与 room 路径、快照、审批卡推送、手机批准后 `tool.updated`、关中继断开），凭据开关 4 项，TUI 4 项，审批归属与协议 `Debug` 遮 token 各 1 项。
+- 新增 31 项测试：网关 21 项（含本机假中继端到端：Bearer 鉴权与 room 路径、快照、审批卡推送、手机批准后 `tool.updated`、关中继断开；手机不在场时不推送但实时尾巴照记），凭据开关 4 项，TUI 4 项，审批归属与协议 `Debug` 遮 token 各 1 项。
 - 真实 daemon 冒烟（临时 `WILLDEEP_HOME`，中继指向本机不可达端口）：`daemon mobile enable` 按需拉起 Runtime 并打开中继；`daemon stop` / `start` 后自动恢复为开启；`disable` 落盘关闭；Runtime 不在跑时 `status` / `disable` 不会拉起它，也不会凭空生成凭据。
 
 未验证：

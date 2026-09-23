@@ -477,6 +477,31 @@ impl RuntimeClient {
             .await
     }
 
+    /// 手机中继的连接状态。旧 Runtime 不认识这个操作，回 `unsupported_operation`。
+    pub async fn mobile_status(
+        &self,
+    ) -> Result<ApiResponse<willdeep_runtime_protocol::MobileRelayStatus>, ClientError> {
+        self.call("mobile.status", &EmptyParams::default(), None)
+            .await
+    }
+
+    /// 打开手机中继并取回配对 URL（含 relay token，只用来出二维码）。
+    ///
+    /// 设值语义，重复调用结果相同，所以不带幂等 request id。
+    pub async fn mobile_enable(
+        &self,
+    ) -> Result<ApiResponse<willdeep_runtime_protocol::MobileRelayEnabled>, ClientError> {
+        self.call("mobile.enable", &EmptyParams::default(), None)
+            .await
+    }
+
+    pub async fn mobile_disable(
+        &self,
+    ) -> Result<ApiResponse<willdeep_runtime_protocol::MobileRelayStatus>, ClientError> {
+        self.call("mobile.disable", &EmptyParams::default(), None)
+            .await
+    }
+
     pub async fn approvals(&self) -> Result<ApiResponse<Vec<PendingApproval>>, ClientError> {
         self.call("approval.list", &EmptyParams::default(), None)
             .await

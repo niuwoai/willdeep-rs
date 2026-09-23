@@ -105,9 +105,23 @@ Provider Profile 可声明 `context_window`。在途自动压缩按四道水位�
 
 ### Mobile Relay
 
-`/mobile` 按需创建独立于 Swift App 的 CLI room/token，并主动连接 `wss://j.niuwoai.com/ws/broadcast/<room>`。二维码里是 `mobile-gateway.v1` 的紧凑配对 URL（`?r=<room>&t=<token>&d=<桌面名>`，自建中继另带 `u`），由手机端补全成完整配对 JSON；`base_url`/`pairing_token`/`expires_at` 是中继字段的副本或常量，不进二维码（详见 [手机中继](MOBILE.md)）。Android 与 CLI 使用同一 Bearer Token 加入广播房间。CLI 不开放本地监听端口。
+中继归 **Runtime Daemon** 所有（0.82.0 起；此前挂在 TUI 进程上，见 [决策单](decisions/2026-09-23-daemon-mobile-relay.md)）：
 
-Relay 凭据写入 `$WILLDEEP_HOME/mobile-relay.toml`，Unix 下强制 `0600`。手机的 `message.send` 进入当前会话；Agent 忙碌时请求按到达顺序排队，最终回复使用 Android 已支持的 `message.append` 与 `message.done` 事件返回。
+```text
+Android ──wss──▶ j.niuwoai.com/ws/broadcast/<room> ◀──wss── Runtime Daemon
+                                                            │
+                                  daemon/mobile_gateway.rs（受限客户端）
+                                   ├─ 手机命令 → 字面量白名单 → control_api::execute（进程内）
+                                   ├─ EventLog 实时订阅 → message.* / tool.* / session.upsert
+                                   └─ 快照：会话 + 全部待审批/提问 + 选中会话的历史投影
+TUI /mobile、willdeep daemon mobile ──本机控制面──▶ mobile.enable / disable / status
+```
+
+- **一台机器一个 Runtime、一个 room**，手机看到整个 Runtime；写操作只开发消息、在已登记工作区新建会话、停止轮次、审批（只 `allow_once` / `deny`）与回答提问。每个手机命令映射到一个已有 Runtime 操作，经与 HTTP handler 共用的 `control_api::execute` 分发，Drain 闸门、幂等缓存、参数校验和公共投影全部复用。
+- 手机发起的轮次 `origin_client = mobile:<id>`：审批弹回手机，同会话的 TUI 也弹；任一端先答，另一端撤回。
+- 开关持久化在 `$WILLDEEP_HOME/mobile-relay.toml` 的 `enabled`（Unix `0600`），Daemon 启动时据此自动重连；TUI 只是遥控器，不持有连接。
+- 二维码里是 `mobile-gateway.v1` 的紧凑配对 URL（`?r=<room>&t=<token>&d=<桌面名>`，自建中继另带 `u`），由手机端补全成完整配对 JSON（详见 [手机中继](MOBILE.md)）。Runtime 不开放新的监听端口，只主动外连中继。
+- 广播房间里只响应手机命令，回声和其它桌面端的回复一律丢弃；手机 60 秒无请求即视为不在场，停止推送。
 
 ### 后台任务回流与子 Agent
 
