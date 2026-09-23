@@ -1152,9 +1152,9 @@ impl App {
         let message = self
             .language
             .text(
-                "⚠ Runtime {runtime} 与客户端 {client} 版本不一致。命令实际由 Runtime 执行，当前仍按旧版审批策略运行。请运行 `willdeep daemon upgrade` 后重试。",
-                "⚠ Runtime {runtime} does not match client {client}. Commands execute inside the Runtime, which still applies its older approval policy. Run `willdeep daemon upgrade`, then retry.",
-                "⚠ Runtime {runtime} とクライアント {client} のバージョンが不一致です。コマンドは Runtime 側で実行され、古い承認ポリシーが適用されます。`willdeep daemon upgrade` を実行してください。",
+                "⚠ Runtime {runtime} 与客户端 {client} 版本不一致。命令实际由 Runtime 执行，当前仍按旧版审批策略运行。请运行 `/daemon upgrade` 后重试。",
+                "⚠ Runtime {runtime} does not match client {client}. Commands execute inside the Runtime, which still applies its older approval policy. Run `/daemon upgrade`, then retry.",
+                "⚠ Runtime {runtime} とクライアント {client} のバージョンが不一致です。コマンドは Runtime 側で実行され、古い承認ポリシーが適用されます。`/daemon upgrade` を実行してください。",
             )
             .replace("{runtime}", &stale)
             .replace("{client}", willdeep_core::VERSION);

@@ -157,9 +157,9 @@ impl App {
         let mut report = format!("System: CLI {} · Runtime {runtime}", willdeep_core::VERSION);
         if self.stale_runtime_version().is_some() {
             report.push_str(self.language.text(
-                " · 版本不一致，命令在 Runtime 里跑，请执行 `willdeep daemon upgrade` 对齐",
-                " · versions differ; commands run inside the Runtime, run `willdeep daemon upgrade`",
-                " · バージョン不一致。コマンドは Runtime 側で実行されます。`willdeep daemon upgrade` で揃えてください",
+                " · 版本不一致，命令在 Runtime 里跑，请执行 `/daemon upgrade` 对齐",
+                " · versions differ; commands run inside the Runtime, run `/daemon upgrade`",
+                " · バージョン不一致。コマンドは Runtime 側で実行されます。`/daemon upgrade` で揃えてください",
             ));
         }
         report

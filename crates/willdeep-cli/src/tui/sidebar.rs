@@ -366,9 +366,9 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         format!(
                             "  {}",
                             app.language.text(
-                                "工具按旧版策略执行 · 请运行 willdeep daemon upgrade",
-                                "Tools run old policy · run willdeep daemon upgrade",
-                                "ツールは旧ポリシーで実行 · willdeep daemon upgrade を実行",
+                                "工具按旧版策略执行 · 请运行 /daemon upgrade",
+                                "Tools run old policy · run /daemon upgrade",
+                                "ツールは旧ポリシーで実行 · /daemon upgrade を実行",
                             )
                         ),
                         Style::default().fg(Color::Yellow),
