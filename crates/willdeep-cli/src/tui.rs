@@ -2683,6 +2683,16 @@ fn runtime_status_label(status: RuntimeStatus, language: Language) -> &'static s
     }
 }
 
+/// Runtime 任务借用了 `BackgroundShell` 这个来源（核心枚举没有「任务」一档），
+/// 可它是一整轮对话，不是一条 shell 命令——照直显示成「后台命令」会误导人。
+fn attention_item_label(item: &AttentionItem, language: Language) -> &'static str {
+    if item.id.starts_with("runtime-task:") {
+        language.text("任务", "Task", "タスク")
+    } else {
+        attention_source_label(item.source, language)
+    }
+}
+
 fn attention_source_label(source: AttentionSource, language: Language) -> &'static str {
     match source {
         AttentionSource::Approval => language.text("审批", "Approval", "承認"),

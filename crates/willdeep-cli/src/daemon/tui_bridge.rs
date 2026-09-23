@@ -868,10 +868,12 @@ pub(crate) async fn runtime_snapshot(
     .collect();
     let approvals = api_data(runtime_client(&state)?.approvals().await?)?;
     let questions = api_data(runtime_client(&state)?.questions().await?)?;
+    let superseded = superseded_runtime_tasks(&tasks);
     let mut attention = tasks
         .into_iter()
         .filter(|task| visible_tasks.contains_key(&task.id))
         .filter(|task| runtime_task_visible(task, now()))
+        .filter(|task| !superseded.contains(&task.id))
         .filter(|task| task.status != willdeep_runtime_protocol::TaskStatus::Queued)
         .map(|task| {
             let activity = task.agent_id.and_then(|id| agent_activity.get(&id));
@@ -1249,23 +1251,78 @@ fn runtime_task_attention(
         .flatten()
         .collect::<Vec<_>>()
         .join("\n"),
-        elapsed_millis: task
-            .started_at
-            .map(|started| now().saturating_sub(started).saturating_mul(1_000)),
+        // 结束的任务算到结束为止：拿「现在」去减，三天前停下的任务会顶着
+        // 「62h」挂在 Inbox 里，看着像还在跑。
+        elapsed_millis: task.started_at.map(|started| {
+            task.completed_at
+                .unwrap_or_else(now)
+                .saturating_sub(started)
+                .saturating_mul(1_000)
+        }),
     }
 }
+
+/// 顺利收尾（或被用户取消）的任务在 Inbox 里停留这么久。
+const SETTLED_TASK_RETENTION_SECONDS: u64 = 5 * 60;
+
+/// 部分完成、失败、中断的任务留得久一些——它们也许还等着人处理——但不是永远。
+/// 与后台命令的失败保留期同一口径：几天前停下的任务不是待办，只是把真正需要
+/// 关注的条目挤出视野。
+const UNSETTLED_TASK_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 
 pub(super) fn runtime_task_visible(
     task: &willdeep_runtime_protocol::RuntimeTask,
     timestamp: u64,
 ) -> bool {
-    !matches!(
-        task.status,
-        willdeep_runtime_protocol::TaskStatus::Completed
-            | willdeep_runtime_protocol::TaskStatus::Cancelled
-    ) || task
-        .completed_at
-        .is_some_and(|completed| timestamp.saturating_sub(completed) <= 5 * 60)
+    use willdeep_runtime_protocol::TaskStatus;
+
+    let age = |completed: u64| timestamp.saturating_sub(completed);
+    match task.status {
+        TaskStatus::Completed | TaskStatus::Cancelled => task
+            .completed_at
+            .is_some_and(|completed| age(completed) <= SETTLED_TASK_RETENTION_SECONDS),
+        // 没记下结束时间的宁可留着，也不把可能还要处理的任务藏起来。
+        TaskStatus::Partial | TaskStatus::Failed | TaskStatus::Interrupted => task
+            .completed_at
+            .is_none_or(|completed| age(completed) <= UNSETTLED_TASK_RETENTION_SECONDS),
+        TaskStatus::Queued
+        | TaskStatus::Running
+        | TaskStatus::Cancelling
+        | TaskStatus::WaitingApproval
+        | TaskStatus::WaitingAnswer => true,
+    }
+}
+
+/// 同一会话里之后又提交过轮次的未竟任务。用户已经接着往下聊了，上一轮的
+/// 「部分完成」「失败」不再是待办——否则每追问一句，Inbox 里就多压一条
+/// 「需要你处理」，而且点开也无事可做。
+pub(super) fn superseded_runtime_tasks(
+    tasks: &[willdeep_runtime_protocol::RuntimeTask],
+) -> std::collections::HashSet<uuid::Uuid> {
+    use willdeep_runtime_protocol::TaskStatus;
+
+    let mut latest = std::collections::HashMap::<uuid::Uuid, u64>::new();
+    for task in tasks {
+        if let Some(session) = task.session_id {
+            let entry = latest.entry(session).or_insert(task.created_at);
+            *entry = (*entry).max(task.created_at);
+        }
+    }
+    tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Partial | TaskStatus::Failed | TaskStatus::Interrupted
+            )
+        })
+        .filter(|task| {
+            task.session_id
+                .and_then(|session| latest.get(&session))
+                .is_some_and(|newest| *newest > task.created_at)
+        })
+        .map(|task| task.id)
+        .collect()
 }
 
 /// 取回一个任务的失败排查材料。只有本机 Runtime 提供，旧版本 Daemon 没有这个

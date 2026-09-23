@@ -20,7 +20,7 @@ pub(super) fn render_attention_detail(f: &mut ratatui::Frame<'_>, app: &mut App)
         .unwrap_or_default();
     let content = format!(
         "{} · {}\n\n{}\n\n{}{diagnostics}{}",
-        attention_source_label(detail.source, app.language),
+        attention_item_label(detail, app.language),
         runtime_status_label(detail.status, app.language),
         detail.title,
         detail.detail,
@@ -323,7 +323,7 @@ pub(super) fn render_sidebar(f: &mut ratatui::Frame<'_>, app: &mut App, area: Re
                         lines.push(Line::styled(
                             format!(
                                 "    {} · {}{elapsed}",
-                                attention_source_label(item.source, app.language),
+                                attention_item_label(item, app.language),
                                 runtime_status_label(item.status, app.language),
                             ),
                             if app.focus == FocusPane::Sidebar

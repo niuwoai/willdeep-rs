@@ -103,6 +103,72 @@ fn completed_runtime_tasks_leave_recent_attention_after_five_minutes() {
     assert!(!tui_bridge::runtime_task_visible(&task(699), 1_000));
 }
 
+fn unsettled_task(
+    session: uuid::Uuid,
+    status: willdeep_runtime_protocol::TaskStatus,
+    created_at: u64,
+    completed_at: Option<u64>,
+) -> willdeep_runtime_protocol::RuntimeTask {
+    willdeep_runtime_protocol::RuntimeTask {
+        origin_client: None,
+        id: uuid::Uuid::new_v4(),
+        session_id: Some(session),
+        turn_id: None,
+        agent_id: None,
+        event_start_sequence: 0,
+        status,
+        workspace: None,
+        profile: None,
+        prompt_excerpt: None,
+        created_at,
+        started_at: Some(created_at),
+        completed_at,
+        exit_code: None,
+        failure_domain: None,
+    }
+}
+
+/// 几天前「部分完成」的任务曾永久顶着「需要你处理」挂在侧栏。
+#[test]
+fn unsettled_runtime_tasks_leave_attention_after_a_day() {
+    use willdeep_runtime_protocol::TaskStatus;
+    const DAY: u64 = 24 * 60 * 60;
+    let session = uuid::Uuid::new_v4();
+    for status in [TaskStatus::Partial, TaskStatus::Failed, TaskStatus::Interrupted] {
+        let task = unsettled_task(session, status, 1, Some(100));
+        assert!(tui_bridge::runtime_task_visible(&task, 100 + DAY));
+        assert!(!tui_bridge::runtime_task_visible(&task, 101 + DAY));
+    }
+    // 没有结束时间的宁可留着。
+    let unknown = unsettled_task(session, TaskStatus::Partial, 1, None);
+    assert!(tui_bridge::runtime_task_visible(&unknown, 10 * DAY));
+}
+
+/// 同一会话里接着发了新消息，上一轮的未竟任务就不再是待办；别的会话不受牵连。
+#[test]
+fn later_turns_in_the_same_session_supersede_unsettled_tasks() {
+    use willdeep_runtime_protocol::TaskStatus;
+    let session = uuid::Uuid::new_v4();
+    let other = uuid::Uuid::new_v4();
+    let partial = unsettled_task(session, TaskStatus::Partial, 10, Some(20));
+    let failed = unsettled_task(session, TaskStatus::Failed, 30, Some(40));
+    let latest = unsettled_task(session, TaskStatus::Partial, 50, Some(60));
+    let running = unsettled_task(session, TaskStatus::Running, 5, None);
+    let elsewhere = unsettled_task(other, TaskStatus::Partial, 1, Some(2));
+    let superseded = tui_bridge::superseded_runtime_tasks(&[
+        partial.clone(),
+        failed.clone(),
+        latest.clone(),
+        running.clone(),
+        elsewhere.clone(),
+    ]);
+    assert!(superseded.contains(&partial.id));
+    assert!(superseded.contains(&failed.id));
+    assert!(!superseded.contains(&latest.id));
+    assert!(!superseded.contains(&running.id));
+    assert!(!superseded.contains(&elsewhere.id));
+}
+
 /// 摘要进公共 DTO 前的三道处理各自都要能单独兜住：凭据打码（用户会把
 /// token 粘进提示词）、空白压平、按字符截断（多字节中间切一刀是 panic）。
 #[test]
