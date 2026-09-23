@@ -2315,3 +2315,22 @@ fn only_an_older_runtime_is_queued_for_one_automatic_upgrade() {
     assert!(app.stale_runtime_version().is_some());
     assert!(!app.runtime_auto_upgrade_pending);
 }
+
+/// 新开的会话还没发过消息、磁盘上没有文件；`/model` 切换要让 Runtime 领养它，
+/// 必须先落盘，否则 Runtime 报 not found、模型选择器看上去「按回车没反应」。
+#[test]
+fn unsaved_session_is_persisted_before_runtime_adoption() {
+    let workspace = std::env::temp_dir().join(format!(
+        "willdeep-persist-before-adopt-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(workspace.join("home"));
+    let mut session = Session::new(workspace.clone(), None, "");
+    assert!(store.load(session.id).is_err());
+    super::runtime_ui::persist_missing_core_session(&mut session, &store).unwrap();
+    assert_eq!(store.load(session.id).unwrap().id, session.id);
+    // 已在磁盘上的会话再走一遍不报错。
+    super::runtime_ui::persist_missing_core_session(&mut session, &store).unwrap();
+    let _ = std::fs::remove_dir_all(&workspace);
+}

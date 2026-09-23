@@ -116,7 +116,10 @@ pub(super) async fn reconcile_stale_runtime_turn(
 ///
 /// 已存在的会话只做可读性校验，绝不把 TUI 手里的旧副本写回去；否则另一个 Runtime
 /// 客户端刚落下的消息可能被覆盖。Xedit 桥接会话也会由 `load` 找到，不会生成本地影子。
-fn persist_missing_core_session(session: &mut Session, store: &SessionStore) -> Result<()> {
+pub(super) fn persist_missing_core_session(
+    session: &mut Session,
+    store: &SessionStore,
+) -> Result<()> {
     match store.load(session.id) {
         Ok(_) => Ok(()),
         Err(willdeep_core::session::SessionError::Io(error))

@@ -361,6 +361,9 @@ pub(super) async fn switch_model(
     {
         bail!("model must contain 1 to {MAX_MODEL_NAME_BYTES} bytes");
     }
+    // 还没发过消息的新会话不在磁盘上，Runtime 领养它会报 not found——和
+    // submit_turn 一样先落盘。
+    super::runtime_ui::persist_missing_core_session(session, store)?;
     let previous_model = runtime.provider_config.model.clone();
     agent
         .set_model(model)
