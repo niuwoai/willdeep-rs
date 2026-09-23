@@ -36,12 +36,13 @@ max_deep_calls_per_harness = 1
 
 # 与 Swift App 同语义的自建辅助模型。可使用域名、局域网 IP 或回环地址，不需要 API Key。
 # 文本辅助任务共用 summary_model，避免本机同时驻留多份模型。
+# 上下文压缩不走本地模型：摘要要替换整段旧历史，压坏了不可逆。
+# 旧配置里的 prefer_for_context_summaries 仍然能解析，只是不再有作用。
 [local_model]
 enabled = false
 base_url = "http://127.0.0.1:11434/v1"
 summary_model = "gemma4:e4b-it-qat"
 prefer_for_titles = true
-prefer_for_context_summaries = false
 prefer_for_worker_routing = true
 
 # 生命周期挂钩：审计留痕与门禁拦截。

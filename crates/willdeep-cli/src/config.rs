@@ -152,7 +152,13 @@ pub struct LocalModelSettings {
     pub base_url: String,
     pub summary_model: String,
     pub prefer_for_titles: bool,
-    pub prefer_for_context_summaries: bool,
+    /// 已废弃：上下文压缩不再支持本地辅助模型，这个键的值不再影响任何行为。
+    ///
+    /// 字段留着只为兼容旧的 `config.toml`——本段是 `deny_unknown_fields`，
+    /// 直接删掉字段会让写过这一行的用户一启动就报「unknown field」。改名
+    /// 加 `serde(rename)` 是有意的：键照旧接受，代码里再有人读它就很显眼。
+    #[serde(rename = "prefer_for_context_summaries")]
+    pub deprecated_prefer_for_context_summaries: bool,
     pub prefer_for_worker_routing: bool,
 }
 
@@ -163,7 +169,7 @@ impl Default for LocalModelSettings {
             base_url: "http://127.0.0.1:11434/v1".to_owned(),
             summary_model: "gemma4:e4b-it-qat".to_owned(),
             prefer_for_titles: true,
-            prefer_for_context_summaries: false,
+            deprecated_prefer_for_context_summaries: false,
             prefer_for_worker_routing: true,
         }
     }
@@ -822,8 +828,21 @@ base_url = "https://example.com/v1"
         assert_eq!(parsed.local_model.base_url, "http://127.0.0.1:11434/v1");
         assert_eq!(parsed.local_model.summary_model, "gemma4:e4b-it-qat");
         assert!(parsed.local_model.prefer_for_titles);
-        assert!(!parsed.local_model.prefer_for_context_summaries);
         assert!(parsed.local_model.prefer_for_worker_routing);
+    }
+
+    #[test]
+    fn retired_context_summary_preference_still_parses_and_is_ignored() {
+        // 上下文压缩不再支持本地模型，但写过这一行的 config.toml 不能因此
+        // 启动失败：本段是 deny_unknown_fields，删字段等于把旧配置判死。
+        for value in ["true", "false"] {
+            let parsed: ConfigFile = toml::from_str(&format!(
+                "version = 1\n[local_model]\nenabled = true\nprefer_for_context_summaries = {value}\n"
+            ))
+            .expect("旧配置里的已废弃键必须仍然能解析");
+            validate(&parsed, Path::new("config.toml")).expect("已废弃键不该让校验失败");
+            assert!(parsed.local_model.enabled, "同段的其它键照旧生效");
+        }
     }
 
     #[test]

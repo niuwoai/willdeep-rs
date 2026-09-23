@@ -1078,31 +1078,20 @@ pub(crate) async fn build(
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
     }
-    // 与 Swift App 同一候选顺序：显式偏好的本地辅助模型 → some.im 托管压缩器
-    // （仅在没有显式 compressor_model 时）/显式模型 → 会话模型兜底。
+    // 与 Swift App 同一候选顺序：显式 compressor_model / some.im 托管压缩器
+    // （仅在没有显式 compressor_model 时）→ 会话模型兜底。
     let mut compressors = Vec::new();
-    if loaded.file.local_model.enabled
-        && loaded.file.local_model.prefer_for_context_summaries
-        && let Some(local_config) = local_auxiliary_config.clone()
+    for (compressor_config, hosted_prompt) in
+        compressor_candidate_configs(&loaded.file, &parent_provider_config, kind)
     {
+        let context = if hosted_prompt {
+            "initialize hosted context compressor"
+        } else {
+            "initialize context compressor provider"
+        };
         compressors.push((
-            build_provider(local_config).context("initialize local context summary model")?,
-            false,
-        ));
-    }
-    if let Some(compressor_model) = loaded.file.agent.compressor_model.clone() {
-        let mut compressor_config = parent_provider_config.clone();
-        compressor_config.model = compressor_model;
-        compressors.push((
-            build_provider(compressor_config).context("initialize context compressor provider")?,
-            false,
-        ));
-    } else if kind == ProviderKind::SomeIm {
-        let mut compressor_config = parent_provider_config.clone();
-        compressor_config.model = SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned();
-        compressors.push((
-            build_provider(compressor_config).context("initialize hosted context compressor")?,
-            true,
+            build_provider(compressor_config).context(context)?,
+            hosted_prompt,
         ));
     }
     compressors.push((provider.clone(), false));
@@ -1180,6 +1169,32 @@ pub(crate) fn resolve_parent_provider_config(
         .or_else(|| profile.and_then(|provider| provider.max_output_tokens))
         .unwrap_or(16_384);
     Ok(provider_config)
+}
+
+/// 上下文压缩在会话模型兜底之前的候选：显式 `[agent] compressor_model`，或者
+/// some.im 会话的托管压缩器（没有显式模型时）。`bool` 为真表示压缩指令存在服务端
+/// 并以 replace 模式注入，客户端这时只发裸转录。调用方在末尾追加会话 Provider，
+/// 所以这条链永远至少有一个候选。
+///
+/// 本地辅助模型刻意不在这条链上：压缩是拿一段摘要替换整段旧历史，弱模型做坏一次
+/// 就把长期上下文丢干净了，而且这是不可逆的。旧配置里的
+/// `[local_model] prefer_for_context_summaries` 仍然能解析，但不再改变这里的顺序。
+fn compressor_candidate_configs(
+    file: &crate::config::ConfigFile,
+    parent: &ProviderConfig,
+    kind: ProviderKind,
+) -> Vec<(ProviderConfig, bool)> {
+    if let Some(compressor_model) = file.agent.compressor_model.clone() {
+        let mut compressor_config = parent.clone();
+        compressor_config.model = compressor_model;
+        vec![(compressor_config, false)]
+    } else if kind == ProviderKind::SomeIm {
+        let mut compressor_config = parent.clone();
+        compressor_config.model = SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned();
+        vec![(compressor_config, true)]
+    } else {
+        Vec::new()
+    }
 }
 
 /// 标题与下一句预测共用的小模型候选：本地模型（`prefer_for_titles`）优先，
@@ -1873,6 +1888,70 @@ context_window = 500000
             .find(|(tier, _)| *tier == willdeep_core::WorkerTier::Expert)
             .expect("expert tier");
         assert!(!expert.1.hosted_job_prompt);
+    }
+
+    fn compressor_candidates(source: &str, kind: ProviderKind) -> Vec<(String, String, bool)> {
+        let file: crate::config::ConfigFile =
+            toml::from_str(source).expect("parse compressor config fixture");
+        compressor_candidate_configs(&file, &parent_config(kind, "glm-5"), kind)
+            .into_iter()
+            .map(|(config, hosted)| (config.base_url.clone(), config.model.clone(), hosted))
+            .collect()
+    }
+
+    /// 本地辅助模型曾经可以排在压缩候选链最前面（`[local_model]
+    /// prefer_for_context_summaries`）。这个能力已经撤掉：键还认，但不许再把本地
+    /// 端点塞进压缩链——弱模型压坏一次，丢掉的是整段不可逆的长期上下文。
+    const RETIRED_LOCAL_PREFERENCE: &str = r#"
+version = 1
+
+[local_model]
+enabled = true
+base_url = "http://127.0.0.1:11434/v1"
+prefer_for_context_summaries = true
+"#;
+
+    #[test]
+    fn the_retired_local_preference_never_reaches_the_compressor_chain() {
+        // some.im 会话：只剩托管压缩器，本地端点不在链上。
+        let someim = compressor_candidates(RETIRED_LOCAL_PREFERENCE, ProviderKind::SomeIm);
+        assert_eq!(
+            someim,
+            vec![(
+                "https://some.im/v1".to_owned(),
+                SOMEIM_CONTEXT_COMPRESSOR_MODEL.to_owned(),
+                true
+            )]
+        );
+
+        // 其它 Provider：会话模型兜底由调用方追加，这里一个候选都不该有。
+        assert!(
+            compressor_candidates(RETIRED_LOCAL_PREFERENCE, ProviderKind::OpenAiCompatible)
+                .is_empty()
+        );
+
+        // 显式 compressor_model 仍然赢过托管压缩器，本地端点照样进不来。
+        let explicit = compressor_candidates(
+            &format!("{RETIRED_LOCAL_PREFERENCE}\n[agent]\ncompressor_model = \"glm-5-air\"\n"),
+            ProviderKind::SomeIm,
+        );
+        assert_eq!(
+            explicit,
+            vec![(
+                "https://some.im/v1".to_owned(),
+                "glm-5-air".to_owned(),
+                false
+            )]
+        );
+
+        for candidates in [someim, explicit] {
+            assert!(
+                candidates
+                    .iter()
+                    .all(|(base_url, ..)| !base_url.contains("127.0.0.1")),
+                "本地辅助端点不得出现在压缩候选链里"
+            );
+        }
     }
 
     #[test]

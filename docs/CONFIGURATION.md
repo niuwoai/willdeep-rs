@@ -37,7 +37,6 @@ enabled = false
 base_url = "http://127.0.0.1:11434/v1"
 summary_model = "gemma4:e4b-it-qat"
 prefer_for_titles = true
-prefer_for_context_summaries = false
 prefer_for_worker_routing = true
 
 [providers.some-im]
@@ -94,18 +93,18 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 
 ## `[local_model]` 段
 
-本段对齐 macOS Swift App 的“本地模型辅助”语义，复用一个轻量文本模型做短任务，避免标题、压缩和路由各自常驻一套模型。当前通过配置文件启用：
+本段对齐 macOS Swift App 的“本地模型辅助”语义，复用一个轻量文本模型做短任务，避免标题和路由各自常驻一套模型。上下文压缩不在其中——它已经不再支持本地模型。当前通过配置文件启用：
 
 | 键 | 说明 |
 |---|---|
 | `enabled` | 本地辅助模型总开关；默认 `false` |
 | `base_url` | OpenAI-compatible API Base；支持域名、局域网 IP 与回环地址，默认 `http://127.0.0.1:11434/v1` |
-| `summary_model` | 三类辅助任务复用的模型 ID；默认 `gemma4:e4b-it-qat` |
+| `summary_model` | 辅助任务（标题与下一句预测、Worker 路由）复用的模型 ID；默认 `gemma4:e4b-it-qat` |
 | `prefer_for_titles` | 会话标题优先本地生成；默认 `true` |
-| `prefer_for_context_summaries` | 上下文压缩优先本地生成；默认 `false`，避免弱模型损失长期上下文 |
+| `prefer_for_context_summaries` | **已废弃、值被忽略。** 上下文压缩不再支持本地模型：摘要替换的是整段旧历史，弱模型压坏一次就不可逆。旧配置写了这一行仍然能正常启动 |
 | `prefer_for_worker_routing` | 低置信度 Worker 路由优先咨询本地模型；默认 `true` |
 
-辅助端点可以不设置 API Key/Token，此时不会发送空的 `Authorization`。它可以部署在当前机器、家庭局域网或用户控制的域名后面；如果使用明文 HTTP，传输内容不会加密，应只放在可信网络。标题和压缩会按候选链自动回退；Worker 路由仅在关键词规则置信度低于 86 时调用模型，并且只允许更换已知 Worker Profile，不会改变 Tier、自动派工或安全约束。关闭总开关后行为与旧版本一致。
+辅助端点可以不设置 API Key/Token，此时不会发送空的 `Authorization`。它可以部署在当前机器、家庭局域网或用户控制的域名后面；如果使用明文 HTTP，传输内容不会加密，应只放在可信网络。标题会按候选链自动回退（压缩的候选链只有远端模型，与本段无关）；Worker 路由仅在关键词规则置信度低于 86 时调用模型，并且只允许更换已知 Worker Profile，不会改变 Tier、自动派工或安全约束。关闭总开关后行为与旧版本一致。
 
 ## `[providers.*]` 段
 

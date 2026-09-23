@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.81.0-rc6] - 2026-09-23
+
+### Removed
+- **上下文压缩不再支持本地辅助模型，`[local_model] prefer_for_context_summaries` 撤销。** 压缩不是可有可无的润色：它拿一段摘要替换整段旧历史，替换完原文就不在上下文里了，弱模型压坏一次没有第二次机会——这一条和 macOS 桌面端同步删。压缩候选链现在只剩远端：显式 `[agent] compressor_model` → some.im 托管压缩器（没有显式模型时）→ 会话模型兜底。兜底那一档永远在，所以候选链不会空；全部候选都失败时仍然按原样报出最后一个 Provider 的错误。
+- **旧配置不会因此启动失败。** `[local_model]` 段是 `deny_unknown_fields`，直接删字段会让写过 `prefer_for_context_summaries` 的 `config.toml` 一启动就撞「unknown field」。所以字段留着、值被忽略：Rust 里改名成 `deprecated_prefer_for_context_summaries` 并用 `serde(rename)` 接住原来的键——键照旧解析，代码里再有人读它就很显眼。`config.example.toml` 和 `docs/CONFIGURATION.md` / `docs/SOMEIM_INTEGRATION.md` 同步改口，配置表里那一行标成已废弃、值被忽略，不直接删，免得升级的人翻不到自己配置里那个键去哪了。
+- 顺手把压缩候选的装配从 `build_harness` 里抽成纯函数 `compressor_candidate_configs`，这样「写了那个键、本地模型也开着，本地端点仍然进不了压缩链」这条断言不用起 Provider 就能钉住：some.im 会话只剩托管压缩器，其它 Provider 一个前置候选都没有，显式 `compressor_model` 仍然赢过托管压缩器。
+- `web/package.json` 的版本号在 0.81.0-rc5 发版时漏改（仍是 rc4），随本版对齐。
+
 ## [0.81.0-rc5] - 2026-09-22
 
 ### Added

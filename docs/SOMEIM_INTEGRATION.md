@@ -117,7 +117,7 @@ Provider 为 some.im 时，`generalist` 与七个内部窄工种绑定基础档 
 
 ## 上下文压缩模型
 
-Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用默认绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。启用 `[local_model] prefer_for_context_summaries = true` 后，本地辅助模型排在这条链之前，失败再回退托管压缩器；其它 Provider 最终回退会话模型。
+Provider 为 some.im 时，手动 `/compress` 与自动压缩的摘要调用默认绑定网关托管的 `someim-32b-compressor`（当前落在 `deepseek-v4-flash`，按 flash 档计费）：固定压缩指令存在服务端并以 replace 模式注入，客户端只发裸转录——压缩把整段旧历史重发一遍，是循环里最大的单笔固定开销，压缩指令的迭代也因此不再依赖客户端发版。`[agent] compressor_model` 可覆盖；覆盖成非托管模型时，行内压缩指令仍随请求携带。压缩链上只有远端模型：本地辅助模型（`[local_model]`）不参与压缩——摘要替换的是整段旧历史，弱模型压坏一次不可逆。其它 Provider 最终回退会话模型。
 
 ## 会话标题模型
 
