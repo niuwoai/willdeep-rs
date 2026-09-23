@@ -70,7 +70,8 @@ TUI /mobile ──本机控制面──▶ mobile.enable / mobile.disable / mobi
 | `session.create` | `session.create`，工作区必须已登记 | `session.upsert` |
 | `turn.stop` | `turn.stop`（会话的 `active_turn_id`） | `ack` |
 | `tool.decide` | 审批：`approval.resolve`（`allow_once` / `deny`）；提问：`question.answer` | `ack` + `tool.updated` |
-| `push.register`、`patch.decide`、`diff.get`、`job.kill`、`file.read`、`queue.update` | — | `error`：`Unsupported mobile command: <type>.`（与 Mac 端逐字一致） |
+| `queue.update`（`action: add`） | 同 `message.send`：Android 在选中会话正跑着时发的就是它，Runtime 的轮次本来就按会话串行排队 | `ack` + 用户消息回显 + 新快照 |
+| `queue.update`（`remove` / `clear` / `send_now`）、`push.register`、`patch.decide`、`diff.get`、`job.kill`、`file.read` | — | `error`：`Unsupported mobile command: <type>.`（与 Mac 端逐字一致） |
 
 `message.send` 的目标会话按顺序解析（与 Mac 端语义对齐）：
 
@@ -141,7 +142,8 @@ TUI /mobile ──本机控制面──▶ mobile.enable / mobile.disable / mobi
 |---|---|
 | `patch.decide` / `diff.get` | rs 没有「补丁提案」这一层，写入走审批，已由 `tool.decide` 覆盖 |
 | `file.read` | 手机直接读文件等于绕过工作区边界，不开 |
-| `job.kill` / `queue.update` | 后台 Shell 与 TUI 键盘队列都不是 Runtime 对象，没有可复用的操作 |
+| `job.kill` | 后台 Shell 不是 Runtime 对象，没有可复用的操作 |
+| `queue.update` 的 `remove` / `clear` / `send_now` | 要改动 Runtime 里排队中的轮次（撤回、插队），快照也得先把排队轮次暴露出来；`add` 已支持（见第 5 节） |
 | `push.register` | 没有推送通道；Android 对它静默降级 |
 | token 级流式 | 见第 6 节 |
 | 端到端加密 | 见第 8 节第 5 条 |
@@ -158,7 +160,7 @@ TUI /mobile ──本机控制面──▶ mobile.enable / mobile.disable / mobi
 已验证：
 
 - `cargo fmt --check`、`cargo clippy --workspace --all-targets -D warnings`、`ruby scripts/check_source_size.rb`、`cargo test --workspace` 全绿（`willdeep` 二进制 540 项 + 集成测试 578 项等）。
-- 新增 31 项测试：网关 21 项（含本机假中继端到端：Bearer 鉴权与 room 路径、快照、审批卡推送、手机批准后 `tool.updated`、关中继断开；手机不在场时不推送但实时尾巴照记），凭据开关 4 项，TUI 4 项，审批归属与协议 `Debug` 遮 token 各 1 项。
+- 新增 32 项测试：网关 22 项（含本机假中继端到端：Bearer 鉴权与 room 路径、快照、审批卡推送、手机批准后 `tool.updated`、关中继断开；手机不在场时不推送但实时尾巴照记；会话忙时 Android 发的 `queue.update add` 照样排成轮次），凭据开关 4 项，TUI 4 项，审批归属与协议 `Debug` 遮 token 各 1 项。
 - 真实 daemon 冒烟（临时 `WILLDEEP_HOME`，中继指向本机不可达端口）：`daemon mobile enable` 按需拉起 Runtime 并打开中继；`daemon stop` / `start` 后自动恢复为开启；`disable` 落盘关闭；Runtime 不在跑时 `status` / `disable` 不会拉起它，也不会凭空生成凭据。
 
 未验证：

@@ -500,6 +500,58 @@ async fn message_send_queues_one_turn_owned_by_the_phone_even_when_retried() {
     );
 }
 
+/// Android 在会话正跑着时把新消息发成 `queue.update`（`action: add`）。它必须照样
+/// 排进 Runtime 的轮次队列，否则「轮次进行中从手机补一句」这个最常用的场景会失败。
+#[tokio::test]
+async fn queued_messages_from_a_busy_session_become_runtime_turns() {
+    let harness = Harness::new();
+    harness.register_workspace().await;
+    let session_id = harness.session().await;
+    let mut gateway = harness.gateway();
+    for text in ["first", "second"] {
+        let kind = if text == "first" {
+            "message.send"
+        } else {
+            "queue.update"
+        };
+        let envelope_id = uuid::Uuid::new_v4().to_string();
+        let outgoing = phone(
+            &mut gateway,
+            json!({
+                "id": envelope_id,
+                "type": kind,
+                "session_id": session_id.to_string(),
+                "payload": { "action": "add", "text": text },
+            }),
+        )
+        .await;
+        let ack = one(&outgoing, "ack");
+        assert_eq!(ack["id"], envelope_id);
+        assert_eq!(ack["payload"]["type"], kind, "回执类型跟着信封走");
+    }
+    let turns = harness
+        .execute("turn.list", json!({ "session_id": session_id }))
+        .await;
+    assert_eq!(turns.as_array().unwrap().len(), 2);
+
+    for action in ["remove", "clear", "send_now"] {
+        let refused = phone(
+            &mut gateway,
+            json!({
+                "id": "q",
+                "type": "queue.update",
+                "session_id": session_id.to_string(),
+                "payload": { "action": action, "message_id": "x" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            one(&refused, "error")["payload"]["message"],
+            "Unsupported mobile command: queue.update."
+        );
+    }
+}
+
 #[tokio::test]
 async fn message_send_with_a_workspace_path_opens_a_session_there() {
     let harness = Harness::new();

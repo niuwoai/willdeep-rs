@@ -35,6 +35,7 @@ impl Gateway {
             "session.create" => self.create_session(server, &envelope).await,
             "turn.stop" => self.stop_turn(server, &envelope).await,
             "tool.decide" => self.decide_tool(server, &envelope).await,
+            "queue.update" => self.queue_update(server, &envelope).await,
             // 与 macOS 桌面端 `AgentMobileGatewayCommandError.unsupportedCommand` 逐字一致：
             // 手机端靠这个前缀区分「这条命令不支持」和「连接出错」。
             _ => Err(CommandError::new(format!(
@@ -182,15 +183,32 @@ impl Gateway {
         self.selected = Some(session_id);
         let echo = self.push_user_echo(session_id, request_id, &text, image_count);
         Ok(vec![
+            // 回执的类型跟着信封走（`message.send` 或 `queue.update`），与 macOS 桌面端一致。
             ack(
                 envelope.id.as_deref(),
-                "message.send",
+                &envelope.kind,
                 Some(session_id),
                 None,
             ),
             echo,
             self.snapshot(server, None).await,
         ])
+    }
+
+    /// Android 在选中会话正跑着的时候，新消息发的是 `queue.update`（`action: add`），
+    /// 不是 `message.send`。Runtime 的轮次本来就按会话严格串行排队，所以 `add` 就是
+    /// 给这个会话提交一轮。`remove` / `clear` / `send_now` 要改动排队中的轮次，暂不开放。
+    async fn queue_update(
+        &mut self,
+        server: &ServerState,
+        envelope: &PhoneEnvelope,
+    ) -> Result<Vec<Value>, CommandError> {
+        match payload_string(&envelope.payload, &["action"]).as_deref() {
+            Some("add") => self.send_message(server, envelope).await,
+            _ => Err(CommandError::new(
+                "Unsupported mobile command: queue.update.",
+            )),
+        }
     }
 
     /// `message.send` 的目标会话，与 macOS 桌面端同一套顺序：

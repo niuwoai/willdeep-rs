@@ -42,7 +42,7 @@ willdeep daemon mobile disable   # 关闭
 
 | 手机上的操作 | 在 Runtime 里 |
 |---|---|
-| 发消息（可带图片） | 给目标会话提交一轮（`turn.submit`）；同一会话的轮次严格串行，正在跑就排队 |
+| 发消息（可带图片） | 给目标会话提交一轮（`turn.submit`）；同一会话的轮次严格串行，正在跑就排队。会话正跑着时 Android 发的是 `queue.update`（加入队列），效果相同；队列里的撤回、清空、插队暂不支持 |
 | 新建会话 | 在**已登记**的工作区里建一条（`session.create`） |
 | 停止 | 停掉会话当前的轮次（`turn.stop`） |
 | 批准 / 拒绝、回答提问 | `approval.resolve`（只有「这一次允许」和「拒绝」）/ `question.answer` |
