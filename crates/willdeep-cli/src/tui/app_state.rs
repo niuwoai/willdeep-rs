@@ -1958,7 +1958,7 @@ impl App {
                         home,
                         bridge.clone(),
                         mobile_tx.clone(),
-                        mobile_snapshot(session),
+                        mobile_state(session),
                     ) {
                         Ok(gateway) => {
                             self.append_transcript(format!(

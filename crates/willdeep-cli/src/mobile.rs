@@ -87,6 +87,18 @@ impl RelayBridge {
     }
 }
 
+/// 手机连上中继时能拿到的桌面状态。CLI 的中继只挂在当前这一条 TUI 会话上，
+/// 所以工作区和能力都只有「当前这一个」，由调用方在开启中继时算好。
+#[derive(Clone, Debug)]
+pub struct MobileState {
+    /// `state.snapshot` 信封，同时回应 `session.list` / `session.select`。
+    pub snapshot: Value,
+    /// `workspace.list` 的 `payload.workspaces`。
+    pub workspaces: Value,
+    /// `capabilities.updated` 的 payload（providers/models/skills/experts/plugins）。
+    pub capabilities: Value,
+}
+
 pub struct RelayGateway {
     task: JoinHandle<()>,
     pub qr: String,
@@ -98,12 +110,12 @@ impl RelayGateway {
         home: &Path,
         bridge: RelayBridge,
         prompts: mpsc::UnboundedSender<MobilePrompt>,
-        snapshot: Value,
+        state: MobileState,
     ) -> Result<Self> {
         let credentials = RelayCredentials::load_or_create(home)?;
         let qr = render_qr(&pairing_url(&credentials)?)?;
         let room = credentials.room.clone();
-        let task = tokio::spawn(run_relay(credentials, bridge, prompts, snapshot));
+        let task = tokio::spawn(run_relay(credentials, bridge, prompts, state));
         Ok(Self { task, qr, room })
     }
 }
@@ -205,7 +217,7 @@ async fn run_relay(
     credentials: RelayCredentials,
     bridge: RelayBridge,
     prompts: mpsc::UnboundedSender<MobilePrompt>,
-    snapshot: Value,
+    state: MobileState,
 ) {
     loop {
         let Ok(request) = relay_request(&credentials) else {
@@ -216,7 +228,7 @@ async fn run_relay(
             let (mut output, mut input) = socket.split();
             let mut events = bridge.events.subscribe();
             let _ = output
-                .send(WebSocketMessage::Text(snapshot.to_string().into()))
+                .send(WebSocketMessage::Text(state.snapshot.to_string().into()))
                 .await;
             loop {
                 tokio::select! {
@@ -229,7 +241,7 @@ async fn run_relay(
                     },
                     incoming = input.next() => match incoming {
                         Some(Ok(WebSocketMessage::Text(value))) => {
-                            if let Some(response) = handle_command(&prompts, &snapshot, &value)
+                            if let Some(response) = handle_command(&prompts, &state, &value)
                                 && output.send(WebSocketMessage::Text(response.into())).await.is_err() {
                                 break;
                             }
@@ -262,9 +274,12 @@ fn relay_request(
     Ok(request)
 }
 
+/// 手机端命令的完整清单见 Android 仓库 `docs/MOBILE_GATEWAY_REQUIREMENTS.md` 的三方对照表。
+/// CLI 只实现其中的子集；其余命令按 macOS 桌面端的口径回 `Unsupported mobile command: <type>.`，
+/// 手机端据此只把这一条命令标成失败，探测型命令（`capabilities.get`/`push.register`）静默降级。
 fn handle_command(
     prompts: &mpsc::UnboundedSender<MobilePrompt>,
-    snapshot: &Value,
+    state: &MobileState,
     input: &str,
 ) -> Option<String> {
     let envelope: Value = serde_json::from_str(input).ok()?;
@@ -290,10 +305,27 @@ fn handle_command(
             }
             Some(ack_envelope(id, "message.send"))
         }
-        "session.list" | "session.select" => Some(snapshot.to_string()),
+        "session.list" | "session.select" => Some(state.snapshot.to_string()),
+        "workspace.list" => Some(reply_envelope(
+            id,
+            "workspace.list",
+            json!({"workspaces": state.workspaces}),
+        )),
+        "capabilities.get" => Some(reply_envelope(
+            id,
+            "capabilities.updated",
+            state.capabilities.clone(),
+        )),
         value if value.starts_with("state.") || value.starts_with("message.") => None,
-        _ => Some(error_envelope(id, &format!("unsupported command: {kind}"))),
+        _ => Some(error_envelope(
+            id,
+            &format!("Unsupported mobile command: {kind}."),
+        )),
     }
+}
+
+fn reply_envelope(id: Option<&str>, kind: &str, payload: Value) -> String {
+    json!({"id": id, "type": kind, "payload": payload, "ts": unix_timestamp()}).to_string()
 }
 
 fn ack_envelope(id: Option<&str>, command: &str) -> String {
@@ -381,17 +413,61 @@ fn validate_secret_permissions(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn test_state() -> MobileState {
+        MobileState {
+            snapshot: json!({"type": "state.snapshot"}),
+            workspaces: json!([{"path": "/tmp/demo", "name": "demo", "session_count": 1, "is_current": true}]),
+            capabilities: json!({
+                "providers": [], "models": [{"id": "m1", "title": "m1", "is_active": true}],
+                "skills": [], "experts": [], "plugins": [], "active_model_id": "m1",
+            }),
+        }
+    }
+
+    fn reply(input: &str) -> Value {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        serde_json::from_str(&handle_command(&tx, &test_state(), input).unwrap()).unwrap()
+    }
+
     #[test]
     fn message_send_is_forwarded() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let response = handle_command(
             &tx,
-            &json!({"type": "state.snapshot"}),
+            &test_state(),
             r#"{"id":"1","type":"message.send","payload":{"text":"hello"}}"#,
         )
         .unwrap();
         assert!(response.contains("ack"));
         assert_eq!(rx.try_recv().unwrap().text, "hello");
+    }
+
+    #[test]
+    fn capabilities_get_replies_with_capabilities_updated() {
+        let response = reply(r#"{"id":"c1","type":"capabilities.get"}"#);
+        assert_eq!(response["type"], "capabilities.updated");
+        assert_eq!(response["id"], "c1");
+        assert_eq!(response["payload"]["active_model_id"], "m1");
+    }
+
+    #[test]
+    fn workspace_list_replies_with_current_workspace() {
+        let response = reply(r#"{"id":"w1","type":"workspace.list"}"#);
+        assert_eq!(response["type"], "workspace.list");
+        assert_eq!(response["payload"]["workspaces"][0]["path"], "/tmp/demo");
+    }
+
+    /// 与 macOS 桌面端 `AgentMobileGatewayCommandError.unsupportedCommand` 的文案逐字一致，
+    /// 手机端靠这个前缀区分「命令不支持」和「连接出错」。
+    #[test]
+    fn unsupported_commands_use_the_mac_gateway_wording() {
+        let response = reply(r#"{"id":"t1","type":"tool.decide","payload":{"id":"x"}}"#);
+        assert_eq!(response["type"], "error");
+        assert_eq!(response["id"], "t1");
+        assert_eq!(
+            response["payload"]["message"],
+            "Unsupported mobile command: tool.decide."
+        );
     }
 
     #[test]

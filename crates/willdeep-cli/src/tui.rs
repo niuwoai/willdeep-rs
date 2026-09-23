@@ -39,7 +39,7 @@ use willdeep_core::{
 
 use crate::editor::{DraftAttachment, PromptEditor};
 use crate::i18n::Language;
-use crate::mobile::{MobilePrompt, RelayBridge, RelayGateway};
+use crate::mobile::{MobilePrompt, MobileState, RelayBridge, RelayGateway};
 
 mod activity;
 mod agent_commands;
@@ -1180,6 +1180,45 @@ fn dispatch_media_action(action: MediaAction, app: &mut App, runtime: &TuiRuntim
 }
 
 mod app_state;
+
+/// 开启手机中继时的桌面状态。CLI 中继只服务当前这一条会话：工作区只有它所在的一个，
+/// 能力只报当前 Profile / 模型——手机端据此不会给出 CLI 切不过去的选项。
+fn mobile_state(session: &Session) -> MobileState {
+    let workspace_name = session
+        .workspace
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Workspace");
+    let active_option = |id: &Option<String>| match id {
+        Some(id) => serde_json::json!([{"id": id, "title": id, "is_active": true}]),
+        None => serde_json::json!([]),
+    };
+    let mut capabilities = serde_json::json!({
+        "providers": active_option(&session.profile),
+        "models": active_option(&session.model),
+        "skills": [],
+        "experts": [],
+        "plugins": [],
+    });
+    if let Some(profile) = &session.profile {
+        capabilities["active_provider_id"] = serde_json::json!(profile);
+    }
+    if let Some(model) = &session.model {
+        capabilities["active_model_id"] = serde_json::json!(model);
+    }
+    MobileState {
+        snapshot: mobile_snapshot(session),
+        workspaces: serde_json::json!([{
+            "path": session.workspace,
+            "name": workspace_name,
+            "session_count": 1,
+            "is_current": true,
+            "is_git_repo": session.workspace.join(".git").exists(),
+            "last_used_at": session.updated_at.to_string(),
+        }]),
+        capabilities,
+    }
+}
 
 fn mobile_snapshot(session: &Session) -> serde_json::Value {
     serde_json::json!({

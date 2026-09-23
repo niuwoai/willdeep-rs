@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.81.0-rc9] - 2026-09-23
+
+### Fixed
+- **手机连上 CLI 中继后提示「capabilities.get 是未知命令」，整条连接被标成错误。** CLI 中继只认 `message.send`/`session.list`/`session.select`，其余一律回 `unsupported command: <type>`；而 Android 与 macOS 桌面端的约定文案是 `Unsupported mobile command: <type>.`，手机端靠这个前缀把「探测型命令不支持」静默降级，文案对不上就当成了连接故障。现在：
+  - `capabilities.get` 回 `capabilities.updated`：只报当前会话的 Profile / 模型（CLI 中继不支持从手机切换，所以不给别的选项），skills/experts/plugins 为空。
+  - `workspace.list` 回当前会话所在的那一个工作区。
+  - 其它未实现的命令（`tool.decide`、`patch.decide`、`turn.stop`、`push.register` 等）改回与 macOS 桌面端逐字一致的 `Unsupported mobile command: <type>.`。
+- 三方命令对照表记在 Android 仓库 `docs/MOBILE_GATEWAY_REQUIREMENTS.md`。
+
 ## [0.81.0-rc8] - 2026-09-23
 
 ### Fixed
