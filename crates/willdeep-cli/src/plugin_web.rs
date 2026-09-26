@@ -230,12 +230,36 @@ struct PluginView {
     /// 本宿主还不认识的清单词汇（`permission:x` / `hostAction:y` / `menu:z`）。
     /// 与 macOS 宿主同形：包照装，界面标明这几条本宿主不支持。
     unsupported: Vec<String>,
-    /// 要由浏览器弹文件框、而不是交给 MCP 服务的命令。
-    file_picker_commands: Vec<String>,
+    /// 要由浏览器弹文件框、而不是让 MCP 服务弹原生框的命令。
+    file_pickers: Vec<FilePickerView>,
     /// 内容指纹。从没批准过的包这里是空的——算它要读遍包内容，而那一步
     /// 属于「点批准」的时候，不属于「列个清单」的时候。
     #[serde(skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
+}
+
+/// 一条由浏览器选文件的命令。`accept` 直接给 `<input type=file>` 用，
+/// `max_bytes` 让页面在上传前就拦下超大文件——服务端照样逐字节核。
+#[derive(Serialize)]
+struct FilePickerView {
+    command: String,
+    accept: String,
+    max_bytes: u64,
+}
+
+impl FilePickerView {
+    fn new(command: &str, picker: &FilePickerTool) -> Self {
+        Self {
+            command: command.to_owned(),
+            accept: picker
+                .extensions
+                .iter()
+                .map(|extension| format!(".{extension}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            max_bytes: picker.max_bytes,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -447,18 +471,18 @@ async fn list_plugins(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
-            file_picker_commands: manifest
+            file_pickers: manifest
                 .map(|manifest| {
                     manifest
                         .commands
                         .iter()
-                        .filter(|command| match &command.handler {
+                        .filter_map(|command| match &command.handler {
                             willdeep_core::plugin::CommandHandler::McpTool { server, tool } => {
-                                intercepts_file_picker(&package.id, server, tool)
+                                file_picker(&package.id, server, tool)
+                                    .map(|picker| FilePickerView::new(&command.id, picker))
                             }
-                            _ => false,
+                            _ => None,
                         })
-                        .map(|command| command.id.clone())
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -726,42 +750,43 @@ async fn execute_command(
     } else {
         request.arguments
     };
-    // 「选文件」类命令在这里改道，**不进** MCP 服务：那边只会去弹一个
+    // 「选文件」类命令在这里改道，**不让** MCP 服务去选：那边只会去弹一个
     // 没人看得见的原生框（界面在浏览器里，服务可能在另一台机器上），
-    // 然后一直等到超时。浏览器选好、上传落地之后，宿主直接合成那个工具
-    // 本该返回的结果。
-    {
-        let package = state.host.package(&plugin)?;
-        if command_intercepts_file_picker(package, &plugin, &command) {
+    // 然后一直等到超时。浏览器选好、上传落地之后，宿主要么直接合成那个
+    // 工具本该返回的结果，要么带着 `path` 把调用转给它（见 `PickerDelivery`）。
+    let picker = command_file_picker(state.host.package(&plugin)?, &plugin, &command);
+    let outcome = match picker {
+        Some(picker) if picker.delivery == PickerDelivery::Synthesize => {
             return Ok(Json(file_picker_response(&state, &plugin, &arguments)?));
         }
-    }
-    Ok(Json(
-        match state
-            .host
-            .execute_command(&plugin, &command, arguments)
-            .await?
-        {
-            CommandOutcome::Host(action) => CommandResponse {
-                kind: "host",
-                action: Some(action.as_str().to_owned()),
-                destination: None,
-                result: None,
-            },
-            CommandOutcome::Navigate { destination } => CommandResponse {
-                kind: "navigate",
-                action: None,
-                destination: Some(destination),
-                result: None,
-            },
-            CommandOutcome::Tool(result) => CommandResponse {
-                kind: "tool",
-                action: None,
-                destination: None,
-                result: Some(result),
-            },
+        Some(picker) => forward_picked_file(&state, &plugin, &command, arguments, picker).await?,
+        None => {
+            state
+                .host
+                .execute_command(&plugin, &command, arguments)
+                .await?
+        }
+    };
+    Ok(Json(match outcome {
+        CommandOutcome::Host(action) => CommandResponse {
+            kind: "host",
+            action: Some(action.as_str().to_owned()),
+            destination: None,
+            result: None,
         },
-    ))
+        CommandOutcome::Navigate { destination } => CommandResponse {
+            kind: "navigate",
+            action: None,
+            destination: Some(destination),
+            result: None,
+        },
+        CommandOutcome::Tool(result) => CommandResponse {
+            kind: "tool",
+            action: None,
+            destination: None,
+            result: Some(result),
+        },
+    }))
 }
 
 // ------------------------------------------------- MCP App 的工具与资源
@@ -1361,8 +1386,32 @@ async fn clear_plugin_storage(
 
 // ---------------------------------------------------------------- 远程选文件
 
-/// 上传上限。参照图这类东西 20 MiB 足够，再大就该走插件自己的服务。
-const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+
+/// 选好的文件宿主怎么交给插件。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerDelivery {
+    /// 工具本身只回「选中的路径」：宿主直接合成那个结果，**不进** MCP 服务。
+    /// 上传件就是选择结果，后续工具还要读它，留着。
+    Synthesize,
+    /// 工具选完还要干活（拷进自己的媒体根、写进设置），合成不出来：宿主把
+    /// 上传件的服务端路径作为 `path` 参数转给原工具，工具跑完（不论成败）
+    /// 就删掉上传件——插件已经拷走了自己的一份，留着只是占盘。
+    Forward,
+}
+
+/// 一条被接管的「选文件」工具。
+struct FilePickerTool {
+    plugin: &'static str,
+    server: &'static str,
+    tool: &'static str,
+    /// 允许的扩展名（小写、不带点）。浏览器文件框的 `accept` 与上传校验
+    /// 用的是同一份，两边不会各说各话。
+    extensions: &'static [&'static str],
+    /// 与插件自己的上限同值：宿主放进来的，插件不该再拒。
+    max_bytes: u64,
+    delivery: PickerDelivery,
+}
 
 /// **本宿主要接管的「选文件」工具。**
 ///
@@ -1371,44 +1420,81 @@ const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 /// 弹出来的框（如果有）在服务器的屏幕上，用户看不见。
 ///
 /// 所以这里把这类调用拦下来，改成「浏览器选文件 → 上传到本插件隔离的
-/// 媒体目录 → 把落地的**服务端绝对路径**当作选择结果交回去」。插件包
-/// 一行不用改：它拿到的仍然是一个能给后续工具用的路径。
+/// 媒体目录 → 按 `delivery` 把落地的**服务端绝对路径**交回去」。
 ///
 /// 做成表而不是 if-else，是因为下一个要选文件的插件只该加一行，不该
-/// 再写一遍这段逻辑。三元组是 (插件 ID, MCP 服务, 工具名)。
-const FILE_PICKER_TOOLS: [(&str, &str, &str); 1] = [(
-    "willdeep-video-studio",
-    "video-studio",
-    "video.pick_reference",
-)];
+/// 再写一遍这段逻辑。
+const FILE_PICKER_TOOLS: [FilePickerTool; 2] = [
+    // 参照图：插件包一行不用改，拿到的仍是一个能给后续工具用的路径。
+    FilePickerTool {
+        plugin: "willdeep-video-studio",
+        server: "video-studio",
+        tool: "video.pick_reference",
+        extensions: &["png", "jpg", "jpeg", "webp"],
+        max_bytes: 20 * MIB,
+        delivery: PickerDelivery::Synthesize,
+    },
+    // 分集背景音乐：插件要把文件拷成 `music-<hex>.<ext>` 并记进成片设置，
+    // 所以转交给原工具，由它读 `path` 参数（没带才弹 osascript）。
+    FilePickerTool {
+        plugin: "willdeep-video-studio",
+        server: "video-studio",
+        tool: "episode.import_music",
+        extensions: &["mp3", "wav", "m4a", "aac", "flac", "aiff", "aif"],
+        max_bytes: 200 * MIB,
+        delivery: PickerDelivery::Forward,
+    },
+];
 
-pub(crate) fn intercepts_file_picker(plugin: &str, server: &str, tool: &str) -> bool {
+fn file_picker(plugin: &str, server: &str, tool: &str) -> Option<&'static FilePickerTool> {
     FILE_PICKER_TOOLS
         .iter()
-        .any(|(id, service, name)| *id == plugin && *service == server && *name == tool)
+        .find(|entry| entry.plugin == plugin && entry.server == server && entry.tool == tool)
 }
 
 /// 命令 ID 走的是同一张表：命令的 handler 指向某个 MCP 工具，
 /// 拦截要发生在「派发之前」，否则请求已经进了 MCP 服务，那边只会去弹
 /// 一个没人看得见的框，然后超时。
-pub(crate) fn command_intercepts_file_picker(
+fn command_file_picker(
     package: &willdeep_core::plugin::PluginPackage,
     plugin: &str,
     command_id: &str,
-) -> bool {
-    let Some(command) = package
-        .manifest
-        .as_ref()
-        .and_then(|manifest| manifest.command(command_id))
-    else {
-        return false;
-    };
+) -> Option<&'static FilePickerTool> {
+    let command = package.manifest.as_ref()?.command(command_id)?;
     match &command.handler {
         willdeep_core::plugin::CommandHandler::McpTool { server, tool } => {
-            intercepts_file_picker(plugin, server, tool)
+            file_picker(plugin, server, tool)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// 页面交回来的选择：必须是本插件媒体目录里实实在在的一个文件。页面自报
+/// 一个 `/etc/passwd` 就能把任意文件喂给后续工具——这道门关在这里。
+fn uploaded_selection(
+    state: &PluginWebState,
+    plugin: &str,
+    arguments: &Value,
+) -> Result<PathBuf, PluginWebError> {
+    let raw = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        // 没带路径说明调用方没走「浏览器选文件」那一步。如实报错，
+        // 不要退回去调那个在本宿主上必然失败的工具。
+        .ok_or_else(|| PluginWebError::BadRequest("filePickerRequired".to_owned()))?;
+    let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, plugin)?;
+    let canonical = FsPath::new(raw)
+        .canonicalize()
+        .map_err(|_| PluginWebError::BadRequest("invalidSelection".to_owned()))?;
+    let root = directory
+        .canonicalize()
+        .map_err(|error| PluginWebError::Internal(error.to_string()))?;
+    if !canonical.starts_with(&root) || !canonical.is_file() {
+        return Err(PluginWebError::BadRequest("invalidSelection".to_owned()));
+    }
+    Ok(canonical)
 }
 
 /// 合成被拦截的那个工具本该返回的结果。
@@ -1420,27 +1506,8 @@ fn file_picker_response(
     plugin: &str,
     arguments: &Value,
 ) -> Result<CommandResponse, PluginWebError> {
-    let raw = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        // 没带路径说明调用方没走「浏览器选文件」那一步。如实报错，
-        // 不要退回去调那个在本宿主上必然失败的工具。
-        .ok_or_else(|| PluginWebError::BadRequest("filePickerRequired".to_owned()))?;
-    let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, plugin)?;
-    // 路径必须是本插件媒体目录里刚落地的那一份。页面自报一个
-    // `/etc/passwd` 就能把任意文件喂给后续工具——这道门关在这里。
-    let canonical = std::path::Path::new(raw)
-        .canonicalize()
-        .map_err(|_| PluginWebError::BadRequest("invalidSelection".to_owned()))?;
-    let root = directory
-        .canonicalize()
-        .map_err(|error| PluginWebError::Internal(error.to_string()))?;
-    if !canonical.starts_with(&root) || !canonical.is_file() {
-        return Err(PluginWebError::BadRequest("invalidSelection".to_owned()));
-    }
-    let payload = json!({"ok": true, "path": canonical.display().to_string()});
+    let selection = uploaded_selection(state, plugin, arguments)?;
+    let payload = json!({"ok": true, "path": selection.display().to_string()});
     Ok(CommandResponse {
         kind: "tool",
         action: None,
@@ -1451,54 +1518,154 @@ fn file_picker_response(
     })
 }
 
+/// 转交型选文件只收**上传落下的**文件。宿主用完要删它，媒体目录里插件
+/// 自己的成品（生成图、已导入的 `music-*.mp3`）哪怕路径合法也不能当作
+/// 选择交进来——否则页面报一个旧曲目的路径，宿主转交完就把它删了。
+fn is_forwardable_upload(path: &FsPath, picker: &FilePickerTool) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    name.starts_with(UPLOAD_PREFIX) && upload_extension(name, picker).is_some()
+}
+
+/// 转交型选文件：把上传件的服务端路径作为 `path` 参数交给原工具。
+async fn forward_picked_file(
+    state: &PluginWebState,
+    plugin: &str,
+    command: &str,
+    mut arguments: Value,
+    picker: &FilePickerTool,
+) -> Result<CommandOutcome, PluginWebError> {
+    let upload = uploaded_selection(state, plugin, &arguments)?;
+    if !is_forwardable_upload(&upload, picker) {
+        return Err(PluginWebError::BadRequest("invalidSelection".to_owned()));
+    }
+    arguments
+        .as_object_mut()
+        .ok_or_else(|| PluginWebError::BadRequest("invalidArguments".to_owned()))?
+        .insert("path".to_owned(), json!(upload.display().to_string()));
+    let outcome = state.host.execute_command(plugin, command, arguments).await;
+    if let Err(error) = tokio::fs::remove_file(&upload).await {
+        eprintln!(
+            "warning: plugin_upload_cleanup_failed plugin={plugin} command={command} path={} error={error}",
+            upload.display()
+        );
+    }
+    Ok(outcome?)
+}
+
+const UPLOAD_PREFIX: &str = "upload-";
+const PARTIAL_SUFFIX: &str = ".part";
+
+/// 文件名由浏览器给，只取扩展名，而且必须在这条命令的白名单里：名字里的
+/// 路径分隔符和 `..` 一个都不许活到落盘那一刻，白名单之外的类型也不收。
+fn upload_extension(name: &str, picker: &FilePickerTool) -> Option<String> {
+    let extension = FsPath::new(name)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    picker
+        .extensions
+        .contains(&extension.as_str())
+        .then_some(extension)
+}
+
 #[derive(Deserialize)]
-struct UploadRequest {
+struct UploadQuery {
+    /// 哪条选文件命令的上传：决定扩展名白名单与大小上限。
+    #[serde(default)]
+    command: String,
+    /// 浏览器里的原文件名，只用来取扩展名。
     #[serde(default)]
     name: String,
-    /// base64 的文件内容。走 JSON 而不是 multipart：上传这条路只有宿主
-    /// 页面会走，省一个解析器就少一处攻击面。
-    #[serde(default)]
-    data: String,
 }
 
 /// 浏览器选好的文件落到服务端。回的是**服务端绝对路径**——这正是被拦截的
-/// 那个工具原本要返回的东西，插件因此不用知道文件从哪来。
+/// 那个工具要的东西，插件因此不用知道文件从哪来。
+///
+/// 请求体就是文件本身（`application/octet-stream`），边收边写盘：导入的
+/// 音乐能到 200 MiB，攒成 base64 JSON 既撑内存，也过不了全站 1 MiB 的
+/// 请求体上限（`web.rs` 的 `DefaultBodyLimit`）。流式读 `Body` 不受那个
+/// 上限管，上限在这里按命令逐字节核。
 async fn upload_plugin_file(
     State(state): State<Arc<PluginWebState>>,
     Path(plugin): Path<String>,
-    Json(request): Json<UploadRequest>,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Json<Value>, PluginWebError> {
-    state.host.package(&plugin)?;
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(request.data.as_bytes())
-        .map_err(|_| PluginWebError::BadRequest("invalidData".to_owned()))?;
-    if bytes.is_empty() || bytes.len() > MAX_UPLOAD_BYTES {
+    let package = state.host.package(&plugin)?;
+    let picker = command_file_picker(package, &plugin, &query.command)
+        .ok_or_else(|| PluginWebError::BadRequest("notFilePicker".to_owned()))?;
+    let extension = upload_extension(&query.name, picker)
+        .ok_or_else(|| PluginWebError::BadRequest("unsupportedFileType".to_owned()))?;
+    // 声明的长度已经超了就不必收；没声明的照收，按实际字节数核。
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|length| length == 0 || length > picker.max_bytes) {
         return Err(PluginWebError::BadRequest("invalidSize".to_owned()));
     }
-    // 文件名由浏览器给，只取扩展名并净化：名字里的路径分隔符和 `..`
-    // 一个都不许活到落盘那一刻。
-    let extension = std::path::Path::new(&request.name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| value.len() <= 8 && value.chars().all(|item| item.is_ascii_alphanumeric()))
-        .unwrap_or("bin")
-        .to_ascii_lowercase();
     let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, &plugin)?;
     let filename = format!(
-        "upload-{}.{extension}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_millis())
-            .unwrap_or_default()
+        "{UPLOAD_PREFIX}{}.{extension}",
+        uuid::Uuid::new_v4().simple()
     );
     let file = directory.join(&filename);
-    std::fs::write(&file, &bytes).map_err(|error| PluginWebError::Internal(error.to_string()))?;
+    let byte_size = receive_upload(body, &file, picker.max_bytes).await?;
     Ok(Json(json!({
         "path": file.display().to_string(),
         "mediaURL": format!("/plugin-media/{plugin}/{filename}"),
-        "byteSize": bytes.len(),
+        "byteSize": byte_size,
     })))
+}
+
+/// 把请求体写到 `destination`，超过 `max_bytes` 立刻停。先写 `.part`，收全了
+/// 才改名：半截文件永远不会以能被当作选择结果的名字出现，失败也不留残件。
+async fn receive_upload(
+    body: Body,
+    destination: &FsPath,
+    max_bytes: u64,
+) -> Result<u64, PluginWebError> {
+    use futures_util::StreamExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut partial_name = destination
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    partial_name.push(PARTIAL_SUFFIX);
+    let partial = destination.with_file_name(partial_name);
+    let internal = |error: std::io::Error| PluginWebError::Internal(error.to_string());
+    let result = async {
+        let mut output = tokio::fs::File::create(&partial).await.map_err(internal)?;
+        let mut stream = body.into_data_stream();
+        let mut total: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|_| PluginWebError::BadRequest("uploadInterrupted".to_owned()))?;
+            total += chunk.len() as u64;
+            if total > max_bytes {
+                return Err(PluginWebError::BadRequest("invalidSize".to_owned()));
+            }
+            output.write_all(&chunk).await.map_err(internal)?;
+        }
+        if total == 0 {
+            return Err(PluginWebError::BadRequest("invalidSize".to_owned()));
+        }
+        output.flush().await.map_err(internal)?;
+        drop(output);
+        tokio::fs::rename(&partial, destination)
+            .await
+            .map_err(internal)?;
+        Ok(total)
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
+    result
 }
 
 /// 插件媒体目录的只读出口：生成图与上传件。文件名只认本目录里的一层，
@@ -2045,3 +2212,6 @@ console.log(JSON.stringify({ values: style.values, colorScheme: style.colorSchem
         );
     }
 }
+
+#[cfg(test)]
+mod file_picker_tests;

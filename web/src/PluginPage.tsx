@@ -18,6 +18,7 @@ import type { ColorScheme } from "./theme";
 import {
   callPluginTool,
   executePluginCommand,
+  filePickerRejection,
   pageUrl,
   pluginCancel,
   pluginComplete,
@@ -100,13 +101,14 @@ type BridgeMessage = {
  *
  * macOS 宿主上这一步是插件的 MCP 服务弹原生框；在这里服务可能跑在另一台
  * 机器上，那个框会弹在没人看的屏幕上。所以改成：宿主页面弹浏览器文件框，
- * 文件上传到本插件隔离的目录，再把落地的服务端路径当作选择结果。
+ * 文件上传到本插件隔离的目录，再把落地的服务端路径交给宿主。
+ * `accept` 由宿主按命令给出（参照图是图片，背景音乐是音频）。
  */
-function chooseLocalFile(): Promise<File | null> {
+function chooseLocalFile(accept: string): Promise<File | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/png,image/jpeg,image/webp";
+    input.accept = accept;
     input.style.display = "none";
     document.body.appendChild(input);
     // 取消不会触发 change，所以窗口一拿回焦点就当没选——否则这个 Promise
@@ -122,19 +124,6 @@ function chooseLocalFile(): Promise<File | null> {
     input.addEventListener("change", () => finish(input.files?.[0] ?? null));
     window.addEventListener("focus", onFocus, { once: true });
     input.click();
-  });
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("readFailed"));
-    reader.onload = () => {
-      const result = String(reader.result ?? "");
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.readAsDataURL(file);
   });
 }
 
@@ -273,20 +262,23 @@ export function PluginPage({
   const runCommand = useCallback(
     async (commandId: string, args: unknown) => {
       // 「选文件」类命令在这里改道：先让用户在浏览器里挑，再把上传后的
-      // 服务端路径交给宿主去合成结果。不改道的话请求会进 MCP 服务，
-      // 那边去弹一个没人看得见的原生框，然后超时。
+      // 服务端路径作为 `path` 交给宿主（宿主合成结果或转给原工具）。不改道
+      // 的话请求会进 MCP 服务，那边去弹一个没人看得见的原生框，然后超时。
       let payload = args;
-      if (plugin.file_picker_commands.includes(commandId)) {
-        const file = await chooseLocalFile();
+      const picker = plugin.file_pickers.find((entry) => entry.command === commandId);
+      if (picker) {
+        const file = await chooseLocalFile(picker.accept);
         if (!file) throw new Error("selection_cancelled");
-        const uploaded = await uploadPluginFile(plugin.id, file.name, await fileToBase64(file));
+        const rejection = filePickerRejection(file, picker);
+        if (rejection) throw new Error(rejection);
+        const uploaded = await uploadPluginFile(plugin.id, commandId, file);
         payload = { ...(args as Record<string, unknown> | null), path: uploaded.path };
       }
       const response = await executePluginCommand(plugin.id, commandId, payload);
       applyHostAction(response.action, response.destination);
       return response.kind === "tool" ? response.result : { kind: response.kind };
     },
-    [plugin.id, plugin.file_picker_commands, applyHostAction]
+    [plugin.id, plugin.file_pickers, applyHostAction]
   );
 
   useEffect(() => {
