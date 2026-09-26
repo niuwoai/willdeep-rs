@@ -1034,10 +1034,17 @@ mod tests {
         );
         assert_eq!(answer["error"]["code"], HostRequestError::METHOD_NOT_FOUND);
         assert!(registry.is_alive());
-        registry
-            .call_tool_on("fake", "exit", json!({}))
-            .await
-            .expect("exit");
+        // 假插件回完这句就退出：客户端读写刚好撞上进程退出时会得到 BrokenPipe 或
+        // Exited，这取决于时序（macOS 上偶发）。这里只关心退出之后的状态。
+        let exit = registry.call_tool_on("fake", "exit", json!({})).await;
+        assert!(
+            match &exit {
+                Ok(_) | Err(McpError::Exited(_)) => true,
+                Err(McpError::Io(error)) => error.kind() == std::io::ErrorKind::BrokenPipe,
+                Err(_) => false,
+            },
+            "{exit:?}"
+        );
         for _ in 0..50 {
             if !registry.is_alive() {
                 break;
