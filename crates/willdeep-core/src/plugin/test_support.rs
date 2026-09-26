@@ -64,6 +64,15 @@ pub fn install_fake_plugin(home: &Path, id: &str, permissions: &str, servers: &s
     log
 }
 
+pub fn events(log: &Path, name: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == name)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,13 +88,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         approved.expect("fixture plugin should be discovered");
     }
-}
-
-pub fn events(log: &Path, name: &str) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["event"] == name)
-        .collect()
 }
