@@ -26,9 +26,12 @@
   transition: background 120ms ease, color 120ms ease;
 }
 
-.rail-button:hover { background: var(--bg-raised); color: var(--text-soft); }
-/* 选中只用灰度表达：插件品牌色不参与，否则一栏入口会看不出当前位置。 */
+/* 与 macOS 侧栏的插件行同一套灰度层次：图标平时是次要色，悬停提亮，
+   选中才用正文色；文字比图标高一档，入口名永远读得清。
+   选中只用灰度表达：插件品牌色不参与，否则一栏入口会看不出当前位置。 */
+.rail-button:hover { background: var(--bg-raised); color: var(--text-dim); }
 .rail-button.active { background: var(--bg-panel); color: var(--text); }
+.rail-button:focus-visible { outline: 2px solid var(--accent-border); outline-offset: -2px; }
 
 .rail-label {
   font-size: 10px;
@@ -38,9 +41,35 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-dim);
 }
 
+.rail-button:hover .rail-label { color: var(--text-soft); }
+.rail-button.active .rail-label { color: var(--text); font-weight: 600; }
+
 .rail-divider { height: 1px; background: var(--bg-panel); margin: 6px 8px; }
+
+/* 插件分组的小标题，对应 macOS 侧栏「插件」那一行。 */
+.rail-section-label {
+  font-size: 9px;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--text-ghost);
+  margin: 0 0 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-overflow-heading {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 4px 9px 5px;
+}
 
 .rail-overflow { position: relative; }
 
@@ -57,37 +86,137 @@
   box-shadow: 0 12px 32px var(--shadow);
 }
 
+/* 「更多插件」里的行照 macOS 侧栏插件行：行高 31、图标 14、图标与文字
+   间距 9、圆角 10 的灰色选中底；图标次要色，悬停/选中提亮。 */
 .rail-overflow-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   width: 100%;
-  padding: 7px 9px;
+  min-height: 31px;
+  padding: 0 9px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 10px;
   background: transparent;
-  color: var(--text-soft);
+  color: var(--text);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
+.rail-overflow-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-overflow-item svg { color: var(--text-dim); }
 .rail-overflow-item:hover { background: var(--bg-panel); }
-.rail-overflow-item.active { background: var(--bg-panel-hover); color: var(--text); }
+.rail-overflow-item:hover svg { color: var(--text-soft); }
+.rail-overflow-item.active { background: var(--bg-panel-hover); }
+.rail-overflow-item.active svg { color: var(--text); }
 
 /* ---------------------------------------------------------------- 页面 */
 
+/* 标题栏的几何与 macOS 宿主一致：高 44、左右 16、图标与标题间距 10、
+   标题 14/600 单行。 */
 .plugin-toolbar {
+  display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px;
+  gap: 10px;
+  height: 44px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--bg-panel);
   background: var(--bg-surface);
   flex: 0 0 auto;
+  min-width: 0;
 }
 
-.plugin-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.plugin-title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text);
+}
+
+.plugin-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+/* 清单声明的命令：图标 + 文字，与 macOS 的无边框 Label 按钮同一个读法。 */
+.plugin-toolbar-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.plugin-toolbar-command:hover:not(:disabled) { background: var(--bg-panel); color: var(--text); }
+.plugin-toolbar-command:disabled { opacity: 0.45; cursor: default; }
+
+.plugin-toolbar-menu { position: relative; }
+
+.plugin-toolbar-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 180px;
+  padding: 5px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px var(--shadow);
+}
+
+/* 重新载入时 iframe 上沿的一条细进度条，不遮内容。 */
+.plugin-reload-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 2px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.plugin-reload-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  background: var(--accent);
+  animation: plugin-reload-slide 1s ease-in-out infinite;
+}
+
+@keyframes plugin-reload-slide {
+  from { left: -30%; }
+  to { left: 100%; }
+}
 
 .plugin-toolbar-button {
   display: inline-flex;
@@ -102,7 +231,8 @@
   cursor: pointer;
 }
 
-.plugin-toolbar-button:hover:not(:disabled) { background: var(--bg-panel); color: var(--text); }
+.plugin-toolbar-button:hover:not(:disabled),
+.plugin-toolbar-button.active { background: var(--bg-panel); color: var(--text); }
 .plugin-toolbar-button:disabled { opacity: 0.45; cursor: default; }
 
 .plugin-frame {
@@ -508,5 +638,8 @@
 
 @media (max-width: 900px) {
   .plugin-sidebar { display: none; }
+  /* 窄屏上命令只留图标，文字进 title / aria-label，不把标题挤没。 */
+  .plugin-toolbar-command-label { display: none; }
+  .plugin-toolbar-command { padding: 0 7px; }
   .plugin-center { padding: 20px 16px 48px; }
 }

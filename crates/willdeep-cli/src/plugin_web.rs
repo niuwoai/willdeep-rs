@@ -53,6 +53,8 @@ pub(crate) struct PluginWebState {
     /// 在跑的 `ai.complete`，按页面给的 streamID 索引。没传 streamID 的
     /// 请求停不了——页面手上没有别的把手，这一点与 macOS 宿主一致。
     ai_streams: Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>,
+    /// 插件 MCP 网关。启用、停用、卸载后重写它的发现文件。
+    gateway: Option<Arc<crate::plugin_gateway::PluginGateway>>,
 }
 
 impl PluginWebState {
@@ -69,6 +71,24 @@ impl PluginWebState {
             workspaces,
             storage_lock: Mutex::new(()),
             ai_streams: Mutex::new(BTreeMap::new()),
+            gateway: None,
+        }
+    }
+
+    pub fn with_gateway(
+        mut self,
+        gateway: Option<Arc<crate::plugin_gateway::PluginGateway>>,
+    ) -> Self {
+        self.gateway = gateway;
+        self
+    }
+
+    /// 插件集合变了：重写网关发现文件里的 `servers`。失败只记一行，不影响本次操作。
+    async fn publish_gateway(&self) {
+        if let Some(gateway) = &self.gateway
+            && let Err(error) = gateway.publish().await
+        {
+            eprintln!("warning: plugin_gateway_publish_failed error={error}");
         }
     }
 }
@@ -93,6 +113,10 @@ pub(crate) fn router(state: Arc<PluginWebState>) -> Router {
             post(execute_command),
         )
         .route("/api/plugins/{plugin}/mcp/call", post(call_plugin_tool))
+        .route(
+            "/api/plugins/{plugin}/mcp/refresh-tools",
+            post(refresh_plugin_tools),
+        )
         .route(
             "/api/plugins/{plugin}/mcp/resource",
             post(read_plugin_resource),
@@ -503,10 +527,13 @@ async fn set_plugin_enabled(
     Json(request): Json<EnabledRequest>,
 ) -> Result<Json<EnabledResponse>, PluginWebError> {
     match state.host.set_enabled(&plugin, request.enabled).await? {
-        Ok(()) => Ok(Json(EnabledResponse {
-            enabled: request.enabled,
-            approval_gap: None,
-        })),
+        Ok(()) => {
+            state.publish_gateway().await;
+            Ok(Json(EnabledResponse {
+                enabled: request.enabled,
+                approval_gap: None,
+            }))
+        }
         Err(gap) => Ok(Json(EnabledResponse {
             enabled: false,
             approval_gap: Some(gap_view(gap)),
@@ -585,7 +612,29 @@ async fn uninstall_plugin(
     std::fs::remove_dir_all(&canonical_root)
         .map_err(|error| PluginWebError::Internal(error.to_string()))?;
     state.host.forget(&plugin).await?;
+    state.publish_gateway().await;
     Ok(Json(json!({"removed": true})))
+}
+
+/// 「刷新工具」：对插件每个能运行的 MCP 服务发一次 `tools/list`（没在跑就拉起），
+/// 结果写进聊天用的插件工具目录。对应 macOS 设置页的同名按钮。
+async fn refresh_plugin_tools(
+    State(state): State<Arc<PluginWebState>>,
+    Path(plugin): Path<String>,
+) -> Result<Json<Value>, PluginWebError> {
+    state.host.package(&plugin)?;
+    let mut servers = Vec::new();
+    for server in state.host.runnable_servers(&plugin) {
+        servers.push(match state.host.refresh_tools(&plugin, &server).await {
+            Ok(listed) => json!({
+                "server": server,
+                "tools": listed.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
+            }),
+            Err(error @ HostError::NotEnabled(_)) => return Err(error.into()),
+            Err(error) => json!({"server": server, "error": error.to_string()}),
+        });
+    }
+    Ok(Json(json!({"servers": servers})))
 }
 
 // ---------------------------------------------------------------- 侧栏与命令
@@ -832,7 +881,7 @@ async fn ai_providers(
 }
 
 #[derive(Deserialize)]
-struct AiMessage {
+pub(crate) struct AiMessage {
     role: String,
     content: String,
     /// 插件媒体目录里的本地图片路径，只认 user 消息。见 `plugin_ai_media`。
@@ -896,7 +945,7 @@ fn stream_key(plugin: &str, stream_id: &str) -> String {
 }
 
 #[derive(Deserialize)]
-struct AiCompleteRequest {
+pub(crate) struct AiCompleteRequest {
     #[serde(default)]
     system: Option<String>,
     #[serde(default)]
@@ -926,7 +975,7 @@ const MAX_AI_SKILLS: usize = 3;
 const MAX_AI_TOOLS: usize = 4;
 
 #[derive(Deserialize)]
-struct AiToolDefinition {
+pub(crate) struct AiToolDefinition {
     name: String,
     #[serde(default)]
     description: String,
@@ -945,6 +994,33 @@ async fn ai_complete(
     Json(request): Json<AiCompleteRequest>,
 ) -> Result<Json<Value>, PluginWebError> {
     state.host.permits(&plugin, PluginPermission::AiChat)?;
+    let host = crate::plugin_capabilities::PluginAiHost {
+        home: &state.home,
+        config_path: &state.config_path,
+        workspaces: state
+            .workspaces
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+    };
+    let permits = |permission: PluginPermission| -> Result<(), PluginWebError> {
+        state.host.permits(&plugin, permission).map_err(Into::into)
+    };
+    complete(&host, &plugin, request, &permits, Some(&state.ai_streams))
+        .await
+        .map(Json)
+}
+
+/// 问一次模型的本体：页面桥与插件 MCP 反向请求（`willdeep/ai/complete`）共用。
+/// `ai.chat` 由调用方核过；`permits` 用来核附带的 `skills.read`。`streams` 给了
+/// 才能按 streamID 取消——反向请求没有页面，传 None。
+pub(crate) async fn complete(
+    host: &crate::plugin_capabilities::PluginAiHost<'_>,
+    plugin: &str,
+    request: AiCompleteRequest,
+    permits: &(dyn Fn(PluginPermission) -> Result<(), PluginWebError> + Send + Sync),
+    streams: Option<&Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>>,
+) -> Result<Value, PluginWebError> {
     if request.messages.is_empty() {
         return Err(PluginWebError::BadRequest("emptyRequest".to_owned()));
     }
@@ -966,7 +1042,7 @@ async fn ai_complete(
     let image_count = media_attachment_count(&request.messages)
         .map_err(|code| PluginWebError::BadRequest(code.to_owned()))?;
 
-    let config = crate::config::LoadedConfig::load(Some(&state.config_path))
+    let config = crate::config::LoadedConfig::load(Some(host.config_path))
         .map_err(|error| PluginWebError::Internal(error.to_string()))?;
     let file = &config.file;
     let profile_name = match &request.provider {
@@ -1007,7 +1083,7 @@ async fn ai_complete(
         .map_err(|_| PluginWebError::BadRequest("unavailable".to_owned()))?;
     // 插件页的 AI 请求同样进本机用量账本（辅助请求）。
     let provider =
-        crate::harness::standalone_usage_ledger(&state.home, None, None).auxiliary(provider);
+        crate::harness::standalone_usage_ledger(host.home, None, None).auxiliary(provider);
 
     if request.skills.len() > MAX_AI_SKILLS {
         return Err(PluginWebError::BadRequest("tooManySkills".to_owned()));
@@ -1018,13 +1094,9 @@ async fn ai_complete(
     // 技能正文在宿主这一侧读出来拼进 system，页面全程接触不到文件。
     let mut skill_text = String::new();
     if !request.skills.is_empty() {
-        state.host.permits(&plugin, PluginPermission::SkillsRead)?;
-        let roots = state
+        permits(PluginPermission::SkillsRead)?;
+        let root = host
             .workspaces
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let root = roots
             .first()
             .cloned()
             .ok_or_else(|| PluginWebError::BadRequest("noWorkspace".to_owned()))?;
@@ -1059,8 +1131,7 @@ async fn ai_complete(
     }
     let media_root = if image_count > 0 {
         Some(crate::plugin_capabilities::plugin_media_directory(
-            &state.home,
-            &plugin,
+            host.home, plugin,
         )?)
     } else {
         None
@@ -1093,14 +1164,15 @@ async fn ai_complete(
         .as_deref()
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(|item| stream_key(&plugin, item));
-    let mut cancel_rx = match &cancel_key {
-        Some(key) => {
+        .map(|item| stream_key(plugin, item));
+    let cancel_key = cancel_key.filter(|_| streams.is_some());
+    let mut cancel_rx = match (&cancel_key, streams) {
+        (Some(key), Some(streams)) => {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            state.ai_streams.lock().await.insert(key.clone(), tx);
+            streams.lock().await.insert(key.clone(), tx);
             Some(rx)
         }
-        None => None,
+        _ => None,
     };
     let completion = {
         let call = provider.complete(&messages, &tools);
@@ -1111,8 +1183,8 @@ async fn ai_complete(
             },
             None => Some(call.await),
         };
-        if let Some(key) = &cancel_key {
-            state.ai_streams.lock().await.remove(key);
+        if let (Some(key), Some(streams)) = (&cancel_key, streams) {
+            streams.lock().await.remove(key);
         }
         match outcome {
             Some(result) => result
@@ -1137,12 +1209,12 @@ async fn ai_complete(
             })
         })
         .collect();
-    Ok(Json(json!({
+    Ok(json!({
         "text": text,
         "model": model_name,
         "providerID": profile_name,
         "toolCalls": tool_calls,
-    })))
+    }))
 }
 
 // ---------------------------------------------------------------- 页面存储
@@ -1534,6 +1606,21 @@ fn apply_sandbox_cors(response: &mut Response, headers: &HeaderMap) {
 
 /// 把宿主桥注入页面的 `<head>`。找不到 `<head>` 就自己包一层——
 /// 插件页面不一定是完整文档，MCP App 资源尤其常是个片段。
+/// 插件页面的默认主题，与 macOS 宿主 `AgentPluginPageHost.composedHTML` 注入的
+/// 同一组变量、同一组字面色值。首帧按 `prefers-color-scheme` 取，不闪白；宿主
+/// 父页面随后推 `theme` 消息（`plugin_bridge.js` 的 `applyTheme`），把变量换成
+/// Web 界面自己的 token，写在根元素内联样式上盖过这里。
+///
+/// 放在页面自己的样式之前：插件写了同名规则就是插件说了算。CSP 的 style-src
+/// 带 `'unsafe-inline'`，内联 `<style>` 不需要 nonce。
+const DEFAULT_THEME_STYLE: &str = "<style>\n\
+:root { --willdeep-bg: #ffffff; --willdeep-fg: #1a1a1c; --willdeep-secondary: #6c6c70; --willdeep-accent: #111111; --willdeep-body-font-size: 14px; color-scheme: light; }\n\
+@media (prefers-color-scheme: dark) { :root { --willdeep-bg: #1c1c1e; --willdeep-fg: #f2f2f4; --willdeep-secondary: #a1a1a6; --willdeep-accent: #f2f2f4; color-scheme: dark; } }\n\
+html, body { margin: 0; min-height: 100%; background: var(--willdeep-bg); color: var(--willdeep-fg); font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; font-size: var(--willdeep-body-font-size); }\n\
+input, button, select, textarea { accent-color: var(--willdeep-accent); }\n\
+a { color: var(--willdeep-accent); }\n\
+</style>";
+
 fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
     // 只把垫片自己的键注进快照：结构化存储走异步 API，塞进 localStorage
     // 快照只会让同名的两份数据互相打架。
@@ -1544,7 +1631,7 @@ fn compose_page(source: &str, storage: &BTreeMap<String, String>) -> String {
         .collect();
     let storage_json = serde_json::to_string(&shim).unwrap_or_else(|_| "{}".to_owned());
     let bootstrap = format!(
-        "<script>window.__WILLDEEP_STORAGE__ = {storage_json};</script>\n<script>{BRIDGE_SCRIPT}</script>"
+        "{DEFAULT_THEME_STYLE}\n<script>window.__WILLDEEP_STORAGE__ = {storage_json};</script>\n<script>{BRIDGE_SCRIPT}</script>"
     );
     let lowered = source.to_ascii_lowercase();
     if let Some(start) = lowered.find("<head")
@@ -1710,6 +1797,115 @@ mod tests {
         assert!(
             head < bridge && bridge < title,
             "bridge must run before page scripts"
+        );
+    }
+
+    #[test]
+    fn default_theme_style_precedes_the_page_and_follows_the_system_scheme() {
+        let page = "<html><head><style>body{background:red}</style></head><body></body></html>";
+        let composed = compose_page(page, &BTreeMap::new());
+        let defaults = composed
+            .find("--willdeep-bg: #ffffff")
+            .expect("light defaults");
+        let dark = composed
+            .find("@media (prefers-color-scheme: dark)")
+            .expect("dark defaults");
+        let page_style = composed.find("background:red").expect("page style");
+        assert!(defaults < dark && dark < page_style, "page styles must win");
+        for variable in [
+            "--willdeep-fg",
+            "--willdeep-secondary",
+            "--willdeep-accent",
+            "--willdeep-body-font-size",
+        ] {
+            assert!(composed.contains(variable), "{variable} default missing");
+        }
+        assert!(composed.contains("accent-color: var(--willdeep-accent)"));
+        // 内联 <style> 靠 style-src 'unsafe-inline' 放行，没有 nonce 可漏。
+        assert!(
+            content_security_policy("http://127.0.0.1:9847")
+                .contains("style-src http://127.0.0.1:9847 'unsafe-inline'")
+        );
+    }
+
+    #[test]
+    fn the_bridge_has_one_version_and_capability_list() {
+        assert!(!BRIDGE_SCRIPT.contains("'1.0.0'"));
+        assert_eq!(
+            BRIDGE_SCRIPT.matches("window.willdeep.version =").count(),
+            1
+        );
+        assert_eq!(
+            BRIDGE_SCRIPT
+                .matches("window.willdeep.capabilities =")
+                .count(),
+            1
+        );
+    }
+
+    /// 在 node 里跑一遍桥，模拟父页面推 `theme` 消息。没有 node 的环境跳过。
+    #[test]
+    fn the_bridge_applies_theme_messages_to_the_root_element() {
+        let harness = r#"
+const style = { values: {}, colorScheme: '', setProperty(name, value) { this.values[name] = value; } };
+const listeners = {};
+const parent = { postMessage() {} };
+global.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = (init || {}).detail; } };
+global.MessageEvent = class { constructor(type, init) { this.type = type; Object.assign(this, init); } };
+global.window = {
+  parent,
+  localStorage: { getItem() { return null; }, setItem() {}, removeItem() {}, clear() {} },
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  dispatchEvent(event) { (listeners[event.type] || []).forEach((fn) => fn(event)); },
+};
+global.document = { documentElement: { style } };
+eval(require('fs').readFileSync(process.argv[2], 'utf8'));
+const send = (data, source) => (listeners.message || []).forEach((fn) => fn({ data, source }));
+send({ __willdeep: 1, type: 'theme', theme: { colorScheme: 'dark', variables: {
+  '--willdeep-bg': '#0b1118', '--willdeep-fg': '#eeeeee', '--willdeep-body-font-size': '14px',
+  'color': 'red', '--willdeep-accent': 42 } } }, parent);
+send({ __willdeep: 1, type: 'theme', theme: { colorScheme: 'purple', variables: { '--willdeep-fg': '#hijack' } } }, {});
+console.log(JSON.stringify({ values: style.values, colorScheme: style.colorScheme }));
+"#;
+        let Ok(output) = std::process::Command::new("node").arg("--version").output() else {
+            eprintln!("node not found; skipping bridge behaviour test");
+            return;
+        };
+        assert!(output.status.success());
+        let directory = std::env::temp_dir().join(format!(
+            "willdeep-bridge-theme-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&directory).expect("scratch");
+        let bridge = directory.join("bridge.js");
+        let script = directory.join("harness.js");
+        std::fs::write(&bridge, BRIDGE_SCRIPT).expect("bridge");
+        std::fs::write(&script, harness).expect("harness");
+        let output = std::process::Command::new("node")
+            .arg(&script)
+            .arg(&bridge)
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(result["colorScheme"], "dark");
+        assert_eq!(result["values"]["--willdeep-bg"], "#0b1118");
+        assert_eq!(
+            result["values"]["--willdeep-fg"], "#eeeeee",
+            "messages from anyone but the parent are ignored"
+        );
+        assert!(
+            result["values"].get("color").is_none(),
+            "only --willdeep-* names"
+        );
+        assert!(
+            result["values"].get("--willdeep-accent").is_none(),
+            "only string values"
         );
     }
 

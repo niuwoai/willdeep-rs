@@ -800,6 +800,9 @@ pub(crate) async fn host_action(
 pub(crate) struct ImageRequest {
     #[serde(default)]
     pub prompt: String,
+    /// 只认 `some-im`（缺省即它），与 macOS 宿主的校验一致。
+    #[serde(default, alias = "providerID")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -807,6 +810,36 @@ pub(crate) struct ImageRequest {
     #[serde(default, rename = "referenceImagePaths")]
     pub reference_image_paths: Vec<String>,
 }
+
+/// 出图、问模型要的宿主上下文。插件页面桥与插件 MCP 进程的反向请求共用，
+/// 所以不绑 axum 的 State：反向请求可能来自没有 Web 的 harness 进程。
+pub(crate) struct PluginAiHost<'a> {
+    pub home: &'a Path,
+    pub config_path: &'a Path,
+    /// 参照图、技能读取用的工作区白名单。
+    pub workspaces: Vec<PathBuf>,
+}
+
+/// 请求本身不合法（该由调用方改参数）的错误码。插件 MCP 反向请求把它们报成
+/// JSON-RPC -32602，其余报 -32000，与 macOS 宿主一致。
+pub(crate) const INVALID_REQUEST_CODES: [&str; 16] = [
+    "invalidPrompt",
+    "invalidImageModel",
+    "invalidImageSize",
+    "tooManyReferences",
+    "unknownProvider",
+    "emptyRequest",
+    "tooManyMessages",
+    "tooLong",
+    "videosUnsupported",
+    "tooManyImages",
+    "mediaOnNonUserMessage",
+    "unknownModel",
+    "tooManySkills",
+    "tooManyTools",
+    "pathOutsideWorkspace",
+    "pathNotFound",
+];
 
 /// `window.willdeep.ai.generateImage`。
 ///
@@ -819,6 +852,29 @@ pub(crate) async fn ai_generate_image(
     Json(request): Json<ImageRequest>,
 ) -> Result<Json<Value>, PluginWebError> {
     state.host.permits(&plugin, PluginPermission::AiImage)?;
+    let host = PluginAiHost {
+        home: &state.home,
+        config_path: &state.config_path,
+        workspaces: workspace_roots(&state),
+    };
+    generate_image(&host, &plugin, request).await.map(Json)
+}
+
+/// 出图本体。权限由调用方核过（页面走 `host.permits`，反向请求走清单权限）。
+pub(crate) async fn generate_image(
+    host: &PluginAiHost<'_>,
+    plugin: &str,
+    request: ImageRequest,
+) -> Result<Value, PluginWebError> {
+    if let Some(provider) = request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        && provider != "some-im"
+    {
+        return Err(PluginWebError::BadRequest("unknownProvider".to_owned()));
+    }
     let prompt = request.prompt.trim().to_owned();
     if prompt.is_empty() || prompt.chars().count() > MAX_IMAGE_PROMPT_CHARS {
         return Err(PluginWebError::BadRequest("invalidPrompt".to_owned()));
@@ -849,16 +905,15 @@ pub(crate) async fn ai_generate_image(
         return Err(PluginWebError::BadRequest("tooManyReferences".to_owned()));
     }
 
-    let config = crate::config::LoadedConfig::load(Some(&state.config_path))
+    let config = crate::config::LoadedConfig::load(Some(host.config_path))
         .map_err(|error| PluginWebError::Internal(error.to_string()))?;
     let (base, key) = someim_credentials(&config.file)
         .ok_or_else(|| PluginWebError::BadRequest("unavailable".to_owned()))?;
 
     // 参照图先换成网关能取的 URL：网关只接 URL，不接字节。
-    let roots = workspace_roots(&state);
     let mut references = Vec::new();
     for path in &request.reference_image_paths {
-        let resolved = resolve_reference_path(&state, path, &roots)?;
+        let resolved = resolve_reference_path(host.home, path, &host.workspaces)?;
         references.push(upload_reference_image(&base, &key, &resolved).await?);
     }
 
@@ -915,7 +970,7 @@ pub(crate) async fn ai_generate_image(
         return Err(PluginWebError::BadRequest("emptyResponse".to_owned()));
     };
 
-    let directory = plugin_media_directory(&state.home, &plugin)?;
+    let directory = plugin_media_directory(host.home, plugin)?;
     let filename = format!(
         "image-{}.png",
         std::time::SystemTime::now()
@@ -925,22 +980,22 @@ pub(crate) async fn ai_generate_image(
     );
     let file = directory.join(&filename);
     std::fs::write(&file, &bytes).map_err(|error| PluginWebError::Internal(error.to_string()))?;
-    Ok(Json(json!({
+    Ok(json!({
         "mediaURL": format!("/plugin-media/{plugin}/{filename}"),
         "filePath": file.display().to_string(),
         "model": model,
         "providerID": "some-im",
-    })))
+    }))
 }
 
 /// 参照图的来源只有两处：工作区里的文件，或宿主自己的插件媒体目录
 /// （生成图、以及浏览器上传落地的那一份）。别处一律不认。
 fn resolve_reference_path(
-    state: &PluginWebState,
+    home: &Path,
     raw: &str,
     roots: &[PathBuf],
 ) -> Result<PathBuf, PluginWebError> {
-    let media = state.home.join("plugin-media");
+    let media = home.join("plugin-media");
     let candidate = Path::new(raw.trim());
     if let Ok(canonical) = candidate.canonicalize()
         && let Ok(media_root) = media.canonicalize()

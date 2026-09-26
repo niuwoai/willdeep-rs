@@ -1,12 +1,13 @@
 {
   "name": "willdeep-web",
   "private": true,
-  "version": "0.82.0-rc1",
+  "version": "0.83.0-rc1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.27.0",
@@ -27,6 +28,7 @@
     "globals": "^16.3.0",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.1",
-    "vite": "^7.1.2"
+    "vite": "^7.1.2",
+    "vitest": "^3.2.4"
   }
 }

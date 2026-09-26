@@ -14,13 +14,15 @@ use tokio::sync::Mutex;
 use crate::mcp::{McpError, McpRegistry, McpServerConfig};
 
 use super::declarative::{DeclarativeDocument, DeclarativeError};
+use super::host_requests::{PluginHostRequests, PluginRequestContext, ScopedHostRequests};
 use super::manifest::{
     CommandHandler, HostAction, PageRuntime, PluginMenuLocation, PluginPermission, SidebarMode,
 };
 use super::package::{
     MAX_MANIFEST_BYTES, MAX_PAGE_BYTES, PackageError, PluginPackage, PluginSource, discover,
 };
-use super::registry::{ApprovalGap, PluginRegistry, RegistryError};
+use super::registry::{ApprovalGap, PluginRegistry, RegistryError, inferred_permissions};
+use super::tool_catalog::PluginToolCatalog;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
@@ -100,6 +102,12 @@ pub struct PluginHost {
     /// pluginID → 该插件自己的 MCP 注册表。隔离靠实例边界：一个插件永远
     /// 拿不到另一个插件的连接，哪怕两边的 server 重名。
     connections: Mutex<BTreeMap<String, Arc<McpRegistry>>>,
+    /// pluginID → 建连锁。页面、网关、聊天可能同时第一次用同一个插件，
+    /// 不锁就会各拉起一个进程，两个进程抢着写同一份数据文件。
+    connecting: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// 插件 MCP 进程反向请求宿主时交给谁处理。没设就不宣告任何方法。
+    host_requests: std::sync::RwLock<Option<Arc<dyn PluginHostRequests>>>,
+    catalog: PluginToolCatalog,
 }
 
 impl PluginHost {
@@ -157,11 +165,106 @@ impl PluginHost {
             failures,
             registry: Mutex::new(registry),
             connections: Mutex::new(BTreeMap::new()),
+            connecting: Mutex::new(BTreeMap::new()),
+            host_requests: std::sync::RwLock::new(None),
+            catalog: PluginToolCatalog::new(home),
         })
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// 装上反向请求处理器。只影响之后新建的连接，所以在第一次用插件之前调用。
+    pub fn set_host_requests(&self, handler: Arc<dyn PluginHostRequests>) {
+        *self
+            .host_requests
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handler);
+    }
+
+    pub fn tool_catalog(&self) -> &PluginToolCatalog {
+        &self.catalog
+    }
+
+    /// 插件自己的数据目录（找 `mcp-http.json` 的顺序）。
+    pub fn plugin_data_dirs(&self, plugin_id: &str) -> Vec<PathBuf> {
+        super::gateway::plugin_data_dirs(&self.home, plugin_id)
+    }
+
+    /// 插件声明的权限。没有 WillDeep 清单的 Codex 兼容包按 `mcp.json` 推断，
+    /// 与安装预览、macOS 宿主同一口径。
+    pub fn declared_permissions(&self, plugin_id: &str) -> Vec<PluginPermission> {
+        match self.package(plugin_id) {
+            Ok(package) => match &package.manifest {
+                Some(manifest) => manifest.permissions.iter().copied().collect(),
+                None => inferred_permissions(package),
+            },
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 这个插件里宿主**愿意代它运行**的 MCP 服务：清单 `dependencies.mcpServers`
+    /// 声明过（没有 WillDeep 清单的包取 `mcp.json` 全部），且声明了
+    /// `process.execute`（本宿主只支持 stdio 服务）。与 macOS 宿主
+    /// `AgentMCPServerDirectory.loadPluginServers` 同一套过滤；网关与聊天工具
+    /// 目录只认这里列出的服务。不检查启用状态。
+    pub fn runnable_servers(&self, plugin_id: &str) -> Vec<String> {
+        let Ok(package) = self.package(plugin_id) else {
+            return Vec::new();
+        };
+        if !self
+            .declared_permissions(plugin_id)
+            .contains(&PluginPermission::ProcessExecute)
+        {
+            return Vec::new();
+        }
+        package
+            .mcp_servers
+            .keys()
+            .filter(|name| match &package.manifest {
+                Some(manifest) => manifest.dependencies.mcp_servers.contains(name),
+                None => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 已启用插件里能运行的全部 MCP 服务：`(pluginID, server)`。网关的发现文件
+    /// 与聊天工具目录都按它过滤。
+    pub async fn enabled_servers(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for package in &self.packages {
+            if !self.registry.lock().await.is_enabled(&package.id) {
+                continue;
+            }
+            for server in self.runnable_servers(&package.id) {
+                out.push((package.id.clone(), server));
+            }
+        }
+        out
+    }
+
+    /// 确保插件在跑，并刷新某个服务的工具目录：经宿主平时那条 MCP 连接发一次
+    /// `tools/list`（插件没在运行就按平常的方式拉起）。返回原始结果。
+    pub async fn refresh_tools(&self, plugin_id: &str, server: &str) -> Result<Value, HostError> {
+        self.require_enabled(plugin_id).await?;
+        if !self
+            .runnable_servers(plugin_id)
+            .iter()
+            .any(|item| item == server)
+        {
+            return Err(HostError::UnknownServer {
+                plugin: plugin_id.to_owned(),
+                server: server.to_owned(),
+            });
+        }
+        let mcp = self.mcp(plugin_id).await?;
+        let listed = mcp
+            .request(server, "tools/list", serde_json::json!({}))
+            .await?;
+        self.catalog.record(plugin_id, server, &listed);
+        Ok(listed)
     }
 
     pub fn packages(&self) -> &[PluginPackage] {
@@ -203,7 +306,9 @@ impl PluginHost {
         let outcome = self.registry.lock().await.set_enabled(package, enabled)?;
         if !enabled {
             // 停用即断连：一个被停用的插件不该还留着一个活着的子进程。
+            // 工具目录里它的条目一并作废，聊天不再看到这些工具。
             self.connections.lock().await.remove(plugin_id);
+            self.catalog.invalidate(plugin_id);
         }
         Ok(outcome)
     }
@@ -212,6 +317,7 @@ impl PluginHost {
     /// 这里只负责状态，好让"删文件失败"不会留下一份仍然有效的审批。
     pub async fn forget(&self, plugin_id: &str) -> Result<(), HostError> {
         self.connections.lock().await.remove(plugin_id);
+        self.catalog.invalidate(plugin_id);
         self.registry.lock().await.forget(plugin_id)?;
         Ok(())
     }
@@ -289,10 +395,25 @@ impl PluginHost {
     ///
     /// `${pluginRoot}` 与 `${setting:<id>}` 在这里展开：前者让插件包可以被安装到
     /// 任意路径，后者让密钥不必写进包里。展开只在这一处发生，别处拿到的都是原文。
+    ///
+    /// 缓存的连接里有 stdio 进程已经退出（被结束、崩溃），就丢掉重连：插件进程
+    /// 没了，下一条请求会重新拉起它，与 macOS 宿主一致。
     pub async fn mcp(&self, plugin_id: &str) -> Result<Arc<McpRegistry>, HostError> {
         let package = self.require_enabled(plugin_id).await?;
-        if let Some(existing) = self.connections.lock().await.get(plugin_id) {
-            return Ok(existing.clone());
+        if let Some(existing) = self.live_connection(plugin_id).await {
+            return Ok(existing);
+        }
+        let gate = self
+            .connecting
+            .lock()
+            .await
+            .entry(plugin_id.to_owned())
+            .or_default()
+            .clone();
+        let _connecting = gate.lock().await;
+        // 排队期间别人可能已经连好了。
+        if let Some(existing) = self.live_connection(plugin_id).await {
+            return Ok(existing);
         }
         let root = package.root.display().to_string();
         let settings = self
@@ -305,28 +426,68 @@ impl PluginHost {
         let mut configs = BTreeMap::new();
         for (name, spec) in &package.mcp_servers {
             let expand = |value: &str| expand_variables(value, &root, &settings);
+            let mut env: BTreeMap<String, String> = spec
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), expand(value)))
+                .collect();
+            // 插件按 WILLDEEP_HOME 找 Web 宿主的媒体目录（`plugin-media/<id>/`）。
+            // 宿主的家目录可能来自 `--config` 而不是环境变量，明确告诉它，
+            // 免得宿主把图写在一处、插件去另一处找。插件自己声明了就不覆盖。
+            env.entry("WILLDEEP_HOME".to_owned())
+                .or_insert_with(|| self.home.display().to_string());
             configs.insert(
                 name.clone(),
                 McpServerConfig {
                     command: Some(expand(&spec.command)),
                     args: spec.args.iter().map(|item| expand(item)).collect(),
-                    env: spec
-                        .env
-                        .iter()
-                        .map(|(key, value)| (key.clone(), expand(value)))
-                        .collect(),
+                    env,
                     startup_timeout_seconds: spec.startup_timeout_seconds,
                     enabled: true,
                     ..McpServerConfig::default()
                 },
             );
         }
-        let registry = Arc::new(McpRegistry::connect(&configs).await?);
+        let handler = self
+            .host_requests
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let registry = Arc::new(match handler {
+            Some(inner) => {
+                let scoped = Arc::new(ScopedHostRequests {
+                    context: PluginRequestContext {
+                        plugin_id: plugin_id.to_owned(),
+                        permissions: self.declared_permissions(plugin_id),
+                    },
+                    inner,
+                });
+                McpRegistry::connect_with_host_requests(&configs, scoped).await?
+            }
+            None => McpRegistry::connect(&configs).await?,
+        });
+        // 连接时已经列过一遍工具，顺手刷新聊天用的目录（只记能运行的服务）。
+        for server in self.runnable_servers(plugin_id) {
+            if let Some(listed) = registry.listed_tools(&server) {
+                self.catalog.record(plugin_id, &server, listed);
+            }
+        }
         self.connections
             .lock()
             .await
             .insert(plugin_id.to_owned(), registry.clone());
         Ok(registry)
+    }
+
+    async fn live_connection(&self, plugin_id: &str) -> Option<Arc<McpRegistry>> {
+        let mut connections = self.connections.lock().await;
+        let existing = connections.get(plugin_id)?.clone();
+        if existing.is_alive() {
+            return Some(existing);
+        }
+        eprintln!("warning: plugin_mcp_reconnect plugin={plugin_id} reason=process_exited");
+        connections.remove(plugin_id);
+        None
     }
 
     /// 执行一条清单里声明过的命令。清单外的东西一律进不来——
@@ -753,6 +914,163 @@ mod tests {
             expand_variables("${HOME}/x", "/pkg", &settings),
             "${HOME}/x"
         );
+    }
+
+    #[tokio::test]
+    async fn runnable_servers_need_a_declaration_and_process_execute() {
+        use crate::plugin::test_support::{install_fake_plugin, scratch_home};
+        let home = scratch_home("runnable");
+        install_fake_plugin(&home, "ok", r#"["process.execute"]"#, r#"["srv"]"#);
+        install_fake_plugin(&home, "noexec", r#"["ai.chat"]"#, r#"["srv"]"#);
+        install_fake_plugin(&home, "undeclared", r#"["process.execute"]"#, "[]");
+        let host = PluginHost::discover(&home).expect("host");
+        assert_eq!(host.runnable_servers("ok"), vec!["srv".to_owned()]);
+        assert!(host.runnable_servers("noexec").is_empty());
+        assert!(host.runnable_servers("undeclared").is_empty());
+        // 启用状态另算：没启用的插件不进网关、不进聊天。
+        assert!(host.enabled_servers().await.is_empty());
+        host.approve("ok", 1).await.expect("approve");
+        host.set_enabled("ok", true)
+            .await
+            .expect("write")
+            .expect("enabled");
+        assert_eq!(
+            host.enabled_servers().await,
+            vec![("ok".to_owned(), "srv".to_owned())]
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn connecting_records_tools_and_a_dead_process_is_restarted() {
+        use crate::plugin::test_support::{
+            events, install_fake_plugin, python_available, scratch_home,
+        };
+        if !python_available() {
+            return;
+        }
+        let home = scratch_home("reconnect");
+        let log = install_fake_plugin(&home, "demo", r#"["process.execute"]"#, r#"["srv"]"#);
+        let host = PluginHost::discover(&home).expect("host");
+        host.approve("demo", 1).await.expect("approve");
+        host.set_enabled("demo", true)
+            .await
+            .expect("write")
+            .expect("enabled");
+        assert!(host.tool_catalog().load().is_empty());
+
+        let first = host.mcp("demo").await.expect("connect");
+        let catalog = host.tool_catalog().load();
+        let tools = &catalog["plugin:demo:srv"].tools;
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.exposed_name == "mcp__srv__echo")
+        );
+        // 宿主把自己的家目录告诉插件（它按这个找 Web 媒体目录）。
+        let spawned = events(&log, "spawned");
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0]["home"], home.display().to_string());
+        // 同一个连接复用，不重复拉进程。
+        let again = host.mcp("demo").await.expect("cached");
+        assert!(Arc::ptr_eq(&first, &again));
+
+        first
+            .call_tool_on("srv", "exit", serde_json::json!({}))
+            .await
+            .expect("exit");
+        for _ in 0..50 {
+            if !first.is_alive() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let restarted = host.mcp("demo").await.expect("reconnect");
+        assert!(!Arc::ptr_eq(&first, &restarted));
+        assert_eq!(
+            events(&log, "spawned").len(),
+            2,
+            "a new process was started"
+        );
+
+        let listed = host.refresh_tools("demo", "srv").await.expect("refresh");
+        assert!(
+            listed["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
+        );
+        assert!(matches!(
+            host.refresh_tools("demo", "nope").await,
+            Err(HostError::UnknownServer { .. })
+        ));
+
+        // 停用：断连并让目录里它的条目作废。
+        host.set_enabled("demo", false)
+            .await
+            .expect("write")
+            .expect("disabled");
+        assert!(host.tool_catalog().load().is_empty());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn reverse_requests_carry_the_plugin_and_its_declared_permissions() {
+        use crate::mcp::HostRequestError;
+        use crate::plugin::host_requests::{PluginHostRequests, PluginRequestContext};
+        use crate::plugin::test_support::{install_fake_plugin, python_available, scratch_home};
+
+        struct Recorder(std::sync::Mutex<Vec<PluginRequestContext>>);
+        #[async_trait::async_trait]
+        impl PluginHostRequests for Recorder {
+            fn methods(&self) -> Vec<String> {
+                vec!["willdeep/images/generate".to_owned()]
+            }
+            async fn handle(
+                &self,
+                context: &PluginRequestContext,
+                _method: &str,
+                _params: Value,
+            ) -> Result<Value, HostRequestError> {
+                self.0.lock().unwrap().push(context.clone());
+                Ok(serde_json::json!({"ok": true}))
+            }
+        }
+
+        if !python_available() {
+            return;
+        }
+        let home = scratch_home("scoped");
+        install_fake_plugin(
+            &home,
+            "demo",
+            r#"["process.execute","ai.image"]"#,
+            r#"["srv"]"#,
+        );
+        let host = PluginHost::discover(&home).expect("host");
+        let recorder = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        host.set_host_requests(recorder.clone());
+        host.approve("demo", 1).await.expect("approve");
+        host.set_enabled("demo", true)
+            .await
+            .expect("write")
+            .expect("enabled");
+        let mcp = host.mcp("demo").await.expect("connect");
+        let result = mcp
+            .call_tool_on(
+                "srv",
+                "draw",
+                serde_json::json!({"params": {"prompt": "x"}}),
+            )
+            .await
+            .expect("draw");
+        assert!(result.to_string().contains("ok"));
+        let seen = recorder.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].plugin_id, "demo");
+        assert!(seen[0].permissions.contains(&PluginPermission::AiImage));
+        assert!(!seen[0].permissions.contains(&PluginPermission::AiChat));
+        drop(seen);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[tokio::test]

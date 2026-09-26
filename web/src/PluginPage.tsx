@@ -12,7 +12,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Text } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
-import { SfIcon } from "./sfSymbols";
+import { PluginPageHeader } from "./PluginPageHeader";
+import { pluginTheme } from "./pluginTheme";
+import type { ColorScheme } from "./theme";
 import {
   callPluginTool,
   executePluginCommand,
@@ -41,6 +43,8 @@ type Props = {
   destination: PluginDestinationView;
   messages: Messages;
   locale: string;
+  /** 宿主此刻生效的配色；插件页面的 colorScheme 上下文与主题变量都跟着它。 */
+  colorScheme: ColorScheme;
   workspace: string | null;
   sessionId: string | null;
   selectedItemId: string | null;
@@ -54,6 +58,9 @@ type Props = {
   /** `window.willdeep.openConversation`：跳到那条会话。 */
   onOpenSession: (sessionId: string) => void;
 };
+
+/** MCP Apps 的显示模式。插件页面占满中央区域，没有 inline / pip 可切。 */
+const MCP_DISPLAY_MODE = "fullscreen";
 
 type JsonRpc = { jsonrpc: "2.0"; id?: number | string; method?: string; params?: Record<string, unknown> };
 
@@ -136,6 +143,7 @@ export function PluginPage({
   destination,
   messages,
   locale,
+  colorScheme,
   workspace,
   sessionId,
   selectedItemId,
@@ -153,6 +161,11 @@ export function PluginPage({
   const [reloadKey, setReloadKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyCommand, setBusyCommand] = useState<string | null>(null);
+  // 重新载入时给一条细进度条：iframe 换新的那一下旧内容已经没了，
+  // 不给反馈的话用户分不清是点了没反应还是正在加载。
+  // 用「已加载完的是哪一帧」而不是一个布尔：换目的地、手动刷新都会换
+  // iframe 的 key，key 对不上就是还在加载，不需要在各处记得把它置回 true。
+  const [loadedFrameKey, setLoadedFrameKey] = useState<string | null>(null);
   // MCP Apps 的握手是有序的：宿主在 initialized 之前不受理 tools/call
   // 与 resources/read。乱序的页面应该拿到明确的 -32002，而不是一个能用的结果。
   const initialized = useRef(false);
@@ -170,16 +183,23 @@ export function PluginPage({
       workspaceReference: canReadWorkspace ? workspace : null,
       sessionReference: permissions.has("conversation.read") ? sessionId : null,
       locale,
-      colorScheme: "dark",
+      colorScheme,
     };
-  }, [plugin.permissions, destination.qualified_id, selectedItemId, workspace, sessionId, locale]);
+  }, [plugin.permissions, destination.qualified_id, selectedItemId, workspace, sessionId, locale, colorScheme]);
 
   const post = useCallback((payload: unknown) => {
     frameRef.current?.contentWindow?.postMessage(payload, "*");
   }, []);
 
+  // 与 macOS 宿主的 pushContext 同一份载荷：window.__WILLDEEP_CONTEXT__ +
+  // willdeep:context-changed 由页面里的桥落地；MCP App 另外收一条
+  // host-context-changed，顶层带 theme / locale，willdeep 下是完整上下文。
+  //
+  // 主题变量在推送时现取：这个回调跑在 effect 里，根元素的 data-theme
+  // 已经换好，读到的是新配色。
   const pushContext = useCallback(() => {
     post({ __willdeep: 1, type: "context", context });
+    post({ __willdeep: 1, type: "theme", theme: pluginTheme(colorScheme) });
     if (initialized.current) {
       post({
         __willdeep: 1,
@@ -187,11 +207,15 @@ export function PluginPage({
         message: {
           jsonrpc: "2.0",
           method: "ui/notifications/host-context-changed",
-          params: { willdeep: context },
+          params: { theme: context.colorScheme, locale: context.locale, willdeep: context },
         },
       });
     }
-  }, [context, post]);
+  }, [context, colorScheme, post]);
+
+  const reload = useCallback(() => {
+    setReloadKey((current) => current + 1);
+  }, []);
 
   useEffect(() => {
     pushContext();
@@ -230,7 +254,7 @@ export function PluginPage({
     (action: string | undefined, navigateTo: string | undefined) => {
       switch (action) {
         case "plugin.refresh":
-          setReloadKey((current) => current + 1);
+          reload();
           break;
         case "plugins.open-center":
         case "settings.mcp":
@@ -243,7 +267,7 @@ export function PluginPage({
       }
       if (navigateTo) onNavigate(navigateTo);
     },
-    [onNavigate, onOpenPluginCenter]
+    [onNavigate, onOpenPluginCenter, reload]
   );
 
   const runCommand = useCallback(
@@ -408,7 +432,7 @@ export function PluginPage({
           onSelectItem(data.itemID ?? null);
           break;
         case "refresh":
-          setReloadKey((current) => current + 1);
+          reload();
           break;
         case "executeCommand": {
           if (!data.requestID || !data.commandID) return;
@@ -496,15 +520,31 @@ export function PluginPage({
       const server = destination.page_server;
       switch (data.method) {
         case "ui/initialize":
+          // 重新握手就是重新开始：initialized 之前的 tools/call 一律按未就绪拒。
+          initialized.current = false;
+          // 能力名与 hostContext 的形状对齐 macOS 宿主（也就是 MCP Apps 规范
+          // 里的 serverTools / serverResources），同一个 MCP App 在两端读到
+          // 同样的字段。
           replyMcp(data.id, {
             protocolVersion: "2026-01-26",
-            hostCapabilities: { tools: {}, resources: {} },
+            hostCapabilities: { serverTools: {}, serverResources: {} },
             hostInfo: { name: "willdeep-web", version: "1" },
-            hostContext: { willdeep: context },
+            hostContext: {
+              theme: context.colorScheme,
+              locale: context.locale,
+              displayMode: MCP_DISPLAY_MODE,
+              availableDisplayModes: [MCP_DISPLAY_MODE],
+              willdeep: context,
+            },
           });
           break;
         case "ui/notifications/initialized":
           initialized.current = true;
+          // 与 macOS 一致：握手一完成就补推一次上下文，页面不必等下一次变化。
+          pushContext();
+          break;
+        case "ping":
+          replyMcp(data.id, {});
           break;
         case "tools/call":
         case "resources/read": {
@@ -546,6 +586,8 @@ export function PluginPage({
     destination.page_server,
     context,
     post,
+    pushContext,
+    reload,
     runCommand,
     onSelectItem,
     onChatText,
@@ -553,47 +595,42 @@ export function PluginPage({
     messages.pluginRunCommandConfirm,
   ]);
 
-  const toolbar = destination.toolbar_commands;
+  const frameKey = `${destination.qualified_id}-${reloadKey}`;
+  const frameLoading = url !== null && loadedFrameKey !== frameKey;
 
   return (
     <Flex direction="column" flex="1" minW="0" h="100vh" bg="var(--bg-page)">
-      <Flex className="plugin-toolbar">
-        <Text className="plugin-title">{destination.title}</Text>
-        <Flex gap="1">
-          {toolbar.map((command) => (
-            <button
-              key={command.id}
-              type="button"
-              className="plugin-toolbar-button"
-              title={command.title}
-              aria-label={command.title}
-              disabled={busyCommand === command.id}
-              onClick={async () => {
-                setBusyCommand(command.id);
-                setError(null);
-                try {
-                  await runCommand(command.id, {});
-                } catch (reason) {
-                  setError(reason instanceof Error ? reason.message : String(reason));
-                } finally {
-                  setBusyCommand(null);
-                }
-              }}
-            >
-              <SfIcon name={command.icon} size={16} />
-            </button>
-          ))}
-        </Flex>
-      </Flex>
+      <PluginPageHeader
+        pluginId={plugin.id}
+        icon={destination.icon}
+        title={destination.title}
+        commands={destination.toolbar_commands}
+        busyCommand={busyCommand}
+        messages={messages}
+        onRunCommand={async (commandId) => {
+          setBusyCommand(commandId);
+          setError(null);
+          try {
+            await runCommand(commandId, {});
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : String(reason));
+          } finally {
+            setBusyCommand(null);
+          }
+        }}
+        onRefresh={reload}
+        onOpenSettings={onOpenPluginCenter}
+      />
       {error && (
         <Text className="plugin-error" role="alert">
           {messages.pluginCommandFailed}: {error}
         </Text>
       )}
       {url ? (
-        <Box flex="1" minH="0">
+        <Box flex="1" minH="0" position="relative">
+          {frameLoading && <Box className="plugin-reload-bar" role="progressbar" aria-label={messages.pluginSidebarLoading} />}
           <iframe
-            key={`${destination.qualified_id}-${reloadKey}`}
+            key={frameKey}
             ref={frameRef}
             src={url}
             title={destination.title}
@@ -603,7 +640,10 @@ export function PluginPage({
             // 把整个宿主界面交到插件手里。也不给 popups：一个能逃出沙箱的
             // 新窗口，等于这道围栏没设。
             sandbox="allow-scripts"
-            onLoad={pushContext}
+            onLoad={() => {
+              setLoadedFrameKey(frameKey);
+              pushContext();
+            }}
           />
         </Box>
       ) : (

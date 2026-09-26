@@ -12,18 +12,29 @@
 //! - [`registry`]：启用状态与审批记录（0600 落盘）。
 //! - [`declarative`]：声明式 UI 文档的限制校验。
 //! - [`host`]：把上面几样组装成运行时，并持有每插件隔离的 MCP 连接。
+//! - [`host_requests`]：插件 MCP 进程反向请求宿主（出图、问模型）的接口。
+//! - [`tool_catalog`] / [`chat_tools`]：已启用插件的 MCP 工具进聊天。
+//! - [`gateway`]：插件 MCP 网关的发现文件、插件 HTTP 入口与客户端调用。
 
+pub mod chat_tools;
 pub mod declarative;
+pub mod gateway;
 pub mod host;
+pub mod host_requests;
 pub mod manifest;
 pub mod package;
 pub mod registry;
+#[doc(hidden)]
+pub mod test_support;
+pub mod tool_catalog;
 
+pub use chat_tools::PluginChatTools;
 pub use declarative::{DeclarativeDocument, DeclarativeError};
 pub use host::{
     CommandOutcome, DestinationContext, HostError, PluginHost, PluginLoadFailure,
     qualified_destination,
 };
+pub use host_requests::{PluginHostRequests, PluginRequestContext};
 pub use manifest::{
     CodexManifest, CommandHandler, HostAction, ManifestError, PageRuntime, PluginCommand,
     PluginDestination, PluginManifest, PluginMenuLocation, PluginPage, PluginPermission,

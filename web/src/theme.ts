@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 export const themeModes = ["system", "dark", "light"] as const;
 export type ThemeMode = (typeof themeModes)[number];
 
@@ -28,4 +30,35 @@ export function applyThemeMode(mode: ThemeMode) {
   } catch {
     // 存不下就只影响这一次会话，不该让界面报错。
   }
+}
+
+export type ColorScheme = "dark" | "light";
+
+const PREFERS_LIGHT_QUERY = "(prefers-color-scheme: light)";
+
+/// 用户选的档位 + 系统偏好 → 此刻真正生效的配色。缺省（跟随系统）时与
+/// theme.css 的判断一致：只有系统明确偏好浅色才是浅色，其余一律深色。
+export function resolveColorScheme(mode: ThemeMode, systemPrefersLight: boolean): ColorScheme {
+  if (mode === "system") return systemPrefersLight ? "light" : "dark";
+  return mode;
+}
+
+function subscribeSystemScheme(onChange: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => undefined;
+  const query = window.matchMedia(PREFERS_LIGHT_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+
+function systemPrefersLight() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(PREFERS_LIGHT_QUERY).matches
+    : false;
+}
+
+/// 生效配色，跟着系统切换实时变化。插件页面的 `colorScheme` 上下文靠它——
+/// 写死 "dark" 的话，浅色界面里的插件会自己画一张黑底。
+export function useResolvedColorScheme(mode: ThemeMode): ColorScheme {
+  const prefersLight = useSyncExternalStore(subscribeSystemScheme, systemPrefersLight, () => false);
+  return resolveColorScheme(mode, prefersLight);
 }

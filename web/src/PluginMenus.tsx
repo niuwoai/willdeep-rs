@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text } from "@chakra-ui/react";
 import type { Messages } from "./i18n";
-import { SfIcon } from "./sfSymbols";
+import { PluginIcon } from "./sfSymbols";
 import type { MenuEntry } from "./pluginMenuModel";
 
 type PaletteProps = {
@@ -65,7 +65,7 @@ export function PluginCommandPalette({ entries, messages, onRun, onClose }: Pale
               onMouseEnter={() => setActive(index)}
               onClick={() => onRun(entry)}
             >
-              <SfIcon name={entry.icon} size={15} />
+              <PluginIcon pluginId={entry.pluginId} icon={entry.icon} kind="command" size={15} />
               <span className="plugin-palette-title">{entry.title}</span>
               <span className="plugin-palette-source">{entry.pluginName}</span>
             </button>
@@ -132,7 +132,7 @@ export function PluginMenuPopup({ entries, x, y, onRun, onClose }: PopupProps) {
           className="plugin-popup-item"
           onClick={() => onRun(entry)}
         >
-          <SfIcon name={entry.icon} size={14} />
+          <PluginIcon pluginId={entry.pluginId} icon={entry.icon} kind="command" size={14} />
           <span>{entry.title}</span>
           <small>{entry.pluginName}</small>
         </button>

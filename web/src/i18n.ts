@@ -52,6 +52,7 @@ const zhCN = {
   settings: "设置",
   addWorkspace: "添加", addWorkspacePlaceholder: "工作区目录绝对路径，如 ~/Sites/my-project", addWorkspaceHint: "只影响这个浏览器视图；对外暴露的实例需在启动命令用 --web-workspace。",
   pluginPalette: "插件命令", pluginPalettePlaceholder: "搜索插件命令…（⌘K / Ctrl+K 开关）", pluginPaletteEmpty: "没有匹配的插件命令", pluginComposerMore: "插件动作",
+  pluginSectionTitle: "插件", pluginRefresh: "刷新", pluginMoreActions: "更多操作", pluginSettings: "设置",
 };
 
 export type Messages = typeof zhCN;
@@ -107,6 +108,7 @@ const en: Messages = {
   settings: "Settings",
   addWorkspace: "Add", addWorkspacePlaceholder: "Absolute workspace path, e.g. ~/Sites/my-project", addWorkspaceHint: "Affects this browser view only; on a non-loopback instance use --web-workspace at startup.",
   pluginPalette: "Plugin commands", pluginPalettePlaceholder: "Search plugin commands… (⌘K / Ctrl+K)", pluginPaletteEmpty: "No matching plugin command", pluginComposerMore: "Plugin actions",
+  pluginSectionTitle: "Plugins", pluginRefresh: "Refresh", pluginMoreActions: "More actions", pluginSettings: "Settings",
 };
 
 const ja: Messages = {
@@ -160,6 +162,7 @@ const ja: Messages = {
   settings: "設定",
   addWorkspace: "追加", addWorkspacePlaceholder: "ワークスペースの絶対パス（例：~/Sites/my-project）", addWorkspaceHint: "このブラウザ表示にのみ影響します。ループバック以外では起動時に --web-workspace を使ってください。",
   pluginPalette: "プラグインコマンド", pluginPalettePlaceholder: "プラグインコマンドを検索…（⌘K / Ctrl+K）", pluginPaletteEmpty: "一致するプラグインコマンドがありません", pluginComposerMore: "プラグイン操作",
+  pluginSectionTitle: "プラグイン", pluginRefresh: "再読み込み", pluginMoreActions: "その他の操作", pluginSettings: "設定",
 };
 
 export const messages: Record<Language, Messages> = { "zh-CN": zhCN, en, ja };

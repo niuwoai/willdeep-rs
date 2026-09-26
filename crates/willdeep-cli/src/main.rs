@@ -34,6 +34,8 @@ mod onboarding;
 mod plugin_ai_media;
 mod plugin_capabilities;
 mod plugin_cmd;
+mod plugin_gateway;
+mod plugin_host_requests;
 mod plugin_web;
 mod projects;
 mod telemetry;

@@ -408,14 +408,45 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     // 插件宿主自带一套路由与状态。发现失败不该让整个 Web 起不来——
     // 一个装坏的插件包不能变成"聊天也用不了"。
     let app = match willdeep_core::plugin::PluginHost::discover(&state.home) {
-        Ok(host) => app.merge(crate::plugin_web::router(Arc::new(
-            crate::plugin_web::PluginWebState::new(
-                Arc::new(host),
-                state.config_path.clone(),
+        Ok(host) => {
+            let host = Arc::new(host);
+            // 插件 MCP 进程可以反向请求出图、问模型；凭据留在宿主。
+            host.set_host_requests(Arc::new(crate::plugin_host_requests::HostRequests::new(
                 state.home.clone(),
+                state.config_path.clone(),
                 state.workspaces.clone(),
-            ),
-        ))),
+            )));
+            // 插件 MCP 网关：只绑 127.0.0.1，端口与 token 持久化在发现文件里。
+            // 起不来不影响 Web 本身。
+            let gateway = match crate::plugin_gateway::PluginGateway::start(
+                &state.home,
+                host.clone(),
+            )
+            .await
+            {
+                Ok(gateway) => {
+                    println!(
+                        "Plugin MCP gateway: {} ({})",
+                        gateway.url(),
+                        willdeep_core::plugin::gateway::discovery_path(&state.home).display()
+                    );
+                    Some(Arc::new(gateway))
+                }
+                Err(error) => {
+                    eprintln!("warning: plugin MCP gateway unavailable: {error}");
+                    None
+                }
+            };
+            app.merge(crate::plugin_web::router(Arc::new(
+                crate::plugin_web::PluginWebState::new(
+                    host,
+                    state.config_path.clone(),
+                    state.home.clone(),
+                    state.workspaces.clone(),
+                )
+                .with_gateway(gateway),
+            )))
+        }
         Err(error) => {
             eprintln!("warning: plugin host unavailable: {error}");
             app

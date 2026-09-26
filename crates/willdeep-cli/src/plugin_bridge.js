@@ -50,16 +50,28 @@
     else pending.resolve(detail.result);
   }
 
+  // 宿主推来的主题：一组 `--willdeep-*` CSS 变量加 color-scheme，与 macOS 宿主
+  // 注入的变量同名。写在根元素的内联样式上，盖过页面 <head> 里那份按
+  // prefers-color-scheme 取的默认值。只收 `--willdeep-` 开头的变量名与字符串值：
+  // 父页面只该改主题，不该借这条路改页面的别的样式。
+  function applyTheme(theme) {
+    if (!theme || typeof theme !== 'object') return;
+    var root = document.documentElement;
+    var variables = theme.variables;
+    if (variables && typeof variables === 'object') {
+      for (var name in variables) {
+        if (!Object.prototype.hasOwnProperty.call(variables, name)) continue;
+        var value = variables[name];
+        if (name.indexOf('--willdeep-') !== 0 || typeof value !== 'string' || value === '') continue;
+        root.style.setProperty(name, value);
+      }
+    }
+    if (theme.colorScheme === 'light' || theme.colorScheme === 'dark') {
+      root.style.colorScheme = theme.colorScheme;
+    }
+  }
+
   window.willdeep = window.willdeep || {};
-  // 同一个插件包跑在两个宿主上，能力集不一样：页面必须能问清楚再用，
-  // 而不是调到一半吃 `undefined is not a function`。写法与 macOS 版同一份：
-  //
-  //     if ((window.willdeep.capabilities || []).includes('fs.write')) { … }
-  //
-  // 判据是 capabilities，不是 version：version 只说这套桥自己的迭代，
-  // 两个宿主的号段互不比较大小。
-  window.willdeep.version = '1.0.0';
-  window.willdeep.capabilities = ['context', 'commands', 'ai.complete', 'ai.providers'];
   window.willdeep.getContext = function () {
     return window.__WILLDEEP_CONTEXT__ || {};
   };
@@ -222,8 +234,10 @@
         : [];
     }
   };
-  // 桥的版本与能力清单。插件据此降级，而不是在旧宿主上白屏：
+  // 桥的版本与能力清单。同一个插件包跑在两个宿主上，能力集不一样：页面
+  // 必须能问清楚再用，而不是调到一半吃 `undefined is not a function`：
   //   if ((window.willdeep.capabilities || []).indexOf('fs.search') >= 0) { … }
+  // 判据是 capabilities，不是 version：version 只说这套桥自己的迭代。
   // 与 macOS 宿主 AgentPluginPageBridgeVersion 同名同序——同一份插件包
   // 在两端做同样的特性判断，判出来必须是同一个答案。
   window.willdeep.version = '2.6.0';
@@ -285,6 +299,9 @@
         window.dispatchEvent(
           new CustomEvent('willdeep:context-changed', { detail: window.__WILLDEEP_CONTEXT__ })
         );
+        break;
+      case 'theme':
+        applyTheme(data.theme);
         break;
       case 'mcpMessage':
         window.__willdeepDeliverMCPMessage(data.message);

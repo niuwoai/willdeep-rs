@@ -146,6 +146,16 @@ Always Allow 使用可撤销的窄签名。当前 Shell 仅保存无组合操作
 插件是 Harness 之外的一层：它不进 Agent Loop，也拿不到工具注册表。一个插件贡献的是
 **目的地**——一级入口、配套侧栏、中央页面与工具栏绑成同一个不可分割的导航状态；
 真实业务能力走插件自带的 MCP 服务，宿主只回答"谁能跑、跑什么、拿得到什么上下文"。
+反方向只有一条窄路：已启用插件的 MCP 工具经持久化目录（`plugin-mcp-tools.json`）
+挂进聊天的 `list_mcp_tools` / `call_mcp_tool`，用到时才拉起插件，走与配置 MCP 工具
+同一套审批。
+
+插件 MCP 进程跨两个进程被用到：页面与**插件 MCP 网关**在 `willdeep web` 进程（网关是
+单独的 `127.0.0.1` 监听，地址与 token 持久化在 `mcp-gateway.json`，给 Claude Code
+等外部客户端用），聊天在 daemon / CLI 进程。聊天调用插件工具优先经网关，好让同一个
+插件只有一个进程；没开 Web 时才由聊天进程自己拉起。插件进程可以反向请求宿主出图、
+问模型（`io.willdeep/host-requests`），凭据不出宿主。契约见
+[decisions/2026-09-26-plugin-mcp-gateway.md](decisions/2026-09-26-plugin-mcp-gateway.md)。
 
 包住在 `~/.willdeep/plugins/<id>/<version>/`，与 macOS 版共享；启用状态与权限审批
 存 `~/.willdeep/plugin-registry.web.json`，**不共享**。分界线是"内容 vs 判断"：

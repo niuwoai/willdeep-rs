@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.83.0-rc1] - 2026-09-26
+
+插件的 MCP 机制与展示对齐 WillDeep macOS（1.405.0-rc1）。
+
+### Added
+- **插件 MCP 网关，按需激活插件**：`willdeep web` 启动时在 `127.0.0.1` 另开监听，发现文件 `<WILLDEEP_HOME>/mcp-gateway.json`（0600，端口与 token 跨重启沿用）。Claude Code / Codex 等外部客户端连 `POST /plugins/<id>/<server>/mcp`，第一条请求到达时才拉起插件，不必先打开插件页；插件公布了 `mcp-http.json` 就原样转发（15 分钟），否则经 stdio 中转；可能已执行的失败不重发。契约与 macOS 宿主同一份（`docs/decisions/2026-09-26-plugin-mcp-gateway.md`）。
+- **插件 MCP 进程可以反向请求宿主**：`initialize` 宣告 `io.willdeep/host-requests`，支持 `willdeep/images/generate`（需 `ai.image`）与 `willdeep/ai/complete`（需 `ai.chat`），凭据不出宿主。短剧工坊在 Web 宿主下经 MCP 出图、审核不再报「宿主不支持」。`willdeep/audio/synthesize` 与 macOS 一样不宣告。
+- **聊天里能用已启用插件的 MCP 工具**：进 `list_mcp_tools` / `call_mcp_tool`，审批与配置里的 MCP 工具相同；工具定义来自持久化目录 `plugin-mcp-tools.json`，用到时才拉起插件，优先经网关与页面共用同一个插件进程。
+- `POST /api/plugins/{id}/mcp/refresh-tools`：手动刷新插件工具目录（对应 macOS 设置页「刷新工具」）。
+- 插件页面标题栏对齐 macOS：目的地图标 + 标题，命令显示图标加文字，新增刷新按钮和「…」菜单（设置），高 44px；刷新时顶部显示进度条。
+- 补齐插件图标：已知插件用到的 52 个 SF Symbol 都有对应字形；认不出的名字逐级降级，最后显示拼图块（与 macOS 相同）而不是圆点；支持包内图片图标。
+- 插件页面注入与 macOS 同名的主题变量（`--willdeep-bg/fg/secondary/accent/body-font-size`、`color-scheme`），首帧跟随系统配色；桥接收父页面推送的 `theme` 消息实时更新。
+- `web/` 引入 vitest 与 `yarn test`，覆盖图标降级、标题栏和主题变量。
+
+### Changed
+- 入口栏加「插件」分组标题；选中和悬停只用灰度层次，「更多插件」菜单行照 macOS 侧栏样式（行高 31、图标 14、圆角 10）。
+- MCP App 握手对齐 macOS：`hostContext` 补 `theme` / `locale` / `displayMode`，能力名改为 `serverTools` / `serverResources`，初始化后立即补推上下文，支持 `ping`。
+
+### Fixed
+- stdio MCP 服务在宿主空闲时发来的请求不再被丢弃；插件请求宿主期间不计入 `startup_timeout_sec`，处理完从头计。
+- 插件进程被结束后，下一次使用会重新拉起，不再一直报「MCP server exited」。
+- 页面、网关、聊天同时首次使用同一插件时不再拉起两个进程。
+- 宿主把自己的 `WILLDEEP_HOME` 传给插件进程，宿主写图与插件找图的目录对得上。
+- 插件上下文里的 `colorScheme` 跟随实际主题（原来写死 `dark`）。
+- 插件桥删除被覆盖掉的旧版本号与能力清单。
+
 ## [0.82.0-rc1] - 2026-09-23
 
 ### Changed

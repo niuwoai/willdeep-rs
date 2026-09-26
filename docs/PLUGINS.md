@@ -249,6 +249,72 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 确实落在这个插件的媒体目录里——页面自报一个 `/etc/passwd` 就能把任意文件喂给
 后续工具，这道门关在服务端。
 
+## 插件的 MCP 服务：反向请求、聊天工具、网关
+
+插件自带的 stdio MCP 服务由宿主按需拉起（`PluginHost::mcp`）。页面、聊天、外部
+MCP 客户端三条路共用同一套连接规则：`${pluginRoot}` / `${setting:<id>}` 展开、
+`WILLDEEP_HOME` 注入（插件自己声明了就不覆盖）、同一插件同时只建一次连接、进程
+退出后下一次使用重新拉起。
+
+### 反向请求（插件 → 宿主）
+
+插件在处理请求期间（或空闲时）往 stdout 写一条带 `id` 的 JSON-RPC 请求，宿主处理完
+把响应写回 stdin。与 macOS 宿主 `AgentMCPHostRequests` 同一份约定：
+
+- `initialize` 的 `capabilities.extensions["io.willdeep/host-requests"].methods` 只列
+  **真的实现了**的方法。本宿主宣告 `willdeep/images/generate`（需 `ai.image`，形状同
+  `ai.generateImage`，图落在 `<WILLDEEP_HOME>/plugin-media/<id>/`）与
+  `willdeep/ai/complete`（需 `ai.chat`，形状同 `ai.complete`，不流式）。
+  `willdeep/audio/synthesize`（宿主代管 TTS）两个宿主都没实现，**不宣告**。
+- 错误码：-32601 方法不存在 / 没宣告、-32602 参数不对、-32000 处理失败（含缺权限、
+  没凭据）、-32001 处理超过 600 秒。
+- 权限读插件清单，不读请求；用户在 `config.toml` 手配的 MCP 服务不宣告扩展，
+  反向请求一律回 -32601。
+- stdout 由常驻读任务独占：插件在宿主没有在途请求时发来的反向请求（短剧工坊的本机
+  HTTP 入口在工作线程里出图就是这样）也会被接住。
+- 超时衡量的是「插件多久没动静」：宿主处理反向请求期间不计时，处理完从头计。
+
+`clientInfo.name` 保持 `willdeep`：短剧工坊按它认出 Web 宿主、切换媒体地址。
+
+### 聊天里的插件工具
+
+已启用插件的 MCP 工具进聊天的 `list_mcp_tools` / `call_mcp_tool`（名字
+`mcp__<服务>__<工具>`，与配置里的 MCP 工具同一套审批与只读模式拦截）。
+
+- 定义来自持久化目录 `<WILLDEEP_HOME>/plugin-mcp-tools.json`，建工具表**不拉进程**。
+  目录在这些时机刷新：宿主连上插件（页面、命令）、网关确保插件在跑、模型调
+  `list_mcp_tools` 时给还没条目的服务补一次 `tools/list`、Web 的
+  `POST /api/plugins/<id>/mcp/refresh-tools`。插件停用或卸载时它的条目作废。
+- 只暴露已启用、声明了 `process.execute`、且在 `dependencies.mcpServers` 里的服务；
+  启用状态按注册表文件现读，Web 里一停用，聊天这边立刻看不到。
+- 调用**优先经插件 MCP 网关**：聊天 harness 在 daemon / CLI 进程，网关在 `willdeep web`
+  进程，走网关就和页面共用一个插件进程，不会有两个进程抢写同一份数据文件。网关不在
+  （没开 Web）时才用本进程自己的插件宿主拉起插件。
+- Runtime 任务显式限定了 MCP 服务白名单时不带插件工具。
+
+### 插件 MCP 网关
+
+契约见 [decisions/2026-09-26-plugin-mcp-gateway.md](decisions/2026-09-26-plugin-mcp-gateway.md)。
+`willdeep web` 启动时在 `127.0.0.1` 上另开一个监听，发现文件
+`<WILLDEEP_HOME>/mcp-gateway.json`（0600）给出地址、token 与每个已启用插件服务的端点。
+外部客户端连 `POST <url>/plugins/<pluginID>/<server>/mcp`，带
+`Authorization: Bearer <token>`；网关按需拉起插件，插件公布了 `mcp-http.json` 就原样
+转发（15 分钟超时），没有就经 stdio 中转。例如给 Claude Code 配：
+
+```bash
+claude mcp add --transport http video-studio \
+  "$(jq -r '.servers[0].url' ~/.willdeep/mcp-gateway.json)" \
+  --header "Authorization: Bearer $(jq -r .token ~/.willdeep/mcp-gateway.json)"
+```
+
+### 页面主题变量
+
+`compose_page` 在每个页面 `<head>` 最前面注入与 macOS 宿主同名的变量
+`--willdeep-bg / -fg / -secondary / -accent / -body-font-size` 与 `color-scheme`，
+首帧按 `prefers-color-scheme` 取 macOS 的同一组色值，不闪白；父页面随后推
+`{type:'theme', theme:{colorScheme, variables}}`，桥把变量写到根元素内联样式上
+（只收 `--willdeep-` 开头的字符串值）。插件自己写了同名规则就是插件说了算。
+
 ## 与 macOS 宿主的已知差异
 
 | 项 | macOS | Web |
@@ -258,7 +324,13 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**。另有一条 macOS 没有的硬地板（见上） |
 | 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见上） |
 | `defaultPinned` | `bundled` 来源可占住入口，用户不能取消 | 只影响排序建议。rs 没有 bundled 来源，插件一律来自共享目录 |
-| MCP 工具执行确认 | 非 bundled 来源每次执行都要用户点头 | 目前不逐条确认；边界由启用前的权限审批把住 |
+| MCP 工具执行确认 | 非 bundled 来源每次执行都要用户点头 | 页面命令不逐条确认，边界由启用前的权限审批把住；聊天里调插件工具走与配置 MCP 工具同一套审批（`mcp:<工具名>`，可 Always Allow） |
+| 聊天里的插件工具 | 一等工具，参数是 `arguments_json` 字符串，直接进每回合工具表 | 进 `list_mcp_tools` / `call_mcp_tool` 两个元工具（与配置的 MCP 工具一致），schema 按需搜索，不随每回合进上下文 |
+| 插件 MCP 网关 | App 进程内，随 App 常驻 | `willdeep web` 进程内；没开 Web 就没有网关 |
+| 网关 stdio 中转的错误 | 一律包成 -32603 | 插件回的 JSON-RPC 错误对象原样带回；宿主侧失败才 -32603 |
+| 反向请求 | `willdeep/images/generate`、`willdeep/ai/complete` | 同（均不含 `willdeep/audio/synthesize`）；`ai/complete` 带 `videoPaths` 报 `videosUnsupported` |
+| stdio 服务需要 `process.execute` | 缺了整个包拒载 | 包照载、页面命令照跑；网关与聊天工具不暴露这个服务 |
+| `minimumWillDeepVersion` | 校验 | 解析但**不校验**（`PluginPackage::check_minimum_version` 没有调用方）。有意为之：插件写的是 macOS 版号（短剧工坊 `1.343.0-rc1`），拿 rs 的 `0.8x` 去比会把所有插件拒掉；要校验得先有按宿主区分的字段 |
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |
 | 图标 | SF Symbols | `web/src/sfSymbols.tsx` 的等价线性图标；认不出的名字回落成圆点 |
 | 安装来源 | 目录 / ZIP / Git / Codex 缓存 / AI 草案 | 目录（`install`）、批量导入（`import`）；ZIP 与 Git 尚未接 |
@@ -277,6 +349,12 @@ Web 界面在浏览器里，服务可能跑在另一台机器上，所以插件 
 | 声明式 UI 限制 | `crates/willdeep-core/src/plugin/declarative.rs` |
 | 运行时与每插件 MCP 隔离 | `crates/willdeep-core/src/plugin/host.rs` |
 | MCP `resources/*` | `crates/willdeep-core/src/mcp.rs` |
+| stdio 传输（常驻读任务、反向请求、超时语义） | `crates/willdeep-core/src/mcp/stdio.rs` |
+| 反向请求接口 / 实现 | `crates/willdeep-core/src/plugin/host_requests.rs`、`crates/willdeep-cli/src/plugin_host_requests.rs` |
+| 聊天工具目录 / 按需调用 | `crates/willdeep-core/src/plugin/tool_catalog.rs`、`chat_tools.rs`；挂载在 `crates/willdeep-cli/src/harness.rs` |
+| 网关发现文件与客户端 | `crates/willdeep-core/src/plugin/gateway.rs` |
+| 网关服务端 | `crates/willdeep-cli/src/plugin_gateway.rs`（启动在 `web.rs`） |
+| 测试用假插件 MCP 服务 | `crates/willdeep-core/tests/fixtures/fake_plugin_mcp.py` |
 | Web API、CSP、资源服务 | `crates/willdeep-cli/src/plugin_web.rs` |
 | 页面能力（fs / process / net / storage / skills / 生图 / 宿主动作） | `crates/willdeep-cli/src/plugin_capabilities.rs` |
 | 注入页面的宿主桥 | `crates/willdeep-cli/src/plugin_bridge.js` |

@@ -879,7 +879,8 @@ impl ToolRegistry {
                 let args: ListMcpToolsArgs = parse(call)?;
                 Ok(self
                     .mcp
-                    .search(args.query.as_deref(), args.max_results.unwrap_or(10)))
+                    .search_refreshing(args.query.as_deref(), args.max_results.unwrap_or(10))
+                    .await)
             }
             "call_mcp_tool" => {
                 let args: CallMcpToolArgs = parse(call)?;

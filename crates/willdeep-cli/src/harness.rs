@@ -746,11 +746,27 @@ pub(crate) async fn build(
     if !allowed_mcp_servers.is_empty() {
         mcp_servers.retain(|name, _| allowed_mcp_servers.contains(name));
     }
-    let mcp = Arc::new(
-        willdeep_core::McpRegistry::connect_in(Some(home), &mcp_servers)
-            .await
-            .context("initialize MCP servers")?,
-    );
+    let mut mcp_registry = willdeep_core::McpRegistry::connect_in(Some(home), &mcp_servers)
+        .await
+        .context("initialize MCP servers")?;
+    // 已启用插件的 MCP 工具（docs/PLUGINS.md「聊天里的插件工具」）：定义读持久化
+    // 目录，调用时才拉起插件，优先经 Web 进程的插件网关。显式限定了 MCP 服务
+    // 白名单的 Runtime 任务不带插件工具——白名单里写的是配置里的服务名。
+    if allowed_mcp_servers.is_empty() {
+        let config_path = cli
+            .config
+            .clone()
+            .unwrap_or_else(|| home.join("config.toml"));
+        let host_requests = Arc::new(crate::plugin_host_requests::HostRequests::new(
+            home.to_path_buf(),
+            config_path,
+            Arc::new(std::sync::RwLock::new(vec![workspace.clone()])),
+        ));
+        mcp_registry = mcp_registry.with_lazy_tools(Arc::new(
+            willdeep_core::plugin::PluginChatTools::new(home).with_host_requests(host_requests),
+        ));
+    }
+    let mcp = Arc::new(mcp_registry);
     let (approver, sink, runtime_connection): (
         Arc<dyn Approver>,
         Arc<dyn EventSink>,

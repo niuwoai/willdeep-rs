@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, Container, Dialog, Flex, Heading, Input, NativeSelect, Portal, Text, Textarea, VStack } from "@chakra-ui/react";
 import { detectLanguage, messages, type Language, type Messages } from "./i18n";
 import { RuntimeSidebar, type AgentSpawnProfile, type RuntimeActivity, type RuntimeEvent } from "./RuntimeSidebar";
@@ -6,7 +6,7 @@ import { Markdown } from "./Markdown";
 import { ConversationCard, type ConversationItem, type Plan } from "./ConversationCard";
 import { SidebarSettings } from "./SidebarSettings";
 import { QuickSettings } from "./QuickSettings";
-import { applyThemeMode, storedThemeMode, type ThemeMode } from "./theme";
+import { applyThemeMode, storedThemeMode, useResolvedColorScheme, type ThemeMode } from "./theme";
 import { PluginCenter } from "./PluginCenter";
 import { PluginPage } from "./PluginPage";
 import { PluginRail, type RailSelection } from "./PluginRail";
@@ -254,8 +254,10 @@ export function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage); const t = messages[language];
   const [theme, setTheme] = useState<ThemeMode>(storedThemeMode);
   // 主题写在根元素上，样式表按 data-theme 取变量；跟随系统那档不写属性，交给
-  // prefers-color-scheme。
-  useEffect(() => { applyThemeMode(theme); }, [theme]);
+  // prefers-color-scheme。用 layout effect：它先于所有子组件的 effect 落地，
+  // 插件页面在自己的 effect 里读 token 推主题时，拿到的已经是新配色。
+  useLayoutEffect(() => { applyThemeMode(theme); }, [theme]);
+  const colorScheme = useResolvedColorScheme(theme);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]); const [workspace, setWorkspace] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]); const [sessionId, setSessionId] = useState("");
   const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
@@ -973,7 +975,7 @@ export function App() {
         event.preventDefault();
         setPopup({ entries, x: event.clientX, y: event.clientY, args: { item: componentId } });
       }} />}
-      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} busy={busy} onChatText={(text, sendNow) => {
+      <PluginPage plugin={plugin} destination={destination} messages={t} locale={language} colorScheme={colorScheme} workspace={workspace || null} sessionId={sessionId || null} selectedItemId={pluginSelectedItem} onSelectItem={setPluginSelectedItem} onNavigate={navigateToDestination} onOpenPluginCenter={() => setRail({ kind: "center" })} busy={busy} onChatText={(text, sendNow) => {
         setRail({ kind: "conversation" });
         if (sendNow) void send(text); else setPrompt(text);
       }} onOpenSession={(id) => { setRail({ kind: "conversation" }); void loadSessionRef.current(id); }} />
