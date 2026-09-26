@@ -4,7 +4,7 @@
 use std::sync::Mutex as StdMutex;
 
 use super::*;
-use willdeep_core::plugin::gateway::{DISCOVERY_FILE, PLUGIN_ENDPOINT_FILE, discovery_path};
+use willdeep_core::plugin::gateway::{DISCOVERY_FILE, PLUGIN_ENDPOINT_FILE};
 use willdeep_core::plugin::test_support::{
     events, install_fake_plugin, python_available, scratch_home,
 };
@@ -116,10 +116,12 @@ async fn discovery_file_is_private_lists_enabled_servers_and_reuses_port_and_tok
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(discovery_path(&fixture.home))
-            .unwrap()
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(willdeep_core::plugin::gateway::discovery_path(
+            &fixture.home,
+        ))
+        .unwrap()
+        .permissions()
+        .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
