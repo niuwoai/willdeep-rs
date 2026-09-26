@@ -48,15 +48,37 @@ pub fn install_fake_plugin(home: &Path, id: &str, permissions: &str, servers: &s
     write(&root.join(".willdeep-plugin/locales/en.json"), "{}");
     write(&root.join("server.py"), FAKE_PLUGIN_SERVER);
     let log = home.join(format!("fake-{id}.jsonl"));
-    write(
-        &root.join("mcp.json"),
-        &format!(
-            r#"{{"mcpServers":{{"srv":{{"command":"python3","args":["${{pluginRoot}}/server.py"],
-                "env":{{"FAKE_MCP_LOG":"{}"}},"startup_timeout_sec":5}}}}}}"#,
-            log.display()
-        ),
-    );
+    // 路径必须经 JSON 转义：Windows 的 `C:\Users\…` 直接拼进字符串是非法转义，
+    // mcp.json 解析失败，整个插件包会被发现逻辑跳过。
+    let mcp = serde_json::json!({
+        "mcpServers": {
+            "srv": {
+                "command": "python3",
+                "args": ["${pluginRoot}/server.py"],
+                "env": { "FAKE_MCP_LOG": log.to_string_lossy() },
+                "startup_timeout_sec": 5
+            }
+        }
+    });
+    write(&root.join("mcp.json"), &mcp.to_string());
     log
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows 的临时目录是 `C:\Users\…`；Unix 目录名里也能放反斜杠，借它在任意平台
+    /// 复现：夹具写出的 mcp.json 必须仍是合法 JSON，插件才会被发现。
+    #[tokio::test]
+    async fn fake_plugin_is_discovered_when_home_contains_backslashes() {
+        let home = scratch_home("back\\slash");
+        install_fake_plugin(&home, "demo", r#"["process.execute"]"#, r#"["srv"]"#);
+        let host = crate::plugin::host::PluginHost::discover(&home).expect("host");
+        let approved = host.approve("demo", 1).await;
+        let _ = std::fs::remove_dir_all(&home);
+        approved.expect("fixture plugin should be discovered");
+    }
 }
 
 pub fn events(log: &Path, name: &str) -> Vec<serde_json::Value> {
