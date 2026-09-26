@@ -29,6 +29,9 @@ export type PluginDestinationView = {
   pinned_order: number | null;
 };
 
+/** 一条由浏览器选文件的命令：`accept` 直接给文件框，`max_bytes` 用来在上传前拦超大文件。 */
+export type PluginFilePickerView = { command: string; accept: string; max_bytes: number };
+
 export type PluginSettingView = {
   id: string;
   type: "string" | "number" | "boolean" | "enum" | "secret";
@@ -59,8 +62,8 @@ export type PluginView = {
   settings: PluginSettingView[];
   /** 本宿主还不认识的清单词汇：`permission:x` / `hostAction:y` / `menu:z`。 */
   unsupported: string[];
-  /** 要由浏览器弹文件框、而不是交给 MCP 服务的命令 ID。 */
-  file_picker_commands: string[];
+  /** 要由浏览器弹文件框、而不是让 MCP 服务弹原生框的命令。 */
+  file_pickers: PluginFilePickerView[];
   /** 从没批准过的包没有这一项——算它要读遍包内容，那是「点批准」时才做的事。 */
   digest?: string;
 };
@@ -232,11 +235,33 @@ export function pluginHostAction(pluginId: string, action: string, payload: unkn
   );
 }
 
-/** 浏览器选好的文件上传到宿主，回服务端绝对路径。 */
-export function uploadPluginFile(pluginId: string, name: string, data: string) {
+/**
+ * 上传前先按宿主给的同一份规则把一遍：文件框的 `accept` 用户可以绕过去
+ * （「所有文件」），几百 MB 的文件也没必要传完才被服务端拒。回错误码，
+ * 与服务端同名；`null` 表示可以传。服务端照样再核一遍。
+ */
+export function filePickerRejection(
+  file: { name: string; size: number },
+  picker: PluginFilePickerView
+): string | null {
+  const dot = file.name.lastIndexOf(".");
+  const extension = dot > 0 ? file.name.slice(dot).toLowerCase() : "";
+  if (!extension || !picker.accept.split(",").includes(extension)) return "unsupportedFileType";
+  if (file.size === 0 || file.size > picker.max_bytes) return "invalidSize";
+  return null;
+}
+
+/**
+ * 浏览器选好的文件上传到宿主，回服务端绝对路径。
+ *
+ * 请求体就是文件本身，不转 base64：导入的音乐能到 200 MiB，服务端边收边落盘。
+ * `commandId` 决定服务端按哪条命令的类型白名单与大小上限来收。
+ */
+export function uploadPluginFile(pluginId: string, commandId: string, file: File) {
+  const query = new URLSearchParams({ command: commandId, name: file.name });
   return request<{ path: string; mediaURL: string; byteSize: number }>(
-    `/api/plugins/${encodeURIComponent(pluginId)}/files`,
-    jsonBody({ name, data })
+    `/api/plugins/${encodeURIComponent(pluginId)}/files?${query}`,
+    { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file }
   );
 }
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.84.0-rc1] - 2026-09-27
+
+### Added
+- **短剧工坊「导入背景音乐」在 Web 上可用。** `episode.import_music` 在插件里是 `osascript choose file`，Web 宿主下那个框会弹在服务器的屏幕上。现在和参照图一样由宿主接管：浏览器弹音频文件框（mp3/wav/m4a/aac/flac/aiff，≤200 MiB）→ 上传到插件媒体目录 → 宿主把服务端路径作为 `path` 参数**转交**给原工具（它要把文件拷成 `music-<hex>.<ext>` 并写进成片设置，合成不出来），调用结束后删掉上传件。需要插件 `import_music` 认 `path` 参数（短剧工坊 0.31.0 系列补）。
+- 选文件表每条自带扩展名白名单、大小上限与交付方式（合成 / 转交）；插件快照的 `file_picker_commands` 改为 `file_pickers`（命令、`accept`、`max_bytes`），页面按命令弹对应类型的文件框，超限或类型不符在上传前就拦下。
+
+### Changed
+- `POST /api/plugins/{id}/files` 的请求体改为文件原始字节（`application/octet-stream`），命令与文件名走查询串 `?command=&name=`；服务端边收边写 `.part`，收全才改名，按命令核类型与大小，被拒不留残件。上传件名改为 `upload-<uuid>.<ext>`。
+- 转交型选文件只收本次上传落下的 `upload-*` 文件；媒体目录里插件自己的成品即使路径合法也拒（宿主转交后要删它）。
+
+### Fixed
+- **参照图超过约 750 KiB 就传不上去。** 旧的上传是 base64 JSON，受全站 1 MiB 请求体上限管，宣称的 20 MiB 上限实际到不了；改成流式上传后不再经过那道上限。
+
 ## [0.83.0-rc1] - 2026-09-26
 
 插件的 MCP 机制与展示对齐 WillDeep macOS（1.405.0-rc1）。
