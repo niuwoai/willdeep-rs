@@ -1599,12 +1599,7 @@ async fn upload_plugin_file(
         .ok_or_else(|| PluginWebError::BadRequest("notFilePicker".to_owned()))?;
     let extension = upload_extension(&query.name, picker)
         .ok_or_else(|| PluginWebError::BadRequest("unsupportedFileType".to_owned()))?;
-    // 声明的长度已经超了就不必收；没声明的照收，按实际字节数核。
-    let declared = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if declared.is_some_and(|length| length == 0 || length > picker.max_bytes) {
+    if declared_length_rejected(&headers, picker.max_bytes) {
         return Err(PluginWebError::BadRequest("invalidSize".to_owned()));
     }
     let directory = crate::plugin_capabilities::plugin_media_directory(&state.home, &plugin)?;
@@ -1619,6 +1614,16 @@ async fn upload_plugin_file(
         "mediaURL": format!("/plugin-media/{plugin}/{filename}"),
         "byteSize": byte_size,
     })))
+}
+
+/// 声明的长度已经是空的或超了就不必收；没声明（或写得不像数字）的照收，
+/// 按实际字节数核。
+fn declared_length_rejected(headers: &HeaderMap, max_bytes: u64) -> bool {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length == 0 || length > max_bytes)
 }
 
 /// 把请求体写到 `destination`，超过 `max_bytes` 立刻停。先写 `.part`，收全了

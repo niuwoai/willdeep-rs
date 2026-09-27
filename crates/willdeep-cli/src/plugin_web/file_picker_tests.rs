@@ -3,10 +3,16 @@
 //! 端到端那几条真的绑回环端口、真的拉起一个假插件进程（python3），挂上与
 //! `web.rs` 同一道 1 MiB 请求体上限。家目录一律在临时目录里，不碰真实的
 //! `~/.willdeep`。
+//!
+//! 端到端用例不发「会被服务端提前拒绝的大请求体」：服务端不读完 body 就回
+//! 400/413，Windows 会把还在发的连接直接掐掉（10053），客户端拿不到响应。
+//! 那几条规则放在单元测试里核。
 
 use super::*;
 use axum::extract::DefaultBodyLimit;
-use willdeep_core::plugin::test_support::{python_available, scratch_home};
+use willdeep_core::plugin::test_support::{
+    FAKE_PLUGIN_TIMEOUT_SECONDS, python_available, scratch_home,
+};
 
 const PLUGIN: &str = "willdeep-video-studio";
 
@@ -74,6 +80,28 @@ fn only_fresh_uploads_can_be_forwarded_because_the_host_deletes_them() {
         FsPath::new("/m/upload-abc.mp3.part"),
         music
     ));
+}
+
+#[test]
+fn declared_lengths_over_the_limit_are_refused_before_reading_the_body() {
+    let with_length = |value: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, value.parse().unwrap());
+        headers
+    };
+    // 参照图的上限：20 MiB 整收，多一个字节就拒。
+    assert!(!declared_length_rejected(
+        &with_length(&(20 * MIB).to_string()),
+        20 * MIB
+    ));
+    assert!(declared_length_rejected(
+        &with_length(&(20 * MIB + 1).to_string()),
+        20 * MIB
+    ));
+    assert!(declared_length_rejected(&with_length("0"), 20 * MIB));
+    // 没声明、声明得不像数字：先收着，交给逐字节的核对。
+    assert!(!declared_length_rejected(&HeaderMap::new(), 20 * MIB));
+    assert!(!declared_length_rejected(&with_length("lots"), 20 * MIB));
 }
 
 #[tokio::test]
@@ -207,7 +235,7 @@ impl Fixture {
                 "command": "python3",
                 "args": ["${pluginRoot}/server.py"],
                 "env": {"FAKE_LOG": log.to_string_lossy()},
-                "startup_timeout_sec": 5
+                "startup_timeout_sec": FAKE_PLUGIN_TIMEOUT_SECONDS
             }}})
             .to_string(),
         );
@@ -329,8 +357,8 @@ async fn imported_music_is_uploaded_forwarded_with_its_path_and_then_cleaned_up(
     let Some(fixture) = Fixture::new("picker-music").await else {
         return;
     };
-    // 3 MiB：比全站 1 MiB 的请求体上限大，证明上传不再被那道上限卡住。
-    let audio = vec![0x49u8; 3 * 1024 * 1024];
+    // 1.5 MiB：比全站 1 MiB 的请求体上限大，证明上传不再被那道上限卡住。
+    let audio = vec![0x49u8; 3 * 512 * 1024];
     let (status, uploaded) = fixture
         .upload("episode.importMusic", "晚风.MP3", audio.clone())
         .await;
@@ -443,13 +471,9 @@ async fn uploads_follow_the_rules_of_the_command_they_are_for() {
         (400, Some("unsupportedFileType"))
     );
 
-    // 参照图的上限是 20 MiB：声明长度一超就拒，不必收完。
+    // 空文件不收。超限的那一侧见 `declared_lengths_*` 与 `uploads_stream_*`。
     let (status, body) = fixture
-        .upload(
-            "video.pickReference",
-            "big.png",
-            vec![0u8; (20 * MIB + 1) as usize],
-        )
+        .upload("video.pickReference", "empty.png", Vec::new())
         .await;
     assert_eq!((status, body["error"].as_str()), (400, Some("invalidSize")));
 
@@ -461,16 +485,6 @@ async fn uploads_follow_the_rules_of_the_command_they_are_for() {
         (status, body["error"].as_str()),
         (400, Some("notFilePicker"))
     );
-
-    // 全站 1 MiB 上限对 JSON 接口照样生效——旧的 base64-JSON 上传就是
-    // 卡在这里，参照图过了约 750 KiB 就传不上去。
-    let (status, _) = fixture
-        .command(
-            "episode.importMusic",
-            json!({"padding": "x".repeat(2 * 1024 * 1024)}),
-        )
-        .await;
-    assert_eq!(status, 413);
 
     let leftovers: Vec<_> = std::fs::read_dir(fixture.media())
         .unwrap()

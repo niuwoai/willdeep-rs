@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 pub const FAKE_PLUGIN_SERVER: &str = include_str!("../../tests/fixtures/fake_plugin_mcp.py");
 
+/// 假插件的 `startup_timeout_sec`（也是每次请求的超时）。Windows CI 上几百个用例
+/// 并行时，冷启动一个 python3 能超过 5 秒，插件就被当成起不来；没有用例靠这个
+/// 超时来断言行为，所以放宽到 30 秒只换来稳定。
+pub const FAKE_PLUGIN_TIMEOUT_SECONDS: u64 = 30;
+
 /// 有没有 python3。没有就跳过依赖假服务的测试。
 pub fn python_available() -> bool {
     std::process::Command::new("python3")
@@ -56,7 +61,7 @@ pub fn install_fake_plugin(home: &Path, id: &str, permissions: &str, servers: &s
                 "command": "python3",
                 "args": ["${pluginRoot}/server.py"],
                 "env": { "FAKE_MCP_LOG": log.to_string_lossy() },
-                "startup_timeout_sec": 5
+                "startup_timeout_sec": FAKE_PLUGIN_TIMEOUT_SECONDS
             }
         }
     });

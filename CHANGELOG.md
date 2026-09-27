@@ -12,6 +12,7 @@
 
 ### Fixed
 - **参照图超过约 750 KiB 就传不上去。** 旧的上传是 base64 JSON，受全站 1 MiB 请求体上限管，宣称的 20 MiB 上限实际到不了；改成流式上传后不再经过那道上限。
+- 测试：假插件的启动 / 请求超时从 5 秒放宽到 30 秒（`test_support::FAKE_PLUGIN_TIMEOUT_SECONDS`）。Windows CI 上几百个用例并行时冷启动 python3 会超过 5 秒，网关与选文件的端到端用例报「MCP server timed out」。端到端用例也不再发会被服务端提前拒绝的大请求体（Windows 会直接断开连接），超限规则改在单元测试里核。
 
 ## [0.83.0-rc1] - 2026-09-26
 
