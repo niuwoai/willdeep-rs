@@ -13,7 +13,10 @@ struct Fixture {
     home: PathBuf,
     host: Arc<PluginHost>,
     gateway: PluginGateway,
+    /// 本宿主自己的插件数据目录（`<home>/plugin-data` 的替身）。
     data: PathBuf,
+    /// macOS 宿主的插件数据目录的替身：只收不带 `host` 的旧文件。
+    macos_data: PathBuf,
     log: PathBuf,
     client: reqwest::Client,
 }
@@ -40,11 +43,17 @@ impl Fixture {
             .expect("write")
             .expect("enabled");
         let data = home.join("plugin-data-test");
-        let dirs = data.clone();
+        let macos_data = home.join("macos-plugin-data-test");
+        let (own, macos) = (data.clone(), macos_data.clone());
         let gateway = PluginGateway::start_with(
             &home,
             host.clone(),
-            Box::new(move |plugin: &str| vec![dirs.join(plugin)]),
+            Box::new(move |plugin: &str| {
+                vec![
+                    PluginDataDir::own(own.join(plugin)),
+                    PluginDataDir::legacy_only(macos.join(plugin)),
+                ]
+            }),
         )
         .await
         .expect("gateway");
@@ -53,6 +62,7 @@ impl Fixture {
             host,
             gateway,
             data,
+            macos_data,
             log,
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
         })
@@ -84,15 +94,17 @@ impl Fixture {
         (status, value)
     }
 
+    /// 在本宿主的数据目录写一份旧格式（只有 url / token）的入口文件。
     fn write_endpoint(&self, url: &str, token: &str) {
-        let dir = self.data.join("demo");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(PLUGIN_ENDPOINT_FILE),
-            json!({"url": url, "token": token}).to_string(),
-        )
-        .unwrap();
+        write_endpoint_file(&self.data, json!({"url": url, "token": token}));
     }
+}
+
+/// 在某个数据目录根下写 `demo` 插件的入口文件。
+fn write_endpoint_file(root: &Path, contents: Value) {
+    let dir = root.join("demo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(PLUGIN_ENDPOINT_FILE), contents.to_string()).unwrap();
 }
 
 #[tokio::test]
@@ -609,6 +621,80 @@ async fn failures_after_delivery_are_reported_not_retried() {
         "not resent"
     );
     assert_eq!(echo_calls(&fixture), 0, "not relayed");
+}
+
+/// 契约修订 1：只转发到本进程拉起的插件写的入口。2026-09-27 两个宿主同时开着时，
+/// 网关读到了另一个宿主拉起的插件写的那份：请求落进没有本宿主插件设置的进程，
+/// 反向请求也发到了那边。这种文件当作不存在，经 stdio 中转回到自己的插件。
+#[tokio::test]
+async fn forwards_only_to_endpoints_of_a_plugin_this_process_spawned() {
+    let Some(fixture) = Fixture::new("gw-owner").await else {
+        return;
+    };
+    let ours = std::process::id();
+    let theirs = ours.wrapping_add(1);
+    let call = |id: u64, via: &str| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"via": via}}})
+    };
+    let relayed_via = |answer: &Value, via: &str| {
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(via))
+    };
+    let reply = r#"{"jsonrpc":"2.0","id":31,"result":{"forwarded":true}}"#;
+    let (mine, seen) = fake_endpoint(StatusCode::OK, reply).await;
+    let (foreign, foreign_seen) = fake_endpoint(StatusCode::OK, reply).await;
+
+    // 本进程拉起的插件写的：转发。
+    write_endpoint_file(
+        &fixture.data,
+        json!({"url": mine, "token": "mine", "host": "willdeep-rs", "pid": 1, "parentPID": ours}),
+    );
+    let (_, answer) = fixture.rpc(call(31, "http")).await;
+    assert_eq!(answer["result"]["forwarded"], true, "{answer}");
+    assert_eq!(
+        seen.lock().unwrap().authorization.as_deref(),
+        Some("Bearer mine")
+    );
+    // 上面的比对成立的前提：宿主直接 spawn 插件，不经 shell，插件看到的父进程就是
+    // 网关所在的进程。Windows 上的 python3 可能是再拉起真解释器的启动器，只在 unix 上核。
+    #[cfg(unix)]
+    assert_eq!(
+        events(&fixture.log, "spawned")[0]["ppid"],
+        json!(ours),
+        "the plugin must be a direct child of the gateway process"
+    );
+
+    // 另一个 willdeep 进程拉起的插件写在同一处：不转发。
+    write_endpoint_file(
+        &fixture.data,
+        json!({"url": foreign, "token": "theirs", "host": "willdeep-rs", "pid": 1, "parentPID": theirs}),
+    );
+    let (_, answer) = fixture.rpc(call(32, "foreign-parent")).await;
+    assert!(relayed_via(&answer, "foreign-parent"), "{answer}");
+
+    // 自己那处没有，macOS 数据目录里是 WillDeep macOS 拉起的插件写的：不转发。
+    std::fs::remove_file(fixture.data.join("demo").join(PLUGIN_ENDPOINT_FILE)).unwrap();
+    write_endpoint_file(
+        &fixture.macos_data,
+        json!({"url": foreign, "token": "theirs", "host": "willdeep-macos", "pid": 1, "parentPID": theirs}),
+    );
+    let (_, answer) = fixture.rpc(call(33, "macos-host")).await;
+    assert!(relayed_via(&answer, "macos-host"), "{answer}");
+    assert!(
+        foreign_seen.lock().unwrap().body.is_empty(),
+        "nothing reaches another host's plugin"
+    );
+
+    // macOS 数据目录里的旧文件（插件 ≤ 0.32.0-rc1，不带 host / parentPID）：照旧转发。
+    write_endpoint_file(&fixture.macos_data, json!({"url": mine, "token": "legacy"}));
+    let (_, answer) = fixture.rpc(call(31, "legacy")).await;
+    assert_eq!(answer["result"]["forwarded"], true, "{answer}");
+    assert_eq!(
+        seen.lock().unwrap().authorization.as_deref(),
+        Some("Bearer legacy")
+    );
 }
 
 /// 聊天 harness 在另一个进程：它经网关调用插件，和页面共用 Web 进程里那一个

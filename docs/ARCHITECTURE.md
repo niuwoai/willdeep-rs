@@ -153,7 +153,10 @@ Always Allow 使用可撤销的窄签名。当前 Shell 仅保存无组合操作
 插件 MCP 进程跨两个进程被用到：页面与**插件 MCP 网关**在 `willdeep web` 进程（网关是
 单独的 `127.0.0.1` 监听，地址与 token 持久化在 `mcp-gateway.json`，给 Claude Code
 等外部客户端用），聊天在 daemon / CLI 进程。聊天调用插件工具优先经网关，好让同一个
-插件只有一个进程；没开 Web 时才由聊天进程自己拉起。插件进程可以反向请求宿主出图、
+插件只有一个进程；没开 Web 时才由聊天进程自己拉起。网关只转发给本进程拉起的插件
+公布的 HTTP 入口（`mcp-http.json` 的 `parentPID` 须是 `willdeep web` 自己的 pid，
+macOS 数据目录里只认不带 `host` 的旧文件），否则经 stdio 中转，与 WillDeep macOS
+同时开着也不会串到对方的插件进程。插件进程可以反向请求宿主出图、
 问模型（`io.willdeep/host-requests`），凭据不出宿主。契约见
 [decisions/2026-09-26-plugin-mcp-gateway.md](decisions/2026-09-26-plugin-mcp-gateway.md)。
 

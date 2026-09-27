@@ -130,19 +130,46 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// 插件自己的数据目录，按查找顺序：先 willdeep-rs 自己的，再 macOS 宿主的——
-/// 插件（短剧工坊）在 macOS 上固定把 `mcp-http.json` 写在后者。
-pub fn plugin_data_dirs(home: &Path, plugin_id: &str) -> Vec<PathBuf> {
-    let mut dirs = vec![home.join("plugin-data").join(plugin_id)];
+/// 找 `mcp-http.json` 的一处目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginDataDir {
+    pub path: PathBuf,
+    /// 只收不带 `host` 的旧文件（插件 ≤ 0.32.0-rc1 写的）。macOS 数据目录是这样：
+    /// 新插件只在 WillDeep macOS 拉起时才写那里（`host` 为 `willdeep-macos`），
+    /// 转发过去就串到另一个宿主的插件进程。
+    pub legacy_only: bool,
+}
+
+impl PluginDataDir {
+    pub fn own(path: PathBuf) -> Self {
+        Self {
+            path,
+            legacy_only: false,
+        }
+    }
+
+    pub fn legacy_only(path: PathBuf) -> Self {
+        Self {
+            path,
+            legacy_only: true,
+        }
+    }
+}
+
+/// 插件的数据目录，按查找顺序（契约修订 1）：先 willdeep-rs 自己的——短剧工坊
+/// ≥ 0.32.0-rc2 由本宿主拉起时把 `mcp-http.json` 写在这里；再 macOS 宿主的——更早的
+/// 版本不论谁拉起都固定写那里，新版本只有 macOS 拉起时才写。
+pub fn plugin_data_dirs(home: &Path, plugin_id: &str) -> Vec<PluginDataDir> {
+    let mut dirs = vec![PluginDataDir::own(home.join("plugin-data").join(plugin_id))];
     if let Some(user_home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-        dirs.push(
+        dirs.push(PluginDataDir::legacy_only(
             PathBuf::from(user_home)
                 .join("Library")
                 .join("Application Support")
                 .join("WillDeep")
                 .join("plugin-data")
                 .join(plugin_id),
-        );
+        ));
     }
     dirs
 }
@@ -154,12 +181,26 @@ pub struct PluginEndpoint {
     pub token: String,
 }
 
-/// 按顺序在数据目录里找 `mcp-http.json`。url 必须是 `http://127.0.0.1:<端口>/…`：
-/// 这份文件在用户目录里，谁都能写，不能让它把请求（连同插件 token）引去别处。
-pub fn read_plugin_endpoint(dirs: &[PathBuf]) -> Option<PluginEndpoint> {
+/// 按顺序在数据目录里找 `mcp-http.json`，不合格的当作不存在、接着找下一处：
+/// - url 必须是 `http://127.0.0.1:<端口>/…`：这份文件在用户目录里，谁都能写，
+///   不能让它把请求（连同插件 token）引去别处；
+/// - 带 `parentPID` 的必须等于 `parent`（传网关所在进程的 pid，插件宿主也在这个进程、
+///   直接 spawn 插件）：不等就是别的宿主拉起的进程写的——WillDeep macOS、另一个
+///   willdeep 进程——转发过去，插件用的是那边注入的设置，反向请求也发给那边；
+/// - 标了 `legacy_only` 的目录只收不带 `host` 的文件。
+///
+/// 插件 ≤ 0.32.0-rc1 写的文件两个字段都没有，照旧接受。
+pub fn read_plugin_endpoint(dirs: &[PluginDataDir], parent: u32) -> Option<PluginEndpoint> {
     dirs.iter().find_map(|dir| {
-        let source = std::fs::read_to_string(dir.join(PLUGIN_ENDPOINT_FILE)).ok()?;
+        let source = std::fs::read_to_string(dir.path.join(PLUGIN_ENDPOINT_FILE)).ok()?;
         let value: Value = serde_json::from_str(&source).ok()?;
+        let spawned_here = value
+            .get("parentPID")
+            .is_none_or(|pid| pid.as_u64() == Some(u64::from(parent)));
+        let host_allowed = !dir.legacy_only || value.get("host").is_none();
+        if !(spawned_here && host_allowed) {
+            return None;
+        }
         let url = value.get("url")?.as_str()?.trim().to_owned();
         let token = value.get("token")?.as_str()?.trim().to_owned();
         (loopback_port(&url).is_some() && !token.is_empty())
@@ -312,6 +353,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// 网关所在进程的 pid 与另一个宿主进程的 pid；只用来比对，不必是真进程。
+    const GATEWAY_PID: u32 = 4242;
+    const OTHER_PID: u32 = 5151;
+
     #[test]
     fn plugin_endpoint_must_be_loopback_and_first_directory_wins() {
         let first = scratch();
@@ -321,9 +366,12 @@ mod tests {
             r#"{"url":"http://127.0.0.1:5000/mcp","token":"b"}"#,
         )
         .unwrap();
-        let dirs = vec![first.clone(), second.clone()];
+        let dirs = vec![
+            PluginDataDir::own(first.clone()),
+            PluginDataDir::legacy_only(second.clone()),
+        ];
         assert_eq!(
-            read_plugin_endpoint(&dirs).map(|endpoint| endpoint.token),
+            read_plugin_endpoint(&dirs, GATEWAY_PID).map(|endpoint| endpoint.token),
             Some("b".to_owned())
         );
         std::fs::write(
@@ -332,7 +380,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_plugin_endpoint(&dirs).map(|endpoint| endpoint.token),
+            read_plugin_endpoint(&dirs, GATEWAY_PID).map(|endpoint| endpoint.token),
             Some("b".to_owned()),
             "a non-loopback url is skipped"
         );
@@ -342,10 +390,126 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_plugin_endpoint(&dirs).map(|endpoint| endpoint.token),
+            read_plugin_endpoint(&dirs, GATEWAY_PID).map(|endpoint| endpoint.token),
             Some("a".to_owned())
         );
         let _ = std::fs::remove_dir_all(&first);
         let _ = std::fs::remove_dir_all(&second);
+    }
+
+    /// 契约修订 1 的两条宿主侧校验：文件得是本进程拉起的插件写的；macOS 数据目录只收
+    /// 旧文件。2026-09-27 的串线就是 macOS 网关读到了 willdeep-rs 拉起的进程写的那份。
+    #[test]
+    fn plugin_endpoint_is_accepted_only_from_a_process_this_host_spawned() {
+        let endpoint = |extra: Value| {
+            let mut value = json!({"url": "http://127.0.0.1:5000/mcp", "token": "t"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        let cases = [
+            ("legacy file, own dir", false, endpoint(json!({})), true),
+            ("legacy file, macOS dir", true, endpoint(json!({})), true),
+            (
+                "spawned by this host, own dir",
+                false,
+                endpoint(json!({"host": "willdeep-rs", "pid": 1, "parentPID": GATEWAY_PID})),
+                true,
+            ),
+            (
+                "spawned by another willdeep process, own dir",
+                false,
+                endpoint(json!({"host": "willdeep-rs", "pid": 1, "parentPID": OTHER_PID})),
+                false,
+            ),
+            (
+                "spawned by WillDeep macOS, macOS dir",
+                true,
+                endpoint(json!({"host": "willdeep-macos", "pid": 1, "parentPID": OTHER_PID})),
+                false,
+            ),
+            (
+                "macOS dir takes no host-tagged file even with this parent",
+                true,
+                endpoint(json!({"host": "willdeep-macos", "parentPID": GATEWAY_PID})),
+                false,
+            ),
+            (
+                "parentPID that is not a number",
+                false,
+                endpoint(json!({"parentPID": GATEWAY_PID.to_string()})),
+                false,
+            ),
+        ];
+        for (label, legacy_only, file, accepted) in cases {
+            let dir = scratch();
+            std::fs::write(dir.join(PLUGIN_ENDPOINT_FILE), file.to_string()).unwrap();
+            let dirs = [PluginDataDir {
+                path: dir.clone(),
+                legacy_only,
+            }];
+            assert_eq!(
+                read_plugin_endpoint(&dirs, GATEWAY_PID).is_some(),
+                accepted,
+                "{label}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_rejected_endpoint_counts_as_absent_and_the_next_directory_is_tried() {
+        let own = scratch();
+        let macos = scratch();
+        std::fs::write(
+            own.join(PLUGIN_ENDPOINT_FILE),
+            json!({"url": "http://127.0.0.1:6000/mcp", "token": "stale",
+                "host": "willdeep-rs", "parentPID": OTHER_PID})
+            .to_string(),
+        )
+        .unwrap();
+        let dirs = vec![
+            PluginDataDir::own(own.clone()),
+            PluginDataDir::legacy_only(macos.clone()),
+        ];
+        assert_eq!(read_plugin_endpoint(&dirs, GATEWAY_PID), None);
+        std::fs::write(
+            macos.join(PLUGIN_ENDPOINT_FILE),
+            r#"{"url":"http://127.0.0.1:5000/mcp","token":"legacy"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_plugin_endpoint(&dirs, GATEWAY_PID).map(|endpoint| endpoint.token),
+            Some("legacy".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&own);
+        let _ = std::fs::remove_dir_all(&macos);
+    }
+
+    #[test]
+    fn only_the_macos_data_directory_is_legacy_only() {
+        let home = PathBuf::from("willdeep-home");
+        let dirs = plugin_data_dirs(&home, "demo");
+        assert_eq!(
+            dirs[0],
+            PluginDataDir::own(home.join("plugin-data").join("demo"))
+        );
+        // 没有 HOME 时（个别 CI）只有第一处。
+        for dir in &dirs[1..] {
+            assert!(dir.legacy_only, "{}", dir.path.display());
+            assert!(
+                dir.path.ends_with(
+                    Path::new("Library")
+                        .join("Application Support")
+                        .join("WillDeep")
+                        .join("plugin-data")
+                        .join("demo")
+                ),
+                "{}",
+                dir.path.display()
+            );
+        }
     }
 }

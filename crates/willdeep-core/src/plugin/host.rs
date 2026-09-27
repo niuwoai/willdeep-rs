@@ -188,7 +188,7 @@ impl PluginHost {
     }
 
     /// 插件自己的数据目录（找 `mcp-http.json` 的顺序）。
-    pub fn plugin_data_dirs(&self, plugin_id: &str) -> Vec<PathBuf> {
+    pub fn plugin_data_dirs(&self, plugin_id: &str) -> Vec<super::gateway::PluginDataDir> {
         super::gateway::plugin_data_dirs(&self.home, plugin_id)
     }
 

@@ -296,7 +296,8 @@ pub(super) fn initialize_params() -> Value {
     initialize_params_with(None)
 }
 
-/// `clientInfo.name` 必须保持 `willdeep`：短剧工坊按它认出 Web 宿主、切换媒体地址。
+/// `clientInfo.name` 必须保持 `willdeep`：短剧工坊按它认出 Web 宿主、切换媒体地址，
+/// 并把 `mcp-http.json` 写到本宿主网关先读的目录（插件网关契约修订 1）。
 /// 带了反向请求处理器时，在 `capabilities.extensions` 里宣告它实现的方法。
 pub(crate) fn initialize_params_with(handler: Option<&dyn HostRequestHandler>) -> Value {
     let methods = handler.map(HostRequestHandler::methods).unwrap_or_default();

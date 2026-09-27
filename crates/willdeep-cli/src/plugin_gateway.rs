@@ -31,8 +31,8 @@ use willdeep_core::mcp::McpError;
 use willdeep_core::plugin::PluginHost;
 use willdeep_core::plugin::gateway::{
     DISCOVERY_VERSION, FORWARD_TIMEOUT, GatewayDiscovery, GatewayServerEntry, HOST_ID,
-    PluginEndpoint, generate_token, read_discovery, read_plugin_endpoint, server_url,
-    write_discovery,
+    PluginDataDir, PluginEndpoint, generate_token, read_discovery, read_plugin_endpoint,
+    server_url, write_discovery,
 };
 
 /// 请求体上限。
@@ -45,7 +45,7 @@ const RANDOM_PORT_START: u16 = 41_000;
 const RANDOM_PORT_SPAN: u16 = 8_000;
 const RANDOM_PORT_ATTEMPTS: usize = 6;
 
-type DataDirs = dyn Fn(&str) -> Vec<PathBuf> + Send + Sync;
+type DataDirs = dyn Fn(&str) -> Vec<PluginDataDir> + Send + Sync;
 
 pub(crate) struct GatewayState {
     host: Arc<PluginHost>,
@@ -440,12 +440,15 @@ async fn dispatch(
     // 2. 插件公布了自己的 HTTP 入口就原样转发过去（出图、审核要跑一两分钟，
     //    stdio 那头有单请求超时，也会堵住页面的请求）。「没送到」时重读一次
     //    入口文件再试——插件可能刚被重启，端口和 token 都换了。
+    //    只认本进程拉起的插件写的入口（契约修订 1）：插件宿主就在本进程，直接
+    //    spawn 插件、不经 shell，插件写的 parentPID 就是本进程的 pid。
     let dirs = (state.data_dirs)(plugin);
-    if let Some(endpoint) = read_plugin_endpoint(&dirs) {
+    let parent = std::process::id();
+    if let Some(endpoint) = read_plugin_endpoint(&dirs, parent) {
         match forward_once(state, &endpoint, &id, &body).await {
             Forwarded::Delivered(response) => return response,
             Forwarded::NotDelivered => {
-                if let Some(retried) = read_plugin_endpoint(&dirs)
+                if let Some(retried) = read_plugin_endpoint(&dirs, parent)
                     && let Forwarded::Delivered(response) =
                         forward_once(state, &retried, &id, &body).await
                 {
@@ -454,7 +457,7 @@ async fn dispatch(
             }
         }
     }
-    // 3. 没有入口、或两次都没送到：经宿主的 stdio 客户端中转。
+    // 3. 没有（本进程拉起的插件写的）入口、或两次都没送到：经宿主的 stdio 客户端中转。
     relay(state, plugin, server, id, method, params).await
 }
 

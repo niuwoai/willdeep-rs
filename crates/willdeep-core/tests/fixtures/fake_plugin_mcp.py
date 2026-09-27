@@ -84,7 +84,7 @@ TOOLS = [
     {"name": "exit", "description": "Exit"},
 ]
 
-log("spawned", pid=os.getpid(), home=os.environ.get("WILLDEEP_HOME"))
+log("spawned", pid=os.getpid(), ppid=os.getppid(), home=os.environ.get("WILLDEEP_HOME"))
 
 while True:
     message = read_message()

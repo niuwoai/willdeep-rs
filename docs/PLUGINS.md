@@ -318,7 +318,10 @@ MCP 客户端三条路共用同一套连接规则：`${pluginRoot}` / `${setting
 `<WILLDEEP_HOME>/mcp-gateway.json`（0600）给出地址、token 与每个已启用插件服务的端点。
 外部客户端连 `POST <url>/plugins/<pluginID>/<server>/mcp`，带
 `Authorization: Bearer <token>`；网关按需拉起插件，插件公布了 `mcp-http.json` 就原样
-转发（15 分钟超时），没有就经 stdio 中转。例如给 Claude Code 配：
+转发（15 分钟超时），没有就经 stdio 中转。只认本宿主拉起的插件进程写的那份：文件里的
+`parentPID` 不是 `willdeep web` 进程、或 macOS 数据目录里带 `host` 字段（WillDeep macOS
+拉起的进程写的），都当作没有，免得两个宿主同时开着时转到对方的插件进程、用上对方的插件
+设置。例如给 Claude Code 配：
 
 ```bash
 claude mcp add --transport http video-studio \

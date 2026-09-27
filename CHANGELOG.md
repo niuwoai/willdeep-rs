@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.84.0-rc2] - 2026-09-27
+
+### Fixed
+- **插件 MCP 网关只转发给本进程拉起的插件。** 2026-09-27 WillDeep macOS 与 `willdeep --web` 同时开着时，两边拉起的短剧工坊都把端口和 token 写进同一份 macOS 数据目录下的 `mcp-http.json`，后写的赢。网关照这份文件转发，请求就进了另一个宿主的插件进程：用的是对方注入的插件设置（macOS 那边报「Video API key is not configured.」），出图、审核这类反向请求也发给了对方。短剧工坊 0.32.0-rc2 已把连接文件按宿主分开（契约修订 1），本宿主再加两条校验（`gateway::read_plugin_endpoint`），不合格的当作文件不存在，接着找下一处，都没有就经 stdio 中转：
+  - 文件带 `parentPID` 而不是 `willdeep web` 进程自己的 pid：不收。插件宿主直接 spawn `mcp.json` 的 `command`，不经 shell，插件的父进程就是网关所在进程。
+  - 退到 macOS 数据目录时只收不带 `host` 的旧文件；`host` 为 `willdeep-macos` 的是 macOS 拉起的进程写的。
+  - 短剧工坊 ≤ 0.32.0-rc1 写的文件两个字段都没有，照旧接受。
+  - 没开 Web 时聊天进程（daemon / CLI）自己拉起的插件写的那份，`parentPID` 对不上，同样不再被网关转发。
+
+### Docs
+- `docs/decisions/2026-09-26-plugin-mcp-gateway.md` 同步短剧工坊的契约修订 1（连接文件位置、`host` / `pid` / `parentPID` 字段、宿主侧加固），并在「willdeep-rs 实现说明」里写明本宿主的实现与仍挡不住的情形。`docs/ARCHITECTURE.md`、`docs/PLUGINS.md` 相应补一句。
+
+### Tests
+- `gateway.rs` 新增 3 个单元测试：按「目录是否只收旧文件 × 文件带不带 `host` / `parentPID`」表驱动核 7 种组合；自己那处不合格时接着找 macOS 那一处；只有 macOS 数据目录标为只收旧文件。
+- 网关端到端新增 1 个用例：自己拉起的插件写的入口照常转发；`parentPID` 是别的进程、macOS 数据目录里带 `host` 的，都不转发、改走 stdio 中转，假入口一个字节都收不到；macOS 数据目录里的旧文件照旧转发。unix 上另核假插件看到的父进程号就是网关所在进程（假插件的 `spawned` 事件多记一个 `ppid`）。
+
 ## [0.84.0-rc1] - 2026-09-27
 
 ### Added
