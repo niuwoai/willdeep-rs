@@ -417,7 +417,7 @@ fn apply_runtime_output(app: &mut App, message: &str) -> Option<Message> {
             }
         }
         Some("turn_started") => {
-            app.transient_thought = None;
+            app.note_model_step_started();
             if let Some(turn) = value.get("turn").and_then(|value| value.as_u64()) {
                 app.record_progress(format!(
                     "Runtime · {} {turn}",
