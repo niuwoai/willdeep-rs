@@ -206,10 +206,42 @@ impl App {
                 "直前のメッセージはこのターンに間に合わず、終了後に送信するためキューに入れました",
             )
         ));
+        // 还压着没显示的，就以「待发」行出现，发出时照常去掉标记。
+        if let Some(index) = self
+            .deferred_steering
+            .iter()
+            .position(|value| *value == text)
+        {
+            self.deferred_steering.remove(index);
+            let row = self.queued_prompt_row(&text);
+            self.append_transcript(row);
+        }
         self.queued_prompts.push_back(QueuedPrompt {
             text,
             attachments: Vec::new(),
         });
+    }
+
+    /// 插话已送进正在跑的这一轮。模型这一步还在生成时先压着，见 `deferred_steering`。
+    pub(super) fn note_steering_delivered(&mut self, text: &str) {
+        if self.model_step_in_flight {
+            self.deferred_steering.push(text.to_owned());
+        } else {
+            self.append_transcript(format!("You: {text}"));
+        }
+    }
+
+    /// 模型新的一步开始。插话正是在这之前注入对话的，压着的这时落进聊天区。
+    pub(super) fn note_model_step_started(&mut self) {
+        self.transient_thought = None;
+        self.flush_deferred_steering();
+        self.model_step_in_flight = true;
+    }
+
+    pub(super) fn flush_deferred_steering(&mut self) {
+        for text in std::mem::take(&mut self.deferred_steering) {
+            self.append_transcript(format!("You: {text}"));
+        }
     }
 
     /// 排队的提示词真正发出时，把那行「待发」标记去掉。
@@ -387,6 +419,8 @@ impl App {
     /// 工具刚发起：先占一行，完成时原地改标记。
     pub(super) fn note_tool_requested(&mut self, name: &str, detail: Option<&str>) {
         self.transient_thought = None;
+        // 模型这一步已定稿，接下来是跑工具；此后的插话下一步就能读到，当场显示。
+        self.model_step_in_flight = false;
         self.append_transcript(tool_line(TOOL_PENDING, name, detail));
     }
 
@@ -696,6 +730,57 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 1);
         assert_eq!(app.queued_prompts[0].text, "先别删");
         assert!(app.transcript[0].starts_with("System: The last message missed this turn"));
+    }
+
+    #[test]
+    fn steering_during_a_streaming_reply_lands_after_that_reply() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(false, "working".to_owned());
+        app.note_model_step_started();
+        app.stream_transient(StreamKind::Reply, "listing");
+        app.note_steering_delivered("clean it up");
+        assert!(app.transcript.iter().all(|row| !row.starts_with("You:")));
+
+        app.note_narration("listing done");
+        app.note_model_step_started();
+        let reply = app
+            .transcript
+            .iter()
+            .position(|row| row == "WillDeep: listing done");
+        let steer = app
+            .transcript
+            .iter()
+            .position(|row| row == "You: clean it up");
+        assert!(
+            reply.is_some() && steer.is_some() && reply < steer,
+            "{:?}",
+            app.transcript
+        );
+
+        // 工具在跑时送达的插话，下一步就能读到，当场显示。
+        app.note_tool_requested("run_command", None);
+        app.note_steering_delivered("stop");
+        assert_eq!(app.transcript.last().map(String::as_str), Some("You: stop"));
+    }
+
+    #[test]
+    fn deferred_steering_is_shown_at_turn_end_or_as_queued_when_it_missed() {
+        let mut app = App::new(Vec::new(), Language::En);
+        app.begin_turn(false, "working".to_owned());
+        app.note_model_step_started();
+        app.note_steering_delivered("missed");
+        app.note_steering_delivered("consumed");
+        app.requeue_steering("missed".to_owned());
+        assert_eq!(
+            app.transcript.last().map(String::as_str),
+            Some("You: [queued] missed")
+        );
+        app.finish_turn();
+        assert_eq!(
+            app.transcript.last().map(String::as_str),
+            Some("You: consumed")
+        );
+        assert!(app.deferred_steering.is_empty());
     }
 
     #[test]

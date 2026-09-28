@@ -71,6 +71,8 @@ impl App {
             progress_log: VecDeque::new(),
             language,
             transient_thought: None,
+            model_step_in_flight: false,
+            deferred_steering: Vec::new(),
             turn_narration: None,
             tool_rows_expanded: false,
             transient_kind: StreamKind::Reply,
@@ -979,6 +981,9 @@ impl App {
         // 轮次结束，句柄就作废了；留着会让下一次 Esc 对着一个已完成的 Task 空掐。
         self.local_turn = None;
         self.transient_thought = None;
+        // 没被交回排队的插话已经送进了任务，收尾时补上，一句都不丢。
+        self.model_step_in_flight = false;
+        self.flush_deferred_steering();
         self.turn_narration = None;
         self.activity_line = self.language.text("就绪", "Ready", "準備完了").to_owned();
         // 铃声只给审批、提问和后台任务的话，盯着别处的用户不知道轮到自己了。
