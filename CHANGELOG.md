@@ -5,6 +5,9 @@
 ### Fixed
 - 不再把工作区根目录的 `PRODUCT_OVERVIEW.md` 全文注入每轮系统提示。它现在作为按需查阅的项目参考文档；`AGENTS.md` 与 `CLAUDE.md` 仍按作用范围完整加载。
 
+### Added
+- 新增 Prompt RSI 设计提案，记录受控优化范围、评测门禁与回滚方案。
+
 ## [0.87.0-rc2] - 2026-09-28
 
 ### Fixed
