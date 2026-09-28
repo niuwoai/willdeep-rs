@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.85.0-rc3] - 2026-09-28
+
+### Fixed
+- **F2 放大输入区后按 Enter 发送，输入区自动缩回。** 原来放大状态会一直保持，聊天区被挤得只剩几行，AI 开始输出了却看不到，得再按一次 F2。现在提交提示词（直接发送、运行中插话、排队）时统一经 `App::take_submitted_input` 取走输入并收起输入区；只打字不发送时保持放大。
+
+### Docs
+- `docs/TUI_GUIDE.md` 输入按键表补上 `F2`。
+
+### Tests
+- `interaction_tests::submitting_collapses_the_expanded_composer`。
+
 ## [0.85.0-rc2] - 2026-09-28
 
 ### Fixed

@@ -9,6 +9,17 @@ fn aggregates_tools() {
 }
 
 #[test]
+fn submitting_collapses_the_expanded_composer() {
+    let mut app = App::new(Vec::new(), Language::ZhCn);
+    app.toggle_composer_expanded();
+    app.input.insert("一段很长的提示词");
+    assert!(app.composer_expanded);
+    assert_eq!(app.take_submitted_input(), "一段很长的提示词");
+    assert!(!app.composer_expanded);
+    assert!(app.input.is_empty());
+}
+
+#[test]
 fn command_menu_discovers_webapp() {
     let mut app = App::new(Vec::new(), Language::En);
     app.input.insert("/web");

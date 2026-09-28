@@ -1069,7 +1069,7 @@ pub(super) async fn event_loop(
                                 match busy_input(app.input.text()) {
                                     BusyInput::RunNow=>{},
                                     BusyInput::Queue=>{
-                                        let text=app.input.take();
+                                        let text=app.take_submitted_input();
                                         // 先试着直接送进正在跑的这一轮；带附件的插话走不了收件箱，照旧排队。
                                         if app.attachments.is_empty() && steer_running_turn(&app,session,runtime,&agent,&text).await {
                                             app.note_steering_delivered(&text);
@@ -1101,7 +1101,7 @@ pub(super) async fn event_loop(
                                     },
                                 }
                             }
-                            let prompt=app.input.take();app.append_transcript(format!("You: {prompt}"));
+                            let prompt=app.take_submitted_input();app.append_transcript(format!("You: {prompt}"));
                             if let Some(command)=permission_commands::parse(&prompt) {
                                 match command {
                                     PermissionCommand::Open=>app.open_permission_picker(false),

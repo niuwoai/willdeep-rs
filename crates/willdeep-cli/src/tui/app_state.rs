@@ -154,6 +154,12 @@ impl App {
         self.composer_expanded = !self.composer_expanded;
         self.focus = FocusPane::Prompt;
     }
+    /// Enter 提交时取走输入。F2 放大的输入区顺手缩回去：话已经发出，接下来
+    /// 该看的是回复，大输入区会把聊天区挤得看不到输出。
+    pub(super) fn take_submitted_input(&mut self) -> String {
+        self.composer_expanded = false;
+        self.input.take()
+    }
     pub(super) fn load_session(&mut self, session: &Session) {
         self.transcript = session_transcript(session, self.language);
         if self.transcript.is_empty() {
