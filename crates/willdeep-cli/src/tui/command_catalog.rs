@@ -153,7 +153,11 @@ pub(super) fn command_candidates(language: Language) -> [(&'static str, &'static
         ),
         (
             "/goal",
-            language.text("设置持续目标", "Set persistent goal", "継続目標を設定"),
+            language.text(
+                "设置并立即执行持续目标",
+                "Set and start a persistent goal",
+                "継続目標を設定してすぐに実行",
+            ),
         ),
         (
             "/plan",

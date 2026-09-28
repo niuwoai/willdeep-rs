@@ -29,6 +29,13 @@ pub(super) fn prompt_execution(prompt: &str) -> PromptExecution {
     PromptExecution::Runtime(prompt.to_owned())
 }
 
+/// `/goal <目标>` 要保存目标并立刻运行；查询 `/goal` 与关闭 `/goal off` 不启动轮次。
+pub(super) fn goal_command_to_start(prompt: &str) -> Option<&str> {
+    let (command, argument) = prompt.trim().split_once(' ')?;
+    let goal = argument.trim();
+    (command == "/goal" && !goal.is_empty() && !goal.eq_ignore_ascii_case("off")).then_some(goal)
+}
+
 pub(super) async fn submit_turn(
     app: &mut App,
     session: &mut Session,

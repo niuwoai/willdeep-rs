@@ -1325,6 +1325,14 @@ pub(super) async fn event_loop(
                                 if app.handle_slash_command(&prompt,&runtime.skills){
                                     if app.goal!=previous_goal{session.goal=app.goal.clone();store.save(session)?;}
                                     if app.quit_requested{break;}
+                                    // /goal <目标> 同时是执行请求。此前只保存开关就返回，
+                                    // 界面立刻显示「轮到你」，必须再发一句「继续」才会开工。
+                                    if let Some(goal)=runtime_ui::goal_command_to_start(&prompt) {
+                                        match runtime_ui::submit_turn(&mut app,session,store,runtime,goal.to_owned()).await {
+                                            Ok(())=>app.notice=Some(language.text("AI 正在处理…","AI is working…","AI が処理しています…").to_owned()),
+                                            Err(error)=>app.append_transcript(format!("Error: {}: {error}",language.text("提交 Runtime 轮次失败","Submit Runtime turn failed","Runtime ターンの送信に失敗"))),
+                                        }
+                                    }
                                     continue;
                                 }
                             }

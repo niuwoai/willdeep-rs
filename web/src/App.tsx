@@ -893,11 +893,17 @@ export function App() {
     if (typed === "/help") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: t.helpText }]); setPrompt(""); return; }
     if (typed === "/skills") { setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: composer.skills.length ? composer.skills.map((skill) => `$${skill.identifier} · ${skill.name}\n${skill.description}`).join("\n\n") : t.noSkills }]); setPrompt(""); return; }
     if (typed === "/goal off") { setGoal(""); setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: t.goalOff }]); setPrompt(""); return; }
-    if (typed.startsWith("/goal ")) { setGoal(typed.slice(6).trim()); setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: `${t.goalSet}: ${typed.slice(6).trim()}` }]); setPrompt(""); return; }
-    const content = typed || (attachments.length ? t.attachmentPrompt : ""); if (!content || !workspace) return;
+    const goalToStart = typed.startsWith("/goal ") ? typed.slice(6).trim() : "";
+    if (goalToStart) {
+      setGoal(goalToStart);
+      setChat((current) => [...current, { id: nextId("assistant"), role: "assistant", content: `${t.goalSet}: ${goalToStart}` }]);
+      if (busy) { setPrompt(""); return; }
+    }
+    const content = goalToStart || typed || (attachments.length ? t.attachmentPrompt : ""); if (!content || !workspace) return;
     // 本轮在跑时回车不是排队也不是被吞：直接送进正在跑的这一轮，下一次调模型前注入。
     if (busy) { await steer(content); return; }
-    const harnessPrompt = goal && content !== "/compress" ? `<goal>\n${goal}\n</goal>\nContinue until this goal is genuinely complete.\n\n${content}` : content;
+    const activeGoal = goalToStart || goal;
+    const harnessPrompt = activeGoal && content !== "/compress" ? `<goal>\n${activeGoal}\n</goal>\nContinue until this goal is genuinely complete.\n\n${content}` : content;
     const outgoingAttachments = attachments;
     const runId = nextId("run"); const controller = new AbortController(); abortRef.current = controller;
     const startedAt = Date.now();

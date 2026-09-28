@@ -2146,6 +2146,30 @@ fn ordinary_prompts_default_to_runtime_with_explicit_local_escape() {
     );
 }
 
+#[test]
+fn goal_command_starts_its_own_turn_without_a_second_user_message() {
+    let mut app = App::new(Vec::new(), Language::ZhCn);
+    let skills = SkillCatalog::default();
+    let command = "/goal  加回图片与语音接口 ";
+
+    assert!(app.handle_slash_command(command, &skills));
+    assert_eq!(app.goal.as_deref(), Some("加回图片与语音接口"));
+    let goal = runtime_ui::goal_command_to_start(command).expect("goal command must start work");
+    assert_eq!(goal, "加回图片与语音接口");
+    assert!(
+        app.enrich_prompt(goal, &skills)
+            .contains("<goal>\n加回图片与语音接口\n</goal>")
+    );
+
+    for command in ["/goal", "/goal off", "/goal OFF", "/goal   ", "/goals test"] {
+        assert_eq!(
+            runtime_ui::goal_command_to_start(command),
+            None,
+            "{command}"
+        );
+    }
+}
+
 /// 压缩反馈此前只有进程内轮次认，Runtime 托管会话整条丢掉——状态栏的占用只
 /// 跟着 `usage` 走，而 usage 要请求成功才回来。于是压缩前的真实体量从来没上过
 /// 屏：一次真实故障里，用户盯着压缩后的 4.6 万 token，实际送出去的是 94 万。

@@ -326,7 +326,7 @@ tmux set -g mouse on
 | 命令 | 用途 |
 |---|---|
 | `/help` | 查看本地命令帮助 |
-| `/goal <目标>` | 为后续消息持续注入目标约束；`/goal off` 关闭。目标按 Core Session 持久保存，重启及切换会话/工作区后恢复 |
+| `/goal <目标>` | 保存持续目标并立即开始执行，后续消息继续携带目标；`/goal off` 关闭。目标按 Core Session 持久保存，重启及切换会话/工作区后恢复 |
 | `/compress` | 立即用压缩模型（some.im 默认 `someim-32b-compressor`，其它 Provider 为会话模型）总结较旧历史，保留最近六条消息并保存会话。历史不足八条时不消耗模型请求 |
 | `/model [模型名]` | 查看或切换当前 Session 模型 |
 | `/permissions [档位]` | 切换审批模式（严格 / 智能审核 / 工作区可写 / 完全访问）；`default <档位>` 写入配置；Shift+Tab 快速循环前三档 |
