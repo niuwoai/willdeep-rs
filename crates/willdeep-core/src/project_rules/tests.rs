@@ -41,6 +41,21 @@ fn long_rules_are_complete_and_directory_overrides_have_sources() {
 }
 
 #[test]
+fn product_overview_is_a_reference_not_a_full_prompt_injection() {
+    let root = workspace();
+    let overview = "PRODUCT OVERVIEW CONTENT ".repeat(16_000);
+    std::fs::write(root.join("PRODUCT_OVERVIEW.md"), &overview).unwrap();
+
+    let rules = ProjectRules::new(&root).unwrap();
+    let rendered = rules.render();
+
+    assert!(!rendered.contains("PRODUCT OVERVIEW CONTENT"));
+    assert!(rendered.contains("Project reference: PRODUCT_OVERVIEW.md"));
+    assert!(rendered.contains("read only the relevant sections when needed"));
+    assert!(rendered.len() < 1_000);
+}
+
+#[test]
 fn changed_and_new_rules_are_refreshed_before_a_repeat_action() {
     let root = workspace();
     let mut rules = ProjectRules::new(&root).unwrap();

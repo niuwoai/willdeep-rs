@@ -142,10 +142,10 @@ Always Allow 对 MCP 的粒度仍是精确的 `server/tool` 组合，不是通�
 
 ## 项目上下文文件
 
-除 Skills 外，WillDeep 每轮还会加载：
+除 Skills 外，WillDeep 每轮还会加载规则文件；产品概览只在需要时查阅：
 
 - `~/.willdeep/CLAUDE.md`
-- 工作区根的 `PRODUCT_OVERVIEW.md`
+- 工作区根的 `PRODUCT_OVERVIEW.md` 不会全文注入；需要产品背景时按需查阅相关章节
 - 工作区根的 `AGENTS.md`
 - 工作区根的 `CLAUDE.md`
 

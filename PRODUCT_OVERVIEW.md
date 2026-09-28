@@ -1,6 +1,8 @@
 # Product Overview
 
-> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc2（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+
+产品概览是按需查阅的参考资料，不会整篇注入 Agent 系统提示；每轮完整加载的项目指令仅限适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
 
 ## 项目简介
 
