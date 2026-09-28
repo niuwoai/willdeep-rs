@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.87.0-rc1] - 2026-09-28
+
+### Added
+- **TUI 输入框按 `Ctrl+G` 换到外部编辑器写提示词，行为照 `crontab -e` / `git commit`。** 当前输入写进 `$TMPDIR/willdeep-prompt-<uuid>.md`，TUI 交出终端（退出 raw mode 与备用屏），等编辑器退出后收回终端、把内容读回输入框——只填不发，按 Enter 才发送。本轮在跑时也能用，读回后照旧走插话 / 排队。
+  - 编辑器取 `WILLDEEP_EDITOR` → `VISUAL` → `EDITOR` 中第一个非空值，兜底 `vi`（Windows 为 `notepad`）；命令可带参数（`mate -w`、`code --wait`、`qe -w`），经 `sh -c` 解析，路径作为位置参数传入，含空格也无妨；工作目录为当前工作区。
+  - 放弃的几种情况都保留原输入：编辑器非 0 退出（vim `:cq`）、GUI 编辑器等待期间在终端按 Ctrl+C（接住 SIGINT 并结束编辑器，WillDeep 不会被一起杀掉）、内容没改、把原本非空的草稿清空。编辑器命令不存在时提示怎么设置环境变量。
+  - 交出终端前先换掉 crossterm 的 `EventStream`，否则它的后台读线程会抢走 vim 的一部分按键。
+  - 没有加配置文件段：`ConfigFile` 拒绝未知字段，新增段会让旧版本读同一份配置时报错；专用环境变量已够用。
+
+### Docs
+- `docs/TUI_GUIDE.md` 新增「用外部编辑器写提示词」一节（含 TextMate / VS Code / Qeditor 的阻塞写法），F1 帮助加上 `Ctrl+G`。
+
+### Tests
+- `tui::external_editor` 新增 4 个：环境变量优先级与空值跳过；读回时去掉末尾换行、识别未改动；清空草稿按放弃处理；带参数的编辑器命令 + 含空格路径能收到文件、非 0 退出与命令不存在（127）分别识别。
+
 ## [0.86.0-rc1] - 2026-09-28
 
 ### Added

@@ -52,6 +52,7 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `Enter` | 发送 Prompt |
 | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | 插入换行 |
 | `F2` | 放大 / 恢复输入区；按 `Enter` 发送后自动恢复，好看到回复 |
+| `Ctrl+G` | 用外部编辑器编辑当前输入，关掉编辑器后内容读回输入框（不自动发送）。见[用外部编辑器写提示词](#用外部编辑器写提示词) |
 | `/` | 打开命令候选 |
 | `$` | 打开技能候选 |
 | `↑` / `↓` | 在多行之间移动光标；候选层打开时用于选择候选 |
@@ -60,6 +61,26 @@ Attention Inbox 会自动回收陈旧条目：顺利完成的后台任务停留 
 | `←` / `→`、`Home` / `End` | 移动编辑光标 |
 | `Alt+V` / `Ctrl+V` / `Ctrl+Shift+V` 或 `Cmd+V` | 从本机系统剪贴板附加图片；终端截获系统粘贴键时优先使用 `Alt+V` 或 `Ctrl+V` |
 | `Ctrl+D` | 删除当前（最近）附件，可重复删除 |
+
+
+### 用外部编辑器写提示词
+
+长提示词在输入框里不好改时，按 `Ctrl+G` 换到你习惯的编辑器，行为与 `crontab -e`、`git commit` 一致：
+
+1. 当前输入写进临时文件 `$TMPDIR/willdeep-prompt-<uuid>.md`，TUI 暂时交出终端。
+2. 编辑器退出后内容读回输入框，**只填不发**，按 `Enter` 才发送；临时文件随即删除。
+3. 编辑器非 0 退出（vim 的 `:cq`）、在等待时按 `Ctrl+C`、没有改动，或把原本非空的内容清空，都按放弃处理，保留原输入。
+
+编辑器按 `WILLDEEP_EDITOR` → `VISUAL` → `EDITOR` 的顺序取第一个非空值，都没有就用 `vi`（Windows 为 `notepad`）。命令可以带参数，由 `sh -c` 解析，工作目录是当前工作区。
+
+GUI 编辑器必须用**等文件关闭才返回**的写法，否则一打开就返回，读回的还是原文：
+
+| 编辑器 | 设置 |
+|---|---|
+| Vim / Neovim | `export WILLDEEP_EDITOR=nvim` |
+| TextMate | `export WILLDEEP_EDITOR="mate -w"` |
+| VS Code | `export WILLDEEP_EDITOR="code --wait"` |
+| Qeditor | `export WILLDEEP_EDITOR="qe -w"`（需要支持 `-w` 的 Qeditor） |
 
 ### 本轮还在跑的时候
 

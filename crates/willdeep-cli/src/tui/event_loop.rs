@@ -111,6 +111,89 @@ fn requeue_undelivered_steering(app: &mut App, agent: &Arc<Agent>) {
     }
 }
 
+/// 把输入框交给外部编辑器，读回来只填不发。
+async fn open_external_editor(
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    events: &mut EventStream,
+    app: &mut App,
+    language: Language,
+) -> Result<()> {
+    use external_editor::EditorOutcome;
+    let editor = external_editor::resolve_editor(|name| std::env::var(name).ok());
+    let original = app.input.text().to_owned();
+    let workspace = app.workspace.clone();
+    let session =
+        external_editor::edit(term, events, &editor, &original, workspace.as_deref()).await;
+    let notice = match session {
+        Err(error) => format!(
+            "{}: {error:#}",
+            language.text(
+                "外部编辑器出错",
+                "External editor failed",
+                "外部エディタでエラー"
+            )
+        ),
+        Ok(session) => {
+            let mut notice = match session.outcome {
+                EditorOutcome::Replaced(text) => {
+                    app.edit_input(|input| {
+                        input.take();
+                        input.insert(&text);
+                    });
+                    language
+                        .text(
+                            "已从编辑器读回 · Enter 发送",
+                            "Loaded from the editor · Enter to send",
+                            "エディタから読み込みました · Enter で送信",
+                        )
+                        .to_owned()
+                }
+                EditorOutcome::Unchanged => language
+                    .text("编辑器里没有改动", "No changes in the editor", "エディタで変更なし")
+                    .to_owned(),
+                EditorOutcome::Emptied => language
+                    .text(
+                        "编辑器里清空了内容，按放弃处理，保留原输入",
+                        "The draft was emptied in the editor; kept the original prompt",
+                        "エディタで空にされたため破棄し、元の入力を残しました",
+                    )
+                    .to_owned(),
+                EditorOutcome::Cancelled(code) => format!(
+                    "{}{}",
+                    language.text(
+                        "编辑已放弃，保留原输入",
+                        "Edit cancelled; kept the original prompt",
+                        "編集を破棄し、元の入力を残しました",
+                    ),
+                    code.map(|code| format!(" (exit {code})")).unwrap_or_default()
+                ),
+                EditorOutcome::NotFound => format!(
+                    "{} `{editor}` · {}",
+                    language.text("找不到编辑器", "Editor not found", "エディタが見つかりません"),
+                    language.text(
+                        "设置 WILLDEEP_EDITOR、VISUAL 或 EDITOR；GUI 编辑器要用阻塞写法，如 mate -w",
+                        "set WILLDEEP_EDITOR, VISUAL or EDITOR; GUI editors need a waiting form such as mate -w",
+                        "WILLDEEP_EDITOR / VISUAL / EDITOR を設定してください。GUI エディタは mate -w など待機する形で",
+                    )
+                ),
+            };
+            if let Some(leftover) = session.leftover {
+                notice.push_str(&format!(
+                    " · {}: {leftover}",
+                    language.text(
+                        "临时草稿未删除",
+                        "Draft file not removed",
+                        "一時ファイルを削除できません"
+                    )
+                ));
+            }
+            notice
+        }
+    };
+    app.notice = Some(notice);
+    Ok(())
+}
+
 pub(super) async fn event_loop(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
@@ -185,6 +268,10 @@ pub(super) async fn event_loop(
         runtime_event_tx.clone(),
     );
     loop {
+        // Ctrl+G：终端和事件流都在这一层，按键分支里交不出去。
+        if std::mem::take(&mut app.pending_external_editor) {
+            open_external_editor(term, &mut events, &mut app, language).await?;
+        }
         // 面板里选中的工作区在这里才真正切：切换要动会话、Runtime 与事件跟随器，
         // 按键分支里做不完，也不该在一次按键里做。
         if let Some(id) = app.pending_workspace_switch.take() {
@@ -1062,6 +1149,7 @@ pub(super) async fn event_loop(
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.delete_selected_attachment(),
                         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT|KeyModifiers::ALT)=>app.input.insert("\n"),
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.input.insert("\n"),
+                        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL)=>app.pending_external_editor=true,
                         KeyCode::Enter if !app.input.is_empty()||!app.attachments.is_empty()=>{
                             // 本轮在跑时不再把 Enter 整条封死：本地命令照常执行，
                             // 提示词排队，其余命令说清楚为什么现在不行。

@@ -132,6 +132,7 @@ impl App {
             routing_settings_rect: Rect::default(),
             pending_session_switch: None,
             pending_workspace_switch: None,
+            pending_external_editor: false,
             transcript_rect: Rect::default(),
             command_rect: Rect::default(),
             command_hits: Vec::new(),
