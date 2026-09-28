@@ -1,5 +1,30 @@
 # 安装与构建
 
+## 用 Homebrew 安装（macOS，推荐）
+
+WillDeep 通过第三方 Homebrew Tap `niuwoai/tap` 发布（非 Homebrew 官方收录），安装的是 macOS 通用二进制（Apple Silicon 与 Intel 均可用），不需要本地 Rust 或 Node 环境：
+
+```bash
+brew install niuwoai/tap/willdeep-cli
+```
+
+这条命令会自动添加 Tap；也可以先执行 `brew tap niuwoai/tap`，再用 `brew install willdeep-cli`。装好后命令名是 `willdeep`：
+
+```bash
+willdeep --version
+```
+
+升级与卸载：
+
+```bash
+brew upgrade willdeep-cli
+brew uninstall willdeep-cli
+```
+
+如果本机跑着 Runtime Daemon，升级后执行 `willdeep daemon upgrade` 让它切换到新版本，详见 [Runtime Daemon](RUNTIME_DAEMON.md)。卸载只删除程序本身，配置与会话数据保留在原处。
+
+Linux、Windows 或需要自行修改代码时，按下文从源码构建。
+
 ## 从源码构建
 
 要求 Rust 1.94、Node.js 22 与 Yarn。Web 前端会嵌入最终二进制，所以必须先构建前端：
