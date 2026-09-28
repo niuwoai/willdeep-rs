@@ -11,7 +11,7 @@ use willdeep_core::{
     SubagentCatalog, ToolRegistry, WebToolConfig, build_provider,
 };
 
-use crate::config::LoadedConfig;
+use crate::config::{LoadedConfig, ProviderProfile};
 use crate::daemon::{AgentCommandWatcher, RuntimeConnection};
 use crate::i18n::Language;
 use crate::{
@@ -673,7 +673,19 @@ pub(crate) async fn build(
         .unwrap_or_else(uuid::Uuid::new_v4);
     let resumed_profile = resumed.and_then(|session| session.profile.as_deref());
     let profile = loaded.select_provider(cli.profile.as_deref().or(resumed_profile))?;
-    let provider_config = resolve_parent_provider_config(cli, loaded, resumed_profile)?;
+    let mut provider_config = resolve_parent_provider_config(cli, loaded, resumed_profile)?;
+    let configured_dialect = provider_config.dialect;
+    // 网关能力表（some.im / tokenhub 的 /v1/model-capabilities）：取不到时一切照旧。
+    let gateway = gateway_adjustments(
+        willdeep_core::provider::capabilities::load_model_capability(home, &provider_config)
+            .await
+            .as_ref(),
+        configured_dialect,
+        api_pinned(cli, profile),
+    );
+    if let Some(dialect) = gateway.dialect {
+        provider_config.dialect = dialect;
+    }
     let kind = provider_config.kind;
     let model = provider_config.model.clone();
     // 缺省值与上限见 config.rs：命令行、配置、缺省三级取值，同一把尺子校验。
@@ -699,7 +711,10 @@ pub(crate) async fn build(
         some_im_base_url: provider_config.base_url.clone(),
         api_key: provider_config.api_key.clone(),
     });
-    let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
+    let accepts_images = gateway
+        .accepts_images
+        .unwrap_or_else(|| model_accepts_images(&model));
+    let image_fallback = if kind == ProviderKind::SomeIm && !accepts_images {
         let vision_model = profile
             .and_then(|value| value.vision_model.clone())
             .unwrap_or_else(|| SOMEIM_VISION_FALLBACK_MODEL.to_owned());
@@ -715,7 +730,10 @@ pub(crate) async fn build(
     } else {
         None
     };
-    let parent_provider_config = provider_config.clone();
+    // 协议回落只针对会话模型：子 Agent、压缩器等换了模型的派生配置沿用用户配的协议，
+    // 父模型只能走 Responses 不代表别的模型也是。
+    let mut parent_provider_config = provider_config.clone();
+    parent_provider_config.dialect = configured_dialect;
     let provider = build_provider(provider_config).context("initialize provider")?;
     // 主模型一格共享：凡是「定义为跟主模型一样」的兜底都拿 follower，`/model`
     // 一换全跟着换；显式配了模型的照旧是自己那一份。
@@ -932,9 +950,11 @@ pub(crate) async fn build(
         );
         system_prompt.push_str(&skills.routing_summary(4_096));
     }
-    let context_window = profile
-        .and_then(|value| value.context_window)
-        .unwrap_or_else(|| crate::model_defaults::default_context_window(&model));
+    let context_window = session_context_window(
+        profile.and_then(|value| value.context_window),
+        gateway.context_window,
+        &model,
+    );
     let subagent_profiles = worker_profiles::configure_worker_profiles(
         &loaded.file,
         &parent_provider_config,
@@ -1096,6 +1116,57 @@ pub(crate) async fn build(
         notifier,
         _command_watcher: command_watcher,
     })
+}
+
+/// 会话上下文窗口：档案里显式写的 `context_window` > 网关能力表报告的值 >
+/// 按模型名的缺省（`someim-*` 256K，其余 128K，见 `model_defaults`）。
+fn session_context_window(configured: Option<u64>, gateway: Option<u64>, model: &str) -> u64 {
+    configured
+        .or(gateway)
+        .unwrap_or_else(|| crate::model_defaults::default_context_window(model))
+}
+
+/// 网关能力表对本次会话的调整；每一项为 `None` 都表示沿用原有行为。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GatewayAdjustments {
+    /// 用户没指定协议、而网关没有线路能以缺省协议服务这个模型时，改用网关能服务的协议。
+    dialect: Option<ApiDialect>,
+    /// 网关给出的看图结论（只信经探测验证的声明或目录明确列出的 image）。
+    accepts_images: Option<bool>,
+    /// 网关报告的上下文窗口，已夹在配置允许的范围内；配置文件里写了的仍以配置为准。
+    context_window: Option<u64>,
+}
+
+fn gateway_adjustments(
+    capability: Option<&willdeep_core::provider::capabilities::GatewayModelCapability>,
+    dialect: ApiDialect,
+    api_pinned: bool,
+) -> GatewayAdjustments {
+    let Some(capability) = capability else {
+        return GatewayAdjustments::default();
+    };
+    let switched = (!api_pinned)
+        .then(|| capability.fallback_dialect(dialect))
+        .flatten();
+    let effective = switched.unwrap_or(dialect);
+    GatewayAdjustments {
+        dialect: switched,
+        accepts_images: capability.accepts_images(effective),
+        context_window: capability.context_window().map(|window| {
+            window.clamp(
+                willdeep_core::CONTEXT_WINDOW_MIN,
+                willdeep_core::CONTEXT_WINDOW_MAX,
+            )
+        }),
+    }
+}
+
+/// 用户是否显式指定了协议（命令行或档案里的 `api`，`auto` 不算）。
+fn api_pinned(cli: &Cli, profile: Option<&ProviderProfile>) -> bool {
+    cli.api.is_some_and(|api| api != ApiArg::Auto)
+        || profile
+            .and_then(|provider| provider.api.as_deref())
+            .is_some_and(|api| !api.trim().is_empty() && !api.trim().eq_ignore_ascii_case("auto"))
 }
 
 /// 会话主 Provider 的配置：命令行 > 所选档案 > 环境里的钥匙 > 缺省。
@@ -1491,6 +1562,88 @@ pub(crate) fn configured_approval_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod gateway_capabilities {
+        use super::*;
+        use willdeep_core::provider::capabilities::parse_model_capabilities;
+
+        fn capability(json: &str) -> willdeep_core::provider::capabilities::GatewayModelCapability {
+            parse_model_capabilities(format!(r#"{{"data":[{json}]}}"#).as_bytes())
+                .unwrap()
+                .remove(0)
+        }
+
+        #[test]
+        fn no_capability_keeps_existing_behaviour() {
+            assert_eq!(
+                gateway_adjustments(None, ApiDialect::ChatCompletions, false),
+                GatewayAdjustments::default()
+            );
+        }
+
+        #[test]
+        fn responses_only_model_switches_dialect_unless_pinned() {
+            let only = capability(
+                r#"{"id":"m","context_window":2000000,"protocols":{"responses":{"mode":"native","verified":true,"image_input":true,"function_tools":true}}}"#,
+            );
+            let auto = gateway_adjustments(Some(&only), ApiDialect::ChatCompletions, false);
+            assert_eq!(auto.dialect, Some(ApiDialect::Responses));
+            // 看图结论跟着切换后的协议走。
+            assert_eq!(auto.accepts_images, Some(true));
+            assert_eq!(auto.context_window, Some(willdeep_core::CONTEXT_WINDOW_MAX));
+
+            let pinned = gateway_adjustments(Some(&only), ApiDialect::ChatCompletions, true);
+            assert_eq!(pinned.dialect, None);
+            assert_eq!(pinned.accepts_images, None);
+        }
+
+        #[test]
+        fn verified_text_only_disables_images_but_unverified_default_does_not() {
+            let verified = capability(
+                r#"{"id":"m","protocols":{"chat_completions":{"verified":true,"image_input":false}}}"#,
+            );
+            assert_eq!(
+                gateway_adjustments(Some(&verified), ApiDialect::ChatCompletions, false)
+                    .accepts_images,
+                Some(false)
+            );
+            let unverified = capability(
+                r#"{"id":"m","protocols":{"chat_completions":{"verified":false,"image_input":false}}}"#,
+            );
+            assert_eq!(
+                gateway_adjustments(Some(&unverified), ApiDialect::ChatCompletions, false)
+                    .accepts_images,
+                None
+            );
+        }
+
+        #[test]
+        fn context_window_prefers_config_then_gateway_then_model_default() {
+            // 档案显式配置压过网关与缺省。
+            assert_eq!(
+                session_context_window(Some(64_000), Some(1_000_000), "someim-32b"),
+                64_000
+            );
+            // 没配时取网关值，哪怕模型名缺省更大。
+            assert_eq!(
+                session_context_window(None, Some(32_000), "someim-32b"),
+                32_000
+            );
+            // 都没有时按模型名：someim-* 256K，其余 128K。
+            assert_eq!(session_context_window(None, None, "someim-32b"), 262_144);
+            assert_eq!(session_context_window(None, None, "glm-5"), 128_000);
+        }
+
+        #[test]
+        fn api_pinned_ignores_auto() {
+            let mut cli = <Cli as clap::Parser>::try_parse_from(["willdeep"]).unwrap();
+            assert!(!api_pinned(&cli, None));
+            cli.api = Some(ApiArg::Auto);
+            assert!(!api_pinned(&cli, None));
+            cli.api = Some(ApiArg::Responses);
+            assert!(api_pinned(&cli, None));
+        }
+    }
 
     mod fence {
         use super::*;

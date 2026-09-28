@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-28 | 当前版本：v0.84.0-rc4（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-28 | 当前版本：v0.85.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
 
 ## 项目简介
 
@@ -78,6 +78,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - TOML 多 Provider Profile 与安全凭据引用；
 - 可选自建辅助模型复用单一 OpenAI-compatible 端点完成会话标题、上下文压缩和低置信度 Worker 路由；支持域名、局域网 IP 与回环地址显式免 Key，各职能独立开关，失败自动回退远端候选，模型路由不得改变关键词规则决定的层级与安全闸门；
 - TUI `/routing` 与 Web“模型与路由”设置共用同一套持久化配置：可调整 Root、`reader` / `implementer` / `tester` / `ops_runner` / `judge` / `deep` 六个公开工种、上下文窗口、自动派工与 Deep 预算；旧专门工种仍保留为内部路由兼容 ID；保存带版本冲突检测并原子更新 `config.toml`，可一键恢复 some.im 推荐 Worker 映射；
+- 连 some.im / tokenhub 时读取网关模型能力表（v0.85.0-rc1）：看图判定、上下文窗口缺省值、协议回落以网关经探测验证的声明为准，取不到时沿用原有规则；
 - TUI 支持 `/model <模型名>` 直接切换当前 Session 模型；裸 `/model` 从 Provider `/v1/models` 获取模型，提供模糊筛选、键盘翻页、鼠标滚动和点击选择，并同步 Runtime 与进程内 Agent；
 - TUI Goal 按 Core Session 持久保存，重启以及 Session/Workspace 切换时恢复；`willdeep -r` / `willdeep --resume` 可直接加载最近更新的持久会话，同时保留显式 UUID 与 `latest` 参数；Core Runtime 统一识别 `<goal>` 信封，Web、TUI 与 Headless 共用同一续推判定；
 - Provider Profile、模型和配置按 Session 恢复；Skills/MCP 在每轮执行前按当前 Workspace 策略重新绑定，撤权立即生效；

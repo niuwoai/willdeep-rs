@@ -1,4 +1,5 @@
 mod anthropic;
+pub mod capabilities;
 mod chat_completions;
 mod common;
 mod main_model;

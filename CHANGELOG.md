@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.85.0-rc1] - 2026-09-28
+
+### Added
+- **会话启动时读取网关的模型能力表（`GET /v1/model-capabilities`），按网关声明避坑，不再只靠模型名硬编码。** some.im 与 tokenhub（0.253.0 起）为对话模型按协议给出原生 / 桥接、看图、工具、具名 `tool_choice`、strict schema 等能力，并标出哪些经上游能力探测验证。新模块 `willdeep_core::provider::capabilities` 负责拉取、宽松解析（单条坏数据跳过、未知字段忽略）与落盘缓存，CLI 在 `harness::build` 里用它做三件事：
+  - **看图**：网关给出权威结论时以网关为准，只信经探测验证的协议声明，或目录里明确列出的 `image`；给不出时照旧用 `model_accepts_images` 名单。未验证声明里的 `image_input=false` 不信，它多半只是默认的纯文本模态。
+  - **上下文窗口**：配置文件没写 `context_window` 时用网关报告的值（夹在 `CONTEXT_WINDOW_MIN..=MAX` 内），网关也没给时才按模型名缺省（`someim-*` 256K，其余 128K，见 0.84.0-rc4）。取值顺序收在 `harness::session_context_window` 一处。小窗口模型不会再因高估窗口而迟迟不压缩、撞上上游超长报错。
+  - **协议回落**：用户没显式指定 `api` 时，如果网关没有任何线路能用缺省协议服务这个模型，改用网关能服务的协议（例如只有 Responses 线路的模型）。只作用于会话模型，子 Agent、压缩器等换了模型的派生配置仍用原协议；「跟主模型一样」的兜底（`MainModelHandle` 的 follower）拿的是改过协议的会话 Provider。
+- 缓存放在 `<WILLDEEP_HOME>/cache/model-capabilities/`，按「端点 + Key」的 SHA-256 摘要分文件（可见范围随 Key 所属租户变化；文件名不含 Key）。新鲜期 10 分钟；网关不提供该接口（4xx，429 除外）时负缓存 24 小时；拉取失败时退用 7 天内的旧缓存。拉取请求限时 5 秒；Anthropic 官方端点和免 Key 的本地辅助模型不拉。
+
+### Impact
+- 网关没有这个接口、拉取失败或表里没有该模型时，行为与 0.84.0-rc4 完全一致。
+- 连 some.im / tokenhub 时每 10 分钟最多多一次 GET；首次启动最多多等 5 秒（网关不可达时）。
+- 用户显式配置的 `api`、`context_window` 始终优先，网关只补默认值。
+- 本地端到端：对本机 tokenhub（0.253.0-rc1 开发版）跑 `willdeep run`，缓存文件按摘要落盘，内容含 `protocols`；随后的 401 是测试用的假 Key 所致，符合预期。
+
+### Tests
+- `provider::capabilities` 新增 4 个单元测试：宽松解析（坏条目跳过、未知字段忽略）；看图结论只信验证过的声明或目录 `image`；协议回落只在网关服务不了所请求协议时触发；缓存往返且不同 Key 分文件、文件名不含 Key。
+- `harness::tests::gateway_capabilities` 新增 5 个：无能力表时不做任何调整；只有 Responses 线路的模型在未指定协议时切换过去，指定后不切；验证过的纯文本关掉看图而未验证的不动；`api = auto` 不算显式指定；上下文窗口按「显式配置 > 网关 > 模型名缺省」取值。
+- `cargo test --workspace` 全部通过。
+
+### Known issues
+- 会话模型因协议回落改走 Responses 后，`/model` 切到别的模型时新模型沿用这条协议（`with_model` 保留协议）；上下文窗口也不随 `/model` 重新向网关取值。
+
 ## [0.84.0-rc4] - 2026-09-28
 
 ### Fixed

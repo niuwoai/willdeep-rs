@@ -84,7 +84,9 @@ MCP server 由 TOML 声明：stdio 服务给 command、args、env，Streamable H
 
 TUI 使用独立的多行 Prompt Editor，光标以 UTF-8 边界存储，并按 Unicode 显示宽度计算换行、上下移动、点击定位和内部滚动。终端启用 Bracketed Paste，长文本保留为消息附件而不是撑满编辑框。
 
-图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`。some.im 已知纯文本主模型由 Agent 通过同一 API Base/API Key 的 `qwen3-vl-plus`（或 `vision_model` 覆盖值）生成描述，再移除发往主模型的图片负载。
+图片从本机系统剪贴板读取 RGBA，限制为最多 64 MB 原始像素，编码为 PNG/Base64 后进入版本兼容的 `Message.attachments`。发送前附件可从草稿删除；发送后随会话 JSON 持久化。Provider Adapter 分别转换为 Chat Completions `image_url`、Responses `input_image` 和 Anthropic `image/source`。some.im 已知纯文本主模型由 Agent 通过同一 API Base/API Key 的 `qwen3-vl-plus`（或 `vision_model` 覆盖值）生成描述，再移除发往主模型的图片负载。「是否纯文本」优先取网关能力表（`GET /v1/model-capabilities`，见 `willdeep_core::provider::capabilities`）：只信经上游探测验证的协议声明或目录明确列出的 `image`，给不出结论时回落 `model_accepts_images` 名单。
+
+网关能力表在会话启动时拉取（限时 5 秒，按「端点 + Key」摘要缓存于 `<WILLDEEP_HOME>/cache/model-capabilities/`，新鲜 10 分钟、接口不存在负缓存 24 小时、失败时退用 7 天内旧缓存），还用于：配置未写 `context_window` 时取网关报告的窗口；未显式指定 `api` 且网关没有线路能以缺省协议服务该模型时，会话模型改用网关能服务的协议（派生的子 Agent / 压缩器配置不受影响）。
 
 助手输出的媒体采用另一条只读链路：Markdown 图片先在聊天文本中变成卡片，用户通过 `Ctrl+L` 明确选择后才下载。远端目标复用 Web Tool 的公网地址校验，并叠加重定向、超时、8 MiB 响应、尺寸和解码内存上限；本地目标 canonicalize 后必须仍位于 Workspace。Ratatui 图片状态在后台线程完成缩放/编码，启动探测 Kitty、iTerm2、Sixel，原生编码失败时使用保留的解码缓存重建 Unicode halfblocks，避免阻塞或清空 TUI。
 
