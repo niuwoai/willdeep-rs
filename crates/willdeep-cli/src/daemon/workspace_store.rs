@@ -706,7 +706,7 @@ mod tests {
             .unwrap();
         assert!(!second_item.active);
         let third_item = store.ensure_registered(&third).unwrap();
-        assert_eq!(third_item.access, WorkspaceAccess::Smart);
+        assert_eq!(third_item.access, WorkspaceAccess::WorkspaceWrite);
         assert!(store.activate(second_item.id).unwrap().unwrap().active);
         drop(store);
 
