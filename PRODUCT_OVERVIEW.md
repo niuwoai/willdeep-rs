@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md；未发布）
+> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc2（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 ## 项目简介
 
@@ -207,7 +207,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - JSON 会话持久化、列表与恢复；
 - Codex 兼容 Skills 发现和按需读取；
 - MCP 工具发现、注册和调用，stdio 与 Streamable HTTP 两种传输，远程服务支持静态 Bearer 与 OAuth 2.1 登录（`willdeep mcp login`）；工具 Schema 不再全量常驻每轮上下文，通过 `list_mcp_tools` 按需搜索、`call_mcp_tool` 精确调用；
-- `/goal` 命令模式和 `$skill-name` 显式技能触发；
+- `/goal <目标>` 保存持续目标并立即启动首轮执行，后续消息继续携带目标；`/goal off` 关闭。Web 与 TUI 行为一致；`$skill-name` 可显式触发技能；
 - 分阶段 CLI/TUI/Runtime 产品路线图与逐项验收状态；
 - `/mobile` 出配对二维码并打开 Runtime 托管的手机中继（见本节第一条）；
 - 区分角色的 TUI 配色；
