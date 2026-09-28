@@ -367,26 +367,13 @@ fn tier_settings(
     })
 }
 
-/// 这个工种改名前叫什么。已经写在别人 config 里的段落不该因为一次改名就失效。
-fn legacy_section_ids(id: &str) -> &'static [&'static str] {
-    match id {
-        "generalist" => &["reader", "deep"],
-        "reviewer" => &["judge"],
-        _ => &[],
-    }
-}
-
 /// 定位一个工种在 config 里实际使用的段落名：新名优先，其次是改名前的名字。
-/// 保存时也用它，免得写出一个新段落、把用户原来那段晾在旁边失效。
+/// 保存时也用它，免得写出一个新段落、把用户原来那段晾在旁边失效。映射与运行时
+/// 共用 [`crate::config::subagent_section_id`]。
 fn configured_section_id(file: &ConfigFile, id: &str) -> String {
-    if file.subagents.contains_key(id) {
-        return id.to_owned();
-    }
-    legacy_section_ids(id)
-        .iter()
-        .find(|legacy| file.subagents.contains_key(**legacy))
-        .map(|legacy| (*legacy).to_owned())
-        .unwrap_or_else(|| id.to_owned())
+    crate::config::subagent_section_id(file, id)
+        .unwrap_or(id)
+        .to_owned()
 }
 
 fn profile_settings(
@@ -395,11 +382,7 @@ fn profile_settings(
     root_provider: &str,
     root_model: &str,
 ) -> Result<ProfileRoutingSettings> {
-    let configured = file.subagents.get(id).or_else(|| {
-        legacy_section_ids(id)
-            .iter()
-            .find_map(|legacy| file.subagents.get(*legacy))
-    });
+    let configured = crate::config::subagent_settings(file, id);
     let provider_profile = configured.and_then(|settings| settings.provider_profile.clone());
     let model = configured.and_then(|settings| settings.model.clone());
     let effective_provider = provider_profile
@@ -414,15 +397,16 @@ fn profile_settings(
     let recommended_model = (automatic && is_some_im)
         .then(|| willdeep_core::subagent::hosted_worker_model(id))
         .flatten();
-    let provider_model = provider.model.as_deref().unwrap_or(root_model);
+    // 没有托管绑定的工种沿用会话主模型，与 harness、macOS 版同一条规则；换了
+    // provider_profile 却没写 model 的，用那个 Profile 自己的模型。
+    let inherited_model = match &provider_profile {
+        Some(_) => provider.model.as_deref().unwrap_or(root_model),
+        None => root_model,
+    };
     let effective_model = model.clone().unwrap_or_else(|| {
-        recommended_model.clone().unwrap_or_else(|| {
-            if is_some_im {
-                "glm-5".to_owned()
-            } else {
-                provider_model.to_owned()
-            }
-        })
+        recommended_model
+            .clone()
+            .unwrap_or_else(|| inherited_model.to_owned())
     });
     Ok(ProfileRoutingSettings {
         id: id.to_owned(),

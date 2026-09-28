@@ -1,6 +1,7 @@
 mod anthropic;
 mod chat_completions;
 mod common;
+mod main_model;
 mod responses;
 pub mod sse;
 #[cfg(test)]
@@ -17,6 +18,7 @@ use crate::types::{Completion, Message, ToolDefinition};
 
 pub use anthropic::AnthropicMessagesProvider;
 pub use chat_completions::ChatCompletionsProvider;
+pub use main_model::{MainModelHandle, provider_model};
 pub use responses::ResponsesProvider;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

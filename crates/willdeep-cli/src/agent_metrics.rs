@@ -14,22 +14,24 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 use willdeep_runtime_protocol::RuntimeAgent;
 
-/// Profiles that exist to take work off the parent model. `deep` is not one
-/// of them: it runs the parent model by design, so counting it as delegation
-/// would make the coverage number flatter itself.
-pub(crate) const WORKER_PROFILES: &[&str] = &[
-    "scout",
-    "reader",
-    "log_inspector",
-    "git_detective",
-    "editor",
-    "test_fixer",
-    "build_fixer",
-];
+/// 记录里的工种名算不算「从主模型那里接走活」的 Worker。
+///
+/// 名单从工种目录推出来（[`willdeep_core::public_profile_id`] 认得的都是当前
+/// 或改名前的工种），不再手抄：以前这里只列了七个窄工种，`generalist` /
+/// `tester` / `reviewer` / `ops_runner` 上线后全被漏算，覆盖率被压低。
+///
+/// 两个例外：`implementer` 单算标准档；`deep` 是改名前「在子预算上跑父模型」
+/// 的那个工种，旧记录里还有，把它算成委派会让覆盖率自己抬自己。专家档现在是
+/// `worker_tier` 而不是工种，记录里没有档位字段，这里数不到。
+pub(crate) fn is_worker_profile(profile: &str) -> bool {
+    profile != STANDARD_PROFILE
+        && profile != DEEP_PROFILE
+        && willdeep_core::public_profile_id(profile).is_some()
+}
 
-/// The profile that runs the parent model on a child budget.
+/// 改名前「在子预算上跑父模型」的工种，只会出现在旧记录里。
 const DEEP_PROFILE: &str = "deep";
-/// The general-purpose child profile: neither narrow worker nor deep.
+/// The general-purpose implementation profile: neither worker nor deep.
 const STANDARD_PROFILE: &str = "implementer";
 
 /// Targets from the delegation design. They are printed next to every rate
@@ -99,7 +101,7 @@ impl AgentMetrics {
                 .filter(|agent| agent.profile.as_deref().is_some_and(wanted))
                 .count()
         };
-        let workers = profile_count(&|profile| WORKER_PROFILES.contains(&profile));
+        let workers = profile_count(&|profile| is_worker_profile(profile));
         let standard = profile_count(&|profile| profile == STANDARD_PROFILE);
         let deep = profile_count(&|profile| profile == DEEP_PROFILE);
 
@@ -312,6 +314,35 @@ mod tests {
             created_at: run.created_at,
             updated_at: run.created_at,
             completed_at: Some(run.created_at + 10),
+        }
+    }
+
+    #[test]
+    fn current_trades_count_as_workers_and_only_legacy_deep_counts_as_deep() {
+        let agents = [
+            "generalist",
+            "tester",
+            "reviewer",
+            "ops_runner",
+            "scout",
+            "implementer",
+            "deep",
+            "not_a_trade",
+        ]
+        .into_iter()
+        .map(|profile| agent(run(profile)))
+        .collect::<Vec<_>>();
+        let metrics = AgentMetrics::compute(&agents, None);
+        assert_eq!(metrics.children, 8);
+        assert_eq!(metrics.workers, 5, "五个当前委派工种都算 Worker");
+        assert_eq!(metrics.standard, 1);
+        assert_eq!(metrics.deep, 1);
+        for trade in willdeep_core::PUBLIC_SUBAGENT_IDS {
+            assert_eq!(
+                is_worker_profile(trade),
+                trade != "implementer",
+                "目录里的公开工种 {trade} 归类不对"
+            );
         }
     }
 

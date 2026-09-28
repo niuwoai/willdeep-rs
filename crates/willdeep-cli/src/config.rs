@@ -349,6 +349,40 @@ pub struct SubagentProfileSettings {
     pub max_attempts: Option<usize>,
 }
 
+/// 一个工种改名前的段落名，按优先级排。已经写在别人 config 里的
+/// `[subagents.deep]` / `[subagents.judge]` 不该因为一次改名就失效。
+///
+/// 这是**唯一**一处映射：运行时（harness 组装工种）和设置面板（显示、保存）
+/// 都从 [`subagent_section_id`] 取段落，两边不可能再对不上——以前运行时只认
+/// 正名、面板却回落旧名，面板上显示的模型并不是实际在跑的那个。
+pub(crate) fn legacy_subagent_sections(id: &str) -> &'static [&'static str] {
+    match id {
+        "generalist" => &["reader", "deep"],
+        "reviewer" => &["judge"],
+        _ => &[],
+    }
+}
+
+/// 工种 `id` 在 config 里实际生效的段落名：正名优先，其次是改名前的名字；
+/// 都没写就是 `None`。
+pub(crate) fn subagent_section_id<'a>(file: &'a ConfigFile, id: &str) -> Option<&'a str> {
+    std::iter::once(id)
+        .chain(legacy_subagent_sections(id).iter().copied())
+        .find_map(|name| {
+            file.subagents
+                .get_key_value(name)
+                .map(|(key, _)| key.as_str())
+        })
+}
+
+/// 工种 `id` 实际生效的那段 `[subagents.*]` 设置。
+pub(crate) fn subagent_settings<'a>(
+    file: &'a ConfigFile,
+    id: &str,
+) -> Option<&'a SubagentProfileSettings> {
+    subagent_section_id(file, id).and_then(|section| file.subagents.get(section))
+}
+
 /// `[worker_tiers.<档>]`：这一档兑现成哪个模型。
 ///
 /// 三个字段都可以只填一部分：只填 `model` 就沿用当前 provider 的端点与凭据
@@ -866,6 +900,28 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn subagent_sections_resolve_canonical_first_then_legacy_names() {
+        let file: ConfigFile = toml::from_str(
+            "version = 1\n[subagents.deep]\nmodel = \"d\"\n[subagents.judge]\nmodel = \"j\"\n[subagents.tester]\nmodel = \"t\"\n",
+        )
+        .expect("parse legacy sections");
+        assert_eq!(subagent_section_id(&file, "generalist"), Some("deep"));
+        assert_eq!(subagent_section_id(&file, "reviewer"), Some("judge"));
+        assert_eq!(subagent_section_id(&file, "tester"), Some("tester"));
+        assert_eq!(subagent_section_id(&file, "implementer"), None);
+        assert_eq!(
+            subagent_settings(&file, "reviewer").and_then(|s| s.model.as_deref()),
+            Some("j")
+        );
+
+        let both: ConfigFile = toml::from_str(
+            "version = 1\n[subagents.generalist]\nmodel = \"g\"\n[subagents.deep]\nmodel = \"d\"\n",
+        )
+        .expect("parse both sections");
+        assert_eq!(subagent_section_id(&both, "generalist"), Some("generalist"));
+    }
+
+    #[test]
     fn deep_budget_is_bounded_and_can_be_disabled() {
         let disabled: ConfigFile =
             toml::from_str("version = 1\n[agent]\nmax_deep_calls_per_harness = 0\n")
@@ -995,8 +1051,19 @@ context_window = 400000
             assert_eq!(profile.provider_profile, None, "{hosted} provider override");
             assert_eq!(profile.model, None, "{hosted} model override");
         }
-        let deep = parsed.subagents.get("deep").expect("deep profile");
-        assert_eq!(deep.model.as_deref(), Some("deepseek-v4-flash"));
+        let generalist = parsed
+            .subagents
+            .get("generalist")
+            .expect("generalist profile");
+        assert_eq!(generalist.model.as_deref(), Some("deepseek-v4-flash"));
+        // 示例只写正名：改名前的 `deep` / `judge` 段仍能读，但不该再被示范。
+        for legacy in ["deep", "judge"] {
+            assert!(
+                !parsed.subagents.contains_key(legacy),
+                "示例里不该再写 [subagents.{legacy}]"
+            );
+        }
+        assert!(parsed.subagents.contains_key("reviewer"));
         // 这条测试的名字说的是「stays valid」，那就真的校验一遍——只解析
         // 不校验的话，示例里写错一个 provider_profile 也照样绿。
         validate(&parsed, Path::new("config.example.toml")).expect("example config validates");

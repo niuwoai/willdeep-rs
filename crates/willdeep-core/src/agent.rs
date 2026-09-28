@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -139,6 +139,22 @@ pub enum AgentEvent {
         profile: Option<String>,
         confidence: u8,
         auto_dispatched: bool,
+        reason: String,
+        /// 实际干这份活的模型；说不上来（测试替身）时为 `None`。
+        model: Option<String>,
+        /// `model` 是兜底而不是本来要的那个时，说明原因。
+        fallback: Option<String>,
+    },
+    /// 某一路没用上首选模型，退到了别的模型（或只放宽了预算没换模型）。
+    /// 以前这些都是静默的：分类器候选失败、压缩 / 标题换下一家、要了贵一档
+    /// 却没有绑定。
+    ModelFallback {
+        /// `classifier` / `compressor` / `title` / `worker_tier`。
+        purpose: String,
+        /// 没用上的那个（失败的候选模型，或没绑定的档位）。
+        skipped: Option<String>,
+        /// 实际用上的模型；`None` 表示没有可用的或说不上来。
+        used: Option<String>,
         reason: String,
     },
     CompressionStarted {
@@ -354,7 +370,8 @@ pub enum AgentError {
 }
 
 pub struct Agent {
-    provider: RwLock<Arc<dyn Provider>>,
+    /// 主模型。与「跟主模型一样」的那些兜底共用一格，`/model` 一换全跟着换。
+    provider: crate::provider::MainModelHandle,
     tools: ToolRegistry,
     config: AgentConfig,
     sink: Arc<dyn EventSink>,
@@ -371,7 +388,13 @@ pub struct Agent {
     instruction_inbox: Option<Arc<AgentInstructionInbox>>,
     goal_continuation: Option<Arc<GoalContinuation>>,
     background_tasks: Option<Arc<BackgroundTaskRegistry>>,
+    /// 小模型优先路由（`small_model_routing`）：只管关键词分类、自动下发与
+    /// 引导。关掉它不影响下面的准入。
     routing: Option<Arc<RoutingGuard>>,
+    /// 专家档的准入闸：票据校验、低档尝试的证据、每个 harness 的次数上限。
+    /// 它**总是在**——以前它挂在 `routing` 上，路由开关一关，专家档就不要票
+    /// 据了，贵模型的闸门跟一个与它无关的开关绑在了一起。
+    admission: Arc<RoutingGuard>,
     /// 宿主事件内核。不挂等于本改动前的行为：没有边界投递，也没有抢占。
     kernel: Option<crate::kernel::EventKernel>,
     /// 本机用量账本。不挂就不记账，其余行为完全不变。
@@ -381,7 +404,7 @@ pub struct Agent {
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self {
-            provider: RwLock::new(provider),
+            provider: crate::provider::MainModelHandle::new(provider),
             tools,
             config,
             sink: Arc::new(NoopSink),
@@ -395,6 +418,7 @@ impl Agent {
             goal_continuation: None,
             background_tasks: None,
             routing: None,
+            admission: Arc::new(RoutingGuard::new(crate::RoutingPolicy::default())),
             kernel: None,
             usage_ledger: None,
         }
@@ -455,26 +479,27 @@ impl Agent {
     }
 
     /// Switch future completions to another model without rebuilding the
-    /// Agent's tools, approvals, subagents, or event sinks.
+    /// Agent's tools, approvals, subagents, or event sinks. Every provider
+    /// obtained from [`Self::main_model`]'s follower switches with it.
     pub fn set_model(&self, model: &str) -> Result<(), ProviderError> {
-        let configured = self
-            .provider
-            .read()
-            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))?
-            .with_model(model)?;
-        *self
-            .provider
-            .write()
-            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))? =
-            configured;
-        Ok(())
+        self.provider.set_model(model)
+    }
+
+    /// 主模型的共享句柄。宿主在组装 Agent 之前就要拿到它（Worker、压缩兜底
+    /// 等在 Agent 之前建好），所以也可以先建句柄再用 [`Self::with_main_model`]
+    /// 交进来。
+    pub fn main_model(&self) -> crate::provider::MainModelHandle {
+        self.provider.clone()
+    }
+
+    /// 用宿主先建好的主模型句柄替换 [`Self::new`] 里那一份。
+    pub fn with_main_model(mut self, handle: crate::provider::MainModelHandle) -> Self {
+        self.provider = handle;
+        self
     }
 
     fn provider(&self) -> Result<Arc<dyn Provider>, ProviderError> {
-        self.provider
-            .read()
-            .map(|provider| provider.clone())
-            .map_err(|_| ProviderError::InvalidResponse("provider lock poisoned".to_owned()))
+        self.provider.current()
     }
 
     pub fn with_image_fallback(
@@ -539,14 +564,54 @@ impl Agent {
     /// 把第一轮问答压成一行短标题。没绑标题 Provider、调用失败或模型返回
     /// 垃圾时一律 `None`——标题是装饰，不值得为它中断任何东西。
     pub async fn summarize_title(&self, first_user: &str, first_assistant: &str) -> Option<String> {
-        for provider in &self.titlers {
+        let mut skipped = Vec::new();
+        for (index, provider) in self.titlers.iter().enumerate() {
+            let model = crate::provider::provider_model(provider.as_ref())
+                .unwrap_or_else(|| format!("candidate #{}", index + 1));
             if let Some(title) =
                 crate::session_title::summarize(provider.clone(), first_user, first_assistant).await
             {
+                self.report_model_fallback("title", &skipped, Some(model))
+                    .await;
                 return Some(title);
             }
+            skipped.push((
+                model,
+                "request failed or the answer was not a usable title".to_owned(),
+            ));
         }
+        self.report_model_fallback("title", &skipped, None).await;
         None
+    }
+
+    /// 报一次「首选没用上、退到了下一家」。`skipped` 为空就是首选成功，不报。
+    pub(crate) async fn report_model_fallback(
+        &self,
+        purpose: &str,
+        skipped: &[(String, String)],
+        used: Option<String>,
+    ) {
+        if skipped.is_empty() {
+            return;
+        }
+        self.sink
+            .emit(AgentEvent::ModelFallback {
+                purpose: purpose.to_owned(),
+                skipped: Some(
+                    skipped
+                        .iter()
+                        .map(|(model, _)| model.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                used,
+                reason: skipped
+                    .iter()
+                    .map(|(model, reason)| format!("{model}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            })
+            .await;
     }
 
     pub fn with_subagents(mut self, catalog: Arc<SubagentCatalog>) -> Self {
@@ -600,7 +665,15 @@ impl Agent {
 
     /// Attach deterministic small-model routing and deep-tier admission.
     pub fn with_routing_guard(mut self, routing: Arc<RoutingGuard>) -> Self {
+        self.admission = routing.clone();
         self.routing = Some(routing);
+        self
+    }
+
+    /// 只换准入闸（例如按配置的专家档次数上限），不开小模型路由。
+    /// `small_model_routing = false` 时宿主走这条：路由关了，票据照要。
+    pub fn with_admission_guard(mut self, admission: Arc<RoutingGuard>) -> Self {
+        self.admission = admission;
         self
     }
 
@@ -1201,10 +1274,8 @@ impl Agent {
             }
             if call.name != "spawn_agent" {
                 let result = self.tools.execute(call).await;
-                if result.is_ok()
-                    && let Some(routing) = &self.routing
-                {
-                    routing.record_tool_success(&call.name);
+                if result.is_ok() {
+                    self.admission.record_tool_success(&call.name);
                 }
                 return result;
             }
@@ -1252,10 +1323,17 @@ impl Agent {
                 .and_then(crate::WorkerTier::parse)
                 .or_else(|| crate::WorkerTier::parse(&profile))
                 .unwrap_or_default();
-            if let Some(routing) = &self.routing
-                && requested_tier.requires_admission()
-            {
-                routing
+            // `profile="deep"` 按专家档收了票据，就得按专家档兑现：档位绑定只认
+            // `worker_tier`，不补上的话票据照扣、跑的却是 generalist 的基础模型。
+            let mut args = args;
+            if args.worker_tier.is_none() && requested_tier.requires_admission() {
+                args.worker_tier = Some(requested_tier.as_str().to_owned());
+            }
+            // 准入与 `small_model_routing` 无关：路由开关关掉的是自动分类与
+            // 下发，不是贵模型的票据。
+            let dispatch = catalog.dispatch_model(&profile, args.worker_tier.as_deref());
+            if requested_tier.requires_admission() {
+                self.admission
                     .authorize_deep(args.escalation.as_ref())
                     .map_err(ToolError::Network)?;
                 self.sink
@@ -1265,6 +1343,19 @@ impl Agent {
                         confidence: 100,
                         auto_dispatched: false,
                         reason: "runtime-validated escalation ticket".to_owned(),
+                        model: dispatch.model.clone(),
+                        fallback: dispatch.fallback.clone(),
+                    })
+                    .await;
+            } else if let Some(reason) = &dispatch.fallback {
+                // 要了贵一档、这个 provider 上却没绑那一档：只放宽了预算，模型
+                // 没换。以前这里一声不吭，用户以为自己拿到了更强的模型。
+                self.sink
+                    .emit(AgentEvent::ModelFallback {
+                        purpose: "worker_tier".to_owned(),
+                        skipped: args.worker_tier.clone(),
+                        used: dispatch.model.clone(),
+                        reason: reason.clone(),
                     })
                     .await;
             }
@@ -1281,13 +1372,11 @@ impl Agent {
                 None
             };
             // 专家档自己不算「低档尝试」，别让它给自己攒证据。
-            if !requested_tier.requires_admission()
-                && let Some(routing) = &self.routing
-            {
+            if !requested_tier.requires_admission() {
                 // Only count a lower-tier attempt after its task packet and
                 // write authority have passed validation. A rejected packet
                 // must not become evidence that unlocks Deep.
-                routing.record_profile_attempt(&profile);
+                self.admission.record_profile_attempt(&profile);
             }
             catalog
                 .run_authorized(args, approved_targets, approved_command)
@@ -1309,6 +1398,40 @@ impl Agent {
             let decision = routing
                 .route(routing_request_from_message(&user_message.content))
                 .await;
+            if !decision.classifier_failures.is_empty() {
+                // 分类器候选失败以前是静默 continue：本地模型挂了一个月，
+                // 路由悄悄退回关键词或会话模型，没人知道。
+                self.sink
+                    .emit(AgentEvent::ModelFallback {
+                        purpose: "classifier".to_owned(),
+                        skipped: Some(
+                            decision
+                                .classifier_failures
+                                .iter()
+                                .map(|failure| failure.model.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                        used: decision.classifier_model.clone(),
+                        reason: decision
+                            .classifier_failures
+                            .iter()
+                            .map(|failure| format!("{}: {}", failure.model, failure.reason))
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    })
+                    .await;
+            }
+            // 这一轮实际由谁干活：自动下发给 Worker 的是那个工种的模型，其余
+            // 仍是主模型（引导只是提示，派不派工由主模型决定）。
+            let dispatch = decision
+                .profile
+                .filter(|_| decision.auto_dispatch_read_only)
+                .map(|profile| catalog.dispatch_model(profile, None));
+            let model = match &dispatch {
+                Some(dispatch) => dispatch.model.clone(),
+                None => self.provider.model(),
+            };
             self.sink
                 .emit(AgentEvent::RouteDecided {
                     tier: decision.tier,
@@ -1316,6 +1439,8 @@ impl Agent {
                     confidence: decision.confidence,
                     auto_dispatched: decision.auto_dispatch_read_only,
                     reason: decision.reason.to_owned(),
+                    model,
+                    fallback: dispatch.and_then(|dispatch| dispatch.fallback),
                 })
                 .await;
             let Some(profile) = decision.profile else {
@@ -1329,7 +1454,7 @@ impl Agent {
                 return;
             }
 
-            routing.record_profile_attempt(profile);
+            self.admission.record_profile_attempt(profile);
             let prompt = user_message.content.clone();
             let report = catalog
                 .run(

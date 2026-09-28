@@ -106,7 +106,7 @@ async fn some_im_login() -> Result<(String, String, String, String)> {
                 // standard tier; `deep` remains an explicit escalation
                 // profile instead of silently becoming every session's root.
                 let model = string(data, &["standard_model", "standardModel"])
-                    .unwrap_or_else(|| "glm-5".to_owned());
+                    .unwrap_or_else(|| crate::model_defaults::SOMEIM_DEFAULT_MODEL.to_owned());
                 return Ok((
                     "some-im".to_owned(),
                     "https://some.im/v1".to_owned(),

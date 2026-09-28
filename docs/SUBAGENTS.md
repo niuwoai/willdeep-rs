@@ -192,7 +192,8 @@ token_budget = 32000
 timeout_seconds = 300
 max_consecutive_failures = 3
 
-[subagents.deep]
+[subagents.generalist]
+# 旧名 [subagents.deep] / [subagents.reader] 仍会被运行时与设置面板读到（正名优先）。
 provider_profile = "some-im"
 model = "deepseek-v4-flash"
 context_window = 1000000
@@ -216,7 +217,7 @@ timeout_seconds = 1200
 worktree = "dedicated"
 ```
 
-Provider 为 some.im 时，`generalist` 与七个内部窄工种默认使用基础档 `someim-32b`，`implementer` 默认使用 GLM-5。`worker_tier=expert`（旧名 `deep`）没有有效升级票据不会启动。七个 `someim-32b-<trade>` 别名已退役：职责提示词随请求发送，网关不再按工种各铺一条链，旧名在请求边界归一到 `someim-32b`。
+Provider 为 some.im 时，`generalist` 与七个内部窄工种默认使用基础档 `someim-32b`；`implementer` / `tester` / `reviewer` / `ops_runner` 没有托管绑定，默认沿用会话主模型（与 macOS 版一致，`/model` 切换后跟着换；0.84.0-rc3 之前写死 GLM-5）。`worker_tier=expert`（旧名 `deep`）没有有效升级票据不会启动。七个 `someim-32b-<trade>` 别名已退役：职责提示词随请求发送，网关不再按工种各铺一条链，旧名在请求边界归一到 `someim-32b`。
 
 > **注意**：子 Agent 从 Profile 直接构造 Provider 配置，**不继承** `--api-key` / `WILLDEEP_API_KEY`。给子 Agent 绑定独立 Profile 时必须在该 Profile 里写 `api_key` 或 `api_key_env`，见 [认证与凭据](AUTHENTICATION.md)。
 

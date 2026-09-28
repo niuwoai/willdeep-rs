@@ -55,6 +55,18 @@ pub struct RouteDecision {
     pub confidence: u8,
     pub auto_dispatch_read_only: bool,
     pub reason: &'static str,
+    /// 给出最终工种的分类模型；纯关键词判定时为 `None`。
+    pub classifier_model: Option<String>,
+    /// 在它之前失败的分类候选，按尝试顺序。
+    pub classifier_failures: Vec<ClassifierFailure>,
+}
+
+/// 一个没答上来的分类候选：哪个模型、为什么。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassifierFailure {
+    /// 候选的模型名；Provider 说不上来时是 `candidate #<序号>`。
+    pub model: String,
+    pub reason: String,
 }
 
 impl RouteDecision {
@@ -135,29 +147,64 @@ impl RoutingGuard {
         }
 
         let messages = classifier_messages(prompt);
-        for classifier in &self.classifiers {
+        // 失败不再静默吞掉：哪个候选、为什么没答上来，都随决定带回去，由
+        // Agent 作为 `ModelFallback` 事件报出来。
+        let mut failures = Vec::new();
+        for (index, classifier) in self.classifiers.iter().enumerate() {
+            let model = crate::provider::provider_model(classifier.as_ref())
+                .unwrap_or_else(|| format!("candidate #{}", index + 1));
             let completion =
                 match tokio::time::timeout(CLASSIFIER_TIMEOUT, classifier.complete(&messages, &[]))
                     .await
                 {
                     Ok(Ok(completion)) => completion,
-                    Ok(Err(_)) | Err(_) => continue,
+                    Ok(Err(error)) => {
+                        failures.push(ClassifierFailure {
+                            model,
+                            reason: format!("request failed: {error}"),
+                        });
+                        continue;
+                    }
+                    Err(_) => {
+                        failures.push(ClassifierFailure {
+                            model,
+                            reason: format!(
+                                "no answer within {} seconds",
+                                CLASSIFIER_TIMEOUT.as_secs()
+                            ),
+                        });
+                        continue;
+                    }
                 };
             let Some(verdict) = parse_model_verdict(&completion.content) else {
+                failures.push(ClassifierFailure {
+                    model,
+                    reason: "answer was not the expected JSON verdict".to_owned(),
+                });
                 continue;
             };
             let Some(profile) = verdict.profile.as_deref().and_then(known_profile) else {
-                return keyword;
+                return RouteDecision {
+                    classifier_model: Some(model),
+                    classifier_failures: failures,
+                    ..keyword
+                };
             };
             return RouteDecision {
                 profile: Some(profile),
                 reason: "local routing model selected the worker profile",
+                classifier_model: Some(model),
+                classifier_failures: failures,
                 // The model may refine only the trade. Tier, confidence and
                 // auto-dispatch authority remain owned by the keyword path.
                 ..keyword
             };
         }
-        keyword
+        // 所有候选都没答上来，退回关键词判定。
+        RouteDecision {
+            classifier_failures: failures,
+            ..keyword
+        }
     }
 
     pub fn record_tool_success(&self, name: &str) {
@@ -470,7 +517,10 @@ fn classify(prompt: &str, auto_dispatch_read_only: bool) -> RouteDecision {
             profile: Some("implementer"),
             confidence: 78,
             auto_dispatch_read_only: false,
-            reason: "ordinary implementation belongs on the GLM-5 standard tier",
+            // 标准档就是会话模型；以前这里写死「GLM-5」，换了会话模型就是假话。
+            reason: "ordinary implementation belongs on the standard tier",
+            classifier_model: None,
+            classifier_failures: Vec::new(),
         };
     }
     RouteDecision {
@@ -479,6 +529,8 @@ fn classify(prompt: &str, auto_dispatch_read_only: bool) -> RouteDecision {
         confidence: 70,
         auto_dispatch_read_only: false,
         reason: "keep ambiguous work on the standard tier and decompose before escalating",
+        classifier_model: None,
+        classifier_failures: Vec::new(),
     }
 }
 
@@ -494,6 +546,8 @@ fn worker(
         confidence,
         auto_dispatch_read_only,
         reason,
+        classifier_model: None,
+        classifier_failures: Vec::new(),
     }
 }
 
@@ -613,5 +667,66 @@ mod tests {
         assert_eq!(refined.tier, RoutingTier::Standard);
         assert_eq!(refined.confidence, 78);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(refined.classifier_failures.is_empty());
+    }
+
+    /// 一个请求必失败、报得出自己模型名的分类候选。
+    struct BrokenClassifier;
+
+    #[async_trait]
+    impl Provider for BrokenClassifier {
+        fn ledger_identity(&self) -> Option<crate::provider::ProviderIdentity> {
+            Some(crate::provider::ProviderIdentity {
+                provider: "localhost".to_owned(),
+                model: "local-router".to_owned(),
+                local: true,
+            })
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            Err(ProviderError::InvalidResponse(
+                "connection refused".to_owned(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_classifier_candidate_is_reported_with_its_reason_and_the_fallback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fallback = Arc::new(ClassifierProvider {
+            reply: "{\"worker\":\"editor\",\"confidence\":94}",
+            calls: calls.clone(),
+        });
+        let guard = RoutingGuard::new(RoutingPolicy::default())
+            .with_classifiers(vec![Arc::new(BrokenClassifier), fallback]);
+
+        let refined = guard.route("修改这个需求，你看着办").await;
+
+        assert_eq!(refined.profile, Some("editor"));
+        assert_eq!(refined.classifier_failures.len(), 1);
+        assert_eq!(refined.classifier_failures[0].model, "local-router");
+        assert!(
+            refined.classifier_failures[0]
+                .reason
+                .contains("connection refused"),
+            "{:?}",
+            refined.classifier_failures
+        );
+        // 兜底候选报不出模型名，就用它在候选里的序号。
+        assert_eq!(refined.classifier_model.as_deref(), Some("candidate #2"));
+    }
+
+    #[tokio::test]
+    async fn when_every_classifier_fails_the_keyword_route_carries_all_failures() {
+        let guard = RoutingGuard::new(RoutingPolicy::default())
+            .with_classifiers(vec![Arc::new(BrokenClassifier)]);
+        let route = guard.route("修改这个需求，你看着办").await;
+        assert_eq!(route.classifier_model, None);
+        assert_eq!(route.classifier_failures.len(), 1);
+        assert_eq!(route.profile, Some("implementer"), "退回关键词判定");
     }
 }

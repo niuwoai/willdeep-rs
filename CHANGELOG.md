@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.84.0-rc3] - 2026-09-28
+
+### Fixed
+- **`[subagents.deep]` / `[subagents.judge]` 在运行时生效了。** 校验放行这两个旧名，设置面板也回落旧名显示它们的模型，运行时却只按正名找——面板上的模型根本没在跑。现在旧名映射只有一处（`config::subagent_section_id`：generalist ← reader、deep；reviewer ← judge；正名优先），harness 与设置面板共用。`config.example.toml`、`docs/SUBAGENTS.md` 改写正名。
+- **关掉 `small_model_routing` 不再顺带关掉专家档的票据。** 准入以前挂在路由守卫上，路由一关，`worker_tier=expert`（或 `profile="deep"`）不带升级票据也能派出去。准入闸现在总是在，路由关掉时按 `max_deep_calls_per_harness` 单独挂一个。`profile="deep"` 过了专家档准入后也按专家档兑现模型（以前票据照扣，跑的却是 generalist 的基础模型）。
+- **没有托管绑定的工种沿用会话主模型。** some.im 上 implementer / tester / reviewer / ops_runner 以前写死 `glm-5`，会话换了模型它们仍跑 glm-5；现在与 macOS 版一致继承父会话，设置面板显示同一个模型。
+- **`/model` 切换后，「跟主模型一样」的兜底跟着换。** 新增 `MainModelHandle`：主 Agent 与这些兜底共用一格，follower 每次请求时读当前主模型——压缩兜底、分类器兜底、标题模型（没配 `title_model` 时）、非 some.im 的安全裁判（没配 `judge_model` 时）、没有托管绑定的 Worker、非 some.im 的专家档回落。显式配置了模型的照旧不动。Daemon 每个任务按会话模型重建 harness，本来就没有这个问题。
+- **路由分类器不再静默吞错。** 候选失败（请求出错、超时、答非 JSON）的模型与原因随决定带回，Agent 发 `ModelFallback { purpose: "classifier" }` 事件，并写明最终用的是哪个。
+- `agent-metrics` 的 Worker 工种名单从工种目录推出，当前的 generalist / tester / reviewer / ops_runner 不再被漏算。
+
+### Added
+- `route_decided` 事件带 `model`（实际干活的模型）与 `fallback`（是兜底时的原因）。
+- 新事件 `model_fallback`（`purpose` / `skipped` / `used` / `reason`）：压缩、标题换到下一家候选时报出来；`worker_tier=advanced` 等档位在当前 provider 上没有绑定、只放宽了预算没换模型时也报。CLI、`--output json`、TUI 进度行都显示。
+
+### Changed
+- 客户端写死的缺省模型名（`glm-5`、`claude-sonnet-4-5`、`someim-security-guard`、`someim-32b-compressor`、`qwen3-vl-plus`）集中到 `crates/willdeep-cli/src/model_defaults.rs`，值不变。路由理由里写死的「GLM-5 standard tier」改为「standard tier」。
+- `harness::build` 里组装工种的那段拆到 `harness/worker_profiles.rs`，便于和设置面板对拍。
+
+### Model eval
+- **一个任务都没执行的一轮不再归档。** 2026-09-20 起夜跑每晚 60 个任务全部 `error`（退出码 3），照样往 `history.jsonl` 写 `executed: 0` 的行。现在这种一轮不写报告、不进历史，退出 1，并按退出码与 willdeep stderr 最后一行（打码、截断）说明原因；开头连续 3 个 `error` 就停下这个模型。交互 shell 里单任务冒烟正常执行，属夜跑环境问题（launchd 缺环境变量），排查方法写进 `docs/MODEL_EVAL.md`。
+- 工作区 git 铺不起来时记成该任务的 `error` 并带上 git 的报错，不再把整轮带崩；fixture 仓库的提交关掉签名与钩子。
+- `model_eval_nightly.sh`（以及 `agent_metrics_weekly.sh`、`range_weekly.sh`）的失败提示 `$LOG。` 在 launchd 的 C locale 下被 bash 读成未绑定变量，失败分支自己先崩；改为 `${LOG}`。
+
+### Tests
+- core：`MainModelHandle` 跟随与钉住；分类器候选失败带原因、全部失败退回关键词；路由关闭时专家档仍要票据、次数上限生效；`dispatch_model` 报绑定模型与未绑定档位；压缩换家发 `ModelFallback`、首选成功不发。
+- cli：旧名段落进运行时、正名优先、运行时与设置面板对每个公开工种说同一个模型；未托管工种继承并跟随主模型、显式模型不跟随；专家档回落跟随 `/model`；`route_decided` / `model_fallback` 的 JSON；`agent-metrics` 工种归类。
+- scripts：`unusable_reason` / `abort_early?` / `error_hint` 打码；敌意全局 git 配置下 fixture 照样铺得起来；shell 脚本里紧跟非 ASCII 的变量必须带花括号。
+
+### Known issues
+- 安全裁判跟随 `/model` 时，裁决日志里的模型名仍记启动时那个（只是标签）。
+- 子 Agent 记录没有档位字段，`agent-metrics` 的 Deep Share 数不到 `worker_tier=expert` 的运行。
+- `bench/model-eval/history.jsonl` 里已有的 9 行 `executed: 0` 未删除，留给人决定。
+
 ## [0.84.0-rc2] - 2026-09-27
 
 ### Fixed

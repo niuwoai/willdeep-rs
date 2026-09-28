@@ -63,14 +63,16 @@ pub use plugin::{
     PluginManifest, PluginPackage, PluginPermission, PluginRegistry, PluginSource,
 };
 pub use provider::{ApiDialect, ProviderConfig, ProviderKind, build_provider};
-pub use routing::{EscalationTicket, RouteDecision, RoutingGuard, RoutingPolicy, RoutingTier};
+pub use routing::{
+    ClassifierFailure, EscalationTicket, RouteDecision, RoutingGuard, RoutingPolicy, RoutingTier,
+};
 pub use safety::{CommandSafety, classify_with_workspace_write};
 pub use session::{Session, SessionDigest, SessionStore, format_iso8601};
 pub use session_title::TitleSource;
 pub use skills::SkillCatalog;
 pub use subagent::{
-    PUBLIC_SUBAGENT_IDS, SubagentCatalog, SubagentProfile, SubagentWriteScope, TaskPacket,
-    TaskVerifier, TierBinding, builtin_profiles, public_profile_id,
+    DispatchModel, PUBLIC_SUBAGENT_IDS, SubagentCatalog, SubagentProfile, SubagentWriteScope,
+    TaskPacket, TaskVerifier, TierBinding, builtin_profiles, public_profile_id,
 };
 pub use subagent_worktree::SubagentWorktreePolicy;
 pub use tools::{

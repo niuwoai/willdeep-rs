@@ -90,6 +90,15 @@ pub struct SubagentCatalog {
     usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
 }
 
+/// 见 [`SubagentCatalog::dispatch_model`]。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchModel {
+    /// 实际会用的模型；说不上来（测试替身）时为 `None`。
+    pub model: Option<String>,
+    /// 这是兜底而不是所要的那个时，说明原因。
+    pub fallback: Option<String>,
+}
+
 /// 一个档位兑现出来的模型。
 #[derive(Clone)]
 pub struct TierBinding {
@@ -209,6 +218,53 @@ impl SubagentCatalog {
     /// 这一档兑现成什么。没绑就是 `None`。
     pub fn tier_binding(&self, tier: crate::WorkerTier) -> Option<&TierBinding> {
         self.tier_bindings.get(&tier)
+    }
+
+    /// 一次派工会跑在哪个模型上，与 `run_with_id` 的兑现规则同一条：有档位
+    /// 绑定就用绑定，否则是工种自己的模型。给事件与提示用，不改变派工。
+    ///
+    /// 要了贵一档（非 standard）却没有绑定时，`fallback` 说明「只放宽了预算，
+    /// 模型没换」——以前这件事是静默的。
+    pub fn dispatch_model(&self, profile: &str, worker_tier: Option<&str>) -> DispatchModel {
+        let Some(resolved) = self.profile(Some(profile)) else {
+            return DispatchModel::default();
+        };
+        let own = resolved
+            .model
+            .clone()
+            .or_else(|| crate::provider::provider_model(resolved.provider.as_ref()));
+        let Some(tier) = worker_tier.and_then(crate::WorkerTier::parse) else {
+            return DispatchModel {
+                model: own,
+                fallback: None,
+            };
+        };
+        match self.tier_bindings.get(&tier) {
+            Some(binding) => DispatchModel {
+                model: binding
+                    .model
+                    .clone()
+                    .or_else(|| crate::provider::provider_model(binding.provider.as_ref())),
+                fallback: None,
+            },
+            None if tier != crate::WorkerTier::Standard => DispatchModel {
+                fallback: Some(format!(
+                    "worker_tier={} has no model bound on this provider (configure [worker_tiers.{}]); `{}` keeps its own model{} and only gets the wider {}-token budget",
+                    tier.as_str(),
+                    tier.as_str(),
+                    resolved.id,
+                    own.as_deref()
+                        .map(|model| format!(" {model}"))
+                        .unwrap_or_default(),
+                    resolved.context_window.max(tier.context_budget()),
+                )),
+                model: own,
+            },
+            None => DispatchModel {
+                model: own,
+                fallback: None,
+            },
+        }
     }
 
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
@@ -579,6 +635,14 @@ impl SubagentCatalog {
             if profile.model.as_deref() != Some(model.as_str()) {
                 profile.provider = profile.provider.with_model(&model)?;
             }
+            profile.hosted_job_prompt = crate::hosts_job_prompt(&model);
+            profile.model = Some(model);
+        }
+        // 跟随主模型的工种没有固定模型名：派工这一刻主模型是谁，就记谁。
+        // 落盘的派工记录与事件因此记的是实际跑的模型，不是启动时的快照。
+        if profile.model.is_none()
+            && let Some(model) = crate::provider::provider_model(profile.provider.as_ref())
+        {
             profile.hosted_job_prompt = crate::hosts_job_prompt(&model);
             profile.model = Some(model);
         }
@@ -1589,6 +1653,53 @@ mod tests {
         assert_eq!(
             catalog.profile(Some("judge")).map(|p| p.id.as_str()),
             Some("reviewer")
+        );
+    }
+
+    #[test]
+    fn dispatch_model_names_the_bound_model_and_flags_an_unbound_tier() {
+        let mut profiles = builtin_profiles(Arc::new(ReportProvider));
+        for profile in &mut profiles {
+            profile.model = Some("trade-model".to_owned());
+        }
+        let catalog = SubagentCatalog::new(
+            std::env::temp_dir(),
+            profiles,
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_tier_binding(
+            crate::WorkerTier::Expert,
+            TierBinding {
+                provider: Arc::new(ReportProvider),
+                model: Some("gpt-5.6-sol".to_owned()),
+                window: 200_000,
+                hosted_job_prompt: false,
+            },
+        );
+
+        let plain = catalog.dispatch_model("generalist", None);
+        assert_eq!(plain.model.as_deref(), Some("trade-model"));
+        assert_eq!(plain.fallback, None);
+
+        let expert = catalog.dispatch_model("deep", Some("expert"));
+        assert_eq!(expert.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(expert.fallback, None);
+
+        // 进阶档在这个 provider 上没绑：模型没换，这件事必须说出来。
+        let advanced = catalog.dispatch_model("tester", Some("advanced"));
+        assert_eq!(advanced.model.as_deref(), Some("trade-model"));
+        let reason = advanced.fallback.expect("unbound tier is reported");
+        assert!(reason.contains("worker_tier=advanced"), "{reason}");
+        assert!(reason.contains("[worker_tiers.advanced]"), "{reason}");
+
+        // 基础档不绑定是常态，不算兜底。
+        assert_eq!(
+            catalog.dispatch_model("tester", Some("standard")).fallback,
+            None
+        );
+        assert_eq!(
+            catalog.dispatch_model("no_such_trade", None),
+            DispatchModel::default()
         );
     }
 

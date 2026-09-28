@@ -1025,6 +1025,92 @@ async fn deep_spawn_is_refused_before_provider_work_without_a_ticket() {
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
+/// `small_model_routing = false` 时宿主不挂路由守卫。以前准入挂在路由守卫
+/// 上，于是路由一关，专家档就不要票据了。
+#[tokio::test]
+async fn expert_tier_needs_a_ticket_even_with_small_model_routing_off() {
+    let provider = RecordingProvider::new(&["unused"]);
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-expert-gate-no-routing-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).expect("workspace");
+    let catalog = Arc::new(SubagentCatalog::new(
+        &root,
+        crate::subagent::builtin_profiles(provider.clone()),
+        Arc::new(BackgroundTaskRegistry::default()),
+    ));
+    let agent = Agent::new(
+        provider.clone(),
+        registry("expert-gate-no-routing"),
+        AgentConfig {
+            max_turns: 2,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_subagents(catalog);
+    for (id, arguments) in [
+        (
+            "tier",
+            serde_json::json!({"profile": "generalist", "worker_tier": "expert", "prompt": "inspect everything"}),
+        ),
+        (
+            "legacy-name",
+            serde_json::json!({"profile": "deep", "prompt": "inspect everything"}),
+        ),
+    ] {
+        let call = ToolCall {
+            id: id.to_owned(),
+            name: "spawn_agent".to_owned(),
+            arguments: arguments.to_string(),
+        };
+        let error = agent
+            .execute_tool(&call)
+            .await
+            .expect_err("expert without a ticket must be rejected with routing off");
+        assert!(
+            error.to_string().contains("deep requires escalation"),
+            "{id}: {error}"
+        );
+    }
+    assert!(
+        provider.requests.lock().expect("requests").is_empty(),
+        "被拒的派工不该碰到模型"
+    );
+
+    // 配置的次数上限同样生效：0 次就是一次都不放。
+    let guarded = Agent::new(
+        provider,
+        registry("expert-gate-budget"),
+        AgentConfig {
+            max_turns: 2,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_admission_guard(Arc::new(RoutingGuard::new(crate::RoutingPolicy {
+        auto_dispatch_read_only: true,
+        max_deep_calls: 0,
+    })));
+    guarded.admission.record_profile_attempt("generalist");
+    let ticket = crate::EscalationTicket {
+        reason: "cross-module invariants still conflict".to_owned(),
+        attempted_profiles: vec!["generalist".to_owned()],
+        context_evidence: "twenty modules remain coupled after slicing".to_owned(),
+        why_not_decompose: "the same invariant must be proven across every module".to_owned(),
+    };
+    let refused = guarded
+        .admission
+        .authorize_deep(Some(&ticket))
+        .expect_err("zero budget refuses");
+    assert!(refused.contains("budget exhausted"), "{refused}");
+    assert!(guarded.routing.is_none(), "只挂准入，不开路由");
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
 #[tokio::test]
 async fn rejected_write_packet_does_not_unlock_deep() {
     let provider = RecordingProvider::new(&["unused"]);

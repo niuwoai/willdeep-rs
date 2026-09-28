@@ -33,7 +33,7 @@ mod types;
 mod test_support;
 
 pub use audit::{CitationAudit, audit_citations};
-pub use catalog::{SubagentCatalog, TierBinding};
+pub use catalog::{DispatchModel, SubagentCatalog, TierBinding};
 pub use profiles::{
     HOSTED_WORKER_MODEL_PREFIX, STANDARD_WINDOW, WORKER_WINDOW_BALANCED, WORKER_WINDOW_STANDARD,
     WORKER_WINDOW_WIDE, builtin_profiles, hosted_worker_model,

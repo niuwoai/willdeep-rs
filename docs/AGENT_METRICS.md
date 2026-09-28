@@ -18,8 +18,11 @@
 | 只读工种引用准确率 | 只读工种引用的位置真实存在的比例 | — |
 | 未验证 | 没给 verifier 的运行数，独立于通过与失败的第三种答案 | — |
 
-窄工种是 `scout` / `reader` / `log_inspector` / `git_detective` / `editor` / `test_fixer` / `build_fixer`；
-`deep` 按设计跑父模型，不算派工；`implementer` 是标准档。目标值与 CLI 打印在每个比率旁边的是
+Worker 工种从工种目录推出（`willdeep_core::public_profile_id` 认得的名字）：当前的 `generalist` /
+`tester` / `reviewer` / `ops_runner`，加上内部窄工种 `scout` / `reader` / `log_inspector` / `git_detective` /
+`editor` / `test_fixer` / `build_fixer`（0.84.0-rc3 之前名单是手抄的，只有后七个，当前工种全被漏算）。
+`implementer` 是标准档；`deep` 是改名前在子预算上跑父模型的工种，只出现在旧记录里，不算派工。专家档
+现在是 `worker_tier` 而不是工种，子 Agent 记录里没有档位字段，Deep Share 数不到它。目标值与 CLI 打印在每个比率旁边的是
 同一组常量（`crates/willdeep-cli/src/agent_metrics.rs`），发布脚本报警也认它。
 
 三条边界，与 [小上下文 Skill Worker](SKILL_WORKERS.md) 的「遥测与指标」同源：

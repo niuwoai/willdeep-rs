@@ -8,7 +8,7 @@ use willdeep_core::tools::ApprovalTrace;
 use willdeep_core::{
     Agent, AgentConfig, ApprovalMode, Approver, BackgroundTaskKind, BackgroundTaskRegistry,
     BackgroundTaskStatus, EventSink, ProviderSafetyJudge, RoutingGuard, RoutingPolicy, SafetyJudge,
-    SubagentCatalog, ToolRegistry, WebToolConfig, build_provider, builtin_profiles,
+    SubagentCatalog, ToolRegistry, WebToolConfig, build_provider,
 };
 
 use crate::config::LoadedConfig;
@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod verification;
+mod worker_profiles;
 
 /// 把三个 Worker 档位各自解析成一个模型绑定。
 ///
@@ -38,12 +39,39 @@ mod verification;
 fn resolve_tier_bindings(
     file: &crate::config::ConfigFile,
     parent: &ProviderConfig,
+    follow_main: &Arc<dyn willdeep_core::provider::Provider>,
     kind: ProviderKind,
     session_window: u64,
 ) -> Result<Vec<(willdeep_core::WorkerTier, willdeep_core::TierBinding)>> {
     let mut bindings = Vec::new();
     for tier in willdeep_core::WorkerTier::ALL {
         let configured = file.worker_tiers.get(tier.as_str());
+        let window = configured
+            .and_then(|value| value.context_window)
+            .unwrap_or_else(|| match tier {
+                // 专家档兑现的是整个会话预算——这一档贵到要票据，就是因为它
+                // 把会话窗口整个交给一个 Worker。
+                willdeep_core::WorkerTier::Expert => tier.context_budget().max(session_window),
+                _ => tier.context_budget(),
+            });
+        // 专家档在非网关 provider 上、又没配任何东西时回落「会话模型」：跟着
+        // `/model` 走，而不是钉死启动时那个。模型名留空，派工时现取。
+        if tier == willdeep_core::WorkerTier::Expert
+            && kind != ProviderKind::SomeIm
+            && configured
+                .is_none_or(|value| value.provider_profile.is_none() && value.model.is_none())
+        {
+            bindings.push((
+                tier,
+                willdeep_core::TierBinding {
+                    provider: follow_main.clone(),
+                    hosted_job_prompt: false,
+                    model: None,
+                    window,
+                },
+            ));
+            continue;
+        }
         let mut provider_config =
             match configured.and_then(|value| value.provider_profile.as_deref()) {
                 // 这里是 fail-fast：绑了却建不起来（多半是那个 Profile 的密钥
@@ -67,17 +95,11 @@ fn resolve_tier_bindings(
                 (tier == willdeep_core::WorkerTier::Expert).then(|| parent.model.clone())
             })
         else {
+            // 不绑定：派工时只放宽预算。Agent 会在那一刻发 `ModelFallback`
+            // 说明「要了这一档但模型没换」，不再静默。
             continue;
         };
         provider_config.model = model.clone();
-        let window = configured
-            .and_then(|value| value.context_window)
-            .unwrap_or_else(|| match tier {
-                // 专家档兑现的是整个会话预算——这一档贵到要票据，就是因为它
-                // 把会话窗口整个交给一个 Worker。
-                willdeep_core::WorkerTier::Expert => tier.context_budget().max(session_window),
-                _ => tier.context_budget(),
-            });
         let binding = willdeep_core::TierBinding {
             provider: build_provider(provider_config).with_context(|| {
                 format!("initialize {} worker tier model {model}", tier.as_str())
@@ -91,11 +113,9 @@ fn resolve_tier_bindings(
     Ok(bindings)
 }
 
-/// The some.im alias whose safety policy is managed on the gateway. It is a
-/// reasoning model: it emits a long private rationale before the verdict tag,
-/// which is why the judge must never cap its output tightly (see
-/// [`willdeep_core::judge`]).
-const SOMEIM_SECURITY_GUARD_MODEL: &str = "someim-security-guard";
+use crate::model_defaults::{
+    SOMEIM_CONTEXT_COMPRESSOR_MODEL, SOMEIM_SECURITY_GUARD_MODEL, SOMEIM_VISION_FALLBACK_MODEL,
+};
 
 /// The judge's model when `[agent] judge_model` is unset.
 ///
@@ -112,16 +132,6 @@ fn default_judge_model(kind: ProviderKind, session_model: &str) -> String {
         _ => session_model.to_owned(),
     }
 }
-
-/// The context compressor's model when `[agent] compressor_model` is unset.
-///
-/// Compression re-sends the whole older history in one request — the largest
-/// single fixed cost in the loop. On some.im it goes to the gateway-hosted
-/// `someim-32b-compressor` (flash-tier pricing; the fixed compression prompt
-/// is injected server-side in replace mode, see muchtoken
-/// docs/someim-32b-compressor.md). Every other provider keeps the session
-/// model with the inline instruction.
-const SOMEIM_CONTEXT_COMPRESSOR_MODEL: &str = "someim-32b-compressor";
 
 /// Append one approval decision to `~/.willdeep/approvals.jsonl`. This is the
 /// audit trail for "why did that command run without asking me" — and the
@@ -692,7 +702,7 @@ pub(crate) async fn build(
     let image_fallback = if kind == ProviderKind::SomeIm && !model_accepts_images(&model) {
         let vision_model = profile
             .and_then(|value| value.vision_model.clone())
-            .unwrap_or_else(|| "qwen3-vl-plus".to_owned());
+            .unwrap_or_else(|| SOMEIM_VISION_FALLBACK_MODEL.to_owned());
         let mut vision_config = provider_config.clone();
         vision_config.dialect = ApiDialect::ChatCompletions;
         vision_config.model = vision_model.clone();
@@ -707,6 +717,10 @@ pub(crate) async fn build(
     };
     let parent_provider_config = provider_config.clone();
     let provider = build_provider(provider_config).context("initialize provider")?;
+    // 主模型一格共享：凡是「定义为跟主模型一样」的兜底都拿 follower，`/model`
+    // 一换全跟着换；显式配了模型的照旧是自己那一份。
+    let main_model = willdeep_core::provider::MainModelHandle::new(provider.clone());
+    let follow_main = main_model.follower();
     let local_auxiliary_config = local_auxiliary_provider_config(&loaded.file.local_model);
     let (runtime_access, runtime_approval_handle, runtime_inbox) = match &frontend {
         HarnessFrontend::Runtime {
@@ -823,18 +837,21 @@ pub(crate) async fn build(
     // the gateway's managed `someim-security-guard` policy, elsewhere the
     // session's own model. `[agent] judge_model` overrides both.
     let safety_judge = if loaded.file.agent.safety_judge.unwrap_or(true) {
-        let judge_model = loaded
-            .file
-            .agent
-            .judge_model
+        let configured_judge = loaded.file.agent.judge_model.clone();
+        let judge_model = configured_judge
             .clone()
             .unwrap_or_else(|| default_judge_model(kind, &model));
-        let mut judge_config = parent_provider_config.clone();
-        judge_config.model = judge_model.clone();
+        // 没配 judge_model 且不在 some.im 上，裁判就是「会话模型」：跟着 `/model`
+        // 走。裁决日志里的模型名仍记启动时那个——它只是标签。
+        let judge_provider = if configured_judge.is_none() && kind != ProviderKind::SomeIm {
+            follow_main.clone()
+        } else {
+            let mut judge_config = parent_provider_config.clone();
+            judge_config.model = judge_model.clone();
+            build_provider(judge_config).context("initialize safety judge provider")?
+        };
         Some(Arc::new(ProviderSafetyJudge::new(
-            usage_ledger.auxiliary(
-                build_provider(judge_config).context("initialize safety judge provider")?,
-            ),
+            usage_ledger.auxiliary(judge_provider),
             judge_model,
         )) as Arc<dyn SafetyJudge>)
     } else {
@@ -918,87 +935,12 @@ pub(crate) async fn build(
     let context_window = profile
         .and_then(|value| value.context_window)
         .unwrap_or(128_000);
-    let cheap_model = if kind == ProviderKind::SomeIm {
-        "glm-5".to_owned()
-    } else {
-        model.clone()
-    };
-    let cheap_provider = if kind == ProviderKind::SomeIm {
-        let mut cheap = parent_provider_config.clone();
-        cheap.model = cheap_model.clone();
-        build_provider(cheap).context("initialize default subagent provider")?
-    } else {
-        provider.clone()
-    };
-    let mut subagent_profiles = builtin_profiles(cheap_provider);
-    for subagent in &mut subagent_profiles {
-        // some.im 上基础档统一是 `someim-32b`：同一个网关、同一批账号，同一个
-        // 职责在两个客户端必须解析到同一个模型。历史上的 `someim-32b-<工种>`
-        // 已经退役，职责提示词改由客户端随请求发送。
-        let hosted = (kind == ProviderKind::SomeIm)
-            .then(|| willdeep_core::subagent::hosted_worker_model(&subagent.id))
-            .flatten();
-        // 每个工种都走自己的托管绑定，没有绑定时回落便宜模型。没有哪个职责
-        // 天生配父模型——那是 WorkerTier::Expert 的事，而那一档要票据。
-        subagent.model = Some(hosted.clone().unwrap_or_else(|| cheap_model.clone()));
-        if let Some(hosted_model) = &hosted {
-            let mut configured = parent_provider_config.clone();
-            configured.model = hosted_model.clone();
-            subagent.provider = build_provider(configured)
-                .with_context(|| format!("initialize hosted subagent model {hosted_model}"))?;
-        }
-        if let Some(settings) = loaded.file.subagents.get(&subagent.id) {
-            if let Some(provider_name) = settings.provider_profile.as_deref() {
-                let mut configured = provider_config_from_profile(&loaded.file, provider_name)?;
-                if let Some(model) = &settings.model {
-                    configured.model = model.clone();
-                }
-                subagent.model = Some(configured.model.clone());
-                subagent.provider = build_provider(configured)
-                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
-            } else if let Some(model) = &settings.model {
-                let mut configured = parent_provider_config.clone();
-                configured.model = model.clone();
-                subagent.model = Some(model.clone());
-                subagent.provider = build_provider(configured)
-                    .with_context(|| format!("initialize subagent profile {}", subagent.id))?;
-            }
-            if let Some(max_turns) = settings.max_turns {
-                subagent.max_turns = max_turns;
-            }
-            if let Some(window) = settings.context_window {
-                subagent.context_window = window;
-            }
-            if let Some(token_budget) = settings.token_budget {
-                subagent.token_budget = Some(token_budget);
-            }
-            if let Some(timeout_seconds) = settings.timeout_seconds {
-                subagent.timeout_seconds = Some(timeout_seconds);
-            }
-            if let Some(max_failures) = settings.max_consecutive_failures {
-                subagent.max_consecutive_failures = max_failures;
-            }
-            if let Some(limit) = settings.tool_output_limit {
-                subagent.tool_output_limit = Some(limit);
-            }
-            if let Some(max_attempts) = settings.max_attempts {
-                subagent.max_attempts = max_attempts;
-            }
-            if let Some(worktree) = settings.worktree.as_deref() {
-                subagent.worktree = match worktree {
-                    "dedicated" => willdeep_core::SubagentWorktreePolicy::Dedicated,
-                    _ => willdeep_core::SubagentWorktreePolicy::Shared,
-                };
-            }
-        }
-        // 判定放在所有覆盖之后，跟着**最终**解析出的模型走。跟着工种名走是
-        // 错的：工种绑成 `someim-32b` 时网关并不会 prepend 职责提示词，客户端
-        // 若也把自己那份省掉，Worker 就只剩边界段落、不知道自己是干什么的。
-        subagent.hosted_job_prompt = subagent
-            .model
-            .as_deref()
-            .is_some_and(willdeep_core::hosts_job_prompt);
-    }
+    let subagent_profiles = worker_profiles::configure_worker_profiles(
+        &loaded.file,
+        &parent_provider_config,
+        &follow_main,
+        kind,
+    )?;
     tools
         .require_verifications(&loaded.file.agent.verification_commands)
         .map_err(anyhow::Error::msg)?;
@@ -1020,9 +962,13 @@ pub(crate) async fn build(
         .with_event_sink(sink.clone())
         .with_usage_ledger(usage_ledger.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
-    for (tier, binding) in
-        resolve_tier_bindings(&loaded.file, &parent_provider_config, kind, context_window)?
-    {
+    for (tier, binding) in resolve_tier_bindings(
+        &loaded.file,
+        &parent_provider_config,
+        &follow_main,
+        kind,
+        context_window,
+    )? {
         catalog = catalog.with_tier_binding(tier, binding);
     }
     // Verifier commands run unattended, with no approval card to fall back
@@ -1062,6 +1008,7 @@ pub(crate) async fn build(
             token_budget: loaded.file.agent.token_budget,
         },
     )
+    .with_main_model(main_model)
     .with_event_sink(sink)
     .with_subagents(subagents)
     .with_goal_continuation(goal_continuation.clone())
@@ -1072,11 +1019,12 @@ pub(crate) async fn build(
     if let Some(inbox) = runtime_inbox {
         agent = agent.with_instruction_inbox(inbox);
     }
+    let routing_policy = RoutingPolicy {
+        auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
+        max_deep_calls: loaded.file.agent.max_deep_calls_per_harness.unwrap_or(1),
+    };
     if loaded.file.agent.small_model_routing.unwrap_or(true) {
-        let mut routing = RoutingGuard::new(RoutingPolicy {
-            auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
-            max_deep_calls: loaded.file.agent.max_deep_calls_per_harness.unwrap_or(1),
-        });
+        let mut routing = RoutingGuard::new(routing_policy);
         if loaded.file.local_model.enabled
             && loaded.file.local_model.prefer_for_worker_routing
             && let Some(local_config) = local_auxiliary_config.clone()
@@ -1085,10 +1033,13 @@ pub(crate) async fn build(
                 usage_ledger.auxiliary(
                     build_provider(local_config).context("initialize local routing model")?,
                 ),
-                usage_ledger.auxiliary(provider.clone()),
+                usage_ledger.auxiliary(follow_main.clone()),
             ]);
         }
         agent = agent.with_routing_guard(Arc::new(routing));
+    } else {
+        // 路由关了，专家档的票据与次数上限照样生效——那道闸与路由无关。
+        agent = agent.with_admission_guard(Arc::new(RoutingGuard::new(routing_policy)));
     }
     if let Some((vision_provider, vision_model)) = image_fallback {
         agent = agent.with_image_fallback(vision_provider, format!("some.im / {vision_model}"));
@@ -1109,7 +1060,8 @@ pub(crate) async fn build(
             hosted_prompt,
         ));
     }
-    compressors.push((provider.clone(), false));
+    // 会话模型兜底跟着 `/model` 走。
+    compressors.push((follow_main.clone(), false));
     agent = agent.with_compressors(compressors);
 
     // 标题同样本地优先、会话 Provider 兜底；请求仍只带一问一答各 800 字。
@@ -1118,7 +1070,7 @@ pub(crate) async fn build(
     let auto_title = loaded.file.agent.auto_title.unwrap_or(true);
     let input_suggestions = loaded.file.agent.input_suggestions.unwrap_or(true);
     if auto_title || input_suggestions {
-        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config)?
+        let auxiliaries = auxiliary_providers(loaded, &parent_provider_config, Some(&follow_main))?
             .into_iter()
             .map(|provider| usage_ledger.auxiliary(provider))
             .collect::<Vec<_>>();
@@ -1214,9 +1166,13 @@ fn compressor_candidate_configs(
 
 /// 标题与下一句预测共用的小模型候选：本地模型（`prefer_for_titles`）优先，
 /// 会话 Provider 换成 `title_model` 兜底。按顺序试，前一家请求失败才问下一家。
+///
+/// 没配 `title_model` 时兜底就是会话模型：有 `follow_main` 就用它，跟着 `/model`
+/// 走；没有（Web 端不起 Agent 的一次性预测）才按 `parent` 现建一份。
 pub(crate) fn auxiliary_providers(
     loaded: &LoadedConfig,
     parent: &ProviderConfig,
+    follow_main: Option<&Arc<dyn willdeep_core::provider::Provider>>,
 ) -> Result<Vec<Arc<dyn willdeep_core::provider::Provider>>> {
     let mut auxiliaries = Vec::new();
     if loaded.file.local_model.prefer_for_titles
@@ -1225,11 +1181,17 @@ pub(crate) fn auxiliary_providers(
         auxiliaries
             .push(build_provider(local_config).context("initialize local session title model")?);
     }
-    let mut title_config = parent.clone();
-    if let Some(title_model) = loaded.file.agent.title_model.clone() {
-        title_config.model = title_model;
+    match (loaded.file.agent.title_model.clone(), follow_main) {
+        (None, Some(follow_main)) => auxiliaries.push(follow_main.clone()),
+        (title_model, _) => {
+            let mut title_config = parent.clone();
+            if let Some(title_model) = title_model {
+                title_config.model = title_model;
+            }
+            auxiliaries
+                .push(build_provider(title_config).context("initialize session title provider")?);
+        }
     }
-    auxiliaries.push(build_provider(title_config).context("initialize session title provider")?);
     Ok(auxiliaries)
 }
 
@@ -1244,7 +1206,7 @@ pub(crate) fn input_suggestion_providers(
         .context("build default CLI settings")?;
     cli.model = model;
     let parent = resolve_parent_provider_config(&cli, loaded, profile)?;
-    auxiliary_providers(loaded, &parent)
+    auxiliary_providers(loaded, &parent, None)
 }
 
 fn local_auxiliary_provider_config(
@@ -1800,19 +1762,68 @@ mod tests {
         kind: ProviderKind,
         parent_model: &str,
     ) -> Vec<(String, String, u64)> {
+        bound_models_following(source, kind, parent_model, None)
+    }
+
+    /// 同 [`bound_models`]，但在解析之后把主模型切到 `switched_to`，看绑定报
+    /// 出来的是哪个模型。
+    fn bound_models_following(
+        source: &str,
+        kind: ProviderKind,
+        parent_model: &str,
+        switched_to: Option<&str>,
+    ) -> Vec<(String, String, u64)> {
         let file: crate::config::ConfigFile =
             toml::from_str(source).expect("parse tier config fixture");
-        resolve_tier_bindings(&file, &parent_config(kind, parent_model), kind, 400_000)
-            .expect("resolve tier bindings")
+        let parent = parent_config(kind, parent_model);
+        let main_model = willdeep_core::provider::MainModelHandle::new(
+            build_provider(parent.clone()).expect("build parent provider"),
+        );
+        let bindings = resolve_tier_bindings(&file, &parent, &main_model.follower(), kind, 400_000)
+            .expect("resolve tier bindings");
+        if let Some(model) = switched_to {
+            main_model.set_model(model).expect("switch main model");
+        }
+        bindings
             .into_iter()
             .map(|(tier, binding)| {
                 (
                     tier.as_str().to_owned(),
-                    binding.model.unwrap_or_default(),
+                    binding
+                        .model
+                        .or_else(|| {
+                            willdeep_core::provider::provider_model(binding.provider.as_ref())
+                        })
+                        .unwrap_or_default(),
                     binding.window,
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn the_expert_fallback_follows_a_model_switch_but_explicit_bindings_do_not() {
+        // `/model` 之后，「回落父模型」的专家档必须跟着换；显式绑定的不动。
+        let bound = bound_models_following(
+            "version = 1\n",
+            ProviderKind::Anthropic,
+            "opus-5",
+            Some("opus-6"),
+        );
+        assert_eq!(
+            bound,
+            vec![("expert".to_owned(), "opus-6".to_owned(), 400_000)]
+        );
+        let pinned = bound_models_following(
+            "version = 1\n[worker_tiers.expert]\nmodel = \"opus-5\"\n",
+            ProviderKind::Anthropic,
+            "opus-5",
+            Some("opus-6"),
+        );
+        assert_eq!(
+            pinned,
+            vec![("expert".to_owned(), "opus-5".to_owned(), 400_000)]
+        );
     }
 
     #[test]
@@ -1885,13 +1896,13 @@ context_window = 500000
         let file: crate::config::ConfigFile =
             toml::from_str("version = 1\n[worker_tiers.advanced]\nmodel = \"someim-32b-reader\"\n")
                 .expect("parse legacy alias config");
-        let bindings = resolve_tier_bindings(
-            &file,
-            &parent_config(ProviderKind::SomeIm, "glm-5"),
-            ProviderKind::SomeIm,
-            400_000,
-        )
-        .expect("resolve tier bindings");
+        let parent = parent_config(ProviderKind::SomeIm, "glm-5");
+        let follow_main =
+            willdeep_core::provider::MainModelHandle::new(build_provider(parent.clone()).unwrap())
+                .follower();
+        let bindings =
+            resolve_tier_bindings(&file, &parent, &follow_main, ProviderKind::SomeIm, 400_000)
+                .expect("resolve tier bindings");
         let advanced = bindings
             .iter()
             .find(|(tier, _)| *tier == willdeep_core::WorkerTier::Advanced)

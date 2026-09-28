@@ -28,6 +28,7 @@ mod integrations;
 mod job_cmd;
 mod mcp_cmd;
 mod mobile;
+mod model_defaults;
 mod model_routing;
 mod notify;
 mod onboarding;
@@ -1112,8 +1113,8 @@ pub(crate) fn provider_arg_name(provider: ProviderArg) -> &'static str {
 /// 没写模型名时各 Provider 的缺省模型；OpenAI-compatible 端点五花八门，不猜。
 pub(crate) fn default_model(kind: ProviderKind) -> Option<&'static str> {
     match kind {
-        ProviderKind::SomeIm => Some("glm-5"),
-        ProviderKind::Anthropic => Some("claude-sonnet-4-5"),
+        ProviderKind::SomeIm => Some(model_defaults::SOMEIM_DEFAULT_MODEL),
+        ProviderKind::Anthropic => Some(model_defaults::ANTHROPIC_DEFAULT_MODEL),
         ProviderKind::OpenAiCompatible => None,
     }
 }
@@ -1574,12 +1575,28 @@ impl EventSink for TerminalSink {
                 confidence,
                 auto_dispatched,
                 reason,
+                model,
+                fallback,
             } => eprintln!(
-                "[route] tier={} profile={} confidence={} auto={} reason={reason}",
+                "[route] tier={} profile={} model={} confidence={} auto={} reason={reason}{}",
                 tier.as_str(),
                 profile.as_deref().unwrap_or("root"),
+                model.as_deref().unwrap_or("-"),
                 confidence,
-                auto_dispatched
+                auto_dispatched,
+                fallback
+                    .map(|fallback| format!(" fallback={fallback}"))
+                    .unwrap_or_default()
+            ),
+            AgentEvent::ModelFallback {
+                purpose,
+                skipped,
+                used,
+                reason,
+            } => eprintln!(
+                "[model fallback] {purpose}: skipped={} used={} reason={reason}",
+                skipped.as_deref().unwrap_or("-"),
+                used.as_deref().unwrap_or("-"),
             ),
             AgentEvent::TurnStarted { turn } if turn > 1 => eprintln!("[turn {turn}]"),
             AgentEvent::TurnPreempted { turn } => {
@@ -1764,12 +1781,28 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             confidence,
             auto_dispatched,
             reason,
+            model,
+            fallback,
         } => serde_json::json!({
             "type": "route_decided",
             "tier": tier.as_str(),
             "profile": profile,
             "confidence": confidence,
             "auto_dispatched": auto_dispatched,
+            "reason": reason,
+            "model": model,
+            "fallback": fallback
+        }),
+        AgentEvent::ModelFallback {
+            purpose,
+            skipped,
+            used,
+            reason,
+        } => serde_json::json!({
+            "type": "model_fallback",
+            "purpose": purpose,
+            "skipped": skipped,
+            "used": used,
             "reason": reason
         }),
         AgentEvent::TurnStarted { turn } => {
@@ -2557,6 +2590,8 @@ mod tests {
                 confidence: 90,
                 auto_dispatched: true,
                 reason: "bounded read-only work".to_owned(),
+                model: Some("someim-32b".to_owned()),
+                fallback: None,
             }),
             serde_json::json!({
                 "type": "route_decided",
@@ -2564,7 +2599,24 @@ mod tests {
                 "profile": "scout",
                 "confidence": 90,
                 "auto_dispatched": true,
-                "reason": "bounded read-only work"
+                "reason": "bounded read-only work",
+                "model": "someim-32b",
+                "fallback": null
+            })
+        );
+        assert_eq!(
+            agent_event_json(AgentEvent::ModelFallback {
+                purpose: "compressor".to_owned(),
+                skipped: Some("someim-32b-compressor".to_owned()),
+                used: Some("glm-5".to_owned()),
+                reason: "someim-32b-compressor: HTTP 502".to_owned(),
+            }),
+            serde_json::json!({
+                "type": "model_fallback",
+                "purpose": "compressor",
+                "skipped": "someim-32b-compressor",
+                "used": "glm-5",
+                "reason": "someim-32b-compressor: HTTP 502"
             })
         );
         assert_eq!(

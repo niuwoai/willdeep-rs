@@ -323,7 +323,12 @@ impl Agent {
             self.compressors.clone()
         };
         let mut last_error = None;
-        for (provider, hosted_prompt) in candidates {
+        // 前面几家为什么没压成。换到下一家时要把这件事报出来：压缩兜底落到
+        // 会话模型上是按会话模型计价的，静默换过去等于静默涨价。
+        let mut skipped: Vec<(String, String)> = Vec::new();
+        for (index, (provider, hosted_prompt)) in candidates.into_iter().enumerate() {
+            let model = crate::provider::provider_model(provider.as_ref())
+                .unwrap_or_else(|| format!("candidate #{}", index + 1));
             let request = if hosted_prompt {
                 Message::user(source.clone())
             } else {
@@ -359,12 +364,22 @@ impl Agent {
                 Ok(completion)
                     if !completion.content.trim().is_empty() && !completion.is_incomplete() =>
                 {
+                    self.report_model_fallback("compressor", &skipped, Some(model))
+                        .await;
                     return Ok(completion.content);
                 }
-                Ok(_) => last_error = Some(ProviderError::EmptyResponse),
-                Err(error) => last_error = Some(error),
+                Ok(_) => {
+                    skipped.push((model, "empty or incomplete summary".to_owned()));
+                    last_error = Some(ProviderError::EmptyResponse);
+                }
+                Err(error) => {
+                    skipped.push((model, error.to_string()));
+                    last_error = Some(error);
+                }
             }
         }
+        self.report_model_fallback("compressor", &skipped, None)
+            .await;
         Err(last_error.unwrap_or(ProviderError::EmptyResponse).into())
     }
 }

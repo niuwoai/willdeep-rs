@@ -118,6 +118,8 @@ impl Provider for BilledProvider {
 struct Ledger {
     checkpoints: Mutex<Vec<RunCheckpoint>>,
     usage: Mutex<Vec<Usage>>,
+    /// `(purpose, used, reason)` of every `ModelFallback` event.
+    fallbacks: Mutex<Vec<(String, Option<String>, String)>>,
 }
 
 impl CheckpointSink for Ledger {
@@ -130,8 +132,15 @@ impl CheckpointSink for Ledger {
 #[async_trait]
 impl EventSink for Ledger {
     async fn emit(&self, event: AgentEvent) {
-        if let AgentEvent::Usage(usage) = event {
-            self.usage.lock().unwrap().push(usage);
+        match event {
+            AgentEvent::Usage(usage) => self.usage.lock().unwrap().push(usage),
+            AgentEvent::ModelFallback {
+                purpose,
+                used,
+                reason,
+                ..
+            } => self.fallbacks.lock().unwrap().push((purpose, used, reason)),
+            _ => {}
         }
     }
 }
@@ -141,7 +150,7 @@ async fn automatic_compression_counts_in_outcome_and_durable_usage() {
     let (mut agent, _) = agent(WINDOW);
     let root = BilledProvider::new("done", 3);
     let compressor = BilledProvider::new("summary", 10);
-    agent.provider = RwLock::new(root.clone());
+    agent.provider = crate::provider::MainModelHandle::new(root.clone());
     let ledger = Arc::new(Ledger::default());
     let agent = agent
         .with_compressors(vec![(compressor.clone(), false)])
@@ -168,7 +177,7 @@ async fn automatic_compression_counts_in_outcome_and_durable_usage() {
 async fn compression_exhausting_budget_prevents_root_request_and_keeps_bill() {
     let (mut agent, _) = agent(WINDOW);
     let root = BilledProvider::new("must not run", 3);
-    agent.provider = RwLock::new(root.clone());
+    agent.provider = crate::provider::MainModelHandle::new(root.clone());
     agent.config.token_budget = Some(12);
     let ledger = Arc::new(Ledger::default());
     let agent = agent
@@ -215,4 +224,26 @@ async fn manual_compression_reports_unusable_and_interrupted_fallback_usage() {
         usage.iter().map(|u| u.input_tokens.unwrap()).sum::<u64>(),
         22
     );
+    // 换到第三家这件事要报出来：哪两家没压成、为什么、最后用的是谁。
+    let fallbacks = ledger.fallbacks.lock().unwrap();
+    assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
+    let (purpose, used, reason) = &fallbacks[0];
+    assert_eq!(purpose, "compressor");
+    assert_eq!(used.as_deref(), Some("candidate #3"));
+    assert!(
+        reason.contains("candidate #1: empty or incomplete summary"),
+        "{reason}"
+    );
+    assert!(reason.contains("candidate #2: "), "{reason}");
+}
+
+#[tokio::test]
+async fn a_first_choice_compressor_that_works_reports_no_fallback() {
+    let (agent, _) = agent(WINDOW);
+    let ledger = Arc::new(Ledger::default());
+    let agent = agent
+        .with_compressors(vec![(BilledProvider::new("summary", 10), false)])
+        .with_event_sink(ledger.clone());
+    agent.compress_history(history()).await.unwrap();
+    assert!(ledger.fallbacks.lock().unwrap().is_empty());
 }

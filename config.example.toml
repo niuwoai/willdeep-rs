@@ -144,10 +144,10 @@ max_consecutive_failures = 3
 [subagents.reader]
 context_window = 49152
 
-[subagents.deep]
-# `deep` 现在是 generalist 的旧名，段落保留是为了别人写好的 config 不失效。
-# 它已经不再自带「最贵的模型」这层含义——那层含义搬到了 worker_tier=expert，
-# 准入也跟着档位走（改名当天差点在这里漏掉，见 CHANGELOG 0.51.0-rc1）。
+[subagents.generalist]
+# 兜底通用工种。旧名 `[subagents.deep]`（以及 `[subagents.reader]`）仍然能被
+# 运行时和设置面板读到，但新写的 config 请用正名。它不带「最贵的模型」这层
+# 含义——那层含义在 worker_tier=expert，准入也跟着档位走。
 provider_profile = "some-im"
 model = "deepseek-v4-flash"
 context_window = 1000000
@@ -178,7 +178,8 @@ context_window = 49152
 max_turns = 32
 timeout_seconds = 1200
 
-[subagents.judge]
+[subagents.reviewer]
+# 旧名 `[subagents.judge]` 仍然有效。
 context_window = 49152
 max_turns = 12
 timeout_seconds = 600
