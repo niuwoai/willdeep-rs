@@ -1377,33 +1377,38 @@ fn draw(
         let offset = max
             .saturating_sub(app.scroll_from_bottom)
             .min(u16::MAX as usize) as u16;
+        // 标题带上工作区名：并排开着几个 TUI 时，一眼能分清哪个窗口在跑哪个项目。
+        let brand = chat_title_brand(app.workspace.as_deref());
         let mut title = if app.native_selection_mode {
-            app.language
-                .text(
-                    "WillDeep · 终端原生选择 · 拖选后右键或 Cmd+C 复制 · Esc 退出",
-                    "WillDeep · native terminal selection · drag, then right-click or Cmd+C · Esc exits",
-                    "WillDeep · 端末の標準選択 · ドラッグ後に右クリック / Cmd+C · Esc 終了",
+            format!(
+                "{brand} · {}",
+                app.language.text(
+                    "终端原生选择 · 拖选后右键或 Cmd+C 复制 · Esc 退出",
+                    "native terminal selection · drag, then right-click or Cmd+C · Esc exits",
+                    "端末の標準選択 · ドラッグ後に右クリック / Cmd+C · Esc 終了",
                 )
-                .to_owned()
+            )
         } else if app.selection_mode {
-            app.language
-                .text(
-                    "WillDeep · 拖动选择 · Ctrl/Cmd+C 或 Y 复制 · Q 引用 · Esc 退出",
-                    "WillDeep · drag to select · Ctrl/Cmd+C or Y copy · Q quote · Esc exits",
-                    "WillDeep · ドラッグ選択 · Ctrl/Cmd+C / Y コピー · Q 引用 · Esc 終了",
+            format!(
+                "{brand} · {}",
+                app.language.text(
+                    "拖动选择 · Ctrl/Cmd+C 或 Y 复制 · Q 引用 · Esc 退出",
+                    "drag to select · Ctrl/Cmd+C or Y copy · Q quote · Esc exits",
+                    "ドラッグ選択 · Ctrl/Cmd+C / Y コピー · Q 引用 · Esc 終了",
                 )
-                .to_owned()
+            )
         } else if app.follow_bottom {
             if app.focus == FocusPane::Chat {
-                app.language
-                    .text("WillDeep [焦点]", "WillDeep [focused]", "WillDeep [フォーカス]")
-                    .to_owned()
+                format!(
+                    "{brand} {}",
+                    app.language.text("[焦点]", "[focused]", "[フォーカス]")
+                )
             } else {
-                "WillDeep".to_owned()
+                brand
             }
         } else {
             format!(
-                "WillDeep{} · history ↑{}",
+                "{brand}{} · history ↑{}",
                 if app.focus == FocusPane::Chat {
                     app.language.text(" [焦点]", " [focused]", " [フォーカス]")
                 } else {
@@ -2527,6 +2532,27 @@ fn workspace_status(workspace: &std::path::Path, language: Language) -> String {
         language.text("变更文件", "Diff files", "変更ファイル"),
         language.text("工作树", "Worktrees", "ワークツリー")
     )
+}
+
+/// 聊天区标题里的品牌段：`WillDeep · <工作区目录名>`。取不到目录名（比如工作区是 `/`）
+/// 就用完整路径；过长的名字截断，免得把「工作中」计时挤出标题栏。
+fn chat_title_brand(workspace: Option<&std::path::Path>) -> String {
+    const BRAND: &str = "WillDeep";
+    const MAX_WORKSPACE_CHARS: usize = 32;
+    let Some(workspace) = workspace else {
+        return BRAND.to_owned();
+    };
+    let name = workspace
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| workspace.display().to_string());
+    let name = if name.chars().count() > MAX_WORKSPACE_CHARS {
+        let head: String = name.chars().take(MAX_WORKSPACE_CHARS - 1).collect();
+        format!("{head}…")
+    } else {
+        name
+    };
+    format!("{BRAND} · {name}")
 }
 
 /// Dialog title carrying how many more are queued behind this one, so the
