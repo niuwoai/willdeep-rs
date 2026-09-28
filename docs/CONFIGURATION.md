@@ -82,7 +82,7 @@ willdeep --profile anthropic --workspace . "检查当前项目"
 | `sandbox_writable_roots` | 围栏开着时额外放行的写入根，支持 `~/…`，必须是绝对路径 |
 | `sandbox_toolchain_caches` | 是否默认放行 `~/.cargo/registry`、`~/.npm`、`~/.cache` 等工具链缓存，不写按放行 |
 | `sandbox_network` | 网络围栏：不写按档位（`read-only` 与 `workspace-write` 断，`strict` / `smart` 通）；`"deny"` 全断（需要联网的命令由模型用 `network: true` 重试、由你放行），`"allow"` 全通 |
-| `approval` | `strict` / `smart`（默认）/ `workspace-write` / `full-access`；TUI 中 `/permissions default <档位>` 可写回，见 [审批与自动化](APPROVALS.md) |
+| `approval` | `strict` / `smart` / `workspace-write`（默认）/ `full-access`；TUI 中 `/permissions default <档位>` 可写回，见 [审批与自动化](APPROVALS.md) |
 | `language` | 界面语言 `zh-CN` / `en` / `ja` |
 | `small_model_routing` | Runtime 小模型优先路由；默认 `true` |
 | `auto_dispatch_read_only` | 自动把高置信度定位、阅读、日志、Git 追溯派给窄工种；默认 `true` |

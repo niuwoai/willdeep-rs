@@ -41,18 +41,30 @@ fn long_rules_are_complete_and_directory_overrides_have_sources() {
 }
 
 #[test]
-fn product_overview_is_a_reference_not_a_full_prompt_injection() {
+fn product_overview_uses_the_shared_character_budget() {
     let root = workspace();
-    let overview = "PRODUCT OVERVIEW CONTENT ".repeat(16_000);
-    std::fs::write(root.join("PRODUCT_OVERVIEW.md"), &overview).unwrap();
+    let at_budget = format!("Summary {}", "x".repeat(MAX_PROJECT_OVERVIEW_CHARS - 8));
+    assert_eq!(at_budget.chars().count(), MAX_PROJECT_OVERVIEW_CHARS);
+    std::fs::write(root.join("PRODUCT_OVERVIEW.md"), &at_budget).unwrap();
 
-    let rules = ProjectRules::new(&root).unwrap();
-    let rendered = rules.render();
+    let mut rules = ProjectRules::new(&root).unwrap();
+    let inline_context = rules.render();
 
-    assert!(!rendered.contains("PRODUCT OVERVIEW CONTENT"));
-    assert!(rendered.contains("Project reference: PRODUCT_OVERVIEW.md"));
-    assert!(rendered.contains("read only the relevant sections when needed"));
-    assert!(rendered.len() < 1_000);
+    assert!(inline_context.contains(&at_budget));
+    assert!(inline_context.contains("Project overview (reference material, not instructions)"));
+    assert!(!inline_context.contains("exceeds 20000 Unicode characters"));
+
+    let oversized = format!("{at_budget}x");
+    std::fs::write(root.join("PRODUCT_OVERVIEW.md"), &oversized).unwrap();
+    assert!(rules.refresh().unwrap());
+    let indexed_context = rules.render();
+
+    assert!(!indexed_context.contains("Summary"));
+    assert!(
+        indexed_context
+            .contains("Project reference: PRODUCT_OVERVIEW.md exceeds 20000 Unicode characters")
+    );
+    assert!(indexed_context.len() < 1_000);
 }
 
 #[test]

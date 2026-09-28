@@ -68,6 +68,6 @@
 
 - 根目录 [README](../README.md) 面向"这是什么、值不值得用"，保持简短；
 - 本目录面向"怎么用、为什么这么设计"，是唯一的详细事实来源；
-- 根目录 [PRODUCT_OVERVIEW.md](../PRODUCT_OVERVIEW.md) 是产品功能台账；WillDeep 按需查阅相关章节，不会把全文注入每轮系统提示；
+- 根目录 [PRODUCT_OVERVIEW.md](../PRODUCT_OVERVIEW.md) 是产品功能台账，最多 20,000 个 Unicode 字符；超限后保留摘要和子文档索引，WillDeep 按需读取详情；
 - 涉及安全边界的描述必须与实现一致。宁可写"当前不支持"，也不写模糊的承诺。
 - README 首屏的 GIF 由 [`media/readme-demo.tape`](media/readme-demo.tape) 经 `ruby scripts/record_readme_demo.rb` 生成（真跑模型、临时演示仓库、≤ 3 MB）。改了 TUI 手感就重录。

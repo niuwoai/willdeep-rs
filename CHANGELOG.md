@@ -1,9 +1,17 @@
 # Changelog
 
+## [0.87.0-rc4] - 2026-09-28
+
+### Changed
+- 默认授权档位调整为“工作区可写”；工作区内写入继续由 OS 沙箱保护，工作区外 Shell 操作与联网命令改走智能审核，风险或审核不可用时再请求用户确认。
+
+### Fixed
+- `docs/schemas/` 下两份 JSON Schema 的 `$id` 域名由 `willdeep.dev` 改为官网 `willdeep.com`，契约结构不变。
+
 ## [0.87.0-rc3] - 2026-09-28
 
 ### Fixed
-- 不再把工作区根目录的 `PRODUCT_OVERVIEW.md` 全文注入每轮系统提示。它现在作为按需查阅的项目参考文档；`AGENTS.md` 与 `CLAUDE.md` 仍按作用范围完整加载。
+- 为工作区根目录的 `PRODUCT_OVERVIEW.md` 统一设置 20,000 Unicode 字符预算：预算内直接作为参考资料注入；超限时只注入摘要/索引提示，详情按需读取，不额外调用模型临时摘要。`AGENTS.md` 与 `CLAUDE.md` 仍按作用范围完整加载。
 
 ### Added
 - 新增 Prompt RSI 设计提案，记录受控优化范围、评测门禁与回滚方案。

@@ -1,8 +1,8 @@
 # Product Overview
 
-> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-09-28 | 当前版本：v0.87.0-rc4（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
-产品概览是按需查阅的参考资料，不会整篇注入 Agent 系统提示；每轮完整加载的项目指令仅限适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
+产品概览最多 20,000 个 Unicode 字符；预算内作为参考资料直接注入 Agent 提示，超限后主文档只保留摘要与子文档索引，运行时只注入索引提示并按需读取详情。完整项目指令仍限于适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
 
 ## 项目简介
 
@@ -15,7 +15,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - 本机用量账本 `willdeep.usage-ledger.v1`：主回合、子 Agent、上下文压缩与辅助请求（标题、预测、路由、判官、看图兜底）的**每次模型调用**写一行到 `$WILLDEEP_HOME/usage/YYYY-MM.jsonl`，daemon 与进程内回合同一写入口，只记数不记内容，写失败不影响回合；daemon 回合带 `events.ndjson` 序号。`willdeep usage backfill [--dry-run]` 从 daemon 事件日志回填账本上线前的用量，daemon 首次启动自动跑一次。WillDeep for macOS 只读合并进 Token 活动。canonical 规范在 Xedit `docs/USAGE_LEDGER_DESIGN.md`，rs 侧见 docs/USAGE_LEDGER.md。
 
 - TUI 与 Web 轮次结束后预测下一句：空输入框里灰字显示最可能的下一条消息，`Tab` 采用（只填入不发送），打字 / `Esc` / 新一轮开始即清掉；走标题摘要那一档模型的独立小请求，只看最近两条用户原话与助手回复尾部，结果晚到按世代号丢弃；不落盘、不进 Runtime 协议，`[agent] input_suggestions = false` 两端一起关。Web 走独立端点 `POST /api/sessions/{id}/input-suggestion`，不挂进聊天流。详见 docs/TUI_GUIDE.md「轮次结束后的下一句预测」、docs/WEB_GUIDE.md「Composer」。
-- OS 级围栏默认开（macOS Seatbelt / Linux bubblewrap）：主 Agent 与子 Agent 的命令、后台任务、监视器、verifier 只能往工作区、临时目录和工具链缓存里写；网络按档位断通（`workspace-write` / `read-only` 断），断网的命令由模型带 `network: true` 重试、由人放行；`willdeep doctor` 报围栏状态。详见 docs/SANDBOX.md。
+- OS 级围栏默认开（macOS Seatbelt / Linux bubblewrap）：主 Agent 与子 Agent 的命令、后台任务、监视器、verifier 只能往工作区、临时目录和工具链缓存里写；`workspace-write` 默认允许网络连接供 AI 判官审核后的外部命令使用，`read-only` 断网；可用 `agent.sandbox_network` 显式收紧或放开；`willdeep doctor` 报围栏状态。详见 docs/SANDBOX.md。
 - Runtime 控制面可作为平台对外：`willdeep-runtime-client`（Rust SDK）与 `willdeep-runtime-protocol` 发布就绪，README、crate 文档与可运行示例齐全；`willdeep run` 进 CI 的做法与样例见 docs/CI_INTEGRATION.md、examples/ci/。
 - `willdeep audit export` 把一个会话（或一个工作区一段时间）里的审批放行、人工裁决、hook 拦截、验证证据、改动归属与回滚汇成一份 Markdown / JSON 审计报告；只读本地状态文件，不需要 Runtime 在跑，报告里没有提示词、模型正文和凭据。详见 docs/AUDIT_EXPORT.md。
 - 接住 WillDeep for macOS 交接过来的会话：`willdeep handoff list / accept / watch` 读取 `willdeep/handoff/*` git 分支，切到分支、导入会话并按 `run` 的路径续跑；`watch --accept` 可常驻轮询、逐条接手。信道是 git 远端，两边各用各的凭据。详见 docs/CLI_REFERENCE.md。
@@ -183,7 +183,7 @@ WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户�
 - Diff Attribution API、CLI `daemon diff-attributions` 和 TUI Diff Review 沿快照链显示文件最近责任 Agent 与工具；记录采用 Tool Window 置信度，共享工作区并发的强隔离由后续独立 Worktree 阶段完成；
 - TUI Inbox 自动隐藏完成或取消超过 5 分钟的 Runtime 任务；等待审批/回答的任务与其 Interaction 建立直接关联，鼠标点击或 Enter 可进入实际审批/回答控件；
 - Runtime 持久维护多 Workspace 注册表，提供注册、更新、列表、激活和保守移除 API/CLI；每项独立保存规范化根目录、访问策略、默认 Provider、Skill 与 MCP 允许列表，切换默认项不影响旧 Workspace 任务；
-- 审批档位与 macOS 版逐档对齐：`strict`、`smart`（默认，静态规则 + AI 判官）、`workspace-write`（工作区内写入与内核围栏内、不出工作区的命令免审，不请 AI）、`full-access`（除破坏性命令黑名单外免审）；TUI 用 `/permissions`（确认页防误开完全访问）或 Shift+Tab（只循环前三档）随时切换，对正在跑的 Runtime 轮次立即生效，`/permissions default` 写回配置，每次切换记审计；
+- 审批档位与 macOS 版逐档对齐：`strict`、`smart`、`workspace-write`（默认；工作区内写入由 OS 围栏保护并免审，工作区外、远程与联网命令走 AI 判官）、`full-access`（除破坏性命令黑名单外免审）；TUI 用 `/permissions`（确认页防误开完全访问）或 Shift+Tab（只循环前三档）随时切换，对正在跑的 Runtime 轮次立即生效，`/permissions default` 写回配置，每次切换记审计；
 - Runtime 在任务入队时以服务端注册表覆盖客户端 Workspace 策略，会话选过的审批档位优先、`read_only` 工作区为硬上限；只读 Workspace 在审批前阻止 Shell、文件写入、Worktree、MCP 与 Editor 子 Agent，默认 Provider 和非空 Skill/MCP 允许列表进入同一 Harness；
 - TUI `/workspace` 打开工作区面板：一行一个工作区（名称与路径在前，ID 不占版面），当前工作区高亮且默认选中，输入即过滤（名称/路径/ID），↑/↓/PgUp/PgDn 选择，Enter 或鼠标点击原地切换，Esc 或点面板外关闭；`/workspace list` 仍输出含 ID 的文本清单，`/workspace switch <id|名称|路径>` 接入 Runtime 注册表；切换保存/恢复 Workspace 专属 Session 与事件游标，重启事件订阅、状态和 Skill 视图，不取消旧 Workspace 后台任务；启动时绑定旧路径的 `/local` 在跨 Workspace 后保守禁用；
 - Web 工作区 API/选择器改读 Runtime 注册表，并与服务启动时的路径白名单取交集；展示当前项与 read-only/smart/workspace-write 模式，Composer Skills 使用 Workspace 允许列表；默认 Workspace 内文件写入免审，Shell/MCP/网络仍按审批策略执行；

@@ -8,7 +8,7 @@
 //! | `read-only` | 拒绝 | 拒绝 | 拒绝 |
 //! | `strict` | 每次问 | 每次问 | 每次问 |
 //! | `smart` | 放行 | 静态规则 → AI 审核 → 问 | 问 |
-//! | `workspace-write` | 放行 | 静态规则 → 围栏内且不出工作区则放行 → 问（不过 AI） | 问 |
+//! | `workspace-write` | 放行 | 工作区内围栏写入直接放行；外部命令走 AI 审核，风险/不可用时问 | 外部访问走 AI 审核，风险/不可用时问 |
 //! | `full-access` | 放行 | 放行，破坏性形态照样问 | 放行 |
 //!
 //! 档位在会话中途可以换：[`SharedApprovalMode`] 是一个原子量，TUI、Runtime
@@ -309,11 +309,18 @@ impl ToolRegistry {
                 );
                 return Ok(());
             }
-            ApprovalMode::WorkspaceAccess => {
-                return self
-                    .gate_workspace_command(command, description, escalate)
-                    .await;
-            }
+            ApprovalMode::WorkspaceAccess => match self.gate_workspace_command(command) {
+                Some(true) => return Ok(()),
+                Some(false) => {}
+                None => {
+                    escalate(
+                            self,
+                            "workspace write: no OS write fence, cannot prove the command stays in the workspace"
+                                .to_owned(),
+                        );
+                    return self.ask_for_command(command, description).await;
+                }
+            },
             _ => {}
         }
 
@@ -354,37 +361,22 @@ impl ToolRegistry {
         }
     }
 
-    /// `workspace-write` 不请 AI 审核，靠的是两件确定的事：内核围栏把写入
-    /// 关在工作区里，命令本身也看不出要去别的主机。两件缺一件就问人——
-    /// 这一档的承诺是「工作区内的事不打扰你」，不是「猜它大概没事」。
-    async fn gate_workspace_command(
-        &self,
-        command: &str,
-        description: &str,
-        escalate: impl Fn(&Self, String),
-    ) -> Result<(), ToolError> {
+    /// 工作区内、确实被 OS 围栏约束的命令可免审。越界命令返回 false，
+    /// 继续走与 smart 相同的 AI 审核；没有判官或判官不确定时再请求用户确认。
+    fn gate_workspace_command(&self, command: &str) -> Option<bool> {
         let fence = self.effective_sandbox();
         if !fence.policy.is_enforcing() || !crate::sandbox::available() {
-            escalate(
-                self,
-                "workspace write: no OS write fence, cannot prove the command stays in the workspace"
-                    .to_owned(),
-            );
-            return self.ask_for_command(command, description).await;
+            return None;
         }
         if crate::safety::reaches_outside_workspace(command) {
-            escalate(
-                self,
-                "workspace write: command reaches another host or a privileged service".to_owned(),
-            );
-            return self.ask_for_command(command, description).await;
+            return Some(false);
         }
         self.report_approval(
             command,
             ApprovalSource::WorkspaceAccess,
             "workspace write: contained by the OS write fence".to_owned(),
         );
-        Ok(())
+        Some(true)
     }
 
     /// 网络围栏的逃生口：模型声明这条命令必须联网。放不放只有人能定——判官判的
@@ -700,7 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_write_without_a_fence_asks_instead_of_consulting_the_judge() {
+    async fn workspace_write_without_a_fence_still_asks_before_unbounded_writes() {
         let root = fixture("workspace-no-fence");
         let judged = Arc::new(AtomicUsize::new(0));
         let registry = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
@@ -717,7 +709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_write_runs_fenced_commands_and_asks_for_remote_ones() {
+    async fn workspace_write_runs_fenced_commands_and_judges_external_ones() {
         if !crate::sandbox::available() {
             eprintln!("skipping: no OS sandbox backend on this machine");
             return;
@@ -745,11 +737,18 @@ mod tests {
                 .iter()
                 .any(|trace| trace.source == ApprovalSource::WorkspaceAccess)
         );
-        let remote = registry
-            .execute(&command("curl -s https://example.com -o page.html"))
-            .await;
-        assert!(matches!(remote, Err(ToolError::ApprovalDenied(_))));
-        assert_eq!(judged.load(Ordering::SeqCst), 0);
+        registry
+            .gate_main_command("curl -s https://example.invalid/", "fetch remote page")
+            .await
+            .expect("external command should use the AI judge");
+        assert_eq!(judged.load(Ordering::SeqCst), 1);
+        assert!(
+            traces
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|trace| trace.source == ApprovalSource::Judge)
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

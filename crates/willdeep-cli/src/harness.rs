@@ -1464,9 +1464,8 @@ fn external_git_dirs(workspace: &std::path::Path) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// 各档位的网络围栏。`read-only` 永远断；`workspace-write` 不请判官，「命令留在
-/// 工作区里」的承诺里包含不往外发，所以缺省断，需要联网的命令走 `network: true`
-/// 由人放行；`strict` / `smart` 缺省通——那两档联网命令本来就要过判官或问人。
+/// 各档位的网络围栏。`read-only` 永远断；`workspace-write` 与 `smart` 一样允许
+/// 网络，由外部命令的 AI 审核决定是否执行；`strict` 仍由逐次人工确认控制。
 /// `agent.sandbox_network` 可以整体收紧或放开。
 fn sandbox_network(
     agent: &crate::config::AgentSettings,
@@ -1478,7 +1477,7 @@ fn sandbox_network(
         Some(crate::config::SandboxNetwork::Allow) => NetworkPolicy::Allow,
         Some(crate::config::SandboxNetwork::Deny) => NetworkPolicy::Deny,
         None => match approval_mode {
-            ApprovalMode::ReadOnly | ApprovalMode::WorkspaceAccess => NetworkPolicy::Deny,
+            ApprovalMode::ReadOnly => NetworkPolicy::Deny,
             _ => NetworkPolicy::Allow,
         },
     }
@@ -1517,9 +1516,9 @@ fn resolve_sandbox(
 
 /// `workspace-write` 档的围栏。
 ///
-/// 这一档不请 AI 审核，「命令留在工作区里」只能靠内核来保证，所以没配
+/// 工作区内操作靠围栏免审；工作区外操作走 AI 审核，所以没配
 /// `agent.sandbox` 时它也默认套上围栏；用户显式写了 `sandbox = false`，或
-/// 这台机器没有围栏实现时返回 `None`，该档对未分类的命令改为问人。
+/// 这台机器没有围栏实现时返回 `None`，该档对工作区内未分类写命令改为问人。
 /// 会话中途可以切到这一档，所以不论启动档位是什么都要算出来备用。
 fn resolve_workspace_sandbox(
     agent: &crate::config::AgentSettings,
@@ -1543,13 +1542,13 @@ fn resolve_workspace_sandbox(
     )
 }
 
-/// 配置里的 `agent.approval`，未配置时为 `smart`。`read-only` 是工作区策略，
+/// 配置里的 `agent.approval`，未配置时为 `workspace-write`。`read-only` 是工作区策略，
 /// 不是会话默认档，这里不接受。
 pub(crate) fn configured_approval_mode(
     agent: &crate::config::AgentSettings,
 ) -> Result<ApprovalMode> {
     let Some(value) = agent.approval.as_deref() else {
-        return Ok(ApprovalMode::Smart);
+        return Ok(ApprovalMode::WorkspaceAccess);
     };
     match ApprovalMode::parse(value) {
         Some(mode) if mode != ApprovalMode::ReadOnly => Ok(mode),
@@ -1562,6 +1561,15 @@ pub(crate) fn configured_approval_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_mode_defaults_to_workspace_write() {
+        let config: crate::config::ConfigFile = toml::from_str("version = 1\n[agent]\n").unwrap();
+        assert_eq!(
+            configured_approval_mode(&config.agent).unwrap(),
+            ApprovalMode::WorkspaceAccess
+        );
+    }
 
     mod gateway_capabilities {
         use super::*;
@@ -1706,7 +1714,7 @@ mod tests {
             );
             assert_eq!(
                 sandbox_network(&agent, ApprovalMode::WorkspaceAccess),
-                NetworkPolicy::Deny
+                NetworkPolicy::Allow
             );
             assert_eq!(
                 sandbox_network(&agent, ApprovalMode::ReadOnly),
@@ -1763,8 +1771,8 @@ mod tests {
                     .expect("workspace-write fence");
                 assert_eq!(fence.policy, SandboxPolicy::WorkspaceWrite);
                 assert!(
-                    !fence.allows_network(),
-                    "workspace-write cuts the network by default"
+                    fence.allows_network(),
+                    "workspace-write allows network for judge-reviewed external commands"
                 );
             }
         }

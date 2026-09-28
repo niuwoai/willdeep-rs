@@ -453,7 +453,9 @@ impl TaskManager {
                 .and_then(|session| session.approval_mode),
             None => None,
         };
-        let workspace_access = request.workspace_access.unwrap_or_default();
+        let workspace_access = request
+            .workspace_access
+            .unwrap_or(WorkspaceAccess::WorkspaceWrite);
         let effective_access = workspace_access.with_session_override(session_mode);
         request.workspace_access = Some(effective_access);
         request.approval_handle = Some(self.approval_modes.register(

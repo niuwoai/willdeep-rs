@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://willdeep.dev/schemas/model-catalog.v1.schema.json",
+  "$id": "https://willdeep.com/schemas/model-catalog.v1.schema.json",
   "title": "WillDeep shared model catalog v1",
   "type": "object",
   "additionalProperties": false,

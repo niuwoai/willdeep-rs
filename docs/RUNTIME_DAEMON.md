@@ -69,9 +69,9 @@ willdeep daemon remove-workspace <workspace-id> --yes
 
 | 策略 | 语义 |
 |---|---|
-| `smart` | 默认。Workspace 内创建、编辑免审；Shell 走静态规则 + AI 判官；MCP、网络 POST 审批 |
+| `smart` | Workspace 内创建、编辑免审；Shell 走静态规则 + AI 判官；MCP、网络 POST 审批 |
 | `strict` | 写入、Shell、MCP、网络逐次审批 |
-| `workspace-write` | Workspace 内写入与写入围栏内、不出工作区的命令免审，不请 AI 判官；其余问人 |
+| `workspace-write` | 默认。Workspace 内写入由 OS 围栏保护并免审；Workspace 外 Shell、远程和联网命令走 AI 判官，风险或判官不可用时问人 |
 | `full-access` | 除破坏性命令黑名单外全部免审，摘掉写入围栏 |
 | `read-only` | 仅在用户显式选择时启用；是会话档位越不过的硬上限 |
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://willdeep.dev/schemas/agent-kernel-event.v1.schema.json",
+  "$id": "https://willdeep.com/schemas/agent-kernel-event.v1.schema.json",
   "title": "WillDeep agent kernel event v1",
   "description": "宿主 Runtime 投递给主 Agent 的统一事件信封。canonical 在 willdeep-rs，Xedit 为 mirror。两侧各有一个守卫测试对着本文件断言：改了代码没改契约（或反过来）就红。",
   "type": "object",

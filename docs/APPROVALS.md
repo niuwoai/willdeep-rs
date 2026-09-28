@@ -9,22 +9,23 @@
 | 模式 | 工作区内创建/编辑 | Shell 命令 | 网络 POST、MCP、Worktree |
 |---|---|---|---|
 | `strict` | 逐次审批 | 逐次审批 | 逐次审批 |
-| `smart`（默认） | 免审 | 静态规则 → AI 判官 → 拿不准才问 | 审批 |
-| `workspace-write` | 免审 | 静态规则 → **写入围栏内且不出工作区**则放行（围栏断网，要联网的命令用 `network: true` 问人）→ 其余问人；**不请 AI 判官** | 审批 |
+| `smart` | 免审 | 静态规则 → AI 判官 → 拿不准才问 | 审批 |
+| `workspace-write`（默认） | 免审 | 工作区内命令由 OS 写入围栏保护并免审；工作区外、远程与联网命令走 AI 判官，风险或判官不可用时再问人 | 审批 |
 | `full-access` | 免审 | 放行；**破坏性形态（`rm -rf`、`sudo`、`git push --force`…）照样问** | 放行 |
 
 另有 `read-only`，它是 Runtime 工作区策略而不是会话档位：写入、Shell、MCP、Worktree 在审批前直接拒绝，会话切档无法越过它。
 
-未显式配置时默认采用 `smart`。别名：`ask` / `request-every-time` = `strict`，`auto-review` = `smart`，`workspace-access` = `workspace-write`，`full` / `silent` = `full-access`。
+未显式配置时默认采用 `workspace-write`。别名：`ask` / `request-every-time` = `strict`，`auto-review` = `smart`，`workspace-access` = `workspace-write`，`full` / `silent` = `full-access`。
 
-### `workspace-write` 靠什么「不请 AI」
+### `workspace-write` 怎样处理工作区外操作
 
-这一档的承诺是「工作区里的事不打扰你」，所以它只在两件事都**确定**时放行一条未分类命令：
+这一档让工作区内的开发操作少打断，同时让越界操作经过与 `smart` 相同的 AI 判官：
 
-1. **内核围栏在起作用**（macOS `sandbox-exec` / Linux `bwrap`，见 [围栏](SANDBOX.md)）。没配 `agent.sandbox` 时这一档默认就套上围栏且**断网**；显式 `sandbox = false` 或机器上没有围栏实现时，未分类命令一律问人。围栏断网的命令失败后，模型可以带 `network: true` 重试，那一次由你放行（可「始终允许」，与不联网的同一条命令分开记）；
-2. **命令看不出要出工作区**（`safety::reaches_outside_workspace`）：`curl`/`ssh`/`docker`/`sudo`/`kubectl`、`git push/pull/fetch/clone`、`cargo publish`、`npm i -g` 等，以及含 heredoc、`$(…)`、反引号或解析不了的命令，都算「出去」。
+1. **工作区内命令**由 OS 写入围栏约束（macOS `sandbox-exec` / Linux `bwrap`，见 [围栏](SANDBOX.md)），不会交给判官；
+2. **工作区外、远程或联网命令**（如 `curl`、`ssh`、`git push`、全局安装）交给 AI 判官。判官拒绝、不可用或命令具有破坏性时再询问用户；
+3. OS 围栏默认允许网络连接，以便已通过判官的联网命令执行。`agent.sandbox_network = "deny"` 仍可显式禁网；`sandbox = false` 或平台没有围栏实现时，未分类的本地命令仍需人工确认。
 
-放行记审计来源 `workspace-access`。
+放行记审计来源 `workspace-access` 或 `judge`。
 
 ### `full-access` 的边界
 
@@ -153,7 +154,7 @@ Runtime 注册表里每个 Workspace 保存独立的访问策略（`read_only` /
 
 `read-only` 策略下，Shell、文件写入、Worktree 创建、MCP 和 `editor` 子 Agent 会在进入审批流程**之前**就被拒绝。
 
-自动登记的工作区默认 `smart`。0.78.0 之前的注册表里 `workspace_write` 与 `smart` 判定完全相同（而且多数是自动登记的默认值），首次启动时一次性迁移为 `smart`，升级前后行为不变；迁移后显式选择的 `workspace_write` 是新语义。详见 [Runtime Daemon 与工作区](RUNTIME_DAEMON.md)。
+自动登记的工作区默认 `workspace-write`。历史注册表中用户明确选择的档位仍保留；没有档位的工作区继续使用兼容默认值。详见 [Runtime Daemon 与工作区](RUNTIME_DAEMON.md)。
 
 ## 网络工具
 

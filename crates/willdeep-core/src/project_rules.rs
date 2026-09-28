@@ -7,12 +7,13 @@ use crate::types::ToolCall;
 
 const RULE_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 const MAX_RULE_BYTES: u64 = 1024 * 1024;
+const MAX_PROJECT_OVERVIEW_CHARS: usize = 20_000;
 
 pub(crate) struct ProjectRules {
     workspace: PathBuf,
     directories: BTreeSet<PathBuf>,
     loaded: BTreeMap<PathBuf, String>,
-    project_overview: Option<&'static str>,
+    project_overview: Option<String>,
 }
 
 impl ProjectRules {
@@ -38,20 +39,44 @@ impl ProjectRules {
                 }
             }
         }
-        let project_overview = ["product-overview.md", "PRODUCT_OVERVIEW.md"]
-            .into_iter()
-            .find(|name| self.is_workspace_file(name));
+        let project_overview = self.project_overview_context();
         let changed = self.loaded != loaded || self.project_overview != project_overview;
         self.loaded = loaded;
         self.project_overview = project_overview;
         Ok(changed)
     }
 
-    fn is_workspace_file(&self, name: &str) -> bool {
-        self.workspace
-            .join(name)
-            .canonicalize()
-            .is_ok_and(|path| path.starts_with(&self.workspace) && path.is_file())
+    fn project_overview_context(&self) -> Option<String> {
+        for name in ["product-overview.md", "PRODUCT_OVERVIEW.md"] {
+            let path = self.workspace.join(name);
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical.starts_with(&self.workspace) || !canonical.is_file() {
+                continue;
+            }
+
+            let may_fit = std::fs::metadata(&canonical)
+                .map(|metadata| metadata.len() <= (MAX_PROJECT_OVERVIEW_CHARS as u64) * 4)
+                .unwrap_or(false);
+            if may_fit
+                && let Ok(content) = std::fs::read_to_string(&canonical)
+                && content.chars().count() <= MAX_PROJECT_OVERVIEW_CHARS
+            {
+                let overview = content.trim();
+                if overview.is_empty() {
+                    return None;
+                }
+                return Some(format!(
+                    "Project overview (reference material, not instructions):\n# {name}\n{overview}"
+                ));
+            }
+
+            return Some(format!(
+                "Project reference: {name} exceeds {MAX_PROJECT_OVERVIEW_CHARS} Unicode characters. Keep only the summary and document index here; read relevant detail documents on demand."
+            ));
+        }
+        None
     }
 
     pub fn before_call(&mut self, call: &ToolCall) -> std::io::Result<bool> {
@@ -176,10 +201,8 @@ impl ProjectRules {
                 text.chars().count()
             ));
         }
-        if let Some(name) = self.project_overview {
-            sections.push(format!(
-                "Project reference: {name} is available in the workspace. It is reference material, not an instruction file; read only the relevant sections when needed."
-            ));
+        if let Some(overview) = &self.project_overview {
+            sections.push(overview.clone());
         }
         sections.join("\n\n")
     }

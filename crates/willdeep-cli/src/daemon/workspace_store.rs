@@ -3,8 +3,8 @@ use super::*;
 const WORKSPACE_SCHEMA: u32 = 1;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 /// 档位语义的版本。`1`（字段缺省）时 `workspace_write` 与 `smart` 是同一套
-/// 判定；`2` 起两者分开，见 `willdeep_core::tools::approval`。
-const ACCESS_SEMANTICS: u32 = 2;
+/// 判定；`2` 起两者分开；`3` 调整默认行为但保留已显式选择的档位。
+const ACCESS_SEMANTICS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -225,7 +225,7 @@ impl WorkspaceStore {
             id,
             name: normalize_name(None, &root)?,
             root,
-            access: WorkspaceAccess::default(),
+            access: WorkspaceAccess::WorkspaceWrite,
             provider_profile: None,
             skills: Vec::new(),
             mcp_servers: Vec::new(),
@@ -636,16 +636,17 @@ fn mark_active(items: &mut [RuntimeWorkspace], active_id: Option<uuid::Uuid>) {
     }
 }
 
-/// 旧注册表里的 `workspace_write` 当年与 `smart` 判定完全相同，而且绝大多数
-/// 是自动登记时的默认值，不是用户选的。迁成 `smart` 才能让升级前后行为一致；
-/// 按字面保留反而会让它变成新的、不请 AI 审核的那一档。返回是否改动过。
+/// 语义版本 1 的旧注册表把 `workspace_write` 当作 `smart` 别名；只迁移该版本。
+/// 版本 2 已区分两档，用户显式选的 `workspace_write` 必须原样保留。
 fn migrate_access_semantics(state: &mut PersistedWorkspaces) -> bool {
     if state.access_semantics >= ACCESS_SEMANTICS {
         return false;
     }
-    for item in &mut state.items {
-        if item.access == WorkspaceAccess::WorkspaceWrite {
-            item.access = WorkspaceAccess::Smart;
+    if state.access_semantics < 2 {
+        for item in &mut state.items {
+            if item.access == WorkspaceAccess::WorkspaceWrite {
+                item.access = WorkspaceAccess::Smart;
+            }
         }
     }
     state.access_semantics = ACCESS_SEMANTICS;
@@ -780,6 +781,32 @@ mod tests {
             reopened.ensure_registered(&root).unwrap().access,
             WorkspaceAccess::WorkspaceWrite
         );
+    }
+
+    #[test]
+    fn semantic_version_two_preserves_explicit_workspace_write() {
+        let mut state = PersistedWorkspaces {
+            schema: WORKSPACE_SCHEMA,
+            access_semantics: 2,
+            active_id: None,
+            items: vec![RuntimeWorkspace {
+                schema: WORKSPACE_SCHEMA,
+                id: uuid::Uuid::new_v4(),
+                name: "project".to_owned(),
+                root: PathBuf::from("/tmp/project"),
+                access: WorkspaceAccess::WorkspaceWrite,
+                provider_profile: None,
+                skills: Vec::new(),
+                mcp_servers: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                active: false,
+            }],
+        };
+
+        assert!(migrate_access_semantics(&mut state));
+        assert_eq!(state.access_semantics, ACCESS_SEMANTICS);
+        assert_eq!(state.items[0].access, WorkspaceAccess::WorkspaceWrite);
     }
 
     #[test]

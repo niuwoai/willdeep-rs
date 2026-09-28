@@ -65,9 +65,9 @@ fn startup_notices(runtime: &TuiRuntime, language: Language) -> Vec<String> {
             let text = match note {
                 crate::config::Deprecation::LegacyApproval { spelled } => language
                     .text(
-                        "配置里 agent.approval = \"{spelled}\" 是旧写法，等同 strict（写文件、跑命令、联网都先问）；推荐 smart，输入 /permissions default smart 可写回",
-                        "agent.approval = \"{spelled}\" in the config is a legacy spelling of strict (every write, command and network call asks); smart is recommended — /permissions default smart writes it back",
-                        "設定の agent.approval = \"{spelled}\" は古い書き方で strict と同じ（書き込み・コマンド・通信のたびに確認）。smart を推奨、/permissions default smart で保存できます",
+                        "配置里 agent.approval = \"{spelled}\" 是旧写法，等同 strict（写文件、跑命令、联网都先问）；推荐 workspace-write，输入 /permissions default workspace-write 可写回",
+                        "agent.approval = \"{spelled}\" in the config is a legacy spelling of strict (every write, command and network call asks); workspace-write is recommended — /permissions default workspace-write writes it back",
+                        "設定の agent.approval = \"{spelled}\" は古い書き方で strict と同じ（書き込み・コマンド・通信のたびに確認）。workspace-write を推奨、/permissions default workspace-write で保存できます",
                     )
                     .replace("{spelled}", &spelled),
             };

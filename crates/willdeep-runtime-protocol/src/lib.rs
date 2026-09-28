@@ -799,9 +799,9 @@ pub enum WorkspaceAccess {
     ReadOnly,
     /// 每次都问。与 Xedit 的 `requestEveryTime` 对应。
     Strict,
-    #[default]
     Smart,
-    /// 工作区内的写入与围栏内的命令免审，不请 AI 审核；出工作区的动作问人。
+    /// 工作区内写入免审；工作区外操作走智能审核，风险或判官不可用时再询问用户。
+    #[default]
     WorkspaceWrite,
     /// 除破坏性命令黑名单外全部免审。与 Xedit 的 `fullAccess`（raw `silent`）对应。
     FullAccess,
