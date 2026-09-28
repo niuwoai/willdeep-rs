@@ -934,7 +934,7 @@ pub(crate) async fn build(
     }
     let context_window = profile
         .and_then(|value| value.context_window)
-        .unwrap_or(128_000);
+        .unwrap_or_else(|| crate::model_defaults::default_context_window(&model));
     let subagent_profiles = worker_profiles::configure_worker_profiles(
         &loaded.file,
         &parent_provider_config,

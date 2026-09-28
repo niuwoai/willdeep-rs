@@ -24,3 +24,33 @@ pub(crate) const SOMEIM_CONTEXT_COMPRESSOR_MODEL: &str = "someim-32b-compressor"
 
 /// some.im 纯文本根模型遇到图片时，先用它把图片描述成文字。
 pub(crate) const SOMEIM_VISION_FALLBACK_MODEL: &str = "qwen3-vl-plus";
+
+/// 会话配置没写 `context_window` 时的缺省窗口。
+pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
+/// `someim-*` 虚拟模型（someim-32b、someim-code-*、someim-auto-*…）名字里只有
+/// 档位、没有上游模型，看不出窗口；它们背后的上游现在都是 256K 级，按 128K
+/// 算会过早压缩。与 macOS 版同一个缺省。
+pub(crate) const SOMEIM_VIRTUAL_MODEL_CONTEXT_WINDOW: u64 = 262_144;
+
+/// 没有显式配置时，按模型名给出的缺省上下文窗口。
+pub(crate) fn default_context_window(model: &str) -> u64 {
+    if model.to_ascii_lowercase().starts_with("someim-") {
+        SOMEIM_VIRTUAL_MODEL_CONTEXT_WINDOW
+    } else {
+        DEFAULT_CONTEXT_WINDOW
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn someim_virtual_models_default_to_256k() {
+        for model in ["someim-32b", "someim-code-high", "SomeIM-Auto-Flash"] {
+            assert_eq!(default_context_window(model), 262_144, "{model}");
+        }
+        assert_eq!(default_context_window("glm-5"), 128_000);
+    }
+}
