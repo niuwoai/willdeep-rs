@@ -282,6 +282,8 @@ struct App {
     /// 攒够 [`STALE_RUNTIME_TURN_SNAPSHOTS`] 次就去问 Runtime 一句「还有在途轮次吗」，
     /// 没有就把残留的「工作中」复位——否则排队的提示词会跟着一起死等。
     stale_runtime_turn_snapshots: u8,
+    /// 一次残留状态复位只确认、提示一次；等新轮次或 Runtime 活动任务出现后再解锁。
+    stale_runtime_turn_recovery_reported: bool,
     last_elapsed: Option<Duration>,
     context_window: u64,
     context_tokens: u64,

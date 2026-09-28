@@ -102,6 +102,9 @@ pub(super) async fn reconcile_stale_runtime_turn(
 ) {
     match crate::daemon::remote_active_turn(&runtime.home, session.id).await {
         Ok(None) => {
+            // 快照可能已经在途；复位后它们仍会逐个抵达。锁住本次恢复，
+            // 避免同一故障反复输出提示。新轮次或重新发现活动任务会解锁。
+            app.stale_runtime_turn_recovery_reported = true;
             app.finish_turn();
             app.append_transcript(format!(
                 "System: {}",

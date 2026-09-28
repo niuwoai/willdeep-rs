@@ -42,6 +42,7 @@ impl App {
             last_progress_at: None,
             runtime_turn: false,
             stale_runtime_turn_snapshots: 0,
+            stale_runtime_turn_recovery_reported: false,
             last_elapsed: None,
             context_window: 128_000,
             context_tokens: 0,
@@ -1061,6 +1062,7 @@ impl App {
         self.running = true;
         self.runtime_turn = runtime_turn;
         self.stale_runtime_turn_snapshots = 0;
+        self.stale_runtime_turn_recovery_reported = false;
         self.turn_started = Some(now);
         self.last_progress_at = Some(now);
         self.last_elapsed = None;
@@ -1122,9 +1124,13 @@ impl App {
         let fresh = snapshot_sequence.is_some_and(|sequence| sequence >= self.runtime_event_cursor);
         if has_active_task {
             self.stale_runtime_turn_snapshots = 0;
+            self.stale_runtime_turn_recovery_reported = false;
             if !self.running && fresh {
                 self.ensure_runtime_turn();
             }
+            return false;
+        }
+        if self.stale_runtime_turn_recovery_reported {
             return false;
         }
         if !(self.running && self.runtime_turn && fresh) {
