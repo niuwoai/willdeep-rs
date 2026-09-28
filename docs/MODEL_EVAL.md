@@ -70,6 +70,25 @@ ruby scripts/model_eval_trend.rb --alarm --inject                            # �
 | `by_kind` | fix / feature / test / lint 各自的执行数与通过率 |
 | `commit` / `dirty` / `binary_version` | 测的是哪版代码、哪版二进制 |
 
+### 没跑成的一轮（0.84.0-rc3 起）
+
+一个模型的任务**一个都没执行**（全是 `error` / `skipped`）时，这一轮不是成绩：不写报告、不进
+`history.jsonl`，脚本退出 1，并在 stderr 打出原因——按退出码归类（1 未分类，多半缺 API Key；3 Provider 出错：
+鉴权、模型名、网络或代理；127 找不到二进制），附 willdeep stderr 的最后一行（按 `sk-…`、`Bearer …`、
+`api_key=…` 打码、截断到 240 字）。开头连续 3 个任务都是 `error` 就不再往下跑这个模型。工作区 git 铺不起来
+（例如全局配置要求签名而签名工具不可用）记成该任务的 `error` 并带上 git 自己的报错，不再把整轮带崩；fixture
+仓库的提交关掉了签名与钩子。
+
+2026-09-20 ～ 09-27 夜跑每晚 60 个任务全部 `error`（退出码 3，1～17 秒就结束，模型没开工），却照样往
+`history.jsonl` 写了 `executed: 0` 的行；失败分支里 `$LOG。` 又在 launchd 的 C locale 下被 bash 读成未绑定变量，
+连失败提示都没打出来。同一时间交互 shell 里单任务冒烟能正常执行，说明是夜跑环境的问题（launchd 没有交互
+shell 的环境变量：`api_key_env` 指向的变量、`HTTPS_PROXY` 等），不是脚本把任务跑丢了。排查：
+
+```bash
+ruby scripts/model_eval.rb --model glm-5 --tasks js-add-test-clamp --no-archive --keep --max-turns 2
+# 看保留的运行目录里 logs/stderr.log；夜跑需要的环境变量写进 plist 的 EnvironmentVariables
+```
+
 ### 报警
 
 `model_eval_trend.rb --alarm`：每个模型拿最近一轮与基线比，**verifier 通过率或人话率任一掉超过 10 个百分点**

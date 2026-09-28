@@ -89,7 +89,25 @@ module ModelEval
       FileUtils.mkdir_p(@options[:out])
       exit_code = 0
       @options[:models].each do |model|
-        rows = @tasks.map { |task| run_task(task, model) }
+        @hints = []
+        rows = []
+        @tasks.each do |task|
+          rows << run_task(task, model)
+          next unless Report.abort_early?(rows)
+
+          warn "[#{model}] 开头 #{rows.size} 个任务全是 error，不再往下跑：多半是环境问题，不是模型问题。"
+          break
+        end
+        if (reason = Report.unusable_reason(rows, @hints))
+          # 一个都没执行的一轮不是成绩：不写报告、不进 history.jsonl，退出码 1。
+          warn "[#{model}] 这一轮没跑成，不归档：#{reason}"
+          warn '排查：用 --tasks <一个任务> --keep 重跑，看运行目录 logs/stderr.log；' \
+               '夜跑（launchd）没有交互 shell 的环境变量，api_key_env 指向的变量、HTTPS_PROXY 要在 plist 或 ~/.bash_profile 里给。'
+          puts JSON.generate({ model: model, executed: 0, errors: rows.count { |row| row[:status] == 'error' },
+                               archived: [], unusable: reason })
+          exit_code = 1
+          next
+        end
         summary = Report.summarize(model: model, rows: rows, commit: context[:commit], dirty: context[:dirty],
                                    version: workspace_version, binary_version: @binary_version)
         report = { 'schema_version' => 1, 'model' => model, 'binary_version' => @binary_version,
@@ -136,7 +154,14 @@ module ModelEval
       home = File.join(slot, 'home')
       logs = File.join(slot, 'logs')
       [workspace, home, logs].each { |dir| FileUtils.mkdir_p(dir, mode: 0o700) }
-      Verifier.seed(task, workspace)
+      begin
+        Verifier.seed(task, workspace)
+      rescue Verifier::SeedError => e
+        # 铺不起工作区是宿主的事，不是模型的事：记成 error，别把整轮带崩。
+        @hints << e.message
+        warn "[#{model}] #{e.message}"
+        return base_row(task).merge(status: 'error', exit_code: nil)
+      end
       before = Verifier.snapshot(workspace, task.editable)
       command = [@binary, '--config', @config, '--workspace', workspace, '--full-auto',
                  '--max-turns', @options[:turns].to_s, '--model', model]
@@ -153,6 +178,11 @@ module ModelEval
                elsif verdict[:verifier_passed] && !intact then 'cheated'
                else 'failed'
                end
+      if status == 'error'
+        hint = Report.error_hint(read_log(File.join(logs, 'stderr.log')))
+        @hints << hint
+        warn format('[%s] %-30s 退出码 %s：%s', model, task.id, code.inspect, hint || '（stderr 为空）')
+      end
       claimed = result.empty? ? nil : result['type'] == 'completed'
       tokens = AgentEvalObservation.checkpoint(home, result)
       row = base_row(task).merge(
@@ -165,6 +195,10 @@ module ModelEval
       ).merge(session_metrics(home, result['session_id']))
       warn format('[%s] %-30s %-8s %6.1fs', model, task.id, status, elapsed)
       row
+    end
+
+    def read_log(path)
+      File.file?(path) ? File.binread(path).force_encoding('UTF-8').scrub : ''
     end
 
     def base_row(task)

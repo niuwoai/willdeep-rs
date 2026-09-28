@@ -116,6 +116,37 @@ class TaskLoadingTest < Minitest::Test
 end
 
 class VerifierTest < Minitest::Test
+  # 用户全局 git 配置要求签名、而签名工具不可用（夜跑的 launchd 里常见）时，
+  # fixture 仓库照样铺得起来。
+  def test_seed_ignores_a_hostile_global_git_config
+    Dir.mktmpdir do |root|
+      global = File.join(root, 'gitconfig')
+      File.write(global, "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/gpg\n" \
+                         "[core]\n\thooksPath = /nonexistent/hooks\n")
+      previous = ENV.fetch('GIT_CONFIG_GLOBAL', nil)
+      ENV['GIT_CONFIG_GLOBAL'] = global
+      begin
+        workspace = File.join(root, 'ws')
+        ModelEval::Verifier.seed(TaskFixture.fix_task(root), workspace)
+        assert File.directory?(File.join(workspace, '.git'))
+      ensure
+        previous ? ENV['GIT_CONFIG_GLOBAL'] = previous : ENV.delete('GIT_CONFIG_GLOBAL')
+      end
+    end
+  end
+
+  # 夜跑脚本在 launchd 的 C locale 下运行：`$LOG。` 会被 bash 读成一个叫
+  # `LOG\xe3` 的变量，`set -u` 当场崩掉。所有紧跟非 ASCII 字符的变量都得带花括号。
+  def test_shell_scripts_brace_variables_followed_by_non_ascii
+    Dir[File.expand_path('../*.sh', __dir__)].each do |script|
+      File.foreach(script, encoding: 'UTF-8').with_index(1) do |line, number|
+        next if line.lstrip.start_with?('#')
+
+        refute_match(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/, line, "#{File.basename(script)}:#{number}")
+      end
+    end
+  end
+
   def test_self_check_is_red_then_green_for_both_kinds
     Dir.mktmpdir do |root|
       fix = ModelEval::Verifier.self_check(TaskFixture.fix_task(root))
@@ -221,6 +252,37 @@ class ReportTest < Minitest::Test
   def test_narration_is_weighted_by_turns
     rows = [row(turns: 9, narration_ratio: 1.0), row(turns: 1, narration_ratio: 0.0)]
     assert_equal 90.0, ModelEval::Report.summarize(model: 'm', rows: rows)['narration_ratio']
+  end
+
+  # 2026-09-20 起夜跑每晚往 history.jsonl 写 `executed: 0` 的行：那不是成绩，
+  # 是环境坏了。这样的一轮必须说清原因，并且不归档。
+  def test_a_round_with_nothing_executed_is_unusable_and_says_why
+    rows = [row(status: 'error', exit_code: 3), row(status: 'error', exit_code: 3),
+            row(status: 'skipped', missing: ['node'])]
+    reason = ModelEval::Report.unusable_reason(rows, ['provider error: HTTP 401 Unauthorized', nil])
+    refute_nil reason
+    assert_includes reason, '3 个任务一个都没真正执行（error 2、skipped 1）'
+    assert_includes reason, '退出码 3 × 2（Provider 出错'
+    assert_includes reason, 'HTTP 401 Unauthorized'
+    assert_nil ModelEval::Report.unusable_reason([row, row(status: 'error', exit_code: 3)])
+  end
+
+  def test_three_leading_errors_abort_the_model_but_a_later_error_does_not
+    errors = Array.new(3) { row(status: 'error', exit_code: 3) }
+    refute ModelEval::Report.abort_early?(errors.first(2))
+    assert ModelEval::Report.abort_early?(errors)
+    refute ModelEval::Report.abort_early?([row] + errors)
+  end
+
+  def test_error_hint_is_the_last_line_redacted_and_bounded
+    text = "starting\nprovider error: 401 for key sk-abcdefghijkl1234 with Authorization: Bearer abc.def api_key=xyz123\n\n"
+    hint = ModelEval::Report.error_hint(text)
+    refute_includes hint, 'sk-abcdefghijkl1234'
+    refute_includes hint, 'abc.def'
+    refute_includes hint, 'xyz123'
+    assert_includes hint, 'provider error: 401'
+    assert_nil ModelEval::Report.error_hint("\n  \n")
+    assert_operator ModelEval::Report.error_hint('x' * 1000).length, :<=, ModelEval::Report::HINT_LIMIT + 1
   end
 
   def test_archive_writes_dated_report_and_appends_history_with_a_safe_name

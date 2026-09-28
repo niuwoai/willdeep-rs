@@ -31,7 +31,7 @@ if ! git diff --quiet HEAD 2>/dev/null; then
 fi
 
 if ! ruby scripts/agent_metrics_publish.rb --window "${WILLDEEP_METRICS_WINDOW:-7d}" "$@" >>"$LOG" 2>&1; then
-  log "快照失败，详见 $LOG。趋势不更新——宁可显示上一张的旧数字，也不显示半张的假数字。"
+  log "快照失败，详见 ${LOG}。趋势不更新——宁可显示上一张的旧数字，也不显示半张的假数字。"
   exit 1
 fi
 

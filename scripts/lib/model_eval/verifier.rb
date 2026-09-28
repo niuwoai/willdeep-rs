@@ -3,6 +3,7 @@
 require 'digest'
 require 'fileutils'
 require 'find'
+require 'open3'
 require 'tmpdir'
 
 require_relative '../agent_eval_process'
@@ -27,13 +28,24 @@ module ModelEval
     module_function
 
     # 把 fixture 铺成一个正常的 git 仓库：模型的 diff / 检查点工具都默认有仓库。
+    # 铺不起来时抛 SeedError，带上 git 自己说的原因——以前错误输出被丢进
+    # /dev/null，夜跑日志里只有一句「git 初始化失败」，还把整轮评测带崩了。
+    class SeedError < RuntimeError; end
+
     def seed(task, workspace)
       copy_tree(task.fixture_dir, workspace)
-      git = ->(*args) { system('git', '-C', workspace, *args, out: File::NULL, err: File::NULL) }
-      ready = git.call('init', '--quiet') && git.call('add', '.') &&
+      failure = nil
+      git = lambda do |*args|
+        output, status = Open3.capture2e('git', '-C', workspace, *args)
+        failure = "git #{args.first}: #{output.strip.lines.last.to_s.strip}" unless status.success?
+        status.success?
+      end
+      # 钩子与全局模板都关掉：fixture 仓库不该被用户自己的 git 配置左右。
+      ready = git.call('init', '--quiet', '--template=') && git.call('add', '.') &&
               git.call('-c', 'user.name=Model Eval', '-c', 'user.email=model-eval@invalid',
-                       'commit', '--quiet', '-m', 'fixture')
-      raise "#{task.id}: 工作区 git 初始化失败" unless ready
+                       '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                       'commit', '--quiet', '--no-verify', '-m', 'fixture')
+      raise SeedError, "#{task.id}: 工作区 git 初始化失败（#{failure}）" unless ready
 
       workspace
     end

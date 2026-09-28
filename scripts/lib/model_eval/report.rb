@@ -16,6 +16,60 @@ module ModelEval
 
     module_function
 
+    # 开头连续这么多个任务都是 error（一个都没执行）就不再往下跑：几乎一定是
+    # 环境问题（钥匙、代理、网络），再跑十七个只是把同一个错误重复十七遍。
+    LEADING_ERRORS_TO_ABORT = 3
+
+    # 「没跑成」时退出码的人话。与 model_eval.rb 的 INFRASTRUCTURE_EXITS 对应。
+    EXIT_MEANINGS = {
+      1 => '未分类错误，多半是缺 API Key 或配置读不了',
+      2 => '输入错误',
+      3 => 'Provider 出错：鉴权、模型名、网络或代理',
+      127 => '找不到 willdeep 可执行文件'
+    }.freeze
+
+    HINT_LIMIT = 240
+    # stderr 里可能混进凭据；只取最后一行，再按这几种形状打码。
+    SECRET_PATTERNS = [
+      [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/, '[REDACTED]'],
+      [/(Bearer\s+)\S+/i, '\1[REDACTED]'],
+      [/((?:api[_-]?key|token|secret|password)["']?\s*[=:]\s*["']?)[^\s"',;]+/i, '\1[REDACTED]']
+    ].freeze
+
+    # 开头几个任务全是 error，就该停下这个模型。
+    def abort_early?(rows)
+      rows.size >= LEADING_ERRORS_TO_ABORT && rows.all? { |row| row[:status] == 'error' }
+    end
+
+    # willdeep stderr 的最后一行，打码、截断。只给终端和夜跑日志看，不进报告。
+    def error_hint(stderr_text)
+      line = stderr_text.to_s.lines.map(&:strip).reject(&:empty?).last
+      return nil unless line
+
+      redacted = SECRET_PATTERNS.reduce(line) { |text, (pattern, replacement)| text.gsub(pattern, replacement) }
+      redacted.length > HINT_LIMIT ? "#{redacted[0, HINT_LIMIT]}…" : redacted
+    end
+
+    # 一轮一个任务都没执行时，说清楚为什么；有执行的就返回 nil。
+    #
+    # 这样的一轮**不归档**：`history.jsonl` 里一行 `executed: 0` 不是成绩，是
+    # 环境坏了——2026-09-20 起夜跑连续多天写进这种行，趋势区块什么也说明不了。
+    def unusable_reason(rows, hints = [])
+      return nil if rows.any? { |row| EXECUTED.include?(row[:status]) }
+
+      errors = rows.select { |row| row[:status] == 'error' }
+      skipped = rows.count { |row| row[:status] == 'skipped' }
+      parts = ["#{rows.size} 个任务一个都没真正执行（error #{errors.size}、skipped #{skipped}）"]
+      codes = errors.group_by { |row| row[:exit_code] }.map do |code, list|
+        meaning = EXIT_MEANINGS[code]
+        "退出码 #{code.inspect} × #{list.size}#{meaning ? "（#{meaning}）" : ''}"
+      end
+      parts << codes.join('，') unless codes.empty?
+      shown = hints.compact.uniq.first(3)
+      parts << "willdeep stderr 最后一行：#{shown.join(' | ')}" unless shown.empty?
+      parts.join('；')
+    end
+
     # 分母为 0 返回 nil 而不是 0：「什么都没验证」和「什么都没通过」是两件事。
     def rate(part, total)
       total.to_i.zero? ? nil : (part * 100.0 / total).round(1)

@@ -38,7 +38,10 @@ if ! git diff --quiet HEAD 2>/dev/null; then
 fi
 
 if ! ruby scripts/model_eval.rb "${args[@]}" "$@" >>"$LOG" 2>&1; then
-  log "评测失败，详见 $LOG。趋势不更新——宁可显示上一轮的旧数字，也不显示半轮的假数字。"
+  # 变量名一律带花括号：launchd 下没有 UTF-8 locale，bash 会把紧跟的全角标点
+  # 的首字节当成变量名的一部分，`set -u` 当场报「未绑定的变量」，这条失败提示
+  # 自己先崩了（2026-09-21 起每晚如此）。
+  log "评测失败，详见 ${LOG}。趋势不更新——宁可显示上一轮的旧数字，也不显示半轮的假数字。"
   exit 1
 fi
 
@@ -46,7 +49,7 @@ if ruby scripts/model_eval_trend.rb --inject --alarm >>"$LOG" 2>&1; then
   log "完成。待 review 的变更："
   git status --short bench/model-eval docs/MODEL_EVAL.md | tee -a "$LOG"
 else
-  log "⚠️ 报警：通过率或人话率比基线掉了 10 个点以上，详见 $LOG 与 docs/MODEL_EVAL.md。"
+  log "⚠️ 报警：通过率或人话率比基线掉了 10 个点以上，详见 ${LOG} 与 docs/MODEL_EVAL.md。"
   git status --short bench/model-eval docs/MODEL_EVAL.md | tee -a "$LOG"
   exit 2
 fi

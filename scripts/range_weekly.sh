@@ -32,7 +32,7 @@ if ! git diff --quiet HEAD 2>/dev/null; then
 fi
 
 if ! ruby scripts/skill_worker_range.rb "$@" >>"$LOG" 2>&1; then
-  log "靶场失败，详见 $LOG。趋势不更新——宁可显示上一轮的旧数字，也不显示半轮的假数字。"
+  log "靶场失败，详见 ${LOG}。趋势不更新——宁可显示上一轮的旧数字，也不显示半轮的假数字。"
   exit 1
 fi
 
