@@ -241,6 +241,10 @@ pub(super) async fn event_loop(
     // 首次使用与旧写法都在开屏说清楚，不让配置静默改变行为。
     initial_transcript.extend(startup_notices(runtime, language));
     let mut app = App::new(initial_transcript, language);
+    app.feedback = agent
+        .feedback()
+        .cloned()
+        .unwrap_or_else(willdeep_core::feedback::FeedbackRecorder::disabled);
     app.approval_mode = agent.approval_mode_handle().get();
     let (media_resize_tx, mut media_resize_rx) =
         mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
@@ -1408,7 +1412,7 @@ pub(super) async fn event_loop(
                 },
                 // 摘要失败是静默的：列表里还留着 L1 派生的标题，为一行装饰
                 // 文字往聊天区塞报错不划算。改成功了才说一句。
-                UiMessage::InputSuggested{suggestion,epoch}=>{app.adopt_input_suggestion(suggestion,epoch);},
+                UiMessage::InputSuggested{suggestion,epoch}=>{app.feedback_session=Some(session.id);app.adopt_input_suggestion(suggestion,epoch);},
                 UiMessage::Retitled{title,requested}=>{let had_title=title.is_some();if crate::titling::adopt_summarized_title(session,title){store.save(session)?;runtime.notifier.set_session(&session.id.to_string(),Some(session.title.as_str()));app.notice=Some(format!("{}: {}",language.text("会话标题已整理","Session retitled","セッション名を整理しました"),session.title));}else if requested{app.append_transcript(format!("System: {}",if had_title{language.text("标题没有变化","The title is unchanged","タイトルに変更はありません")}else{language.text("标题整理失败：标题模型没有给出可用结果，沿用当前标题","Retitle failed: the title model returned nothing usable; keeping the current title","タイトル整理に失敗しました：タイトルモデルから有効な結果が得られなかったため、現在の名前を維持します")}));}},
             },
             Ok(event)=background_rx.recv()=>{

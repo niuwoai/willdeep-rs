@@ -347,6 +347,7 @@ async fn main() {
     telemetry::flush_before_exit().await;
     // 同理：用量账本的写线程在这里排空，进程内回合的最后几行不丢。
     willdeep_core::usage_ledger::flush_all(willdeep_core::usage_ledger::EXIT_FLUSH_TIMEOUT);
+    willdeep_core::feedback::flush_all(willdeep_core::usage_ledger::EXIT_FLUSH_TIMEOUT);
     if let Err(error) = result {
         eprintln!("error: {error:#}");
         std::process::exit(stable_exit_code(&error));

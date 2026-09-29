@@ -6,6 +6,7 @@ pub mod checkpoint;
 pub mod conversation;
 pub mod detached_job;
 mod execution;
+pub mod feedback;
 pub mod goal;
 pub mod hooks;
 pub mod input_suggestion;

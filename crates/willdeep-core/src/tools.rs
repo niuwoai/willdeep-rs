@@ -148,6 +148,31 @@ pub enum ToolError {
     Mcp(#[from] crate::mcp::McpError),
 }
 
+impl ToolError {
+    /// 稳定的错误类别，给反馈账本用：只说是哪一类错，不带路径、参数或输出。
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::UnknownTool(_) => "unknown_tool",
+            Self::InvalidArguments { .. } => "invalid_arguments",
+            Self::OutsideWorkspace(_) => "outside_workspace",
+            Self::ApprovalDenied(_) => "approval_denied",
+            Self::ReadOnlyPolicy(_) => "read_only_policy",
+            Self::HookDenied(_) => "hook_denied",
+            Self::FileAlreadyExists(_) => "file_already_exists",
+            Self::EditTextNotFound(_) => "edit_text_not_found",
+            Self::EditTextNotUnique { .. } => "edit_text_not_unique",
+            Self::IdenticalEdit => "identical_edit",
+            Self::InvalidRegex(_) => "invalid_regex",
+            Self::InvalidGlob(_) => "invalid_glob",
+            Self::Io(_) => "io",
+            Self::CommandTimeout { .. } => "command_timeout",
+            Self::Network(_) => "network",
+            Self::Skill(_) => "skill",
+            Self::Mcp(_) => "mcp",
+        }
+    }
+}
+
 pub struct ToolRegistry {
     workspace: PathBuf,
     approval_mode: SharedApprovalMode,
