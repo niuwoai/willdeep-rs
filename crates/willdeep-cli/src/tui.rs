@@ -216,6 +216,15 @@ impl ChatSelection {
     }
 }
 
+/// 一条下一句建议在反馈账本里的身份。
+#[derive(Clone, Debug)]
+struct TrackedSuggestion {
+    id: uuid::Uuid,
+    text: String,
+    shown_at: Instant,
+    session_id: Option<uuid::Uuid>,
+}
+
 struct App {
     input: PromptEditor,
     transcript: Vec<String>,
@@ -250,6 +259,15 @@ struct App {
     input_suggestion: Option<String>,
     /// 输入框世代号：每次清预测就加一。在途的预测带着旧世代号回来时对不上号，丢弃。
     input_suggestion_epoch: u64,
+    /// 当前灰字那条建议的反馈账本身份（id、出现时间、所属会话）。与
+    /// `input_suggestion` 同生同灭，但被 Tab 采用后移到 `accepted_suggestion`，
+    /// 等 Enter 发出去时比较「原样 / 改过 / 重写」。
+    suggestion_track: Option<TrackedSuggestion>,
+    accepted_suggestion: Option<TrackedSuggestion>,
+    /// 下一句建议的反馈账本（`[feedback]`）。没挂就是空操作。
+    feedback: willdeep_core::feedback::FeedbackRecorder,
+    /// 最近一次预测所属的会话，建议落地时记进它的身份里。
+    feedback_session: Option<uuid::Uuid>,
     /// Runtime 轮次刚正常收尾（completed / partial）。事件循环据此发起一次预测；
     /// 失败与中断的收尾不置位。
     runtime_turn_settled: bool,

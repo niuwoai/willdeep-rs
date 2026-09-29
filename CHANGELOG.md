@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- 本机反馈账本 `$WILLDEEP_HOME/feedback/YYYY-MM.jsonl`（`willdeep.feedback.v1`，`[feedback]` 配置）：记录下一句建议的展示、Tab 采用、Esc 放弃、无视另打、被顶掉，以及采用后原样 / 改过 / 重写发送；主 Agent 与 Worker 的工具失败（按错误类别）、轮次耗尽等未收敛运行、Worker 超时与验证用尽。默认只记 hash 与长度，`store_text = true` 才写原文。
+- 路线图文档：主 Agent 协调与长任务缺口自查、Xedit 定时任务与专家团插件化、RSI 反馈数据分阶段计划。
+
 ## [0.87.0-rc6] - 2026-09-29
 
 ### Fixed

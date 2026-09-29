@@ -80,6 +80,13 @@ webhook_url = "http://127.0.0.1:8787/willdeep"
 webhook_on_task_completed = true
 webhook_on_attention_required = true
 
+# 本机反馈账本 $WILLDEEP_HOME/feedback/YYYY-MM.jsonl（docs/FEEDBACK_LEDGER.md）：
+# 下一句建议的采用 / 放弃 / 改写、工具失败、Worker 轮次耗尽等信号，只写本机、不上传。
+# 默认只记 hash 与长度；store_text = true 才写建议与发送原文（含凭据特征的文本始终不写）。
+[feedback]
+enabled = true
+store_text = false
+
 [providers.some-im]
 provider = "some-im"
 api = "chat-completions"

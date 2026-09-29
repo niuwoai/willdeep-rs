@@ -553,6 +553,92 @@ impl Provider for EndlessToolProvider {
 
 /// 轮次用尽不再是错误：交出最后一段可见文字，停机原因标 `MaxTurns`，
 /// 历史里的工具往返一条不少——改动都在，只是没收敛。
+/// 每一轮都去读一个不存在的文件：工具失败 + 轮次耗尽，两种 RSI 信号都该落账。
+struct MissingFileProvider;
+
+#[async_trait]
+impl Provider for MissingFileProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<Completion, ProviderError> {
+        Ok(Completion {
+            reasoning: None,
+            content: String::new(),
+            tool_calls: vec![crate::types::ToolCall {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "read_file".to_owned(),
+                arguments: r#"{"path":"missing.txt"}"#.to_owned(),
+            }],
+            finish_reason: Some("tool_calls".to_owned()),
+            usage: None,
+        })
+    }
+}
+
+/// Worker 的记录者挂在 Agent 上：每次工具失败一行，耗尽轮次且没交出任何
+/// 文字时再记一行 `agent_incomplete`，`report_len` 为 0 就是「没有结果」。
+#[tokio::test]
+async fn tool_failures_and_exhausted_turns_reach_the_feedback_ledger() {
+    let dir =
+        std::env::temp_dir().join(format!("willdeep-agent-feedback-{}", uuid::Uuid::new_v4()));
+    let sink = crate::feedback::FeedbackSink::spawn(&dir);
+    let worker_id = uuid::Uuid::new_v4();
+    let recorder = crate::feedback::FeedbackRecorder::new(sink.clone(), "tui", false)
+        .for_worker(worker_id, "implementer");
+    let agent = Agent::new(
+        Arc::new(MissingFileProvider),
+        registry("feedback"),
+        AgentConfig {
+            max_turns: 2,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_feedback(recorder);
+
+    let outcome = agent.run("read it").await.expect("partial, not an error");
+    assert_eq!(outcome.stop_reason, AgentStopReason::MaxTurns);
+    assert!(sink.flush(std::time::Duration::from_secs(2)));
+
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("feedback dir") {
+        let text = std::fs::read_to_string(entry.expect("entry").path()).expect("read");
+        rows.extend(
+            text.lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("row")),
+        );
+    }
+    let failures: Vec<_> = rows
+        .iter()
+        .filter(|row| row["signal"] == "tool_failed")
+        .collect();
+    assert_eq!(failures.len(), 2, "{rows:?}");
+    assert!(
+        failures
+            .iter()
+            .all(|row| row["tool"] == "read_file" && row["error_class"] == "io")
+    );
+    let incomplete: Vec<_> = rows
+        .iter()
+        .filter(|row| row["signal"] == "agent_incomplete")
+        .collect();
+    assert_eq!(incomplete.len(), 1, "{rows:?}");
+    assert_eq!(incomplete[0]["stop_reason"], "max_turns");
+    assert_eq!(incomplete[0]["turns"], 2);
+    assert_eq!(incomplete[0]["report_len"], 0);
+    assert_eq!(incomplete[0]["agent_id"], worker_id.to_string());
+    assert_eq!(incomplete[0]["worker_profile"], "implementer");
+    let raw = serde_json::to_string(&rows).expect("json");
+    assert!(
+        !raw.contains("missing.txt"),
+        "tool arguments must never be recorded"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn exhausting_turns_returns_the_partial_result_instead_of_failing() {
     let agent = Agent::new(

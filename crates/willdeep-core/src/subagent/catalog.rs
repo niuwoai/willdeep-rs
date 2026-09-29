@@ -88,6 +88,7 @@ pub struct SubagentCatalog {
     pub(super) owned_background_agents: Arc<Mutex<BTreeSet<uuid::Uuid>>>,
     /// 父会话的用量账本；Worker 派生出自己的句柄记 `subagent` 行。
     usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
+    feedback: Option<crate::feedback::FeedbackRecorder>,
 }
 
 /// 见 [`SubagentCatalog::dispatch_model`]。
@@ -147,7 +148,14 @@ impl SubagentCatalog {
             parent_approval_mode: None,
             owned_background_agents: Arc::new(Mutex::new(BTreeSet::new())),
             usage_ledger: None,
+            feedback: None,
         }
+    }
+
+    /// 让 Worker 的工具失败、没收敛与没结果的收尾进父会话的反馈账本。
+    pub fn with_feedback(mut self, recorder: crate::feedback::FeedbackRecorder) -> Self {
+        self.feedback = recorder.is_enabled().then_some(recorder);
+        self
     }
 
     /// 让 Worker 的模型调用进父会话的用量账本。
@@ -779,6 +787,7 @@ impl SubagentCatalog {
             state_home: self.state_home.clone(),
             parent_approval_mode: self.parent_approval_mode.clone(),
             usage_ledger: self.usage_ledger.clone(),
+            feedback: self.feedback.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();

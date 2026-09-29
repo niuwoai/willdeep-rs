@@ -399,6 +399,8 @@ pub struct Agent {
     kernel: Option<crate::kernel::EventKernel>,
     /// 本机用量账本。不挂就不记账，其余行为完全不变。
     usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
+    /// 本机反馈账本（RSI 强反馈）：工具失败、没收敛的运行。不挂就不记。
+    feedback: Option<crate::feedback::FeedbackRecorder>,
 }
 
 impl Agent {
@@ -421,7 +423,18 @@ impl Agent {
             admission: Arc::new(RoutingGuard::new(crate::RoutingPolicy::default())),
             kernel: None,
             usage_ledger: None,
+            feedback: None,
         }
+    }
+
+    /// 挂上反馈账本：每次工具失败、每次没收敛就停下的运行各记一行。
+    pub fn with_feedback(mut self, recorder: crate::feedback::FeedbackRecorder) -> Self {
+        self.feedback = recorder.is_enabled().then_some(recorder);
+        self
+    }
+
+    pub fn feedback(&self) -> Option<&crate::feedback::FeedbackRecorder> {
+        self.feedback.as_ref()
     }
 
     /// 挂上本机用量账本：主循环与上下文压缩的每次模型调用各记一行。
@@ -728,6 +741,15 @@ impl Agent {
                 .map_err(AgentError::VerificationSnapshot)?,
         )?;
         let result = self.run_inner(messages, user_message, &mut recorder).await;
+        if let (Some(feedback), Ok(outcome)) = (&self.feedback, &result)
+            && !outcome.stop_reason.is_complete()
+        {
+            feedback.record_incomplete(
+                outcome.stop_reason.as_str(),
+                outcome.turns,
+                &outcome.final_text,
+            );
+        }
         recorder.finish(&result)?;
         result
     }
@@ -1130,7 +1152,12 @@ impl Agent {
                 };
                 let (output, is_error) = match result {
                     Ok(output) => (output, false),
-                    Err(error) => (format!("tool error: {error}"), true),
+                    Err(error) => {
+                        if let Some(feedback) = &self.feedback {
+                            feedback.record_tool_failure(&call.name, error.class());
+                        }
+                        (format!("tool error: {error}"), true)
+                    }
                 };
                 if progress.observe(&call, &output, is_error) {
                     tools_since_check = tools_since_check.saturating_add(1);

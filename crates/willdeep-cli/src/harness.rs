@@ -224,6 +224,30 @@ pub(crate) struct UsageOrigin {
 
 /// 这次 harness 的记账上下文。进程内前端按界面定 `client`，Runtime 前端按
 /// 提交方的 `origin_client`。
+/// 反馈账本的记录者（`[feedback]`，docs/FEEDBACK_LEDGER.md）。出处取自用量
+/// 账本的同一份上下文：同一个会话、同一个 Runtime 轮次、同一个前端。
+pub(crate) fn feedback_recorder(
+    home: &Path,
+    settings: &crate::config::FeedbackSettings,
+    context: &willdeep_core::usage_ledger::UsageLedgerContext,
+) -> willdeep_core::feedback::FeedbackRecorder {
+    use willdeep_core::feedback::{FeedbackRecorder, feedback_dir, shared_sink};
+    if !settings.enabled {
+        return FeedbackRecorder::disabled();
+    }
+    let client = serde_json::to_value(context.client)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    FeedbackRecorder::new(
+        shared_sink(&feedback_dir(home)),
+        client,
+        settings.store_text,
+    )
+    .with_session(context.session_id)
+    .with_turn(context.turn_id.clone())
+}
+
 fn usage_ledger_context(
     frontend: &HarnessFrontend,
     session_id: uuid::Uuid,
@@ -707,6 +731,7 @@ pub(crate) async fn build(
         willdeep_core::usage_ledger::shared_sink(&willdeep_core::usage_ledger::ledger_dir(home)),
         usage_ledger_context(&frontend, session_id, &workspace),
     );
+    let feedback = feedback_recorder(home, &loaded.file.feedback, usage_ledger.context());
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: provider_config.base_url.clone(),
         api_key: provider_config.api_key.clone(),
@@ -980,7 +1005,8 @@ pub(crate) async fn build(
         .with_parent_session(session_id)
         .with_always_allow_store(home.join("always-allow.json"))
         .with_event_sink(sink.clone())
-        .with_usage_ledger(usage_ledger.clone());
+        .with_usage_ledger(usage_ledger.clone())
+        .with_feedback(feedback.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in resolve_tier_bindings(
         &loaded.file,
@@ -1034,7 +1060,8 @@ pub(crate) async fn build(
     .with_goal_continuation(goal_continuation.clone())
     .with_background_tasks(background_tasks.clone())
     .with_event_kernel(kernel.clone())
-    .with_usage_ledger(usage_ledger.clone());
+    .with_usage_ledger(usage_ledger.clone())
+    .with_feedback(feedback);
     // Runtime 任务的收件箱由任务管理器持有另一半；进程内轮次用 Agent 自带的那个。
     if let Some(inbox) = runtime_inbox {
         agent = agent.with_instruction_inbox(inbox);

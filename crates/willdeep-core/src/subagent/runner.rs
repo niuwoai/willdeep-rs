@@ -172,6 +172,8 @@ pub(super) struct SubagentRun {
     pub(super) parent_approval_mode: Option<crate::tools::SharedApprovalMode>,
     /// 父会话的用量账本。Worker 的每次模型调用以 `subagent` 记一行。
     pub(super) usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
+    /// 父会话的反馈账本。Worker 的行带自己的 id 与工种。
+    pub(super) feedback: Option<crate::feedback::FeedbackRecorder>,
 }
 
 /// Run a worker to a verdict.
@@ -207,8 +209,10 @@ pub(super) async fn run_subagent(
         state_home,
         parent_approval_mode,
         usage_ledger,
+        feedback,
     } = run;
     let usage_ledger = usage_ledger.map(|scope| scope.for_subagent(agent_id));
+    let feedback = feedback.map(|recorder| recorder.for_worker(agent_id, &profile.id));
     let _claim = match &approved_targets {
         Some(targets) => FileClaim::acquire(&claimed_files, targets)?,
         None => None,
@@ -284,6 +288,7 @@ pub(super) async fn run_subagent(
             state_home.as_deref(),
             parent_approval_mode.as_ref(),
             usage_ledger.as_ref(),
+            feedback.as_ref(),
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -321,6 +326,12 @@ pub(super) async fn run_subagent(
     }
 
     let outcome = outcome.expect("a verified run records an outcome before exhausting attempts");
+    if let Some(feedback) = &feedback {
+        feedback.record_worker_failure(
+            crate::feedback::Signal::WorkerVerifierExhausted,
+            Some(outcome.attempts),
+        );
+    }
     lifecycle_sink
         .emit(verdict(
             Some(false),
@@ -372,6 +383,7 @@ async fn run_once(
     state_home: Option<&Path>,
     parent_approval_mode: Option<&crate::tools::SharedApprovalMode>,
     usage_ledger: Option<&crate::usage_ledger::UsageLedgerScope>,
+    feedback: Option<&crate::feedback::FeedbackRecorder>,
 ) -> Result<String, AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
@@ -482,6 +494,9 @@ async fn run_once(
     if let Some(scope) = usage_ledger {
         agent = agent.with_usage_ledger(scope.clone());
     }
+    if let Some(recorder) = feedback {
+        agent = agent.with_feedback(recorder.clone());
+    }
     let run = Box::pin(async {
         if let Some(home) = state_home {
             super::checkpoint::run(&agent, home, workspace, agent_id, &profile.id, brief).await
@@ -493,6 +508,9 @@ async fn run_once(
         tokio::time::timeout(Duration::from_secs(seconds), run)
             .await
             .map_err(|_| {
+                if let Some(feedback) = feedback {
+                    feedback.record_worker_failure(crate::feedback::Signal::WorkerTimedOut, None);
+                }
                 AgentError::Subagent(format!("subagent timed out after {seconds} seconds"))
             })??
     } else {

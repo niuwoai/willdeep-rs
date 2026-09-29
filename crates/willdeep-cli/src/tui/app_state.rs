@@ -27,6 +27,10 @@ impl App {
             notice: None,
             input_suggestion: None,
             input_suggestion_epoch: 0,
+            suggestion_track: None,
+            accepted_suggestion: None,
+            feedback: willdeep_core::feedback::FeedbackRecorder::disabled(),
+            feedback_session: None,
             runtime_turn_settled: false,
             goal: None,
             mobile_status: None,
@@ -160,7 +164,13 @@ impl App {
     /// 该看的是回复，大输入区会把聊天区挤得看不到输出。
     pub(super) fn take_submitted_input(&mut self) -> String {
         self.composer_expanded = false;
-        self.input.take()
+        let submitted = self.input.take();
+        // 采用过的建议到这里才见分晓：原样发出、改几个字、还是整句重写。
+        if let Some(accepted) = self.accepted_suggestion.take() {
+            let signal = willdeep_core::feedback::classify_sent(&accepted.text, &submitted);
+            self.record_suggestion(&accepted, signal, Some(&submitted));
+        }
+        submitted
     }
     pub(super) fn load_session(&mut self, session: &Session) {
         self.transcript = session_transcript(session, self.language);
@@ -169,6 +179,8 @@ impl App {
                 .push(welcome_message(&session.workspace, self.language));
         }
         self.input = PromptEditor::default();
+        self.clear_input_suggestion();
+        self.abandon_accepted_suggestion();
         self.running = false;
         self.turn_started = None;
         self.last_progress_at = None;
@@ -746,6 +758,7 @@ impl App {
         edit(&mut self.input);
         // 开始打字就放弃预测：灰字只在空输入框里有意义，删光了也不回来。
         if !self.input.is_empty() && self.input_suggestion.is_some() {
+            self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionIgnoredTyped);
             self.clear_input_suggestion();
         }
         self.skill_selected = 0;
@@ -998,8 +1011,50 @@ impl App {
         self.bell_pending = true;
     }
 
+    fn record_suggestion(
+        &self,
+        track: &TrackedSuggestion,
+        signal: willdeep_core::feedback::Signal,
+        sent: Option<&str>,
+    ) {
+        if !self.feedback.is_enabled() {
+            return;
+        }
+        self.feedback
+            .clone()
+            .with_session(track.session_id)
+            .record_suggestion(willdeep_core::feedback::SuggestionEvent {
+                suggestion_id: track.id,
+                signal,
+                suggestion: &track.text,
+                dwell: Some(track.shown_at.elapsed()),
+                sent,
+            });
+    }
+
+    /// 当前灰字那条建议有了结局：记一行，身份作废。
+    fn finish_suggestion(&mut self, signal: willdeep_core::feedback::Signal) {
+        if let Some(track) = self.suggestion_track.take() {
+            self.record_suggestion(&track, signal, None);
+        }
+    }
+
+    /// 采用了却始终没发出去（清空了输入框、切了会话、下一条建议又来了）：
+    /// 记作被顶掉。
+    fn abandon_accepted_suggestion(&mut self) {
+        if let Some(accepted) = self.accepted_suggestion.take() {
+            self.record_suggestion(
+                &accepted,
+                willdeep_core::feedback::Signal::SuggestionSuperseded,
+                None,
+            );
+        }
+    }
+
     /// 把预测清掉并翻世代：在途的结果回来时对不上号，自然丢弃。
+    /// 走到这里还没有结局的灰字建议算被顶掉。
     pub(super) fn clear_input_suggestion(&mut self) {
+        self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionSuperseded);
         self.input_suggestion = None;
         self.input_suggestion_epoch = self.input_suggestion_epoch.wrapping_add(1);
     }
@@ -1021,6 +1076,20 @@ impl App {
         let Some(suggestion) = suggestion else {
             return false;
         };
+        self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionSuperseded);
+        self.abandon_accepted_suggestion();
+        let track = TrackedSuggestion {
+            id: uuid::Uuid::new_v4(),
+            text: suggestion.clone(),
+            shown_at: Instant::now(),
+            session_id: self.feedback_session,
+        };
+        self.record_suggestion(
+            &track,
+            willdeep_core::feedback::Signal::SuggestionShown,
+            None,
+        );
+        self.suggestion_track = Some(track);
         self.input_suggestion = Some(suggestion);
         true
     }
@@ -1038,6 +1107,15 @@ impl App {
         let Some(suggestion) = self.visible_input_suggestion().map(str::to_owned) else {
             return false;
         };
+        // 先把身份移到「已采用」，填字触发的清理就不会把它记成「打了别的字」。
+        if let Some(track) = self.suggestion_track.take() {
+            self.record_suggestion(
+                &track,
+                willdeep_core::feedback::Signal::SuggestionAccepted,
+                None,
+            );
+            self.accepted_suggestion = Some(track);
+        }
         self.edit_input(|input| input.insert(&suggestion));
         true
     }
@@ -1047,6 +1125,7 @@ impl App {
         if self.visible_input_suggestion().is_none() {
             return false;
         }
+        self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionDismissed);
         self.clear_input_suggestion();
         true
     }
@@ -1058,6 +1137,7 @@ impl App {
     pub(super) fn begin_turn(&mut self, runtime_turn: bool, initial_progress: String) {
         // 新一轮开始，上一轮的预测作废；在途的结果回来也对不上世代号。
         self.clear_input_suggestion();
+        self.abandon_accepted_suggestion();
         let now = Instant::now();
         self.running = true;
         self.runtime_turn = runtime_turn;

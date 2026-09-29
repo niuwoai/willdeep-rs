@@ -1436,6 +1436,100 @@ fn late_input_suggestions_are_dropped_when_the_world_moved_on() {
     assert!(app.input_suggestion.is_none(), "cleared, not merely hidden");
 }
 
+fn feedback_rows(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("feedback dir") {
+        let text = std::fs::read_to_string(entry.expect("entry").path()).expect("read");
+        rows.extend(
+            text.lines()
+                .map(|line| serde_json::from_str(line).expect("row")),
+        );
+    }
+    rows
+}
+
+/// 建议的每种结局都进反馈账本，且同一条建议的行共享 `suggestion_id`：
+/// 展示是分母，Tab 只是中间态，Enter 发出去时才分出原样 / 改过 / 重写。
+#[test]
+fn input_suggestion_lifecycle_is_recorded_in_the_feedback_ledger() {
+    use willdeep_core::feedback::{FeedbackRecorder, FeedbackSink};
+    let dir = std::env::temp_dir().join(format!("willdeep-tui-feedback-{}", uuid::Uuid::new_v4()));
+    let sink = FeedbackSink::spawn(&dir);
+    let mut app = App::new(Vec::new(), Language::En);
+    app.feedback = FeedbackRecorder::new(sink.clone(), "tui", false);
+    let session = uuid::Uuid::new_v4();
+    app.feedback_session = Some(session);
+
+    // 1. Tab 采用后原样发送。
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("run the tests".to_owned()), epoch));
+    assert!(app.accept_input_suggestion());
+    assert_eq!(app.take_submitted_input(), "run the tests");
+    app.begin_turn(false, "working".to_owned());
+    app.finish_turn();
+
+    // 2. Tab 采用后改写再发送。
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("commit it".to_owned()), epoch));
+    assert!(app.accept_input_suggestion());
+    app.edit_input(|input| input.insert(" please"));
+    assert_eq!(app.take_submitted_input(), "commit it please");
+    app.begin_turn(false, "working".to_owned());
+    app.finish_turn();
+
+    // 3. 无视建议另打一句。
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("push it".to_owned()), epoch));
+    app.edit_input(|input| input.insert("no, revert that"));
+    app.take_submitted_input();
+    app.begin_turn(false, "working".to_owned());
+    app.finish_turn();
+
+    // 4. Esc 放弃；5. 被新一轮顶掉。
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("open a PR".to_owned()), epoch));
+    assert!(app.dismiss_input_suggestion());
+    let epoch = app.input_suggestion_epoch;
+    assert!(app.adopt_input_suggestion(Some("deploy".to_owned()), epoch));
+    app.begin_turn(false, "working".to_owned());
+
+    assert!(sink.flush(Duration::from_secs(2)));
+    let rows = feedback_rows(&dir);
+    let signals: Vec<&str> = rows
+        .iter()
+        .map(|row| row["signal"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        signals,
+        [
+            "suggestion_shown",
+            "suggestion_accepted",
+            "suggestion_sent_verbatim",
+            "suggestion_shown",
+            "suggestion_accepted",
+            "suggestion_sent_edited",
+            "suggestion_shown",
+            "suggestion_ignored_typed",
+            "suggestion_shown",
+            "suggestion_dismissed",
+            "suggestion_shown",
+            "suggestion_superseded",
+        ]
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["session_id"] == session.to_string())
+    );
+    assert_eq!(rows[0]["suggestion_id"], rows[2]["suggestion_id"]);
+    assert_ne!(rows[0]["suggestion_id"], rows[3]["suggestion_id"]);
+    assert_eq!(rows[5]["edit_distance"], 7);
+    assert!(
+        rows.iter().all(|row| row["text"].is_null()),
+        "hash-only by default"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `/workspace` 面板：打开时光标落在当前工作区上，输入即过滤，`Enter` 交出
 /// 选中的工作区。此前切换要人把 UUID 从聊天记录里抄回输入框。
 #[test]

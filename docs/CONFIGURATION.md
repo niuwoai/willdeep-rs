@@ -275,7 +275,8 @@ Web 左栏可直接切换语言，选择保存在当前浏览器的 localStorage
 
 - `[subagents.*]` — 子 Agent 的模型绑定、上下文窗口、工具输出上限（`tool_output_limit`）、验证重试次数（`max_attempts`）、Token 预算、超时与熔断，见 [子 Agent 与后台任务](SUBAGENTS.md) 与 [小上下文 Skill Worker](SKILL_WORKERS.md)；
 - `[mcp_servers.*]` — MCP 服务：stdio（`command`）或 Streamable HTTP（`url`，鉴权走 `bearer_token_env` 或 `[mcp_servers.*.oauth]`），见 [Skills 与 MCP](SKILLS_AND_MCP.md)；
-- `[skills]` 的 `roots` — 额外的 Skill 搜索根目录，见 [Skills 与 MCP](SKILLS_AND_MCP.md)。
+- `[skills]` 的 `roots` — 额外的 Skill 搜索根目录，见 [Skills 与 MCP](SKILLS_AND_MCP.md)；
+- `[feedback]` — 本机反馈账本：`enabled`（默认 `true`）与 `store_text`（默认 `false`，只记 hash 与长度），见 [本机反馈账本](FEEDBACK_LEDGER.md)。
 
 ## 配置命令
 

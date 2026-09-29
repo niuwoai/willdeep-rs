@@ -130,6 +130,9 @@ pub struct ConfigFile {
     /// 匿名产品遥测；缺省即开启。
     #[serde(default)]
     pub telemetry: TelemetrySettings,
+    /// 本机反馈账本（RSI 强反馈数据）。只写本机、不上传。
+    #[serde(default)]
+    pub feedback: FeedbackSettings,
     /// Cross-client attention delivery settings shared with WillDeep.app.
     /// The CLI accepts the full section even when only webhook fields are
     /// relevant on a headless machine; desktop-only sound fields remain
@@ -287,6 +290,33 @@ impl Default for TelemetrySettings {
 }
 
 fn default_telemetry_enabled() -> bool {
+    true
+}
+
+/// `[feedback]`：本机反馈账本 `$WILLDEEP_HOME/feedback/*.jsonl`。
+///
+/// 记下一句建议的采用 / 放弃 / 改写、工具失败、Worker 轮次耗尽等信号，供离线
+/// 改进提示词与路由（`docs/FEEDBACK_LEDGER.md`）。默认开，但只记 hash 与长度；
+/// `store_text = true` 才写建议与发送的原文，含凭据特征的文本始终不写。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSettings {
+    #[serde(default = "default_feedback_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub store_text: bool,
+}
+
+impl Default for FeedbackSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_feedback_enabled(),
+            store_text: false,
+        }
+    }
+}
+
+fn default_feedback_enabled() -> bool {
     true
 }
 
@@ -982,6 +1012,17 @@ context_window = 400000
                 "should reject: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn feedback_defaults_to_hash_only_and_parses_opt_in() {
+        let parsed: ConfigFile = toml::from_str("").expect("parse empty");
+        assert!(parsed.feedback.enabled);
+        assert!(!parsed.feedback.store_text);
+        let parsed: ConfigFile =
+            toml::from_str("[feedback]\nenabled = false\nstore_text = true\n").expect("parse");
+        assert!(!parsed.feedback.enabled);
+        assert!(parsed.feedback.store_text);
     }
 
     #[test]
