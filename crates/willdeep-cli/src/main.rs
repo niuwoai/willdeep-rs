@@ -2015,6 +2015,7 @@ pub(crate) fn agent_event_json(event: AgentEvent) -> serde_json::Value {
             "reason": match reason {
                 SoftStopReason::WallClock => "wall_clock",
                 SoftStopReason::Continuations => "continuations",
+                SoftStopReason::Tokens => "tokens",
             }
         }),
         AgentEvent::SubagentVerdict {

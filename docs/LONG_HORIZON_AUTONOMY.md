@@ -87,7 +87,23 @@ rs 侧目前**没有立场**——`crates/willdeep-core/src/agent.rs:275` 一旦
   - **压缩固定区**：`<goal-state>` 块每轮重建进 system 消息。system 消息不参与压缩摘要，所以目标、清单与在飞 Worker 不会被摘要掉；本地摘要提示也附上它，避免摘要与之矛盾。
   - Web 端 `/goal` 仍是前端状态、随每轮 `<goal>` 信封到达。持久化状态在会话里只「停放」，信封带着同一句目标来才接回，所以关掉的目标不会复活。
 - **wall-clock 跨重启累计**：计时只在轮次运行时走，轮次之间与进程不在时不计。daemon 每轮重建 harness，从 `session.goal_state` 恢复（`harness::restore_goal`），不再每轮从满格预算重来。
-- **尚未做**：RA3 的 token / cost 维度；RA4 的「重启后按计划态自动续推」（daemon 仍把动过工具的中断轮次标成 `Interrupted`，但下次运行的预算与清单已经接得上）；退避阶梯的真实延时。
+- **RA3 token 预算**：
+  - **记账**：`GoalState.tokens_used` 累计主 Agent 为这个目标用掉的 token（优先 `total_tokens`，否则输入 + 输出），随检查点落盘，跨轮次、跨重启累计。
+  - **收尾**：超过 `GoalBudget.max_tokens` 时，与 wall-clock、续推次数用同一条收尾路径（`SoftStopReason::Tokens` → 交接快照 → `BudgetLimited`）。
+  - **配置**：`[agent] goal_token_budget`（缺省不限）、`goal_wall_clock_minutes`（缺省 240）、`goal_max_continuations`（缺省 64）。预算显示在 `<goal-state>` 与续推引导的“态势”一段里。
+- **RA4 重启后自动续推**：`daemon/goal_resume.rs` 在 daemon 启动时跑一次。
+  - **续推谁**：最后一轮被重启打断（`Runtime restarted after Turn history became ambiguous`）、没有排队轮次、core 会话里目标仍在进行且预算未尽的会话。
+  - **续推轮次**：各排一轮续推，`origin_client` 为 `goal-resume:<被打断轮次>`。提示词开头带 `<goal>` 信封，这样才能接回停放的状态；随后要求先用只读工具核对实际状态、不要重做已完成的步骤，并列出未完成的验收项与步骤。
+  - **兜底**：
+    - 已完成、已在收尾、预算用尽的目标不续推（事件 `goal.resume_skipped reason=`）；
+    - 连续 3 个续推轮次都被重启打断就停手（`repeated_restarts`）；
+    - `request_id` 由被打断的轮次派生，同一次中断只排一轮；
+    - `[agent] goal_auto_resume = false` 关掉。
+  - **留下的记录**：事件 `goal.resumed`，反馈账本信号 `goal_resumed`。
+- **尚未做**：
+  - Worker 的 token 不计入目标预算（它们走 `SubagentUsage` 事件）；
+  - 只有 token 维度，没有 cost（缺价格表）；
+  - 退避阶梯的真实延时。
 
 | 步骤 | 内容 | 关键位点 |
 |---|---|---|

@@ -227,6 +227,15 @@ pub struct AgentSettings {
     /// 轮次结束后在空输入框里灰字预测用户的下一句，Tab 采用。不写按开。
     /// 用与标题摘要相同的模型候选，但开关独立于 `auto_title`。
     pub input_suggestions: Option<bool>,
+    /// 一个目标（`/goal`）跨轮次、跨重启累计的主 Agent token 上限，用尽时有序
+    /// 收尾交接。不写不限——wall-clock 与续推次数仍然兜底。
+    pub goal_token_budget: Option<u64>,
+    /// 一个目标的实际运行时长上限（分钟）。缺省 240。
+    pub goal_wall_clock_minutes: Option<u64>,
+    /// 一个目标的续推次数上限。缺省 64。
+    pub goal_max_continuations: Option<usize>,
+    /// daemon 重启打断了一个还在进行的目标时，自动排一轮续推。缺省开。
+    pub goal_auto_resume: Option<bool>,
     /// 会话标题摘要模型。默认取会话模型——标题请求只发一问一答各 800 字，
     /// 成本可忽略，而另指一个端点意味着它可能缺凭据、然后静默退化。
     pub title_model: Option<String>,
@@ -757,9 +766,48 @@ fn enforce_secret_file_permissions(_file: &ConfigFile, _path: &Path) -> Result<(
     Ok(())
 }
 
+impl AgentSettings {
+    /// `[agent] goal_*` 配置对应的目标预算。
+    pub(crate) fn goal_budget(&self) -> willdeep_core::GoalBudget {
+        let defaults = willdeep_core::GoalBudget::default();
+        willdeep_core::GoalBudget {
+            wall_clock: self
+                .goal_wall_clock_minutes
+                .map(|minutes| std::time::Duration::from_secs(minutes.saturating_mul(60)))
+                .or(defaults.wall_clock),
+            max_continuations: self
+                .goal_max_continuations
+                .unwrap_or(defaults.max_continuations),
+            max_tokens: self.goal_token_budget.filter(|tokens| *tokens > 0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_budget_settings_map_onto_the_goal_budget() {
+        let defaults: ConfigFile = toml::from_str("[agent]\n").unwrap();
+        assert_eq!(
+            defaults.agent.goal_budget(),
+            willdeep_core::GoalBudget::default()
+        );
+        assert_eq!(defaults.agent.goal_auto_resume, None);
+        let configured: ConfigFile = toml::from_str(
+            "[agent]\ngoal_token_budget = 2000000\ngoal_wall_clock_minutes = 30\ngoal_max_continuations = 10\ngoal_auto_resume = false\n",
+        )
+        .unwrap();
+        let budget = configured.agent.goal_budget();
+        assert_eq!(budget.max_tokens, Some(2_000_000));
+        assert_eq!(
+            budget.wall_clock,
+            Some(std::time::Duration::from_secs(1_800))
+        );
+        assert_eq!(budget.max_continuations, 10);
+        assert_eq!(configured.agent.goal_auto_resume, Some(false));
+    }
 
     #[test]
     fn parses_explicit_verification_commands_and_defaults_to_no_contract() {

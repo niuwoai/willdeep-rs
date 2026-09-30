@@ -5,8 +5,7 @@ use async_trait::async_trait;
 
 use crate::background::BackgroundTaskRegistry;
 use crate::goal::{
-    ContinuationDecision, ContinuationRung, GoalBudget, GoalContinuation, RoundObservation,
-    SoftStopReason,
+    ContinuationDecision, ContinuationRung, GoalContinuation, RoundObservation, SoftStopReason,
 };
 use crate::provider::{Provider, ProviderError};
 use crate::routing::{RoutingGuard, RoutingTier};
@@ -849,7 +848,7 @@ impl Agent {
         if let Some(goal) = goal_from_message(&user_message.content)
             && let Some(continuation) = &self.goal_continuation
         {
-            continuation.activate(goal, GoalBudget::default());
+            continuation.activate(goal, continuation.default_budget());
         }
         self.apply_runtime_route(&mut user_message).await;
         messages.retain(|message| message.role != crate::types::Role::System);
@@ -1051,12 +1050,17 @@ impl Agent {
             if let Some(usage) = completion.usage {
                 input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                 output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
-                used_tokens = used_tokens.saturating_add(usage.total_tokens.unwrap_or_else(|| {
+                let call_tokens = usage.total_tokens.unwrap_or_else(|| {
                     usage
                         .input_tokens
                         .unwrap_or(0)
                         .saturating_add(usage.output_tokens.unwrap_or(0))
-                }));
+                });
+                used_tokens = used_tokens.saturating_add(call_tokens);
+                // 目标的 token 预算跨轮次累计（RA3），与本轮的 token_budget 分开算。
+                if let Some(goal) = &self.goal_continuation {
+                    goal.record_tokens(call_tokens);
+                }
                 let call = model_call
                     .take()
                     .unwrap_or_else(crate::usage_ledger::ModelCall::inert);

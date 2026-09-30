@@ -98,6 +98,7 @@ mod tests {
                 GoalBudget {
                     wall_clock: None,
                     max_continuations: 20,
+                    max_tokens: None,
                 },
             );
             let events = Arc::new(ProgressEvents::default());

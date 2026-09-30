@@ -152,6 +152,21 @@ struct StoredRuntimeTurn {
     origin_client: Option<String>,
 }
 
+/// 重启时历史有歧义、不能安全重放的在途轮次记的错误。`goal_resume` 只接这一种
+/// 中断：人为取消、失败都不自动续推。
+pub(super) const RESTART_INTERRUPTED_ERROR: &str =
+    "Runtime restarted after Turn history became ambiguous";
+
+/// 一个可能要自动续推目标的会话（RA4，见 `goal_resume`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GoalResumeCandidate {
+    pub session_id: uuid::Uuid,
+    pub root_agent_id: uuid::Uuid,
+    pub interrupted_turn_id: uuid::Uuid,
+    /// 从最后一轮往前数，连续由自动续推发起的轮次数（含被打断的这一轮）。
+    pub consecutive_resumes: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CreateRuntimeTurn {
     pub request_id: uuid::Uuid,
@@ -324,8 +339,7 @@ impl RuntimeSessionStore {
                 } else {
                     turn.metadata.status = RuntimeTurnStatus::Interrupted;
                     turn.metadata.completed_at = Some(now());
-                    turn.metadata.error =
-                        Some("Runtime restarted after Turn history became ambiguous".to_owned());
+                    turn.metadata.error = Some(RESTART_INTERRUPTED_ERROR.to_owned());
                 }
                 turns_changed = true;
             }
@@ -1171,6 +1185,71 @@ impl RuntimeSessionStore {
             .turns_lock()?
             .get(&id)
             .map(|turn| turn.metadata.clone()))
+    }
+
+    /// 最后一轮被重启打断、之后没有排队轮次的会话。目标还在不在进行由调用方
+    /// 读 core 会话判定（[`Self::core_goal_state`]），这里只看 Runtime 的记录。
+    pub(super) fn goal_resume_candidates(
+        &self,
+        resume_origin_prefix: &str,
+    ) -> Result<Vec<GoalResumeCandidate>> {
+        let sessions = self.lock()?;
+        let turns = self.turns_lock()?;
+        let mut candidates = Vec::new();
+        for session in sessions.values() {
+            if session.active_turn_id.is_some() || session.status == RuntimeSessionStatus::Archived
+            {
+                continue;
+            }
+            let mut history = turns
+                .values()
+                .filter(|turn| turn.metadata.session_id == session.id)
+                .collect::<Vec<_>>();
+            history.sort_by_key(|turn| turn.metadata.queue_sequence);
+            if history
+                .iter()
+                .any(|turn| turn.metadata.status == RuntimeTurnStatus::Queued)
+            {
+                continue;
+            }
+            let Some(last) = history.last() else {
+                continue;
+            };
+            if last.metadata.status != RuntimeTurnStatus::Interrupted
+                || last.metadata.error.as_deref() != Some(RESTART_INTERRUPTED_ERROR)
+            {
+                continue;
+            }
+            let consecutive_resumes = history
+                .iter()
+                .rev()
+                .take_while(|turn| {
+                    turn.origin_client
+                        .as_deref()
+                        .is_some_and(|origin| origin.starts_with(resume_origin_prefix))
+                })
+                .count();
+            candidates.push(GoalResumeCandidate {
+                session_id: session.id,
+                root_agent_id: session.root_agent_id,
+                interrupted_turn_id: last.metadata.id,
+                consecutive_resumes,
+            });
+        }
+        candidates.sort_by_key(|candidate| candidate.session_id);
+        Ok(candidates)
+    }
+
+    /// core 会话里持久化的目标状态。
+    pub(super) fn core_goal_state(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<Option<willdeep_core::GoalState>> {
+        Ok(self
+            .core
+            .load(session_id)
+            .context("load core Session")?
+            .goal_state)
     }
 
     pub fn schedulable_sessions(&self) -> Result<Vec<uuid::Uuid>> {

@@ -235,7 +235,7 @@ pub(crate) fn restore_goal(
     continuation: &willdeep_core::GoalContinuation,
     session: &willdeep_core::Session,
 ) {
-    let budget = willdeep_core::GoalBudget::default();
+    let budget = continuation.default_budget();
     let saved = session
         .goal_state
         .clone()
@@ -1074,7 +1074,9 @@ pub(crate) async fn build(
             path.display()
         );
     }
-    let goal_continuation = Arc::new(willdeep_core::GoalContinuation::new());
+    let goal_continuation = Arc::new(willdeep_core::GoalContinuation::with_default_budget(
+        loaded.file.agent.goal_budget(),
+    ));
     if let Some(session) = resumed {
         restore_goal(&goal_continuation, session);
     }
