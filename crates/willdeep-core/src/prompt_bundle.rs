@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+use crate::prompt_sections::PromptVariant;
 use crate::provider::{Provider, ProviderError};
 use crate::subagent::SubagentProfile;
 use crate::types::{Completion, Message, ToolDefinition};
@@ -32,25 +33,45 @@ pub fn bundle_id(role: &str, parts: &[&str]) -> String {
     format!("{role}@{hex}")
 }
 
-/// 主 Agent：稳定契约 + 公开工种契约。
+/// 主 Agent：稳定契约 + 公开工种契约，套上本进程生效的提示词变体。
 pub fn main_bundle() -> String {
     static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| {
-        let trades = crate::subagent::public_trade_contract();
-        bundle_id(MAIN, &[crate::prompt::STABLE_CONTRACT, &trades])
-    })
-    .clone()
+    ID.get_or_init(|| main_bundle_with(crate::prompt_sections::active_variant()))
+        .clone()
 }
 
-/// 输入建议的系统提示。
+pub fn main_bundle_with(variant: Option<&PromptVariant>) -> String {
+    let trades = crate::subagent::public_trade_contract();
+    bundle_id(
+        MAIN,
+        &[&crate::prompt_sections::main_contract(variant), &trades],
+    )
+}
+
+/// 输入建议的系统提示，套上本进程生效的提示词变体。
 pub fn input_suggestion_bundle() -> String {
     static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| bundle_id(INPUT_SUGGESTION, &[crate::input_suggestion::SYSTEM_PROMPT]))
+    ID.get_or_init(|| input_suggestion_bundle_with(crate::prompt_sections::active_variant()))
         .clone()
+}
+
+pub fn input_suggestion_bundle_with(variant: Option<&PromptVariant>) -> String {
+    bundle_id(
+        INPUT_SUGGESTION,
+        &[crate::prompt_sections::suggestion_prompt(variant)],
+    )
 }
 
 /// 一个工种的 Worker：`worker:<工种>`，托管工种加 `@hosted` 后缀再接哈希。
 pub fn worker_bundle(profile: &SubagentProfile, has_board: bool) -> String {
+    worker_bundle_with(profile, has_board, crate::prompt_sections::active_variant())
+}
+
+pub fn worker_bundle_with(
+    profile: &SubagentProfile,
+    has_board: bool,
+    variant: Option<&PromptVariant>,
+) -> String {
     let role = if profile.hosted_job_prompt {
         format!("worker:{}@hosted", profile.id)
     } else {
@@ -58,8 +79,13 @@ pub fn worker_bundle(profile: &SubagentProfile, has_board: bool) -> String {
     };
     bundle_id(
         &role,
-        &crate::subagent::worker_prompt_parts(profile, has_board),
+        &crate::subagent::worker_prompt_parts_with(profile, has_board, variant),
     )
+}
+
+/// 内置工种（只用来读提示词与版本号，provider 不会被调用）。
+pub fn builtin_profile_list() -> Vec<SubagentProfile> {
+    crate::subagent::builtin_profiles(Arc::new(NoProvider))
 }
 
 /// 当前代码里各角色的版本号（`willdeep feedback bundles`）。Worker 按挂着
@@ -67,7 +93,7 @@ pub fn worker_bundle(profile: &SubagentProfile, has_board: bool) -> String {
 pub fn current_bundles() -> Vec<String> {
     let mut bundles = vec![main_bundle(), input_suggestion_bundle()];
     bundles.extend(
-        crate::subagent::builtin_profiles(Arc::new(NoProvider))
+        builtin_profile_list()
             .iter()
             .map(|profile| worker_bundle(profile, true)),
     );

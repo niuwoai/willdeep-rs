@@ -98,18 +98,51 @@ const BOARD_GUIDANCE: &str = "Shared board: other workers of this session run al
 /// （[`crate::prompt_bundle`]）对模板本身取哈希，工作区路径不影响版本号。
 const BOUNDARY_TEMPLATE: &str = "You are a WillDeep subagent working in {workspace}. You do not see the parent conversation, cannot ask the user, and cannot spawn another agent. Your final response is the report returned to the parent. Read-only and bounded commands may pass static checks. Other non-destructive commands may be reviewed by an AI safety judge. Destructive or credential-sensitive commands are outside that judge's authority. If command review is denied or unavailable, report the exact command to the parent; the parent may ask the human and respawn an ops_runner with that exact target_command.";
 
-/// 一个工种的 Worker 系统提示里不随运行变化的部分，按出现顺序。
-/// 与上面拼装 `system_prompt` 的逻辑同源：托管工种只带边界段。
+/// 某工种某段在代码里的原文（[`crate::prompt_sections`] 的段名）。
+pub(crate) fn worker_base_section<'a>(
+    profile: &'a SubagentProfile,
+    section: &str,
+) -> Option<&'a str> {
+    match section {
+        "boundary" => Some(BOUNDARY_TEMPLATE),
+        "capability_prompt" if !profile.hosted_job_prompt => Some(&profile.capability_prompt),
+        "report_contract" if !profile.hosted_job_prompt => Some(REPORT_CONTRACT),
+        "board_guidance" => Some(BOARD_GUIDANCE),
+        _ => None,
+    }
+}
+
+/// 一个工种的 Worker 系统提示里不随运行变化的部分，按出现顺序，套上本进程
+/// 生效的提示词变体。派工时的 system prompt 与版本戳都由它拼出，二者同源。
+/// 托管工种只带边界段（与黑板说明）。
 pub(crate) fn worker_prompt_parts(profile: &SubagentProfile, has_board: bool) -> Vec<&str> {
-    let mut parts = vec![BOUNDARY_TEMPLATE];
+    worker_prompt_parts_with(profile, has_board, crate::prompt_sections::active_variant())
+}
+
+pub(crate) fn worker_prompt_parts_with<'a>(
+    profile: &'a SubagentProfile,
+    has_board: bool,
+    variant: Option<&'a crate::prompt_sections::PromptVariant>,
+) -> Vec<&'a str> {
+    let mut sections = vec!["boundary"];
     if !profile.hosted_job_prompt {
-        parts.push(&profile.capability_prompt);
-        parts.push(REPORT_CONTRACT);
+        sections.extend(["capability_prompt", "report_contract"]);
     }
     if has_board {
-        parts.push(BOARD_GUIDANCE);
+        sections.push("board_guidance");
     }
-    parts
+    sections
+        .into_iter()
+        .filter_map(|section| {
+            let base = worker_base_section(profile, section)?;
+            Some(crate::prompt_sections::worker_section(
+                &profile.id,
+                section,
+                base,
+                variant,
+            ))
+        })
+        .collect()
 }
 
 /// `<worker-facts>` 里最多列多少个文件；再多只报个数。
@@ -627,22 +660,12 @@ async fn run_once(
                     .unwrap_or_default(),
             ),
     };
-    let boundary = BOUNDARY_TEMPLATE.replace("{workspace}", &workspace.display().to_string());
     // A relay-hosted trade already carries its job prompt server-side. Sending
     // the client's copy too would put two descriptions of the same trade in
     // one context — and when they drift, the worker gets to pick.
-    let mut system_prompt = if profile.hosted_job_prompt {
-        boundary
-    } else {
-        format!(
-            "{boundary}\n\n{}\n\n{REPORT_CONTRACT}",
-            profile.capability_prompt
-        )
-    };
-    if has_board {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(BOARD_GUIDANCE);
-    }
+    let mut system_prompt = worker_prompt_parts(profile, has_board)
+        .join("\n\n")
+        .replace("{workspace}", &workspace.display().to_string());
     if let Some(rules) = crate::prompt::global_user_instructions()
         .map_err(|error| AgentError::Subagent(error.to_string()))?
     {

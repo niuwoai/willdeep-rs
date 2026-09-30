@@ -21,6 +21,8 @@ mod foreground_recovery;
 mod local_partial;
 #[path = "headless_runtime/monitor_events.rs"]
 mod monitor_events;
+#[path = "headless_runtime/prompt_variant.rs"]
+mod prompt_variant;
 
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
