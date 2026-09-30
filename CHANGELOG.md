@@ -14,6 +14,12 @@
   - 完成门禁：还有未带证据的验收标准或在跑的委派 Worker 时，拒绝模型的完成声明并点名缺什么。
   - 目标状态每轮钉在 system 消息里，不会被上下文压缩摘要掉。
   - 反馈账本新增 `goal_completed` / `goal_completion_rejected` / `goal_budget_limited`。
+- Worker 协调（Phase C）：
+  - 每份 Worker 报告末尾带运行时写的 `<worker-facts>`（verdict、实际落盘的文件、工具失败数、轮数、引用核对），部分完成与验证用尽的报告也带；非托管工种的报告约定以 CONCLUSION / EVIDENCE / OPEN QUESTIONS 收尾。
+  - 超长报告截成保头保尾，结论与尾注不再被截掉。
+  - 新增主 Agent 工具 `await_agents`：等本会话的后台 Worker 跑完，把报告一次交回，是并行派工的汇合点；交回的报告不再作为通知投第二遍。
+  - 写集与正在跑的 Worker 冲突时，派工当场拒绝并点名冲突文件。
+  - 工种熔断打开 10 分钟后放行一次试探，成功即恢复，不再整个会话都关不上。
 - 路线图文档：主 Agent 协调与长任务缺口自查、Xedit 定时任务与专家团插件化、RSI 反馈数据分阶段计划。
 
 ## [0.87.0-rc6] - 2026-09-29

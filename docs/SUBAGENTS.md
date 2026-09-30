@@ -97,6 +97,33 @@
 
 一个会话最多同时挂 **5** 个后台 Worker（与 macOS 版一致）。这个数不管文件冲突：两个 Worker 同时写一个文件由逐路径认领挡下，写不同文件的两个 Worker 可以并行。
 
+### 并行派工与汇合（`await_agents`）
+
+并行执行走后台派工：几件互不依赖的活各用 `run_in_background=true` 派出（写集不相交，最多 5 个同时跑），然后调 `await_agents` 汇合。
+
+- `agent_ids` 省略时，等本会话所有还在跑的后台 Worker；也可以只列几个（`agent_id` 或 `agent_xxxxxx` 句柄都认）。只认本会话起过的 Worker，别处的 id 一律报找不到。
+- `timeout_seconds` 默认 600、最长 1800。超时就如实返回哪些已经完成、哪些还在跑，可以再调一次、先干别的，或者 `stop_agent`。
+- 每份报告截到保头保尾（约 4000 + 2500 字节），结论与运行时的 `<worker-facts>` 尾注一定在。
+- 经 `await_agents` 交回的报告标记为已交付，**不会**再作为完成通知投第二遍：headless 循环、TUI 与 Agent 注入事件的地方都会跳过它。
+- 写集冲突在派工这一刻就拒绝，点名冲突文件：不会先派出一个注定在认领时失败的后台任务。
+- 前台 `spawn_agent` 仍然串行：每次派工都可能要人批准写集或命令，审批没法并发。
+
+### 报告末尾的 `<worker-facts>`
+
+每份 Worker 报告（包括部分完成与验证用尽的失败报告）末尾都有一段运行时写的尾注：
+
+```
+<worker-facts profile="implementer" verdict="passed" attempts="2" turns="9" tool_failures="1">
+files_touched: src/a.rs, src/b.rs
+citations: checked=4 unverifiable=0
+</worker-facts>
+```
+
+- `verdict` 为 `passed` / `failed` / `unverified` / `partial`，来自验证命令的退出码与运行结局，不是 Worker 的自述。
+- `files_touched` 是成功落盘的 `create_file` / `edit_file` 路径。经 shell 改的文件不在这里；独立 worktree 另有 `git status` 附注。
+- 放在末尾，是因为后台完成通知只保留报告尾巴；前台报告超长时截成保头保尾（开头 48 KiB + 结尾 16 KiB），不再只留开头。
+- 非托管工种的系统提示要求报告以 `CONCLUSION` / `EVIDENCE` / `OPEN QUESTIONS` 收尾；运行时不解析这三段，事实以尾注为准。
+
 ### 换掉某一档的模型
 
 「some.im 默认模型」那一列是与 macOS 版共享的默认表——同一个人换个客户端不该
@@ -190,7 +217,7 @@ context_window = 49152      # 工种自己的窗口档位，不是会话窗口
 tool_output_limit = 5120    # 单次工具输出字节上限
 token_budget = 32000
 timeout_seconds = 300
-max_consecutive_failures = 3
+max_consecutive_failures = 3   # 连续失败到这个数就熔断；10 分钟后放行一次试探，成功即恢复
 
 [subagents.generalist]
 # 旧名 [subagents.deep] / [subagents.reader] 仍会被运行时与设置面板读到（正名优先）。

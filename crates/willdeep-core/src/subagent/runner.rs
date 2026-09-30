@@ -87,6 +87,109 @@ impl EventSink for ChildEventSink {
 /// 会改动工作区的工具。没有已批准写集合时，它们不进 Worker 的工具面。
 const WRITE_TOOLS: &[&str] = &["create_file", "edit_file", "create_worktree"];
 
+/// 报告的收尾约定。托管工种的报告约定由服务端下发，不加这段。运行时不解析
+/// 这三段；改了哪些文件、验证过没有以运行时的 `<worker-facts>` 为准。
+const REPORT_CONTRACT: &str = "Report format: end your final response with three short sections, in this order: CONCLUSION (the answer or what you changed, in one to three sentences), EVIDENCE (exact commands you ran with their results, file paths with line numbers), OPEN QUESTIONS (anything unverified or left for the parent; write \"none\" if nothing). The runtime appends a <worker-facts> block with what it observed; do not write one yourself.";
+
+/// `<worker-facts>` 里最多列多少个文件；再多只报个数。
+const MAX_LISTED_FILES: usize = 20;
+
+/// 运行时对一次 Worker 运行的观察：事实，不是 Worker 的自述。
+///
+/// 以尾注形式追加在报告**末尾**：后台完成通知只留报告的尾巴，前台截断也
+/// 保头保尾，放在最后才保证父 Agent 一定看得到。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct WorkerFacts {
+    pub turns: usize,
+    /// 成功落盘的 `create_file` / `edit_file` 路径，按首次出现的顺序去重。
+    /// 经 shell 改的文件不在这里（独立 worktree 另有 `git status` 附注）。
+    pub files_touched: Vec<String>,
+    pub tool_failures: usize,
+}
+
+impl WorkerFacts {
+    pub(super) fn observe(messages: &[crate::types::Message], turns: usize) -> Self {
+        use crate::types::Role;
+        let results: std::collections::HashMap<&str, &str> = messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| {
+                message
+                    .tool_call_id
+                    .as_deref()
+                    .map(|id| (id, message.content.as_str()))
+            })
+            .collect();
+        let failed = |content: &str| content.starts_with("tool error:");
+        let mut files_touched = Vec::new();
+        for call in messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .flat_map(|message| &message.tool_calls)
+            .filter(|call| matches!(call.name.as_str(), "create_file" | "edit_file"))
+        {
+            let Some(result) = results.get(call.id.as_str()) else {
+                continue;
+            };
+            if failed(result) {
+                continue;
+            }
+            if let Some(path) = call
+                .parsed_arguments()
+                .ok()
+                .and_then(|arguments| arguments.get("path")?.as_str().map(str::to_owned))
+                && !files_touched.contains(&path)
+            {
+                files_touched.push(path);
+            }
+        }
+        Self {
+            turns,
+            files_touched,
+            tool_failures: results.values().filter(|content| failed(content)).count(),
+        }
+    }
+
+    /// `verdict`：`passed` / `failed` / `unverified` / `partial`。
+    pub(super) fn render(
+        &self,
+        profile: &str,
+        verdict: &str,
+        attempts: usize,
+        audit: Option<&CitationAudit>,
+    ) -> String {
+        let mut files = self
+            .files_touched
+            .iter()
+            .take(MAX_LISTED_FILES)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if files.is_empty() {
+            files = "none".to_owned();
+        }
+        if self.files_touched.len() > MAX_LISTED_FILES {
+            files.push_str(&format!(
+                " (+{} more)",
+                self.files_touched.len() - MAX_LISTED_FILES
+            ));
+        }
+        let mut out = format!(
+            "<worker-facts profile=\"{profile}\" verdict=\"{verdict}\" attempts=\"{attempts}\" turns=\"{}\" tool_failures=\"{}\">\nfiles_touched: {files}\n",
+            self.turns, self.tool_failures
+        );
+        if let Some(audit) = audit {
+            out.push_str(&format!(
+                "citations: checked={} unverifiable={}\n",
+                audit.checked,
+                audit.unverifiable.len()
+            ));
+        }
+        out.push_str("</worker-facts>");
+        out
+    }
+}
+
 /// Files one running worker has claimed. Released on drop, so a panic, a
 /// timeout or a cancelled run never leaves a file locked behind it.
 struct FileClaim {
@@ -269,8 +372,9 @@ pub(super) async fn run_subagent(
     let attempts = if verifier.is_some() { max_attempts } else { 1 };
     let mut outcome: Option<VerifierOutcome> = None;
 
+    let mut last_facts = WorkerFacts::default();
     for attempt in 1..=attempts {
-        let report = run_once(
+        let (report, facts) = run_once(
             &workspace,
             &profile,
             &approved_targets,
@@ -289,6 +393,7 @@ pub(super) async fn run_subagent(
             parent_approval_mode.as_ref(),
             usage_ledger.as_ref(),
             feedback.as_ref(),
+            attempt,
         )
         .await?;
         let Some(verifier) = verifier.as_ref() else {
@@ -297,9 +402,10 @@ pub(super) async fn run_subagent(
             // checked without a command is what the report cites.
             let audit = audit_citations(&workspace, &report).await;
             lifecycle_sink.emit(verdict(None, attempt, &audit)).await;
+            let trailer = facts.render(&profile.id, "unverified", attempt, Some(&audit));
             return Ok(match audit.note() {
-                Some(note) => format!("{report}\n\n{note}"),
-                None => report,
+                Some(note) => format!("{report}\n\n{note}\n\n{trailer}"),
+                None => format!("{report}\n\n{trailer}"),
             });
         };
         let result = run_verifier(&workspace, verifier, &sandbox).await?;
@@ -308,10 +414,12 @@ pub(super) async fn run_subagent(
                 .emit(verdict(Some(true), attempt, &CitationAudit::default()))
                 .await;
             return Ok(format!(
-                "{report}\n\n<verifier command={:?} attempts={attempt} verdict=\"passed\" />",
-                verifier.command
+                "{report}\n\n<verifier command={:?} attempts={attempt} verdict=\"passed\" />\n\n{}",
+                verifier.command,
+                facts.render(&profile.id, "passed", attempt, None)
             ));
         }
+        last_facts = facts;
         outcome = Some(VerifierOutcome {
             command: verifier.command.clone(),
             attempts: attempt,
@@ -340,8 +448,11 @@ pub(super) async fn run_subagent(
         ))
         .await;
     Err(AgentError::Subagent(format!(
-        "worker did not reach a verified pass: {} failed after {} attempt(s). Escalate — retry this agent with the parent model, or re-dispatch with a wider task packet.\n\n{}",
-        outcome.command, outcome.attempts, outcome.last_digest
+        "worker did not reach a verified pass: {} failed after {} attempt(s). Escalate — retry this agent with the parent model, or re-dispatch with a wider task packet.\n\n{}\n\n{}",
+        outcome.command,
+        outcome.attempts,
+        outcome.last_digest,
+        last_facts.render(&profile.id, "failed", outcome.attempts, None)
     )))
 }
 
@@ -384,7 +495,8 @@ async fn run_once(
     parent_approval_mode: Option<&crate::tools::SharedApprovalMode>,
     usage_ledger: Option<&crate::usage_ledger::UsageLedgerScope>,
     feedback: Option<&crate::feedback::FeedbackRecorder>,
-) -> Result<String, AgentError> {
+    attempt: usize,
+) -> Result<(String, WorkerFacts), AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
         ApprovalMode::Smart
     } else if approved_targets.is_some() {
@@ -465,7 +577,10 @@ async fn run_once(
     let mut system_prompt = if profile.hosted_job_prompt {
         boundary
     } else {
-        format!("{boundary}\n\n{}", profile.capability_prompt)
+        format!(
+            "{boundary}\n\n{}\n\n{REPORT_CONTRACT}",
+            profile.capability_prompt
+        )
     };
     if let Some(rules) = crate::prompt::global_user_instructions()
         .map_err(|error| AgentError::Subagent(error.to_string()))?
@@ -518,14 +633,16 @@ async fn run_once(
     };
     // 子 Agent 触顶同样交部分结果，但父 Agent 得知道它没收敛，
     // 否则会把一份半成品当成经过验证的答案。
+    let facts = WorkerFacts::observe(&outcome.messages, outcome.turns);
     if !outcome.stop_reason.is_complete() {
+        let trailer = facts.render(&profile.id, "partial", attempt, None);
         return Err(AgentError::SubagentPartial {
             reason: outcome.stop_reason,
             turns: outcome.turns,
-            report: outcome.final_text,
+            report: format!("{}\n\n{trailer}", outcome.final_text),
         });
     }
-    Ok(outcome.final_text)
+    Ok((outcome.final_text, facts))
 }
 
 struct VerifierResult {
@@ -626,6 +743,51 @@ fn digest_failure_output(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_facts_count_only_writes_that_landed() {
+        use crate::types::{Message, ToolCall};
+        let call = |id: &str, name: &str, path: &str| ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: format!(r#"{{"path":"{path}","content":"x"}}"#),
+        };
+        let calls = vec![
+            call("1", "create_file", "src/new.rs"),
+            call("2", "edit_file", "src/lib.rs"),
+            call("3", "edit_file", "src/broken.rs"),
+            call("4", "read_file", "README.md"),
+            call("5", "edit_file", "src/lib.rs"),
+        ];
+        let mut messages = vec![Message::assistant("working", calls.clone())];
+        for call in &calls {
+            let output = if call.id == "3" {
+                "tool error: exact edit text was not found in src/broken.rs"
+            } else {
+                "ok"
+            };
+            messages.push(Message::tool(call, output));
+        }
+        let facts = WorkerFacts::observe(&messages, 4);
+        assert_eq!(facts.files_touched, ["src/new.rs", "src/lib.rs"]);
+        assert_eq!(facts.tool_failures, 1);
+        let rendered = facts.render("implementer", "passed", 2, None);
+        assert!(rendered.starts_with(
+            r#"<worker-facts profile="implementer" verdict="passed" attempts="2" turns="4" tool_failures="1">"#
+        ));
+        assert!(rendered.contains("files_touched: src/new.rs, src/lib.rs"));
+
+        let many = WorkerFacts {
+            files_touched: (0..25).map(|index| format!("f{index}.rs")).collect(),
+            ..WorkerFacts::default()
+        };
+        assert!(many.render("p", "partial", 1, None).contains("(+5 more)"));
+        assert!(
+            WorkerFacts::default()
+                .render("p", "failed", 1, None)
+                .contains("files_touched: none")
+        );
+    }
+
     use async_trait::async_trait;
 
     use super::*;

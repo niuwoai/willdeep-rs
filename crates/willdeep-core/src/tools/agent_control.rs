@@ -14,7 +14,12 @@ pub(crate) const PARENT_ONLY_TOOLS: &[&str] = &[
     "resume_agent",
     "list_agent_recoveries",
     "update_plan",
+    "await_agents",
 ];
+
+/// `await_agents` 的默认与最长等待（秒）。
+pub const DEFAULT_AWAIT_SECONDS: u64 = 600;
+pub const MAX_AWAIT_SECONDS: u64 = 1_800;
 
 /// `update_plan`：只在有激活目标（`/goal`）时出现在主 Agent 的工具面里。
 /// 执行在 Agent 层（它改的是 [`crate::GoalContinuation`]，不碰工作区）。
@@ -47,8 +52,19 @@ All fields are optional; only the fields you pass change. No approval is needed.
 /// `send_agent_message` 的正文上限（字符）。超出直接报错，不截断。
 pub const MAX_AGENT_MESSAGE_CHARS: usize = 4_000;
 
-pub(super) fn definitions() -> [ToolDefinition; 2] {
+pub(super) fn definitions() -> [ToolDefinition; 3] {
     [
+        definition(
+            "await_agents",
+            "Wait for background subagents this session started with spawn_agent to finish, then return their reports together. \
+This is how parallel work joins: dispatch several independent workers with run_in_background=true, keep working or call await_agents, and read all reports at once. \
+Omit agent_ids to wait for every still-running background subagent of this session. Returns when all targets have finished or the timeout passes; \
+on timeout it lists which workers are still running. Reports returned here are not delivered again as notices. No approval is needed.",
+            json!({"type":"object","properties":{
+                "agent_ids":{"type":"array","items":{"type":"string"},"description":"agent_id values (or background_task handles) returned by spawn_agent. Omit to wait for all running ones."},
+                "timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_AWAIT_SECONDS,"description":"Default 600."}
+            },"additionalProperties":false}),
+        ),
         definition(
             "send_agent_message",
             "Send an additional instruction to a running background subagent that this session started with spawn_agent. It is delivered at the child's next turn boundary and does not interrupt its current step. The message may be at most 4000 characters; longer messages are rejected, never truncated. No approval is needed; every call is audited.",

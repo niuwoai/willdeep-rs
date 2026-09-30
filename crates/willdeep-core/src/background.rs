@@ -76,6 +76,9 @@ struct TaskRecord {
 struct RegistryState {
     tasks: Vec<TaskRecord>,
     pending: VecDeque<BackgroundTaskEvent>,
+    /// 报告已经由 `await_agents` 直接交给了父 Agent 的任务。它们的完成通知
+    /// 不再经事件内核投第二遍。
+    delivered: std::collections::HashSet<String>,
 }
 
 struct LaunchSpec {
@@ -108,6 +111,7 @@ impl Default for BackgroundTaskRegistry {
             inner: Arc::new(Mutex::new(RegistryState {
                 tasks: Vec::new(),
                 pending: VecDeque::new(),
+                delivered: std::collections::HashSet::new(),
             })),
             events,
             lifecycle: None,
@@ -167,13 +171,57 @@ impl BackgroundTaskRegistry {
             .count()
     }
 
+    /// 取走待投递的完成事件。报告已被 `await_agents` 交付过的任务不再返回：
+    /// 同一份报告讲两遍只会浪费父 Agent 的上下文。
     pub fn drain_pending(&self) -> Vec<BackgroundTaskEvent> {
+        let mut state = self.inner.lock().expect("background registry");
+        let RegistryState {
+            pending, delivered, ..
+        } = &mut *state;
+        pending
+            .drain(..)
+            .filter(|event| !delivered.contains(&event.snapshot.id))
+            .collect()
+    }
+
+    /// 标记这个任务的报告已经直接交给了父 Agent。
+    pub fn mark_delivered(&self, id: &str) {
         self.inner
             .lock()
             .expect("background registry")
-            .pending
-            .drain(..)
-            .collect()
+            .delivered
+            .insert(id.to_owned());
+    }
+
+    pub fn is_delivered(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .delivered
+            .contains(id)
+    }
+
+    /// 子 Agent 最近一次运行对应的后台任务句柄与快照。
+    pub fn task_for_agent(&self, agent_id: uuid::Uuid) -> Option<BackgroundTaskSnapshot> {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.snapshot.agent_id == Some(agent_id))
+            .map(|task| task.snapshot.clone())
+    }
+
+    /// 任务保留下来的完整输出（子 Agent 报告保头保尾，最多 64 KiB）。
+    pub fn full_output(&self, id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .find(|task| task.snapshot.id == id)
+            .map(|task| task.output.clone())
     }
 
     pub fn output(&self, id: &str, tail_lines: usize) -> Option<String> {
@@ -552,11 +600,31 @@ fn truncate(value: String, keep_tail: bool) -> String {
         }
         return format!("[output truncated]\n{}", &value[boundary..]);
     }
-    let mut boundary = MAX_OUTPUT_BYTES;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
+    // Worker 报告：开头是任务交代，结尾是结论与运行时的 `<worker-facts>`，
+    // 两头都要，只丢中间。
+    keep_head_and_tail(&value, MAX_OUTPUT_BYTES * 3 / 4, MAX_OUTPUT_BYTES / 4)
+}
+
+/// 保留开头 `head` 字节与结尾 `tail` 字节（都落在字符边界上），中间标明省略了
+/// 多少。给 Worker 报告用：结论与运行时尾注在最后，一刀切掉尾巴等于丢了结论。
+pub(crate) fn keep_head_and_tail(value: &str, head: usize, tail: usize) -> String {
+    if value.len() <= head + tail {
+        return value.to_owned();
     }
-    format!("{}\n[output truncated]", &value[..boundary])
+    let mut head_end = head;
+    while head_end > 0 && !value.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = value.len() - tail;
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n[… {} bytes omitted …]\n{}",
+        &value[..head_end],
+        tail_start - head_end,
+        &value[tail_start..]
+    )
 }
 
 #[cfg(test)]

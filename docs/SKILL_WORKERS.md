@@ -178,6 +178,8 @@ This failure is a good fit for the `test_fixer` worker. Spawn it with a task pac
 > 派过工，1.4%**。结论与 rs 侧的 0 派工记录一致——**光有提示不够，模型就是不派**。
 > Xedit 的下一刀切在 workflow 引擎（把 fan-out 步骤直接绑工种）；rs 侧没有
 > workflow 引擎，对应的抓手是 Goal Teams 与调度，尚未动。
+> 2026-09-30 起有了最小的汇合原语：后台派工 + `await_agents`（见 `docs/SUBAGENTS.md`
+> 「并行派工与汇合」），以及每份报告末尾运行时写的 `<worker-facts>`。
 
 ## 配置
 

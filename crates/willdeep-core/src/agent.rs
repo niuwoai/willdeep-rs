@@ -1311,7 +1311,28 @@ impl Agent {
         let Some(kernel) = &self.kernel else {
             return Vec::new();
         };
-        let batch = kernel.take_for_model(BATCH);
+        let mut batch = kernel.take_for_model(BATCH);
+        // `await_agents` 已经把这些 Worker 的报告直接交给了模型：它们的完成
+        // 通知按「已投递」结账，不再讲第二遍。
+        if let Some(background) = &self.background_tasks {
+            let (already, fresh): (Vec<_>, Vec<_>) = batch.into_iter().partition(|leased| {
+                leased
+                    .event
+                    .dedup_key
+                    .as_deref()
+                    .and_then(|key| key.strip_prefix("task:"))
+                    .is_some_and(|id| background.is_delivered(id))
+            });
+            if !already.is_empty() {
+                kernel.ack(
+                    &already
+                        .iter()
+                        .map(|leased| leased.lease_id)
+                        .collect::<Vec<_>>(),
+                );
+            }
+            batch = fresh;
+        }
         if batch.is_empty() {
             return Vec::new();
         }
@@ -1407,6 +1428,9 @@ impl Agent {
             }
             if call.name == "update_plan" {
                 return self.execute_update_plan(call);
+            }
+            if call.name == "await_agents" {
+                return self.execute_await_agents(call).await;
             }
             if call.name != "spawn_agent" {
                 let result = self.tools.execute(call).await;

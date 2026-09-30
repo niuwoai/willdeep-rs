@@ -727,7 +727,7 @@ fn rejection_steering(state: &GoalState, workers_in_flight: usize) -> String {
     }
     if workers_in_flight > 0 {
         steering.push_str(&format!(
-            "- {workers_in_flight} delegated worker(s) are still running. Wait for their reports (or stop them deliberately) before declaring completion.\n"
+            "- {workers_in_flight} delegated worker(s) are still running. Wait for their reports with `await_agents` (or stop them deliberately) before declaring completion.\n"
         ));
     }
     steering.push_str(

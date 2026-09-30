@@ -739,7 +739,7 @@ impl ToolRegistry {
             definition(
                 "spawn_agent",
                 format!(
-                    "Delegate a self-contained task to an isolated child. {} Expert requires a runtime-validated escalation ticket after smaller tiers were attempted. Children cannot spawn agents or show approval UI. Commands use static safety rules, then AI review for non-sensitive ambiguity; declined commands can be returned to the parent for exact target_command approval. Pass task with known facts, read/write files and a verifier.",
+                    "Delegate a self-contained task to an isolated child. {} Expert requires a runtime-validated escalation ticket after smaller tiers were attempted. Children cannot spawn agents or show approval UI. Commands use static safety rules, then AI review for non-sensitive ambiguity; declined commands can be returned to the parent for exact target_command approval. Pass task with known facts, read/write files and a verifier. To run independent tasks in parallel, start each with run_in_background=true (disjoint write files, at most 5 at once) and join them with await_agents. Every report ends with a runtime <worker-facts> block (verdict, files actually written, tool failures); trust it over the worker's own claims.",
                     crate::subagent::public_trade_contract()
                 ),
                 json!({"type":"object","properties":{
@@ -2041,7 +2041,7 @@ pub use approval::{ApprovalMode, ApprovalSource, ApprovalTrace, SharedApprovalMo
 mod background_shell;
 mod monitor;
 mod verification;
-pub use agent_control::MAX_AGENT_MESSAGE_CHARS;
+pub use agent_control::{DEFAULT_AWAIT_SECONDS, MAX_AGENT_MESSAGE_CHARS, MAX_AWAIT_SECONDS};
 pub(crate) use agent_control::{PARENT_ONLY_TOOLS, update_plan_definition};
 use background_shell::run_background_shell;
 pub use background_shell::run_background_supervisor;

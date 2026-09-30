@@ -842,6 +842,47 @@ fn kernel_agent(provider: Arc<dyn Provider>, kernel: crate::kernel::EventKernel)
     .with_event_kernel(kernel)
 }
 
+/// `await_agents` 已经把报告交给了模型的 Worker：它的完成通知在 turn 边界
+/// 被直接结账为已处理，不再作为材料注入第二遍。
+#[tokio::test]
+async fn awaited_worker_notices_are_not_injected_again() {
+    let registry = Arc::new(crate::BackgroundTaskRegistry::default());
+    let mut finished = registry.subscribe();
+    let id = registry.start_retriable(
+        crate::background::BackgroundTaskKind::Subagent,
+        "scout".to_owned(),
+        || async {
+            crate::background::TaskResult {
+                status: crate::BackgroundTaskStatus::Completed,
+                exit_code: Some(0),
+                output: "UNIQUE-REPORT-TEXT".to_owned(),
+            }
+        },
+    );
+    let event = finished.recv().await.expect("finished");
+    let kernel = crate::kernel::EventKernel::new();
+    kernel.publish(
+        crate::kernel::background_task_event(uuid::Uuid::nil(), &event.snapshot, event.notice),
+        crate::kernel::DedupPolicy::Once,
+    );
+    registry.mark_delivered(&id);
+    let provider = RecordingProvider::new(&["done"]);
+    let agent = kernel_agent(provider.clone(), kernel.clone()).with_background_tasks(registry);
+
+    agent.run("carry on").await.expect("run");
+    let requests = provider.requests.lock().expect("requests");
+    assert!(
+        !requests[0]
+            .iter()
+            .any(|message| message.content.contains("UNIQUE-REPORT-TEXT")),
+        "an awaited report must not be delivered twice"
+    );
+    assert!(
+        kernel.take_for_model(4).is_empty(),
+        "the notice is settled, not left pending"
+    );
+}
+
 /// 待投递事件在 turn 边界进入对话，作为用户消息而不是系统提示词。
 #[tokio::test]
 async fn kernel_events_reach_the_model_as_user_material() {
