@@ -21,6 +21,10 @@
   - 写集与正在跑的 Worker 冲突时，派工当场拒绝并点名冲突文件。
   - 工种熔断打开 10 分钟后放行一次试探，成功即恢复，不再整个会话都关不上。
 - `willdeep audit export` 的反馈信号新增纠正率与「已完成却被纠正」的轮次数：把后续输入与其前的回退、喊停、拒绝审批关联起来离线标注。
+- 内置插件（从 Xedit 移植，`willdeep plugin builtin list|install`）：
+  - `willdeep-scheduler`：`schedule_task`（每 N 分钟 / 每天 / 工作日 / 每周，可带自我完成的 goal 与无人值守审批档位）、`complete_scheduled_task`、`list_scheduled_tasks`。daemon 每 30 秒检查，到期任务各开一个全新会话；插件停用即全部停触发，错过的触发只补一次，上一次没跑完就跳过。
+  - `willdeep-roundtable`：专家圆桌，10 位带鲜明人设的专家，强制点名回应与明确表态，每轮小结判断收敛，产出决策文档；专家可反问主持人（`roundtable_continue` 续跑）。模型调用经宿主的 `willdeep/ai/complete`。
+  - 插件宿主新增 `${willdeepExe}` 变量与 `WILLDEEP_PLUGIN_DATA` 私有数据目录。
 - 路线图文档：主 Agent 协调与长任务缺口自查、Xedit 定时任务与专家团插件化、RSI 反馈数据分阶段计划。
 
 ## [0.87.0-rc6] - 2026-09-29

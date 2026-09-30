@@ -57,6 +57,28 @@ pub enum PluginAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Plugins that ship inside willdeep (scheduled tasks, expert roundtable).
+    Builtin {
+        #[command(subcommand)]
+        action: BuiltinAction,
+    },
+    /// Internal: the MCP server of a built-in plugin, launched by the plugin host.
+    #[command(hide = true)]
+    ServeBuiltin { id: String },
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum BuiltinAction {
+    /// List the built-in plugins and the permissions each declares.
+    List,
+    /// Install a built-in plugin as an ordinary plugin package.
+    Install {
+        /// scheduler or roundtable.
+        name: String,
+        /// Approve the declared permissions and enable it immediately.
+        #[arg(long)]
+        enable: bool,
+    },
 }
 
 pub async fn run(action: PluginAction, home: &Path) -> Result<()> {
@@ -69,6 +91,18 @@ pub async fn run(action: PluginAction, home: &Path) -> Result<()> {
         PluginAction::Enable { id } => set_enabled(home, &id, true).await,
         PluginAction::Disable { id } => set_enabled(home, &id, false).await,
         PluginAction::Remove { id, yes } => remove(home, &id, yes).await,
+        PluginAction::Builtin { action } => match action {
+            BuiltinAction::List => {
+                crate::builtin_plugins::list();
+                Ok(())
+            }
+            BuiltinAction::Install { name, enable } => {
+                crate::builtin_plugins::install(home, &name, enable).await
+            }
+        },
+        PluginAction::ServeBuiltin { id } => {
+            crate::builtin_plugins::serve(&id, home.to_path_buf()).await
+        }
     }
 }
 
@@ -235,6 +269,11 @@ fn copy_package(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 装一个插件包目录；内置插件把包写到临时目录后也走这里。
+pub(crate) async fn install_package(home: &Path, path: &Path, enable: bool) -> Result<()> {
+    install(home, path, enable).await
 }
 
 async fn install(home: &Path, path: &Path, enable: bool) -> Result<()> {

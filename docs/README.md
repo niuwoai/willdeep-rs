@@ -34,6 +34,7 @@
 | [本机反馈账本](FEEDBACK_LEDGER.md) | RSI 强反馈信号 `feedback/YYYY-MM.jsonl`：下一句建议的采用与改写、工具失败、Worker 轮次耗尽 |
 | [协调 / 长任务 / 插件 / RSI 路线图](ROADMAP_ORCHESTRATION_RSI.md) | 主 Agent 协调与 goal 缺口自查、Xedit 定时任务与专家团插件化、反馈数据分阶段计划 |
 | [Skills 与 MCP](SKILLS_AND_MCP.md) | Skill 发现规则、MCP 配置、项目上下文文件 |
+| [内置插件](BUILTIN_PLUGINS.md) | 定时任务（`willdeep-scheduler`）与专家圆桌（`willdeep-roundtable`）：安装、工具、无人值守审批、与 Xedit 的差异 |
 | [插件系统](PLUGINS.md) | 与 macOS 版共享插件包、三种页面运行时、页面桥与沙箱边界 |
 | [手机中继](MOBILE.md) | `/mobile` 二维码配对与凭据安全 |
 

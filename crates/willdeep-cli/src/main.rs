@@ -15,6 +15,7 @@ use willdeep_core::{
 
 mod agent_metrics;
 mod audit_cmd;
+mod builtin_plugins;
 mod config;
 mod daemon;
 mod detached_delivery;

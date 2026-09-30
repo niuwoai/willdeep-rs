@@ -45,6 +45,10 @@ willdeep plugin approve <id>              # 打印权限、来源、digest、要
 willdeep plugin enable <id>
 willdeep plugin disable <id>
 willdeep plugin remove <id> --yes
+
+# 随 willdeep 一起发的内置插件（定时任务、专家圆桌），见 docs/BUILTIN_PLUGINS.md
+willdeep plugin builtin list
+willdeep plugin builtin install scheduler     # 同样要 approve + enable，或加 --enable
 ```
 
 **批准与启用是两步**，不是啰嗦：批准是对**内容**的判断（这个 digest、这些权限、
@@ -337,6 +341,15 @@ claude mcp add --transport http video-studio \
 `{type:'theme', theme:{colorScheme, variables}}`，桥把变量写到根元素内联样式上
 （只收 `--willdeep-` 开头的字符串值）。插件自己写了同名规则就是插件说了算。
 
+### 宿主给 MCP 进程的环境
+
+- `${pluginRoot}`：包的安装目录；`${setting:<id>}`：插件设置里的值。
+- `${willdeepExe}`：正在运行的 willdeep 可执行文件。内置插件的 `mcp.json` 写
+  `"command": "${willdeepExe}", "args": ["plugin", "serve-builtin", "<id>"]`，不依赖 PATH
+  和任何外部运行时。它不参与包 digest 的计算以外的任何判断：包里写的就是这串字面量。
+- `WILLDEEP_HOME`：宿主的家目录（插件自己声明了就不覆盖）。
+- `WILLDEEP_PLUGIN_DATA`：宿主为这个插件建好的私有数据目录 `<home>/plugin-data/<id>/`。
+
 ## 与 macOS 宿主的已知差异
 
 | 项 | macOS | Web |
@@ -359,7 +372,7 @@ claude mcp add --transport http video-studio \
 | 页面桥能力 | 桥 2.6.0，25 项 | 桥 2.6.0，23 项（0.74.0-rc1 起）。差集是 `ai.reasoning`（本宿主的 `ai.complete` 一次性返回，不发思考增量）与 `ai.videos`（没有视频解码器抽帧） |
 | `process.run` 确认 | NSAlert，可勾「以后不再询问」 | 宿主页面的确认框，**不记住**；另有一层 macOS 没有的硬地板（外泄 / 接管 / 持久化 / 反取证，确认也不放行） |
 | 选文件 | 插件自己弹原生框 | 宿主接管：浏览器选 + 上传（见下） |
-| 调度 (`schedules`) | 设计中，未实现 | 同 |
+| 调度 (`schedules`) | 设计中，未实现 | manifest 的 `schedules` 贡献点仍未实现；定时任务由内置插件 `willdeep-scheduler` 提供，触发端在 daemon（见 [内置插件](BUILTIN_PLUGINS.md)） |
 
 ## 代码落点
 

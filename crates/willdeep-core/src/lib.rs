@@ -28,6 +28,7 @@ pub mod provider;
 pub mod routing;
 pub mod safety;
 pub mod sandbox;
+pub mod schedule;
 pub mod session;
 pub mod session_title;
 pub mod skills;
