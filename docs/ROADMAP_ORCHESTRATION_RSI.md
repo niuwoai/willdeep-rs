@@ -99,7 +99,11 @@
 8. **Phase H（已完成）**：长任务续航。
    - RA3：goal 的 token 预算，跨轮次、跨重启累计，用尽时有序收尾（`[agent] goal_token_budget` / `goal_wall_clock_minutes` / `goal_max_continuations`）。
    - RA4：daemon 重启后，被打断的进行中目标自动续推一轮；有防崩溃循环与幂等兜底，可用 `goal_auto_resume` 关掉。
-   - 详见 [长程自治](LONG_HORIZON_AUTONOMY.md)。未做：Worker token 计入目标预算。
+   - 详见 [长程自治](LONG_HORIZON_AUTONOMY.md)。
+9. **Phase I（已完成）**：
+   - Worker 的用量计入目标的 token 预算；
+   - `feedback report` 新增失败链：按用户反应切段、按签名聚类，计算各失败的危害度（坏结局率及其相对基线的倍数）；
+   - 改进候选按危害排序，新增 `harmful_failure:*` 候选。
 
 ## 验证
 - 单元测试：GoalState 序列化/resume 预算累计、完成门（有在飞 worker 不得完成）、sink 行大小与脱敏 keyset 测试（仿 usage ledger）。

@@ -158,6 +158,6 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 
 ## 7. 还没做
 
-- 相似失败的聚类（设计文档 Phase 4）：现在一条候选对应一种信号，还不会把措辞不同但根因相同的失败合并。
+- 语义层面的失败聚类：失败链只按标记（工具、错误类别、停止原因）聚类，还不会把表现不同但根因相同的失败合并到一起。
 - 服务端的数据接收与 canary 灰度（Phase 2、Phase 5）。
 - 输入建议样本的分组：样本太少，目前整套都当 validation 用。

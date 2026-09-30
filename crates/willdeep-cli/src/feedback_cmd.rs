@@ -29,6 +29,13 @@ const REJECTION_MIN_CLAIMS: usize = 5;
 /// 后续输入里算作纠正的比例。
 const CORRECTION_RATE: f64 = 0.25;
 const CORRECTION_MIN_FOLLOWUPS: usize = 10;
+/// 危害候选：某失败至少出现在这么多段里、坏结局率不低于这个值、且至少是
+/// 基线的这么多倍。
+const HARM_MIN_EPISODES: usize = 5;
+const HARM_BAD_RATE: f64 = 0.40;
+const HARM_MIN_LIFT: f64 = 2.0;
+/// 报告里列多少个失败链聚类。
+const TOP_CHAIN_CLUSTERS: usize = 15;
 /// 每条候选最多列几个会话 id 作例子。
 const MAX_EXAMPLES: usize = 5;
 /// 文本报告里工具失败排行的条数。
@@ -123,6 +130,8 @@ pub(crate) struct FeedbackReport {
     pub tool_failures: Vec<ToolFailureStats>,
     pub goals: GoalStats,
     pub corrections: CorrectionStats,
+    /// 按用户反应切段后的失败链与各失败的危害度。
+    pub chains: ChainStats,
     pub candidates: Vec<Candidate>,
 }
 
@@ -247,6 +256,51 @@ pub(crate) struct Evidence {
     pub count: usize,
     pub rate: Option<f64>,
     pub examples: Vec<Uuid>,
+    /// 这种失败出现的段里有多少以坏结局收场、是基线的几倍（有足够样本时）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harm: Option<Harm>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct Harm {
+    pub bad_rate: f64,
+    pub lift: f64,
+}
+
+/// 失败链：会话按用户的每一句后续输入切段，一段的结局由结束它的那句话
+/// 判定（纠正、或段内有回退 / 喊停 / 拒绝审批即 `bad`）。最后一段还没有
+/// 反应，结局为 `open`，不进危害统计。
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct ChainStats {
+    pub episodes: usize,
+    /// 有结局（ok / bad）的段数。
+    pub judged: usize,
+    pub bad: usize,
+    /// 基线：所有有结局的段里坏结局的比例。
+    pub bad_rate: Option<f64>,
+    pub clusters: Vec<ChainCluster>,
+    pub harm: Vec<FailureHarm>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChainCluster {
+    /// 段内失败按首次出现排序、工具失败附次数档，`⇒` 后是结局。
+    pub signature: String,
+    pub count: usize,
+    pub examples: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FailureHarm {
+    pub failure: String,
+    /// 出现过这种失败、且有结局的段数。
+    pub episodes: usize,
+    pub bad: usize,
+    pub bad_rate: f64,
+    /// 坏结局率相对基线的倍数；基线为 0 时为 `None`。
+    pub lift: Option<f64>,
+    #[serde(skip)]
+    bad_examples: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -298,6 +352,181 @@ fn week_of(ts_ms: u64) -> String {
         .get(..10)
         .unwrap_or("unknown")
         .to_owned()
+}
+
+/// 一行对应的失败标记；不是失败（或是人的决定，如拒绝审批）时为 `None`。
+fn failure_marker(row: &FeedbackRow) -> Option<String> {
+    let worker = row.worker_profile.as_deref();
+    match row.signal.as_str() {
+        "tool_failed" => {
+            let class = row.error_class.as_deref().unwrap_or("?");
+            (!matches!(class, "approval_denied" | "hook_denied"))
+                .then(|| format!("tool_failed:{}/{class}", row.tool.as_deref().unwrap_or("?")))
+        }
+        "agent_incomplete" => Some(match worker {
+            Some(profile) => format!("worker:{profile}:incomplete"),
+            None => format!(
+                "incomplete:{}",
+                row.stop_reason.as_deref().unwrap_or("unknown")
+            ),
+        }),
+        "worker_timed_out" => Some(format!("worker:{}:timed_out", worker.unwrap_or("?"))),
+        "worker_verifier_exhausted" => Some(format!(
+            "worker:{}:verifier_exhausted",
+            worker.unwrap_or("?")
+        )),
+        "goal_completion_rejected" => Some("goal_completion_rejected".to_owned()),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Bad,
+    Open,
+}
+
+impl Outcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Bad => "bad",
+            Self::Open => "open",
+        }
+    }
+}
+
+/// 一个会话的各段：（结局，段内失败标记与次数，按首次出现排序）。`rows`
+/// 须按时间排好序。
+fn episodes_of(rows: &[&FeedbackRow]) -> Vec<(Outcome, Vec<(String, usize)>)> {
+    let markers = |slice: &[&FeedbackRow]| {
+        let mut found: Vec<(String, usize)> = Vec::new();
+        for marker in slice.iter().filter_map(|row| failure_marker(row)) {
+            match found.iter_mut().find(|(seen, _)| *seen == marker) {
+                Some((_, count)) => *count += 1,
+                None => found.push((marker, 1)),
+            }
+        }
+        found
+    };
+    let mut episodes = Vec::new();
+    let mut start = 0;
+    for (index, corrective) in classify_followups(rows) {
+        let outcome = if corrective {
+            Outcome::Bad
+        } else {
+            Outcome::Ok
+        };
+        episodes.push((outcome, markers(&rows[start..index])));
+        start = index + 1;
+    }
+    if start < rows.len() {
+        episodes.push((Outcome::Open, markers(&rows[start..])));
+    }
+    episodes
+}
+
+fn chain_signature(markers: &[(String, usize)], outcome: Outcome) -> String {
+    let parts: Vec<String> = markers
+        .iter()
+        .map(|(marker, count)| {
+            if marker.starts_with("tool_failed:") {
+                let bucket = match count {
+                    1 => "×1",
+                    2..=3 => "×2-3",
+                    _ => "×4+",
+                };
+                format!("{marker}{bucket}")
+            } else {
+                marker.clone()
+            }
+        })
+        .collect();
+    format!("{} ⇒ {}", parts.join(" → "), outcome.label())
+}
+
+#[derive(Default)]
+struct ChainAccumulator {
+    stats: ChainStats,
+    clusters: BTreeMap<String, (usize, Vec<Uuid>)>,
+    /// 标记 → （有结局的段数，坏结局段数，坏结局的例子会话）。
+    harm: BTreeMap<String, (usize, usize, Vec<Uuid>)>,
+}
+
+impl ChainAccumulator {
+    fn add_session(&mut self, session: Uuid, rows: &[&FeedbackRow]) {
+        for (outcome, markers) in episodes_of(rows) {
+            self.stats.episodes += 1;
+            if outcome != Outcome::Open {
+                self.stats.judged += 1;
+                if outcome == Outcome::Bad {
+                    self.stats.bad += 1;
+                }
+                for (marker, _) in &markers {
+                    let entry = self.harm.entry(marker.clone()).or_default();
+                    entry.0 += 1;
+                    if outcome == Outcome::Bad {
+                        entry.1 += 1;
+                        push_example(&mut entry.2, Some(session));
+                    }
+                }
+            }
+            if !markers.is_empty() {
+                let cluster = self
+                    .clusters
+                    .entry(chain_signature(&markers, outcome))
+                    .or_default();
+                cluster.0 += 1;
+                push_example(&mut cluster.1, Some(session));
+            }
+        }
+    }
+
+    fn finish(mut self) -> ChainStats {
+        let baseline = rate(self.stats.bad, self.stats.judged);
+        self.stats.bad_rate = baseline;
+        let mut clusters: Vec<ChainCluster> = self
+            .clusters
+            .into_iter()
+            .map(|(signature, (count, examples))| ChainCluster {
+                signature,
+                count,
+                examples,
+            })
+            .collect();
+        clusters.sort_by(|a, b| b.count.cmp(&a.count).then(a.signature.cmp(&b.signature)));
+        clusters.truncate(TOP_CHAIN_CLUSTERS);
+        self.stats.clusters = clusters;
+        let mut harm: Vec<FailureHarm> = self
+            .harm
+            .into_iter()
+            .map(|(failure, (episodes, bad, bad_examples))| {
+                let bad_rate = bad as f64 / episodes as f64;
+                FailureHarm {
+                    failure,
+                    episodes,
+                    bad,
+                    bad_rate,
+                    lift: baseline
+                        .filter(|baseline| *baseline > 0.0)
+                        .map(|baseline| bad_rate / baseline),
+                    bad_examples,
+                }
+            })
+            .collect();
+        harm.sort_by(|a, b| {
+            harm_score(b)
+                .total_cmp(&harm_score(a))
+                .then(a.failure.cmp(&b.failure))
+        });
+        self.stats.harm = harm;
+        self.stats
+    }
+}
+
+fn harm_score(harm: &FailureHarm) -> f64 {
+    harm.lift.unwrap_or(0.0) * harm.episodes as f64
 }
 
 pub(crate) fn build_report(
@@ -446,8 +675,10 @@ pub(crate) fn build_report(
     let mut corrections = CorrectionStats::default();
     let mut weeks: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut per_session: Vec<SessionCount> = Vec::new();
+    let mut chains = ChainAccumulator::default();
     for (session, mut session_rows) in sessions {
         session_rows.sort_by_key(|row| row.ts_ms);
+        chains.add_session(session, &session_rows);
         let mut corrective_here = 0;
         for (index, corrective) in classify_followups(&session_rows) {
             let row = session_rows[index];
@@ -509,6 +740,7 @@ pub(crate) fn build_report(
         tool_failures,
         goals,
         corrections,
+        chains: chains.finish(),
         candidates: Vec::new(),
     };
     report.candidates = candidates(&report, &rows);
@@ -584,6 +816,7 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
                 count: failure.count,
                 rate: None,
                 examples: failure.sessions.clone(),
+                harm: None,
             },
             suggestion,
         });
@@ -606,6 +839,7 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
                 count: stats.no_result,
                 rate: Some(no_result_rate),
                 examples: stats.no_result_sessions.clone(),
+                harm: None,
             },
             suggestion: format!(
                 "{} of {} `{profile}` runs returned nothing ({} timed out, {} exhausted the verifier): tighten the scope the brief hands this profile, or revisit its turn budget.",
@@ -638,6 +872,7 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
                 count: stats.shown,
                 rate: Some(accept_rate),
                 examples,
+                harm: None,
             },
             suggestion: format!(
                 "Only {} of {} suggestions were taken with Tab: revise the input suggestion prompt (next-step bias, length, when to answer NONE).",
@@ -663,6 +898,7 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
                 count: report.goals.completion_rejected,
                 rate: Some(rejection_rate),
                 examples: report.goals.rejected_sessions.clone(),
+                harm: None,
             },
             suggestion: format!(
                 "{} of {claims} completion claims were rejected by the gate: have the goal prompt define acceptance criteria up front and attach evidence to each before claiming done.",
@@ -694,6 +930,7 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
                     .iter()
                     .map(|session| session.session_id)
                     .collect(),
+                harm: None,
             },
             suggestion: format!(
                 "{} of {} follow-ups corrected the previous turn ({} right after a completed turn): review the listed sessions to find which instruction the agent keeps getting wrong.",
@@ -703,7 +940,102 @@ fn candidates(report: &FeedbackReport, rows: &[&FeedbackRow]) -> Vec<Candidate> 
             ),
         });
     }
+    apply_harm(&mut out, &report.chains);
     out
+}
+
+/// 把危害度并进候选：已有同一失败的候选就补上证据，没有就新起一条
+/// `harmful_failure:*`；最后按危害排序，有危害证据的排前。
+fn apply_harm(out: &mut Vec<Candidate>, chains: &ChainStats) {
+    for harm in &chains.harm {
+        let Some(lift) = harm.lift else {
+            continue;
+        };
+        if harm.episodes < HARM_MIN_EPISODES
+            || harm.bad_rate < HARM_BAD_RATE
+            || lift < HARM_MIN_LIFT
+        {
+            continue;
+        }
+        let evidence = Harm {
+            bad_rate: harm.bad_rate,
+            lift,
+        };
+        let note = format!(
+            " {:.0}% of the episodes with this failure ended in a correction, rewind or cancel ({lift:.1}x the baseline).",
+            harm.bad_rate * 100.0
+        );
+        let worker = harm
+            .failure
+            .strip_prefix("worker:")
+            .and_then(|rest| rest.split(':').next());
+        let existing = out.iter_mut().find(|candidate| {
+            candidate.signal == harm.failure
+                || (candidate.signal == "worker_no_result"
+                    && worker.is_some_and(|profile| {
+                        candidate.target.role == format!("worker:{profile}")
+                    }))
+        });
+        if let Some(candidate) = existing {
+            if candidate.evidence.harm.is_none() {
+                candidate.evidence.harm = Some(evidence);
+                candidate.suggestion.push_str(&note);
+            }
+            continue;
+        }
+        let (role, section, suggestion) = if let Some(rest) =
+            harm.failure.strip_prefix("tool_failed:")
+        {
+            let (tool, class) = rest.split_once('/').unwrap_or((rest, "?"));
+            let (section, advice) = tool_advice(tool, class);
+            (
+                willdeep_core::prompt_bundle::MAIN.to_owned(),
+                section,
+                advice,
+            )
+        } else if let Some(profile) = worker {
+            (
+                format!("worker:{profile}"),
+                "capability_prompt".to_owned(),
+                format!(
+                    "`{profile}` runs that end as {} tend to be followed by a correction: tighten the scope the brief hands this profile, or its report contract.",
+                    harm.failure.rsplit(':').next().unwrap_or("failures")
+                ),
+            )
+        } else {
+            (
+                willdeep_core::prompt_bundle::MAIN.to_owned(),
+                "delegation".to_owned(),
+                format!(
+                    "Episodes with {} tend to end in a correction: review how the agent plans, delegates and verifies before it stops.",
+                    harm.failure
+                ),
+            )
+        };
+        out.push(Candidate {
+            target: Target {
+                role,
+                bundle: None,
+                section,
+            },
+            signal: format!("harmful_failure:{}", harm.failure),
+            evidence: Evidence {
+                count: harm.episodes,
+                rate: Some(harm.bad_rate),
+                examples: harm.bad_examples.clone(),
+                harm: Some(evidence),
+            },
+            suggestion: format!("{suggestion}{note}"),
+        });
+    }
+    let score = |candidate: &Candidate| {
+        candidate
+            .evidence
+            .harm
+            .as_ref()
+            .map_or(0.0, |harm| harm.lift * candidate.evidence.count as f64)
+    };
+    out.sort_by(|a, b| score(b).total_cmp(&score(a)));
 }
 
 fn percent(value: Option<f64>) -> String {
@@ -793,6 +1125,33 @@ pub(crate) fn render_text(report: &FeedbackReport) -> String {
         ));
     }
 
+    let chains = &report.chains;
+    out.push_str(&format!(
+        "\nFailure chains: {} episodes, {} with an outcome, {} bad ({})\n",
+        chains.episodes,
+        chains.judged,
+        chains.bad,
+        percent(chains.bad_rate)
+    ));
+    for cluster in &chains.clusters {
+        out.push_str(&format!("  {:>5}  {}\n", cluster.count, cluster.signature));
+    }
+    if !chains.harm.is_empty() {
+        out.push_str("\nHarm (bad outcome rate among episodes with the failure)\n");
+        for harm in chains.harm.iter().take(TOP_TOOL_FAILURES) {
+            out.push_str(&format!(
+                "  {} {}/{} ({:.0}%){}\n",
+                harm.failure,
+                harm.bad,
+                harm.episodes,
+                harm.bad_rate * 100.0,
+                harm.lift
+                    .map(|lift| format!(", {lift:.1}x baseline"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
     out.push_str(&format!("\nCandidates ({})\n", report.candidates.len()));
     if report.candidates.is_empty() {
         out.push_str("  none\n");
@@ -834,6 +1193,7 @@ mod tests {
             tool: None,
             error_class: None,
             report_len: None,
+            stop_reason: None,
             followup_hint: None,
             prev_status: None,
             decision: None,
@@ -1013,6 +1373,179 @@ mod tests {
         );
         assert_eq!(late.window.rows, 7);
         assert!(late.candidates.is_empty(), "{:?}", late.candidates);
+    }
+
+    fn tool(session: Uuid, ts_ms: u64, tool: &str, class: &str) -> FeedbackRow {
+        FeedbackRow {
+            tool: Some(tool.to_owned()),
+            error_class: Some(class.to_owned()),
+            ..row(session, ts_ms, "tool_failed")
+        }
+    }
+
+    fn followup(session: Uuid, ts_ms: u64, hint: &str) -> FeedbackRow {
+        FeedbackRow {
+            followup_hint: Some(hint.to_owned()),
+            ..row(session, ts_ms, "user_followup")
+        }
+    }
+
+    /// 五个会话里，反复找不到编辑目标、跑满轮次的那一段都被用户纠正；
+    /// 读文件失败的段都顺利；另有一段被回退。
+    fn chain_sample() -> Vec<FeedbackRow> {
+        let mut rows = Vec::new();
+        for index in 0..5_u64 {
+            let session = Uuid::from_u128(200 + u128::from(index));
+            let at = MONDAY + index * HOUR;
+            for step in 0..4 {
+                rows.push(tool(session, at + step, "edit_file", "edit_text_not_found"));
+            }
+            rows.push(FeedbackRow {
+                stop_reason: Some("max_turns".to_owned()),
+                ..row(session, at + 5, "agent_incomplete")
+            });
+            rows.push(followup(session, at + 10, "correction"));
+            rows.push(tool(session, at + 20, "read_file", "io"));
+        }
+        for index in 0..5_u64 {
+            let session = Uuid::from_u128(300 + u128::from(index));
+            let at = MONDAY + index * HOUR;
+            rows.push(tool(session, at, "read_file", "io"));
+            for step in 1..=4 {
+                rows.push(followup(session, at + step * 10, "supplement"));
+            }
+        }
+        let rewound = Uuid::from_u128(400);
+        rows.push(row(rewound, MONDAY, "session_rewound"));
+        rows.push(followup(rewound, MONDAY + 10, "supplement"));
+        rows
+    }
+
+    #[test]
+    fn failure_chains_measure_which_failures_end_badly() {
+        let report = build_report(&chain_sample(), 0, None, None, MONDAY);
+        let chains = &report.chains;
+        assert_eq!(chains.episodes, 31, "26 judged + 5 open tails");
+        assert_eq!((chains.judged, chains.bad), (26, 6));
+        let signatures: Vec<(&str, usize)> = chains
+            .clusters
+            .iter()
+            .map(|cluster| (cluster.signature.as_str(), cluster.count))
+            .collect();
+        assert!(signatures.contains(&(
+            "tool_failed:edit_file/edit_text_not_found×4+ → incomplete:max_turns ⇒ bad",
+            5
+        )));
+        assert!(signatures.contains(&("tool_failed:read_file/io×1 ⇒ ok", 5)));
+        assert!(signatures.contains(&("tool_failed:read_file/io×1 ⇒ open", 5)));
+        let edit = chains
+            .harm
+            .iter()
+            .find(|harm| harm.failure == "tool_failed:edit_file/edit_text_not_found")
+            .unwrap();
+        assert_eq!((edit.episodes, edit.bad), (5, 5));
+        assert!((edit.lift.unwrap() - 26.0 / 6.0).abs() < 1e-9);
+        let read = chains
+            .harm
+            .iter()
+            .find(|harm| harm.failure == "tool_failed:read_file/io")
+            .unwrap();
+        assert_eq!(
+            (read.episodes, read.bad),
+            (5, 0),
+            "open tails are not judged"
+        );
+        let mut top: Vec<&str> = chains.harm[..2]
+            .iter()
+            .map(|harm| harm.failure.as_str())
+            .collect();
+        top.sort_unstable();
+        assert_eq!(
+            top,
+            [
+                "incomplete:max_turns",
+                "tool_failed:edit_file/edit_text_not_found"
+            ],
+            "equally harmful, ahead of the harmless read failures"
+        );
+
+        // 候选：按次数的编辑失败候选补上危害证据、排第一；没有按次数候选的
+        // 「跑满轮次」新起一条；无害的读文件失败留在后面、没有危害证据。
+        let signals: Vec<&str> = report
+            .candidates
+            .iter()
+            .map(|candidate| candidate.signal.as_str())
+            .collect();
+        assert_eq!(
+            signals,
+            [
+                "tool_failed:edit_file/edit_text_not_found",
+                "harmful_failure:incomplete:max_turns",
+                "tool_failed:read_file/io",
+            ]
+        );
+        let first = &report.candidates[0];
+        assert_eq!(first.evidence.harm.as_ref().unwrap().bad_rate, 1.0);
+        assert!(
+            first.suggestion.contains("100% of the episodes"),
+            "{}",
+            first.suggestion
+        );
+        let incomplete = &report.candidates[1];
+        assert_eq!(incomplete.target.role, "main");
+        assert_eq!(incomplete.target.section, "delegation");
+        assert_eq!(incomplete.evidence.count, 5);
+        assert!(report.candidates[2].evidence.harm.is_none());
+        let text = render_text(&report);
+        assert!(text.contains("Failure chains: 31 episodes, 26 with an outcome, 6 bad"));
+        assert!(text.contains("4.3x baseline"));
+    }
+
+    #[test]
+    fn harm_needs_enough_episodes_a_high_bad_rate_and_lift() {
+        // 只留三个会话：样本不够，危害候选不出现，按次数的候选也不带危害证据。
+        let rows: Vec<FeedbackRow> = chain_sample()
+            .into_iter()
+            .filter(|row| {
+                let id = row.session_id.unwrap().as_u128();
+                !(203..=204).contains(&id)
+            })
+            .collect();
+        let no_harm = |rows: &[FeedbackRow]| {
+            build_report(rows, 0, None, None, MONDAY)
+                .candidates
+                .iter()
+                .all(|candidate| {
+                    candidate.evidence.harm.is_none()
+                        && !candidate.signal.starts_with("harmful_failure:")
+                })
+        };
+        assert!(no_harm(&rows), "fewer than five episodes");
+
+        // 五段里只有一段被纠正：坏结局率不够。
+        let mild: Vec<FeedbackRow> = chain_sample()
+            .into_iter()
+            .map(|mut row| {
+                let id = row.session_id.unwrap().as_u128();
+                if (201..=204).contains(&id) && row.signal == "user_followup" {
+                    row.followup_hint = Some("supplement".to_owned());
+                }
+                row
+            })
+            .collect();
+        assert!(no_harm(&mild), "bad rate below the floor");
+
+        // 基线本身就很差：每段都被纠正，这种失败并不比平均更糟。
+        let everything_bad: Vec<FeedbackRow> = chain_sample()
+            .into_iter()
+            .map(|mut row| {
+                if row.signal == "user_followup" {
+                    row.followup_hint = Some("correction".to_owned());
+                }
+                row
+            })
+            .collect();
+        assert!(no_harm(&everything_bad), "no lift over the baseline");
     }
 
     #[test]

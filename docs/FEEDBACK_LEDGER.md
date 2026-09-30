@@ -88,6 +88,22 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 | goal 完成被拒的比例 | ≥ 30%，且至少 5 次完成声明 | goal 续推的话术，以及先定义验收标准 |
 | 纠正率 | ≥ 25%，且至少 10 句后续输入 | 主 Agent；列出纠正集中的会话，供人工复核 |
 
+### 失败链与危害度
+
+按次数排行只说明“什么失败得多”，不说明“什么失败真的坏事”。报告的“失败链”一节回答后一个问题：
+- **分段**：每个会话以用户的每一句后续输入为界切段。一段的结局由结束它的那句话判定，规则与纠正率相同：算“纠正”，或者段内有回退 / 喊停 / 拒绝审批，就是 `bad`，否则是 `ok`。会话的最后一段还没有反应，结局为 `open`，不计入统计。
+- **失败标记**：只用计数和标识：
+  - `tool_failed:<工具>/<类别>`（人拒绝审批、hook 拦下不算）；
+  - `incomplete:<stop_reason>`（主 Agent）；
+  - `worker:<工种>:incomplete|timed_out|verifier_exhausted`；
+  - `goal_completion_rejected`。
+- **聚类**：段内失败按首次出现排序，工具失败附次数档，再接上结局，就是这一段的签名，例如 `tool_failed:edit_file/edit_text_not_found×4+ → incomplete:max_turns ⇒ bad`。报告列出最常见的 15 种签名。
+- **危害度**：每种失败出现过的段里，坏结局的比例，以及它是基线（所有段的坏结局率）的几倍。
+- **危害候选**：某失败出现在至少 5 段里、坏结局率 ≥ 40%、且至少是基线的 2 倍，就进入改进候选：
+  - 已有按次数产生的同一失败候选时，不另起一条，只在原候选上补 `evidence.harm = {bad_rate, lift}`；
+  - 没有时新起一条 `harmful_failure:<标记>`；
+  - 候选按危害（倍数 × 次数）排序，危害最大的排在最前。
+
 `--candidates` 把候选另外写成 JSON：`{generated_at, window, candidates:[{target:{role, bundle, section}, signal, evidence:{count, rate, examples:[session_id…]}, suggestion}]}`。它是 `docs/PROMPT_RSI_DESIGN.md` §8.2 离线优化器的输入。
 - 报告和候选文件都只有计数和 id，即使账本里存了正文，也一个字都不会带出来。
 - 本命令不会改动任何提示词；提示词的晋升要走设计文档 §11 的门禁。
