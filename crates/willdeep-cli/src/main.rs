@@ -601,7 +601,7 @@ async fn run() -> Result<()> {
             }
             CliCommand::Usage { action } => usage_cmd::run(action, &willdeep_home()?),
             CliCommand::Feedback { action } => feedback_cmd::run(action, &willdeep_home()?),
-            CliCommand::Prompt { action } => prompt_cmd::run(action),
+            CliCommand::Prompt { action } => prompt_cmd::run(action, &cli).await,
             CliCommand::Mcp { action } => {
                 let language = administrative_language(&cli)?;
                 mcp_cmd::run(action, &willdeep_home()?, cli.config.as_deref(), language).await

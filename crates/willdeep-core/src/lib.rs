@@ -26,6 +26,7 @@ pub mod plugin;
 mod project_rules;
 pub mod prompt;
 pub mod prompt_bundle;
+pub mod prompt_optimizer;
 pub mod prompt_sections;
 pub mod provider;
 pub mod routing;
