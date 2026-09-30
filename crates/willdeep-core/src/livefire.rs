@@ -791,6 +791,11 @@ fn every_verifiable_sample_starts_red() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live fire: needs real provider credentials and spends money; run scripts/skill_worker_range.rb"]
 async fn skill_worker_range() {
+    // 候选提示词（WILLDEEP_PROMPT_VARIANT）不合法就别跑：静默退回默认提示词
+    // 会把 baseline 的成绩记在候选名下。
+    if let Err(error) = crate::prompt_sections::init_from_env() {
+        panic!("{error}");
+    }
     let (Some(base_url), Some(api_key)) = (
         env_or_skip("WILLDEEP_RANGE_API_BASE"),
         env_or_skip("WILLDEEP_RANGE_API_KEY"),

@@ -3,6 +3,7 @@
   "title": "给 Version 实现 Display",
   "kind": "feature",
   "language": "rust",
+  "split": "validation",
   "requires": ["cargo"],
   "editable": ["src/lib.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]]

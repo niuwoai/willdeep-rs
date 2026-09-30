@@ -41,7 +41,7 @@ module TaskFixture
   def fix_task(root, extra_spec = {})
     dir = File.join(root, 'tasks', 'fix-adder')
     write(dir, 'task.json', JSON.generate({
-      id: 'fix-adder', title: 'adder', kind: 'fix', language: 'ruby', requires: ['ruby'],
+      id: 'fix-adder', title: 'adder', kind: 'fix', language: 'ruby', split: 'validation', requires: ['ruby'],
       editable: ['lib/adder.rb'], verify: [['ruby', '-Ilib', 'test/adder_test.rb']]
     }.merge(extra_spec)))
     write(dir, 'prompt.md', "fix it\n")
@@ -55,7 +55,7 @@ module TaskFixture
   def test_task(root)
     dir = File.join(root, 'tasks', 'test-adder')
     write(dir, 'task.json', JSON.generate({
-      id: 'test-adder', title: 'adder tests', kind: 'test', language: 'ruby', requires: ['ruby'],
+      id: 'test-adder', title: 'adder tests', kind: 'test', language: 'ruby', split: 'validation', requires: ['ruby'],
       editable: ['test/adder_test.rb'], verify: [['ruby', '-Ilib', 'test/adder_test.rb']], mutants: ['mutants/narrow']
     }))
     write(dir, 'prompt.md', "add tests\n")
@@ -78,7 +78,7 @@ class TaskLoadingTest < Minitest::Test
   def test_solution_must_stay_inside_editable
     Dir.mktmpdir do |root|
       dir = File.join(root, 'tasks', 'bad')
-      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'bad', title: 'x', kind: 'fix', language: 'ruby',
+      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'bad', title: 'x', kind: 'fix', language: 'ruby', split: 'validation',
                                                           editable: ['lib/a.rb'], verify: [['true']] }))
       TaskFixture.write(dir, 'prompt.md', "x\n")
       TaskFixture.write(dir, 'fixture/lib/a.rb', "a\n")
@@ -88,17 +88,37 @@ class TaskLoadingTest < Minitest::Test
     end
   end
 
+  def test_every_task_names_a_known_split
+    Dir.mktmpdir do |root|
+      dir = File.join(root, 'tasks', 'nosplit')
+      TaskFixture.write(dir, 'prompt.md', "x\n")
+      TaskFixture.write(dir, 'fixture/lib/a.rb', "a\n")
+      TaskFixture.write(dir, 'solution/lib/a.rb', "b\n")
+      spec = { id: 'nosplit', title: 'x', kind: 'fix', language: 'ruby', editable: ['lib/a.rb'], verify: [['true']] }
+      TaskFixture.write(dir, 'task.json', JSON.generate(spec))
+      assert_raises(KeyError) { ModelEval::Task.load(dir) }
+      TaskFixture.write(dir, 'task.json', JSON.generate(spec.merge(split: 'test')))
+      error = assert_raises(ArgumentError) { ModelEval::Task.load(dir) }
+      assert_includes error.message, 'split'
+      TaskFixture.write(dir, 'task.json', JSON.generate(spec.merge(split: 'holdout')))
+      assert_equal 'holdout', ModelEval::Task.load(dir).split
+    end
+    tasks = ModelEval::Task.load_all(File.expand_path('../../bench/model-eval', __dir__))
+    counts = tasks.group_by(&:split).transform_values(&:size)
+    assert_equal({ 'holdout' => 4, 'regression' => 4, 'train' => 4, 'validation' => 8 }, counts.sort.to_h)
+  end
+
   def test_test_kind_requires_mutants_and_mutants_must_not_touch_editable
     Dir.mktmpdir do |root|
       dir = File.join(root, 'tasks', 'nomut')
-      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'nomut', title: 'x', kind: 'test', language: 'ruby',
+      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'nomut', title: 'x', kind: 'test', language: 'ruby', split: 'validation',
                                                           editable: ['test/a_test.rb'], verify: [['true']] }))
       TaskFixture.write(dir, 'prompt.md', "x\n")
       FileUtils.mkdir_p(File.join(dir, 'fixture'))
       FileUtils.mkdir_p(File.join(dir, 'solution'))
       assert_raises(ArgumentError) { ModelEval::Task.load(dir) }
 
-      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'nomut', title: 'x', kind: 'test', language: 'ruby',
+      TaskFixture.write(dir, 'task.json', JSON.generate({ id: 'nomut', title: 'x', kind: 'test', language: 'ruby', split: 'validation',
                                                           editable: ['test/a_test.rb'], verify: [['true']],
                                                           mutants: ['mutants/m'] }))
       TaskFixture.write(dir, 'mutants/m/test/a_test.rb', "changing the model's file\n")
@@ -225,7 +245,7 @@ end
 
 class ReportTest < Minitest::Test
   def row(overrides = {})
-    { task: 't', kind: 'fix', language: 'ruby', status: 'passed', claimed: true, false_completion: false,
+    { task: 't', kind: 'fix', language: 'ruby', split: 'validation', status: 'passed', claimed: true, false_completion: false,
       turns: 4, narration_ratio: 0.5, reasoning_ratio: 0.0, silent_tool_turns: 1, tool_calls: 3, tool_failures: 0,
       input_tokens: 100, output_tokens: 50, elapsed_seconds: 10.0 }.merge(overrides)
   end

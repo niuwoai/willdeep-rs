@@ -93,7 +93,8 @@
    - 已完成：Worker 共享黑板 `board_post` / `board_read`（P5），详见 [子 Agent](SUBAGENTS.md)。
    - 已完成：反馈行的提示词版本戳 `prompt_bundle`，以及 `willdeep feedback bundles`。
    - 已完成：跨会话报告与确定性改进候选 `willdeep feedback report [--candidates]`，对应 RSI §8.1 优化器的输入。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
-   - 未做：由候选自动生成并评测提示词变体（§8.2–§11 的晋升门禁）、专家圆桌的流式看板。
+   - 未做：专家圆桌的流式看板。
+6. **Phase F（已完成）**：提示词分段与单段变体（`willdeep prompt sections|show|check|draft`），带结构门，只在 `run --local` 中通过 `WILLDEEP_PROMPT_VARIANT` 加载；任务集按 train / validation / holdout / regression 分组；`scripts/prompt_rsi_eval.rb` 做 baseline 与候选的对照评测，并按 §8.4 门禁给出结论，永不自动上线。详见 [操作手册](PROMPT_RSI_OPERATIONS.md)。未做：由模型撰写变体文本、服务端数据接收与 canary 灰度。
 
 ## 验证
 - 单元测试：GoalState 序列化/resume 预算累计、完成门（有在飞 worker 不得完成）、sink 行大小与脱敏 keyset 测试（仿 usage ledger）。

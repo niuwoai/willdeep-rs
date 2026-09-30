@@ -3,6 +3,7 @@
   "title": "可变默认参数串了状态",
   "kind": "fix",
   "language": "python",
+  "split": "regression",
   "requires": ["python3"],
   "editable": ["registry.py"],
   "verify": [["python3", "-m", "unittest", "-q"]]

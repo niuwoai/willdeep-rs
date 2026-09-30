@@ -5,6 +5,10 @@ require 'find'
 
 module ModelEval
   KINDS = %w[fix feature test lint].freeze
+  # 提示词对照评测（`scripts/prompt_rsi_eval.rb`）的分组，设计文档 §8.4：
+  # train 可以给候选生成看失败摘要；validation 选候选；holdout 只在晋升前跑、
+  # 不把逐题结果交给任何人改提示词；regression 是永远不许破的底线。
+  SPLITS = %w[train validation holdout regression].freeze
 
   # 一个任务就是一个目录：
   #
@@ -18,7 +22,7 @@ module ModelEval
   # 说明书里写死的几条约束在这里就校验掉：错的任务集比没有任务集更糟，它会
   # 一夜一夜地产出看着像成绩的数字。
   class Task
-    attr_reader :dir, :id, :title, :kind, :language, :requires, :editable, :verify,
+    attr_reader :dir, :id, :title, :kind, :language, :split, :requires, :editable, :verify,
                 :must_contain, :must_not_contain, :mutants
 
     def self.load_all(root)
@@ -40,6 +44,9 @@ module ModelEval
       raise ArgumentError, "#{@id}: kind 只能是 #{KINDS.join(' / ')}" unless KINDS.include?(@kind)
 
       @language = spec.fetch('language')
+      @split = spec.fetch('split')
+      raise ArgumentError, "#{@id}: split 只能是 #{SPLITS.join(' / ')}" unless SPLITS.include?(@split)
+
       @requires = Array(spec['requires'])
       @editable = Array(spec.fetch('editable'))
       raise ArgumentError, "#{@id}: editable 不能为空" if @editable.empty?

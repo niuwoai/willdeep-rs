@@ -3,6 +3,7 @@
   "title": "清掉 clippy 警告",
   "kind": "lint",
   "language": "rust",
+  "split": "regression",
   "requires": ["cargo", "cargo-clippy"],
   "editable": ["src/lib.rs"],
   "verify": [

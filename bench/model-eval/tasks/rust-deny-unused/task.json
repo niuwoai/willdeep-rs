@@ -3,6 +3,7 @@
   "title": "deny(unused) 下的死代码",
   "kind": "lint",
   "language": "rust",
+  "split": "train",
   "requires": ["cargo"],
   "editable": ["src/lib.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]],

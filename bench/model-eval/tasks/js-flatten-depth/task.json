@@ -3,6 +3,7 @@
   "title": "实现带深度的 flatten",
   "kind": "feature",
   "language": "javascript",
+  "split": "holdout",
   "requires": ["node"],
   "editable": ["flatten.js"],
   "verify": [["node", "--test"]],

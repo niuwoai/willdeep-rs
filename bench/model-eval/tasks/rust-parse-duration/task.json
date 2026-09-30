@@ -3,6 +3,7 @@
   "title": "实现 parse_duration",
   "kind": "feature",
   "language": "rust",
+  "split": "holdout",
   "requires": ["cargo"],
   "editable": ["src/lib.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]]

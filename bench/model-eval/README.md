@@ -37,6 +37,20 @@ ruby scripts/model_eval_trend.rb --alarm --inject             # 趋势写回 doc
 `--check-tasks` 进 CI（Linux），它保证任务集本身没坏；真跑不进 CI，定时跑法见
 [`docs/MODEL_EVAL.md`](../../docs/MODEL_EVAL.md) 与 [`scripts/launchd/`](../../scripts/launchd/README.md)。
 
+## 分组（split）
+
+每个任务的 `task.json` 都有 `split`，供提示词对照评测（`scripts/prompt_rsi_eval.rb`，设计文档 §8.4）使用：
+
+| 分组 | 数量 | 挑选规则 |
+|---|---|---|
+| `regression` | 4 | 每种 kind 至少一个的基础题（fix ×2、test、lint）：候选必须全过 |
+| `holdout` | 4 | 四种语言各一个，覆盖 feature、fix、test：只在晋升前跑，逐题结果不给任何人看 |
+| `train` | 4 | 允许候选生成阅读失败摘要 |
+| `validation` | 8 | 其余，用于选候选 |
+
+- `--split validation,regression` 只跑指定的分组。
+- 调整分组要同时改 `scripts/test/model_eval_test.rb` 里的计数断言。分组一改，历史对照结果就不可比了（报告里记有数据集哈希）。
+
 ## 加任务
 
 复制一个同语言的目录改名；`id` 必须等于目录名；`solution/` 只放 `editable` 里的文件；

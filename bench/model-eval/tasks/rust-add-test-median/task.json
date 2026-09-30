@@ -3,6 +3,7 @@
   "title": "给 median 补边界测试",
   "kind": "test",
   "language": "rust",
+  "split": "regression",
   "requires": ["cargo"],
   "editable": ["tests/median.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]],
