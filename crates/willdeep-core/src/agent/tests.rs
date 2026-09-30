@@ -1431,3 +1431,198 @@ async fn persisted_orphan_tool_results_are_removed_before_provider_replay() {
     );
     assert_eq!(outcome.final_text, "recovered");
 }
+
+/// 按脚本回复：每步要么是一段文字，要么是一次工具调用。顺带记下每次请求的
+/// system 消息与提供的工具名。
+/// 一步脚本：回复文字，以及可选的一次工具调用（工具名，参数 JSON）。
+type ScriptStep = (String, Option<(String, String)>);
+
+struct ScriptedGoalProvider {
+    script: Mutex<std::collections::VecDeque<ScriptStep>>,
+    systems: Mutex<Vec<String>>,
+    tool_names: Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for ScriptedGoalProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<Completion, ProviderError> {
+        self.systems
+            .lock()
+            .expect("systems")
+            .push(messages[0].content.clone());
+        self.tool_names
+            .lock()
+            .expect("tools")
+            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+        let (content, call) = self
+            .script
+            .lock()
+            .expect("script")
+            .pop_front()
+            .expect("scripted reply");
+        let tool_calls = call
+            .map(|(name, arguments)| {
+                vec![crate::types::ToolCall {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                    arguments,
+                }]
+            })
+            .unwrap_or_default();
+        Ok(Completion {
+            reasoning: None,
+            content,
+            finish_reason: Some(
+                if tool_calls.is_empty() {
+                    "stop"
+                } else {
+                    "tool_calls"
+                }
+                .to_owned(),
+            ),
+            tool_calls,
+            usage: None,
+        })
+    }
+}
+
+/// 有验收清单的目标：先定标准，虚报完成被门禁拒绝（点名缺哪条），不带证据
+/// 标完成被工具拒绝，带证据标完成后才真正收口。目标块每轮钉在 system 消息里，
+/// 反馈账本记下「完成被拒」与「完成」。
+#[tokio::test]
+async fn a_goal_with_criteria_completes_only_after_evidence_is_recorded() {
+    let complete = || {
+        (
+            "<goal-status>complete</goal-status> shipped".to_owned(),
+            None,
+        )
+    };
+    let call = |arguments: &str| {
+        (
+            String::new(),
+            Some(("update_plan".to_owned(), arguments.to_owned())),
+        )
+    };
+    let provider = Arc::new(ScriptedGoalProvider {
+        script: Mutex::new(
+            [
+                call(r#"{"criteria":["tests pass"],"steps":[{"title":"run tests","status":"in_progress"}]}"#),
+                complete(),
+                call(r#"{"checklist":[{"index":1,"done":true}]}"#),
+                call(r#"{"checklist":[{"index":1,"done":true,"evidence":"cargo test: 42 passed"}]}"#),
+                complete(),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        systems: Mutex::new(Vec::new()),
+        tool_names: Mutex::new(Vec::new()),
+    });
+    let dir = std::env::temp_dir().join(format!("willdeep-goal-feedback-{}", uuid::Uuid::new_v4()));
+    let sink = crate::feedback::FeedbackSink::spawn(&dir);
+    let continuation = Arc::new(GoalContinuation::new());
+    continuation.activate("ship rc7", crate::goal::GoalBudget::default());
+    let agent = Agent::new(
+        provider.clone(),
+        registry("goal-criteria"),
+        AgentConfig {
+            max_turns: 12,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_goal_continuation(continuation.clone())
+    .with_feedback(crate::feedback::FeedbackRecorder::new(
+        sink.clone(),
+        "tui",
+        false,
+    ));
+
+    let outcome = agent.run("go").await.expect("goal run");
+    assert_eq!(outcome.stop_reason, AgentStopReason::GoalComplete);
+    let final_state = continuation.snapshot().expect("finished state kept");
+    assert_eq!(final_state.status, crate::goal::GoalStatus::Complete);
+    assert_eq!(
+        final_state.criteria[0].evidence.as_deref(),
+        Some("cargo test: 42 passed")
+    );
+
+    let rejected = outcome
+        .messages
+        .iter()
+        .find(|message| message.content.starts_with("[goal-completion-rejected]"))
+        .expect("the premature claim is refused");
+    assert!(rejected.content.contains("1. tests pass"));
+    assert!(
+        outcome.messages.iter().any(|message| message
+            .content
+            .contains("cannot be marked done without evidence")),
+        "marking done without evidence is a tool error"
+    );
+    let systems = provider.systems.lock().expect("systems");
+    assert!(systems.iter().all(|system| system.contains("<goal-state>")));
+    assert!(systems.last().unwrap().contains("1. [x] tests pass"));
+    assert!(
+        provider
+            .tool_names
+            .lock()
+            .expect("tools")
+            .iter()
+            .all(|names| names.iter().any(|name| name == "update_plan")),
+        "update_plan is offered while a goal is active"
+    );
+
+    assert!(sink.flush(std::time::Duration::from_secs(2)));
+    let mut signals = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("feedback dir") {
+        let text = std::fs::read_to_string(entry.expect("entry").path()).expect("read");
+        signals.extend(text.lines().filter_map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).ok()?;
+            row["signal"]
+                .as_str()
+                .filter(|signal| signal.starts_with("goal_"))
+                .map(|signal| (signal.to_owned(), row["count"].as_u64()))
+        }));
+    }
+    assert_eq!(
+        signals,
+        [
+            ("goal_completion_rejected".to_owned(), Some(1)),
+            ("goal_completed".to_owned(), Some(0)),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 没有目标时不给 `update_plan`，也不钉目标块。
+#[tokio::test]
+async fn update_plan_is_hidden_without_a_goal() {
+    let provider = Arc::new(ScriptedGoalProvider {
+        script: Mutex::new([("done".to_owned(), None)].into_iter().collect()),
+        systems: Mutex::new(Vec::new()),
+        tool_names: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::new(
+        provider.clone(),
+        registry("no-goal"),
+        AgentConfig {
+            max_turns: 2,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_goal_continuation(Arc::new(GoalContinuation::new()));
+    agent.run("hello").await.expect("run");
+    assert!(
+        !provider.tool_names.lock().expect("tools")[0]
+            .iter()
+            .any(|name| name == "update_plan")
+    );
+    assert!(!provider.systems.lock().expect("systems")[0].contains("<goal-state>"));
+}

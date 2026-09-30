@@ -13,7 +13,36 @@ pub(crate) const PARENT_ONLY_TOOLS: &[&str] = &[
     "stop_agent",
     "resume_agent",
     "list_agent_recoveries",
+    "update_plan",
 ];
+
+/// `update_plan`：只在有激活目标（`/goal`）时出现在主 Agent 的工具面里。
+/// 执行在 Agent 层（它改的是 [`crate::GoalContinuation`]，不碰工作区）。
+pub(crate) fn update_plan_definition() -> ToolDefinition {
+    definition(
+        "update_plan",
+        "Record the goal's acceptance criteria, mark criteria done with evidence, update the step plan, or record what blocks you. \
+The goal can only be declared complete when every acceptance criterion is marked done with evidence and no delegated worker is still running. \
+Define concrete, checkable criteria early; mark one done only with proof (command output, test name, file path, commit). \
+All fields are optional; only the fields you pass change. No approval is needed.",
+        json!({"type":"object","properties":{
+            "criteria":{"type":"array","maxItems":24,"items":{"type":"string"},"description":"Replace the full list of acceptance criteria. Criteria whose text is unchanged keep their done state and evidence."},
+            "checklist":{"type":"array","items":{"type":"object","properties":{
+                "index":{"type":"integer","minimum":1,"description":"1-based criterion number."},
+                "done":{"type":"boolean"},
+                "evidence":{"type":"string","description":"Required when done is true."}
+            },"required":["index","done"],"additionalProperties":false}},
+            "merge":{"type":"boolean","description":"true: update steps by id and append new ids; false or omitted: replace the full step plan."},
+            "steps":{"type":"array","maxItems":24,"items":{"type":"object","properties":{
+                "id":{"type":"string","description":"Stable step id such as s1; required when merge is true."},
+                "title":{"type":"string"},
+                "status":{"type":"string","enum":["pending","in_progress","done","skipped","failed"]},
+                "note":{"type":"string"}
+            },"required":["title"],"additionalProperties":false}},
+            "blocked_reason":{"type":"string","description":"What currently blocks progress; an empty string clears it."}
+        },"additionalProperties":false}),
+    )
+}
 
 /// `send_agent_message` 的正文上限（字符）。超出直接报错，不截断。
 pub const MAX_AGENT_MESSAGE_CHARS: usize = 4_000;

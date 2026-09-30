@@ -8,6 +8,12 @@
 - Web 端下一句建议的完整生命周期进反馈账本：服务端签发 `suggestion_id` 并记住原文，前端只回传 id 与信号（`POST /api/sessions/{id}/input-suggestion/feedback`），原样 / 改过 / 重写由服务端判定。
 - `[feedback] retain_months`（默认 12）：daemon 启动时删掉更早的月份分片。
 - `willdeep audit export` 新增「反馈信号」一节：信号计数、建议采用率与原样发送率、按工具与错误类别的失败、没结果就停下的运行数；不含任何正文。
+- 目标（`/goal`）持久化与验收清单（long-horizon.v1 RA2）：
+  - `Session.goal_state` 随检查点落盘，已用时长只计实际运行时间并跨轮次、跨重启累计；daemon 每轮不再从满格预算重来。
+  - 新增主 Agent 专用的 `update_plan` 工具（与 canonical §2.3 同构，另加 `criteria` 定义验收标准），勾选必须附证据。
+  - 完成门禁：还有未带证据的验收标准或在跑的委派 Worker 时，拒绝模型的完成声明并点名缺什么。
+  - 目标状态每轮钉在 system 消息里，不会被上下文压缩摘要掉。
+  - 反馈账本新增 `goal_completed` / `goal_completion_rejected` / `goal_budget_limited`。
 - 路线图文档：主 Agent 协调与长任务缺口自查、Xedit 定时任务与专家团插件化、RSI 反馈数据分阶段计划。
 
 ## [0.87.0-rc6] - 2026-09-29

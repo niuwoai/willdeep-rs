@@ -224,6 +224,35 @@ pub(crate) struct UsageOrigin {
 
 /// 这次 harness 的记账上下文。进程内前端按界面定 `client`，Runtime 前端按
 /// 提交方的 `origin_client`。
+/// 把会话里持久化的目标接回来（long-horizon.v1 RA4 的持久化部分）。
+///
+/// - 会话记着目标、状态也是同一句且还在进行：原样恢复，预算与清单接着算。
+///   daemon 每轮都重建 harness，没有这一步每轮都会从满格预算重新开始。
+/// - 会话记着目标、但状态是别的目标或已收尾：按这句目标从零开始。
+/// - 会话没记目标（Web 的目标只随每轮的 `<goal>` 信封到达）：只停放，等本轮
+///   信封带着同一句目标来再接回；没带就不激活，关掉的目标不会「复活」。
+pub(crate) fn restore_goal(
+    continuation: &willdeep_core::GoalContinuation,
+    session: &willdeep_core::Session,
+) {
+    let budget = willdeep_core::GoalBudget::default();
+    let saved = session
+        .goal_state
+        .clone()
+        .filter(|state| state.status == willdeep_core::GoalStatus::Active);
+    let goal = session
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty());
+    match (goal, saved) {
+        (Some(goal), Some(state)) if state.statement == goal => continuation.restore(state, budget),
+        (Some(goal), _) => continuation.activate(goal, budget),
+        (None, Some(state)) => continuation.park(state),
+        (None, None) => {}
+    }
+}
+
 /// 反馈账本的记录者（`[feedback]`，docs/FEEDBACK_LEDGER.md）。出处取自用量
 /// 账本的同一份上下文：同一个会话、同一个 Runtime 轮次、同一个前端。
 pub(crate) fn feedback_recorder(
@@ -1040,8 +1069,8 @@ pub(crate) async fn build(
         );
     }
     let goal_continuation = Arc::new(willdeep_core::GoalContinuation::new());
-    if let Some(goal) = resumed.and_then(|session| session.goal.as_deref()) {
-        goal_continuation.activate(goal, willdeep_core::GoalBudget::default());
+    if let Some(session) = resumed {
+        restore_goal(&goal_continuation, session);
     }
     let mut agent = Agent::new(
         provider.clone(),
@@ -1588,6 +1617,52 @@ pub(crate) fn configured_approval_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 会话记着的目标与状态对得上就原样恢复；换了目标从零开始；会话没记
+    /// 目标（Web）时只停放，要等本轮信封带着同一句目标来才接回。
+    #[test]
+    fn persisted_goal_state_is_restored_only_for_the_same_goal() {
+        let mut session = willdeep_core::Session::new(std::env::temp_dir(), None, "restore goal");
+        let mut saved = willdeep_core::GoalState::new("ship rc7");
+        saved.continuations = 11;
+        session.goal = Some("ship rc7".to_owned());
+        session.goal_state = Some(saved.clone());
+
+        let same = willdeep_core::GoalContinuation::new();
+        restore_goal(&same, &session);
+        assert_eq!(same.snapshot().unwrap().continuations, 11);
+
+        session.goal = Some("write docs".to_owned());
+        let changed = willdeep_core::GoalContinuation::new();
+        restore_goal(&changed, &session);
+        let state = changed.snapshot().unwrap();
+        assert_eq!(
+            (state.statement.as_str(), state.continuations),
+            ("write docs", 0)
+        );
+
+        session.goal = None;
+        let web = willdeep_core::GoalContinuation::new();
+        restore_goal(&web, &session);
+        assert!(
+            !web.is_active(),
+            "no goal on the session: nothing is activated"
+        );
+        web.activate("ship rc7", willdeep_core::GoalBudget::default());
+        assert_eq!(web.snapshot().unwrap().continuations, 11);
+
+        let mut finished = saved;
+        finished.status = willdeep_core::GoalStatus::Complete;
+        session.goal = Some("ship rc7".to_owned());
+        session.goal_state = Some(finished);
+        let reopened = willdeep_core::GoalContinuation::new();
+        restore_goal(&reopened, &session);
+        assert_eq!(
+            reopened.snapshot().unwrap().continuations,
+            0,
+            "a finished goal restarts from zero when set again"
+        );
+    }
 
     #[test]
     fn approval_mode_defaults_to_workspace_write() {

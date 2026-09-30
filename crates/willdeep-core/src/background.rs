@@ -151,6 +151,22 @@ impl BackgroundTaskRegistry {
             .collect()
     }
 
+    /// 还在跑的委派 Worker 数。不受 [`Self::snapshots`] 50 条上限影响：
+    /// 目标的完成门禁不能因为列表截断而漏看一个还没回报告的 Worker。
+    /// Shell 与 monitor 不算——常驻的开发服务器不该把目标永远卡在「未完成」。
+    pub fn running_subagents(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("background registry")
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.snapshot.kind == BackgroundTaskKind::Subagent
+                    && task.snapshot.status == BackgroundTaskStatus::Running
+            })
+            .count()
+    }
+
     pub fn drain_pending(&self) -> Vec<BackgroundTaskEvent> {
         self.inner
             .lock()

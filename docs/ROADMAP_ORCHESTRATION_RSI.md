@@ -85,8 +85,8 @@
 ---
 
 ## 建议的推进顺序
-1. **Phase A（约 1 周量级，无外部依赖）**：三-2/4 反馈埋点 + sink（先只落建议采纳信号，价值最快显现，且不影响主流程）。
-2. **Phase B**：一 P1/P2（GoalState 持久化 + 验收清单 + pin 区），这是长任务可靠性的地基。
+1. **Phase A（已完成）**：三-2/3/4 反馈埋点 + sink；Web 建议生命周期；后续输入、插话、回退、审批、取消信号；保留期；审计汇总。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
+2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。未做：RA3 token/cost 预算、RA4 重启自动续推。
 3. **Phase C**：一 P3/P4 结构化报告与并行汇合；三-3 follow-up 分类。
 4. **Phase D**：二（宿主 schedules + turn/submit + agent/spawn 反向请求，再做两个插件），需 Xedit 材料。
 5. **Phase E**：黑板、专家团完整版、离线 RSI 优化闭环。

@@ -53,8 +53,9 @@ pub use background::{
 };
 pub use detached_job::{DetachedJob, DetachedJobStore, JobReport, JobState, KillOutcome};
 pub use goal::{
-    ContinuationDecision, ContinuationRung, GOAL_COMPLETE_MARKER, GoalBudget, GoalContinuation,
-    RoundObservation, SoftStopReason,
+    ChecklistUpdate, ContinuationDecision, ContinuationRung, GOAL_COMPLETE_MARKER, GoalBudget,
+    GoalContinuation, GoalCriterion, GoalState, GoalStatus, GoalStep, PlanUpdate, RoundObservation,
+    SoftStopReason, StepStatus,
 };
 pub use judge::{JudgeRequest, JudgeVerdict, ProviderSafetyJudge, SafetyJudge};
 pub use kernel::{DedupPolicy, EventKernel, LeasedEvent, PublishOutcome, host_event};
