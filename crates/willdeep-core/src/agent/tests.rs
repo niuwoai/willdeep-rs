@@ -1354,6 +1354,7 @@ async fn exhausted_budget_wraps_up_instead_of_looping_forever() {
         crate::goal::GoalBudget {
             wall_clock: None,
             max_continuations: 1,
+            max_tokens: None,
         },
     );
 
@@ -1376,6 +1377,70 @@ async fn exhausted_budget_wraps_up_instead_of_looping_forever() {
             .any(|message| message.content.contains("[goal-budget-limited]")),
         "the wrap-up turn must carry the handover steering"
     );
+}
+
+/// 每次都报 600 token、从不收尾的模型。
+struct TokenHungryProvider {
+    requests: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for TokenHungryProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<Completion, ProviderError> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Completion {
+            content: "still working on it".to_owned(),
+            finish_reason: Some("stop".to_owned()),
+            usage: Some(crate::types::Usage {
+                input_tokens: Some(500),
+                output_tokens: Some(100),
+                total_tokens: Some(600),
+                cache_read_tokens: None,
+            }),
+            ..Completion::default()
+        })
+    }
+}
+
+/// RA3：目标的 token 预算按模型报告的用量累计，用尽后有序收尾。
+#[tokio::test]
+async fn a_goal_wraps_up_when_its_token_budget_is_spent() {
+    let provider = Arc::new(TokenHungryProvider { requests: 0.into() });
+    let continuation = Arc::new(GoalContinuation::with_default_budget(
+        crate::goal::GoalBudget {
+            max_tokens: Some(1_000),
+            ..crate::goal::GoalBudget::default()
+        },
+    ));
+    continuation.activate("ship rc7", continuation.default_budget());
+    let agent = Agent::new(
+        provider.clone(),
+        registry("goal-tokens"),
+        AgentConfig {
+            max_turns: 12,
+            system_prompt: "system".to_owned(),
+            context_window: 128_000,
+            token_budget: None,
+        },
+    )
+    .with_goal_continuation(continuation.clone());
+
+    let outcome = agent.run("ship it").await.expect("run");
+
+    assert_eq!(outcome.stop_reason, AgentStopReason::BudgetLimited);
+    assert_eq!(
+        provider.requests.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "one continuation, then the budget is spent and the wrap-up turn ends it"
+    );
+    let state = continuation.snapshot().expect("finished goal state");
+    assert_eq!(state.tokens_used, 1_800);
+    assert_eq!(state.status, crate::goal::GoalStatus::BudgetLimited);
 }
 
 #[tokio::test]

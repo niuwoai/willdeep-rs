@@ -44,6 +44,7 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 | `session_rewound` | 用户回退会话 | `count`（丢掉的轮数）、`decision`（`workspace_restored` / `transcript_only`） | 强负向：那几轮做错了 |
 | `approval_resolved` | 审批 / 提问得到处置 | `interaction_kind`, `decision`, `latency_ms` | `deny` 是负向；`cancelled` 是轮次被停下时自动撤销，**不是**人的拒绝 |
 | `turn_cancelled` | 用户中途停下一轮 | `prev_status` | 负向：方向错或太慢 |
+| `goal_resumed` | daemon 重启打断了进行中的目标，运行时自动排了一轮续推 | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 中性：用来看重启续推之后的结局 |
 | `goal_completed` / `goal_completion_rejected` / `goal_budget_limited` | 目标收尾（见 [长程自治](LONG_HORIZON_AUTONOMY.md)） | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 「完成被拒」是虚报完成的强信号 |
 
 同一条建议的各行共享 `suggestion_id`。Web 端的 `suggestion_id` 由服务端签发，服务端记住建议原文与发出时间，浏览器只回传 id 与信号，所以账本里的原文与停留时长不采信浏览器给的值。Worker 的行带 `agent_id` 与 `worker_profile`，主 Agent 的行这两个字段是 `null`。Runtime 轮次的行带 `turn_id`。

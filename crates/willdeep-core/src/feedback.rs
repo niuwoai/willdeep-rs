@@ -103,6 +103,8 @@ pub enum Signal {
     GoalCompletionRejected,
     /// 目标没做完但预算耗尽，按交接快照收尾。
     GoalBudgetLimited,
+    /// daemon 重启打断了一个还在进行的目标，运行时自动排了一轮续推。
+    GoalResumed,
 }
 
 /// 一行反馈。可选字段一律输出、未知即 `null`，从不省略键。

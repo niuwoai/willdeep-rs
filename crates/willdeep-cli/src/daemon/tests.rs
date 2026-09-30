@@ -15,6 +15,51 @@ fn test_turn_scheduler() -> tokio::sync::mpsc::UnboundedSender<uuid::Uuid> {
     tokio::sync::mpsc::unbounded_channel().0
 }
 
+/// 手工搭的 `ServerState`：调度器与目标续推的测试直接调它们的入口函数。
+fn test_server_state(
+    root: &Path,
+    sessions: Arc<session_store::RuntimeSessionStore>,
+) -> ServerState {
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(root);
+    ServerState {
+        home: root.to_path_buf(),
+        token: "t".to_owned(),
+        started_at: 0,
+        shutdown: watch::channel(false).0,
+        events: events.clone(),
+        tasks: Arc::new(
+            TaskManager::open(TaskManagerOptions {
+                path: root.join("tasks.json"),
+                interactions_path: root.join("interactions.json"),
+                home: root.to_path_buf(),
+                events,
+                agents: agents.clone(),
+                sessions: sessions.clone(),
+                turn_scheduler: test_turn_scheduler(),
+                runtime_url: "http://127.0.0.1:1".to_owned(),
+                runtime_token: "test-token".to_owned(),
+            })
+            .unwrap(),
+        ),
+        agents,
+        agent_commands: Arc::new(
+            AgentCommandStore::open(root.join("agent-commands.json")).unwrap(),
+        ),
+        sessions: sessions.clone(),
+        workspaces: Arc::new(
+            workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
+        ),
+        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
+        idempotency: Arc::new(control_api::IdempotencyStore::default()),
+        local_transport: None,
+        tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
+        work_gate: Arc::new(RwLock::new(false)),
+        kernel_store: willdeep_core::kernel_store::KernelStore::new(root),
+        mobile: Arc::new(mobile_gateway::MobileRelay::new(root)),
+    }
+}
+
 #[tokio::test]
 async fn control_server_shutdown_deadline_starts_after_shutdown_signal() {
     let (shutdown, receiver) = watch::channel(false);
@@ -1776,48 +1821,8 @@ async fn scheduled_tasks_fire_into_fresh_sessions_only_while_the_plugin_is_enabl
         std::env::temp_dir().join(format!("willdeep-schedule-fire-{}", uuid::Uuid::new_v4()));
     let workspace = root.join("project");
     std::fs::create_dir_all(&workspace).unwrap();
-    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
-    let agents = test_agent_store(&root);
-    let sessions = Arc::new(
-        session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root)
-            .unwrap(),
-    );
-    let state = ServerState {
-        home: root.clone(),
-        token: "t".to_owned(),
-        started_at: 0,
-        shutdown: watch::channel(false).0,
-        events: events.clone(),
-        tasks: Arc::new(
-            TaskManager::open(TaskManagerOptions {
-                path: root.join("tasks.json"),
-                interactions_path: root.join("interactions.json"),
-                home: root.clone(),
-                events,
-                agents: agents.clone(),
-                sessions: sessions.clone(),
-                turn_scheduler: test_turn_scheduler(),
-                runtime_url: "http://127.0.0.1:1".to_owned(),
-                runtime_token: "test-token".to_owned(),
-            })
-            .unwrap(),
-        ),
-        agents,
-        agent_commands: Arc::new(
-            AgentCommandStore::open(root.join("agent-commands.json")).unwrap(),
-        ),
-        sessions: sessions.clone(),
-        workspaces: Arc::new(
-            workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
-        ),
-        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
-        idempotency: Arc::new(control_api::IdempotencyStore::default()),
-        local_transport: None,
-        tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
-        work_gate: Arc::new(RwLock::new(false)),
-        kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
-        mobile: Arc::new(mobile_gateway::MobileRelay::new(&root)),
-    };
+    let sessions = test_runtime_session_store(&root);
+    let state = test_server_state(&root, sessions.clone());
     let created_at = 1_790_726_400;
     let task = ScheduledTask {
         id: uuid::Uuid::new_v4(),
@@ -1879,5 +1884,150 @@ async fn scheduled_tasks_fire_into_fresh_sessions_only_while_the_plugin_is_enabl
     assert!(claimed.request.prompt.contains(&task.id.to_string()));
     let log = std::fs::read_to_string(root.join("events.ndjson")).unwrap();
     assert!(log.contains("schedule.fired") && log.contains("schedule.skipped"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 造一个「在跑时被重启打断」的会话：轮次已认领、core 会话里有半截历史，
+/// 重开 Runtime 存储时它被标成 Interrupted。`goal` 写进 core 会话。
+fn interrupted_goal_session(
+    root: &Path,
+    title: &str,
+    goal: Option<willdeep_core::GoalState>,
+    origin_client: Option<String>,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let store = test_runtime_session_store(root);
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session = store
+        .create(session_store::CreateRuntimeSession {
+            id: None,
+            workspace,
+            profile: None,
+            model: None,
+            config: None,
+            title: Some(title.to_owned()),
+        })
+        .unwrap();
+    let (turn, _) = store
+        .enqueue_turn(
+            session.id,
+            session_store::CreateRuntimeTurn {
+                origin_client,
+                request_id: uuid::Uuid::new_v4(),
+                prompt: "keep going".to_owned(),
+                attachments: Vec::new(),
+            },
+        )
+        .unwrap();
+    store.claim_next(session.id).unwrap().unwrap();
+    assert!(store.bind_task(turn.id, uuid::Uuid::new_v4()).unwrap());
+    let core_store = willdeep_core::SessionStore::new(root);
+    let mut core = core_store.load(session.id).unwrap();
+    core.messages
+        .push(willdeep_core::Message::user("keep going"));
+    core.messages.push(willdeep_core::Message::assistant(
+        "half-written output",
+        Vec::new(),
+    ));
+    core.goal_state = goal;
+    core_store.save(&mut core).unwrap();
+    (session.id, turn.id)
+}
+
+/// RA4：重启打断的、目标还在进行的会话被自动续推一轮；已完成、在收尾、
+/// 预算用尽的目标不续推；续推只排一轮；关掉开关就不续推。
+#[tokio::test]
+async fn interrupted_goals_resume_once_after_a_restart() {
+    let root = std::env::temp_dir().join(format!("willdeep-goal-resume-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut active = willdeep_core::GoalState::new("migrate the parser");
+    active.criteria.push(willdeep_core::GoalCriterion {
+        text: "parser tests pass".to_owned(),
+        done: false,
+        evidence: None,
+    });
+    let mut complete = willdeep_core::GoalState::new("already shipped");
+    complete.status = willdeep_core::GoalStatus::Complete;
+    let mut wrapping = willdeep_core::GoalState::new("out of time");
+    wrapping.wrap_up_injected = true;
+    let mut spent = willdeep_core::GoalState::new("out of tokens");
+    spent.tokens_used = 5_000;
+
+    let (resume, interrupted) = interrupted_goal_session(&root, "resume", Some(active), None);
+    let (done, _) = interrupted_goal_session(&root, "done", Some(complete), None);
+    let (wrap, _) = interrupted_goal_session(&root, "wrap", Some(wrapping), None);
+    let (budget, _) = interrupted_goal_session(&root, "budget", Some(spent), None);
+    let (plain, _) = interrupted_goal_session(&root, "no goal", None, None);
+
+    // 重开 = daemon 重启。
+    let sessions = test_runtime_session_store(&root);
+    let state = test_server_state(&root, sessions.clone());
+    let settings = crate::config::AgentSettings {
+        goal_token_budget: Some(1_000),
+        ..Default::default()
+    };
+    let disabled = crate::config::AgentSettings {
+        goal_auto_resume: Some(false),
+        ..settings.clone()
+    };
+    assert_eq!(goal_resume::recover(&state, &disabled).unwrap(), 0);
+    assert_eq!(goal_resume::recover(&state, &settings).unwrap(), 1);
+    assert_eq!(
+        goal_resume::recover(&state, &settings).unwrap(),
+        0,
+        "the queued resume turn is not queued twice"
+    );
+
+    let claimed = sessions.claim_next(resume).unwrap().expect("resume turn");
+    assert!(
+        claimed
+            .request
+            .prompt
+            .starts_with("<goal>\nmigrate the parser\n</goal>\n[goal-resume]")
+    );
+    assert!(claimed.request.prompt.contains("1. parser tests pass"));
+    for skipped in [done, wrap, budget, plain] {
+        assert!(sessions.claim_next(skipped).unwrap().is_none());
+    }
+    let events = std::fs::read_to_string(root.join("events.ndjson")).unwrap();
+    assert!(events.contains("goal.resumed"), "{events}");
+    assert!(events.contains(&format!("interrupted_turn_id={interrupted}")));
+    assert!(events.contains("reason=goal_not_active"));
+    assert!(events.contains("reason=wrapping_up"));
+    assert!(events.contains("reason=budget_spent"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 一个每次都把 daemon 弄崩的续推轮次不会被无限重放。
+#[test]
+fn repeated_restart_interruptions_of_resume_turns_stop_resuming() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-goal-resume-loop-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (session, turn) = interrupted_goal_session(
+        &root,
+        "loop",
+        Some(willdeep_core::GoalState::new("keep crashing")),
+        Some(format!(
+            "{}{}",
+            goal_resume::ORIGIN_PREFIX,
+            uuid::Uuid::new_v4()
+        )),
+    );
+    let sessions = test_runtime_session_store(&root);
+    let candidates = sessions
+        .goal_resume_candidates(goal_resume::ORIGIN_PREFIX)
+        .unwrap();
+    assert_eq!(
+        candidates,
+        [session_store::GoalResumeCandidate {
+            session_id: session,
+            root_agent_id: sessions.get(session).unwrap().unwrap().root_agent_id,
+            interrupted_turn_id: turn,
+            consecutive_resumes: 1,
+        }]
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

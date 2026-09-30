@@ -86,7 +86,7 @@
 
 ## 建议的推进顺序
 1. **Phase A（已完成）**：三-2/3/4 反馈埋点 + sink；Web 建议生命周期；后续输入、插话、回退、审批、取消信号；保留期；审计汇总。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
-2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。未做：RA3 token/cost 预算、RA4 重启自动续推。
+2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。RA3 / RA4 已在 Phase H 完成。
 3. **Phase C（已完成）**：Worker 报告末尾的 `<worker-facts>`、保头保尾截断、`await_agents` 汇合、派工时写集冲突预检、熔断冷却后试探；审计里的纠正率离线标注。详见 [子 Agent](SUBAGENTS.md)「并行派工与汇合」。未做：同一轮多个前台派工并发（审批不能并发）、Worker 间共享黑板（P5）。
 4. **Phase D（已完成）**：定时任务与专家圆桌以内置插件形式移植（`willdeep plugin builtin install scheduler|roundtable`），宿主补了 `${willdeepExe}`、`WILLDEEP_PLUGIN_DATA` 与 daemon 调度器。详见 [内置插件](BUILTIN_PLUGINS.md)。未做：圆桌的流式气泡与态势看板、定时任务的 Web / TUI 管理界面。
 5. **Phase E（进行中）**：
@@ -96,6 +96,10 @@
    - 未做：专家圆桌的流式看板。
 6. **Phase F（已完成）**：提示词分段与单段变体（`willdeep prompt sections|show|check|draft`），带结构门，只在 `run --local` 中通过 `WILLDEEP_PROMPT_VARIANT` 加载；任务集按 train / validation / holdout / regression 分组；`scripts/prompt_rsi_eval.rb` 做 baseline 与候选的对照评测，并按 §8.4 门禁给出结论，永不自动上线。详见 [操作手册](PROMPT_RSI_OPERATIONS.md)。未做：服务端数据接收与 canary 灰度。
 7. **Phase G（已完成）**：`willdeep prompt propose` 由会话主模型按 §8.2/§8.3 的约束起草最多 3 个单段变体。起草时只给计数，不给会话正文和 holdout；每个变体过同一道结构门，没过就带着问题修一次。结构门同时新增“不得削弱安全”检查。未做：相似失败聚类。
+8. **Phase H（已完成）**：长任务续航。
+   - RA3：goal 的 token 预算，跨轮次、跨重启累计，用尽时有序收尾（`[agent] goal_token_budget` / `goal_wall_clock_minutes` / `goal_max_continuations`）。
+   - RA4：daemon 重启后，被打断的进行中目标自动续推一轮；有防崩溃循环与幂等兜底，可用 `goal_auto_resume` 关掉。
+   - 详见 [长程自治](LONG_HORIZON_AUTONOMY.md)。未做：Worker token 计入目标预算。
 
 ## 验证
 - 单元测试：GoalState 序列化/resume 预算累计、完成门（有在飞 worker 不得完成）、sink 行大小与脱敏 keyset 测试（仿 usage ledger）。

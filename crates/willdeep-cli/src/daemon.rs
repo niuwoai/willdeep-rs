@@ -37,6 +37,7 @@ mod control_api;
 mod detached_spawn;
 pub(crate) mod diff_review;
 mod event_stream;
+mod goal_resume;
 mod headless;
 mod herdr;
 mod internal_transport;
@@ -2000,6 +2001,14 @@ async fn run(home: &Path) -> Result<()> {
             drop(work_guard);
         }
     });
+    // 重启打断了还在进行的目标：各排一轮续推（RA4）。排进去的轮次由下面的
+    // 调度或 `goal_resume` 自己叫醒调度通道领走。
+    goal_resume::spawn(
+        server_state.clone(),
+        crate::config::LoadedConfig::load(None)
+            .map(|loaded| loaded.file.agent)
+            .unwrap_or_default(),
+    );
     for session_id in sessions.schedulable_sessions()? {
         tasks.schedule_session(session_id)?;
     }

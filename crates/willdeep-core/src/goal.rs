@@ -30,6 +30,8 @@ pub const DEFAULT_MAX_CONTINUATIONS: usize = 64;
 pub struct GoalBudget {
     pub wall_clock: Option<Duration>,
     pub max_continuations: usize,
+    /// 整个目标（跨轮次、跨重启）主 Agent 用掉的 token 上限；`None` 不限。
+    pub max_tokens: Option<u64>,
 }
 
 impl Default for GoalBudget {
@@ -37,6 +39,7 @@ impl Default for GoalBudget {
         Self {
             wall_clock: Some(DEFAULT_WALL_CLOCK_BUDGET),
             max_continuations: DEFAULT_MAX_CONTINUATIONS,
+            max_tokens: None,
         }
     }
 }
@@ -56,6 +59,7 @@ pub enum ContinuationRung {
 pub enum SoftStopReason {
     WallClock,
     Continuations,
+    Tokens,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +181,9 @@ pub struct GoalState {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub continuations: usize,
+    /// 主 Agent 为这个目标累计用掉的 token（输入 + 输出），跨轮次、跨重启。
+    #[serde(default)]
+    pub tokens_used: u64,
     #[serde(default)]
     pub consecutive_no_progress: u32,
     #[serde(default)]
@@ -223,11 +230,12 @@ impl GoalState {
         let mut out = String::from("<goal-state>\n");
         out.push_str(&format!("GOAL: {}\n", self.statement));
         out.push_str(&format!(
-            "BUDGET: elapsed {}, continuation {} of {}, wall-clock remaining {}\n",
+            "BUDGET: elapsed {}, continuation {} of {}, wall-clock remaining {}{}\n",
             format_elapsed(self.elapsed()),
             self.continuations,
             budget.max_continuations,
             format_remaining(budget, self.elapsed()),
+            format_tokens(self.tokens_used, budget),
         ));
         if self.criteria.is_empty() {
             out.push_str("ACCEPTANCE CRITERIA: none recorded yet. Use `update_plan` to record the concrete, checkable criteria this goal must meet.\n");
@@ -365,11 +373,34 @@ struct Slots {
 #[derive(Default)]
 pub struct GoalContinuation {
     slots: Mutex<Slots>,
+    /// 新激活或恢复的目标用的预算（`[agent] goal_*` 配置）。
+    default_budget: GoalBudget,
 }
 
 impl GoalContinuation {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 带配置预算的句柄。
+    pub fn with_default_budget(budget: GoalBudget) -> Self {
+        Self {
+            default_budget: budget,
+            ..Self::default()
+        }
+    }
+
+    pub fn default_budget(&self) -> GoalBudget {
+        self.default_budget
+    }
+
+    /// 记一次模型调用的 token。没有激活目标时不记。
+    pub fn record_tokens(&self, tokens: u64) {
+        if let Ok(mut slots) = self.slots.lock()
+            && let Some(active) = slots.active.as_mut()
+        {
+            active.state.tokens_used = active.state.tokens_used.saturating_add(tokens);
+        }
     }
 
     /// 激活或替换目标。语句为空视为清除。
@@ -689,6 +720,15 @@ impl GoalContinuation {
                 reason: SoftStopReason::Continuations,
             });
         }
+        if let Some(limit) = goal.budget.max_tokens
+            && goal.state.tokens_used >= limit
+        {
+            goal.state.wrap_up_injected = true;
+            return Some(ContinuationDecision::SoftStop {
+                steering: wrap_up_steering(&goal.state.statement, SoftStopReason::Tokens, elapsed),
+                reason: SoftStopReason::Tokens,
+            });
+        }
 
         if observation.made_progress() || std::mem::take(&mut goal.plan_changed) {
             goal.state.consecutive_no_progress = 0;
@@ -703,7 +743,7 @@ impl GoalContinuation {
             &goal.state.statement,
             rung,
             elapsed,
-            goal.state.continuations,
+            (goal.state.continuations, goal.state.tokens_used),
             goal.budget,
             observation,
         );
@@ -764,6 +804,59 @@ fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
+/// `, tokens 1.2M of 5.0M`；没有 token 预算也没用过时为空。
+fn format_tokens(used: u64, budget: GoalBudget) -> String {
+    let short = |tokens: u64| {
+        if tokens >= 1_000_000 {
+            format!("{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("{}k", tokens / 1_000)
+        } else {
+            tokens.to_string()
+        }
+    };
+    match budget.max_tokens {
+        Some(limit) => format!(", tokens {} of {}", short(used), short(limit)),
+        None if used > 0 => format!(", tokens {}", short(used)),
+        None => String::new(),
+    }
+}
+
+/// daemon 重启后自动续推一个未完成目标时的那句话（RA4）。
+///
+/// 开头的 `<goal>` 信封是必需的：Web / daemon 会话的持久化目标只是停放着，
+/// 本轮带同一句目标来才会接回计数、清单与预算。
+pub fn resume_after_restart_prompt(state: &GoalState) -> String {
+    let mut prompt = format!(
+        "<goal>\n{}\n</goal>\n[goal-resume] This is an automated harness message, not a user reply.\n\n\
+The runtime restarted while you were working on this goal, and the interrupted turn may not have finished \
+writing its history: an edit, command or report you remember may or may not have happened. \
+Before continuing, check the actual state with read-only tools (git status, git diff, the files and tests \
+named below). Do not redo steps that are already done; continue from what is actually on disk.\n",
+        state.statement
+    );
+    let open = state.open_criteria();
+    if !open.is_empty() {
+        prompt.push_str("\nOpen acceptance criteria:\n");
+        for (index, criterion) in &open {
+            prompt.push_str(&format!("  {index}. {}\n", criterion.text));
+        }
+    }
+    let pending: Vec<&GoalStep> = state
+        .steps
+        .iter()
+        .filter(|step| step.status != StepStatus::Done)
+        .collect();
+    if !pending.is_empty() {
+        prompt.push_str("\nPlan steps not yet done:\n");
+        for step in pending {
+            prompt.push_str(&format!("  - [{}] {}\n", step.status.label(), step.title));
+        }
+    }
+    prompt.push_str("\nContinue until this goal is genuinely complete.");
+    prompt
+}
+
 fn format_remaining(budget: GoalBudget, elapsed: Duration) -> String {
     match budget.wall_clock {
         Some(limit) => format_elapsed(limit.saturating_sub(elapsed)),
@@ -777,7 +870,7 @@ fn continuation_steering(
     statement: &str,
     rung: ContinuationRung,
     elapsed: Duration,
-    continuations: usize,
+    (continuations, tokens_used): (usize, u64),
     budget: GoalBudget,
     observation: RoundObservation,
 ) -> String {
@@ -789,11 +882,12 @@ fn continuation_steering(
     steering.push_str(&format!("1. GOAL (still active):\n{statement}\n\n"));
 
     steering.push_str(&format!(
-        "2. SITUATION: elapsed {}, continuation {} of {}, wall-clock budget remaining {}.\n\n",
+        "2. SITUATION: elapsed {}, continuation {} of {}, wall-clock budget remaining {}{}.\n\n",
         format_elapsed(elapsed),
         continuations,
         budget.max_continuations,
         format_remaining(budget, elapsed),
+        format_tokens(tokens_used, budget),
     ));
 
     steering.push_str("3. WHY YOU ARE SEEING THIS: you produced a reply without calling any tool, but the goal has not been declared complete. ");
@@ -839,6 +933,7 @@ fn wrap_up_steering(statement: &str, reason: SoftStopReason, elapsed: Duration) 
         SoftStopReason::Continuations => {
             "the continuation budget for this goal segment is exhausted"
         }
+        SoftStopReason::Tokens => "the token budget for this goal is exhausted",
     };
     format!(
         "[goal-budget-limited] This is an automated harness message, not a user reply.\n\n\
@@ -874,6 +969,85 @@ mod tests {
         let continuation = GoalContinuation::new();
         continuation.activate("ship the release", budget);
         continuation
+    }
+
+    #[test]
+    fn the_token_budget_accumulates_and_soft_stops_the_goal() {
+        let continuation = GoalContinuation::with_default_budget(GoalBudget {
+            max_tokens: Some(1_000),
+            ..GoalBudget::default()
+        });
+        continuation.record_tokens(500);
+        assert!(!continuation.is_active());
+        continuation.activate("ship the release", continuation.default_budget());
+        continuation.record_tokens(600);
+        let decision = continuation.evaluate("one", progressed()).unwrap();
+        let ContinuationDecision::Continue { steering, .. } = decision else {
+            panic!("under budget keeps going: {decision:?}");
+        };
+        assert!(steering.contains("tokens 600 of 1k"), "{steering}");
+        let saved = continuation.snapshot().unwrap();
+        assert_eq!(
+            saved.tokens_used, 600,
+            "tokens before activation are not counted"
+        );
+
+        // 换个进程接着算：预算跨重启累计。
+        let resumed = GoalContinuation::with_default_budget(continuation.default_budget());
+        resumed.restore(saved, resumed.default_budget());
+        resumed.record_tokens(400);
+        let decision = resumed.evaluate("two", progressed()).unwrap();
+        let ContinuationDecision::SoftStop { reason, steering } = decision else {
+            panic!("expected a soft stop: {decision:?}");
+        };
+        assert_eq!(reason, SoftStopReason::Tokens);
+        assert!(steering.contains("token budget"));
+        assert_eq!(
+            resumed.evaluate("STATE: …", stalled()),
+            Some(ContinuationDecision::Complete)
+        );
+        assert_eq!(
+            resumed.snapshot().map(|state| state.status),
+            Some(GoalStatus::BudgetLimited)
+        );
+
+        let old: GoalState =
+            serde_json::from_str(r#"{"statement":"old goal","continuations":3}"#).unwrap();
+        assert_eq!(old.tokens_used, 0);
+    }
+
+    #[test]
+    fn the_restart_prompt_carries_the_goal_envelope_and_open_work() {
+        let mut state = GoalState::new("migrate the parser");
+        state.criteria = vec![
+            GoalCriterion {
+                text: "all parser tests pass".to_owned(),
+                done: false,
+                evidence: None,
+            },
+            GoalCriterion {
+                text: "docs updated".to_owned(),
+                done: true,
+                evidence: Some("docs/PARSER.md".to_owned()),
+            },
+        ];
+        state.steps = vec![
+            GoalStep {
+                title: "port the lexer".to_owned(),
+                status: StepStatus::Done,
+            },
+            GoalStep {
+                title: "port the grammar".to_owned(),
+                status: StepStatus::InProgress,
+            },
+        ];
+        let prompt = resume_after_restart_prompt(&state);
+        assert!(prompt.starts_with("<goal>\nmigrate the parser\n</goal>\n[goal-resume]"));
+        assert!(prompt.contains("1. all parser tests pass"));
+        assert!(!prompt.contains("docs updated"));
+        assert!(prompt.contains("port the grammar"));
+        assert!(!prompt.contains("port the lexer"));
+        assert!(prompt.ends_with("Continue until this goal is genuinely complete."));
     }
 
     #[test]
@@ -971,6 +1145,7 @@ mod tests {
         let continuation = goal_with(GoalBudget {
             wall_clock: None,
             max_continuations: 2,
+            max_tokens: None,
         });
         continuation.evaluate("one", progressed());
         continuation.evaluate("two", progressed());
@@ -989,6 +1164,7 @@ mod tests {
         let continuation = goal_with(GoalBudget {
             wall_clock: Some(Duration::ZERO),
             max_continuations: 100,
+            max_tokens: None,
         });
         let decision = continuation.evaluate("anything", progressed()).unwrap();
         let ContinuationDecision::SoftStop { reason, .. } = decision else {
@@ -1002,6 +1178,7 @@ mod tests {
         let continuation = goal_with(GoalBudget {
             wall_clock: Some(Duration::ZERO),
             max_continuations: 100,
+            max_tokens: None,
         });
         assert!(matches!(
             continuation.evaluate("anything", progressed()),
@@ -1019,6 +1196,7 @@ mod tests {
         let continuation = goal_with(GoalBudget {
             wall_clock: None,
             max_continuations: 2,
+            max_tokens: None,
         });
         continuation.evaluate("one", progressed());
         continuation.activate(
@@ -1026,6 +1204,7 @@ mod tests {
             GoalBudget {
                 wall_clock: None,
                 max_continuations: 2,
+                max_tokens: None,
             },
         );
         continuation.evaluate("two", progressed());
@@ -1239,6 +1418,7 @@ mod tests {
         let continuation = goal_with(GoalBudget {
             wall_clock: Some(Duration::ZERO),
             max_continuations: 100,
+            max_tokens: None,
         });
         continuation.evaluate("anything", progressed());
         continuation.evaluate("STATE: …", stalled());
