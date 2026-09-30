@@ -1,6 +1,6 @@
 # WillDeep Agentic RSI（Prompt RSI）设计方案
 
-> 状态：提案
+> 状态：提案；本地部分已落地：Phase 0 的提示词版本戳，Phase 1 的分段、变体与结构门，Phase 3 的分组对照与门禁。操作见 [PROMPT_RSI_OPERATIONS.md](PROMPT_RSI_OPERATIONS.md)。
 >
 > 目标项目：`willdeep-rs`
 >

@@ -3,6 +3,7 @@
   "title": "实现 Slug.of",
   "kind": "feature",
   "language": "ruby",
+  "split": "train",
   "requires": ["ruby"],
   "editable": ["lib/slug.rb"],
   "verify": [["ruby", "-Ilib", "test/slug_test.rb"]]

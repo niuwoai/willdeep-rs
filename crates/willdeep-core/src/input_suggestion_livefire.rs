@@ -146,6 +146,11 @@ fn every_sample_is_well_formed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live fire: needs real provider credentials and spends money; run scripts/input_suggestion_eval.rb"]
 async fn input_suggestion_live_fire() {
+    // 候选提示词（WILLDEEP_PROMPT_VARIANT）不合法就别跑：静默退回默认提示词
+    // 会把 baseline 的成绩记在候选名下。
+    if let Err(error) = crate::prompt_sections::init_from_env() {
+        panic!("{error}");
+    }
     let (Some(base_url), Some(api_key)) = (
         env_value("WILLDEEP_RANGE_API_BASE"),
         env_value("WILLDEEP_RANGE_API_KEY"),

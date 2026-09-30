@@ -40,8 +40,13 @@ OptionParser.new do |parser|
   parser.on('--config PATH', 'willdeep 配置文件路径') { |value| options[:config] = value }
   parser.on('--out DIR', '报告输出目录') { |value| options[:out] = value }
   parser.on('--no-history', '只跑不归档（调试用）') { options[:history] = nil }
+  parser.on('--variant PATH', '候选提示词变体（WILLDEEP_PROMPT_VARIANT）；带变体的一轮不归档') do |value|
+    options[:variant] = File.expand_path(value)
+  end
   parser.on('--rescore PATH', '重算一份已归档的 run（人工填完 judged 后用）') { |value| options[:rescore] = value }
 end.parse!
+# history 追的是同一份提示词下模型的趋势；候选提示词的对照结论归 bench/prompt-rsi。
+options[:history] = nil if options[:variant]
 
 def git_output(*args)
   text = IO.popen(['git', '-C', REPO_ROOT, *args], err: File::NULL, &:read).to_s.strip
@@ -94,6 +99,7 @@ env = {
   'WILLDEEP_RANGE_MODEL' => options[:model],
   'WILLDEEP_SUGGEST_OUT' => json_path
 }
+env['WILLDEEP_PROMPT_VARIANT'] = options[:variant] if options[:variant]
 command = %w[cargo test -p willdeep-core --lib input_suggestion_livefire::input_suggestion_live_fire --
              --ignored --nocapture --test-threads=1]
 ok = system(env, *command)

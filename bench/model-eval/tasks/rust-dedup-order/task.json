@@ -3,6 +3,7 @@
   "title": "实现保序去重",
   "kind": "feature",
   "language": "rust",
+  "split": "train",
   "requires": ["cargo"],
   "editable": ["src/lib.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]]

@@ -18,6 +18,8 @@
 # editable 文件再跑 verifier；受保护文件被动过的算作弊，不进分子；「没跑」
 # （缺可执行文件、Provider 出错）不进分母。报告只有计数，不含模型正文、不含凭据。
 
+require 'digest'
+require 'English'
 require 'fileutils'
 require 'json'
 require 'optparse'
@@ -81,6 +83,7 @@ module ModelEval
 
       @binary = resolve_binary(@options[:binary])
       @binary_version = binary_version(@binary)
+      variant = check_variant(@options[:variant]) if @options[:variant]
       @run_root = Dir.mktmpdir('model-eval-run-')
       FileUtils.chmod(0o700, @run_root)
       @config = derive_config(@options[:config], @run_root)
@@ -112,7 +115,8 @@ module ModelEval
                                    version: workspace_version, binary_version: @binary_version)
         report = { 'schema_version' => 1, 'model' => model, 'binary_version' => @binary_version,
                    'max_turns' => @options[:turns], 'timeout_seconds' => @options[:timeout],
-                   'created_at' => summary['ran_at'], 'rows' => rows.map { |row| row.transform_keys(&:to_s) } }
+                   'created_at' => summary['ran_at'], 'variant' => variant,
+                   'rows' => rows.map { |row| row.transform_keys(&:to_s) } }
         safe_model = model.gsub(/[^A-Za-z0-9._-]/, '_')
         File.write(File.join(@options[:out], "#{safe_model}.json"), "#{JSON.pretty_generate(report.merge('summary' => summary))}\n")
         File.write(File.join(@options[:out], "#{safe_model}.md"), Report.markdown(report, summary))
@@ -140,6 +144,7 @@ module ModelEval
       wanted = @options[:tasks]
       tasks = tasks.select { |task| wanted.include?(task.id) } if wanted
       tasks = tasks.select { |task| task.kind == @options[:kind] } if @options[:kind]
+      tasks = tasks.select { |task| @options[:splits].include?(task.split) } if @options[:splits]
       raise '没有匹配的任务' if tasks.empty?
 
       tasks
@@ -167,7 +172,9 @@ module ModelEval
                  '--max-turns', @options[:turns].to_s, '--model', model]
       command += ['--profile', @options[:profile]] if @options[:profile]
       command += ['run', '--local', '--output', 'json', '--input', task.prompt_path]
-      code, timed_out, elapsed = AgentEvalProcess.run(command, { 'WILLDEEP_HOME' => home }, workspace,
+      env = { 'WILLDEEP_HOME' => home }
+      env['WILLDEEP_PROMPT_VARIANT'] = @options[:variant] if @options[:variant]
+      code, timed_out, elapsed = AgentEvalProcess.run(command, env, workspace,
                                                       @options[:timeout], logs)
       result = AgentEvalObservation.object(File.join(logs, 'stdout.log'))
       intact = before == Verifier.snapshot(workspace, task.editable)
@@ -197,12 +204,25 @@ module ModelEval
       row
     end
 
+    # 先过一遍结构门：不合法的变体让每个任务都以退出码 2 收场，跑完二十个
+    # 才发现只是浪费钱。返回写进报告的变体元数据。
+    def check_variant(path)
+      output = IO.popen([@binary, 'prompt', 'check', path], err: %i[child out], &:read).to_s.force_encoding('UTF-8')
+      raise "提示词变体不合法：#{path}\n#{output}" unless $CHILD_STATUS&.success?
+
+      spec = JSON.parse(File.read(path, encoding: 'UTF-8'))
+      bundles = output[/^bundle (\S+) → (\S+)$/] && [Regexp.last_match(1), Regexp.last_match(2)]
+      { 'id' => spec['id'], 'role' => spec['role'], 'section' => spec['section'],
+        'sha256' => Digest::SHA256.file(path).hexdigest,
+        'parent_bundle' => bundles&.first, 'candidate_bundle' => bundles&.last }
+    end
+
     def read_log(path)
       File.file?(path) ? File.binread(path).force_encoding('UTF-8').scrub : ''
     end
 
     def base_row(task)
-      { task: task.id, kind: task.kind, language: task.language, status: nil, missing: [] }
+      { task: task.id, kind: task.kind, language: task.language, split: task.split, status: nil, missing: [] }
     end
 
     # 行为指标只认 `session_metrics.rb` 这一条算路，不在这里另算一遍。
@@ -257,6 +277,8 @@ if $PROGRAM_NAME == __FILE__
     profile: nil,
     tasks: nil,
     kind: nil,
+    splits: nil,
+    variant: nil,
     binary: ENV.fetch('WILLDEEP_BIN', 'willdeep'),
     config: File.join(ENV.fetch('WILLDEEP_HOME', File.join(Dir.home, '.willdeep')), 'config.toml'),
     timeout: ModelEval::DEFAULT_TIMEOUT,
@@ -272,6 +294,14 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--model NAME', '要评的模型，可重复；缺省读 WILLDEEP_EVAL_MODELS') { |v| options[:models] << v }
     parser.on('--profile NAME', 'willdeep 的 provider profile') { |v| options[:profile] = v }
     parser.on('--tasks LIST', '只跑这些任务，逗号分隔') { |v| options[:tasks] = v.split(',').map(&:strip) }
+    parser.on('--split LIST', "只跑这些分组，逗号分隔（#{ModelEval::SPLITS.join(' / ')}）") do |v|
+      options[:splits] = v.split(',').map(&:strip)
+      unknown = options[:splits] - ModelEval::SPLITS
+      raise "未知分组：#{unknown.join(', ')}" unless unknown.empty?
+    end
+    parser.on('--variant PATH', '候选提示词变体（WILLDEEP_PROMPT_VARIANT）；带变体的一轮不进模型趋势归档') do |v|
+      options[:variant] = File.expand_path(v)
+    end
     parser.on('--kind KIND', "只跑这一类任务（#{ModelEval::KINDS.join(' / ')}）") { |v| options[:kind] = v }
     parser.on('--binary PATH', 'willdeep 二进制，缺省 PATH 里的 willdeep') { |v| options[:binary] = v }
     parser.on('--config PATH', '用户配置文件，缺省 ~/.willdeep/config.toml') { |v| options[:config] = File.expand_path(v) }
@@ -285,6 +315,12 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--list', '列出任务') { options[:mode] = :list }
   end.parse!
   raise 'timeout 与 max-turns 必须为正' unless options[:timeout].positive? && options[:turns].positive?
+  if options[:variant] && options[:archive]
+    # `history.jsonl` 追的是「同一份提示词下模型的趋势」，候选提示词的成绩混进去
+    # 会让趋势线莫名其妙地跳。对照结论归 `bench/prompt-rsi/`。
+    warn '带 --variant 的一轮不归档进 bench/model-eval（对照评测用 scripts/prompt_rsi_eval.rb）。'
+    options[:archive] = nil
+  end
 
   driver = ModelEval::Driver.new(options)
   exit(case options[:mode]

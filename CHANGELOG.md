@@ -22,6 +22,13 @@
   - 工种熔断打开 10 分钟后放行一次试探，成功即恢复，不再整个会话都关不上。
 - `willdeep audit export` 的反馈信号新增纠正率与「已完成却被纠正」的轮次数：把后续输入与其前的回退、喊停、拒绝审批关联起来离线标注。
 - Worker 共享黑板（`board_post` / `board_read`）：父 Agent 与同一会话的所有 Worker 读写同一块板，写入的是事实、发现、决定、疑问；每条最多 500 字符，写入前先脱敏；作者由运行时填写。新派出的 Worker 在任务简报里带上最近条目，`await_agents` 也会附上新条目。
+- 提示词分段与候选变体：
+  - `STABLE_CONTRACT` 等提示词按段命名；`willdeep prompt sections|show|check|draft` 分别用于查看段、跑结构门（父版本、不变量片段、长度、凭据）、从反馈候选起草变体。
+  - 变体只通过 `WILLDEEP_PROMPT_VARIANT` 在 `willdeep run --local` 中生效；变体不合法时直接报错，其他入口一律拒绝。
+  - Worker 的 system prompt 与其版本号改为同源拼装。
+- 提示词对照评测：
+  - model-eval 任务集按 train / validation / holdout / regression 分组，`model_eval.rb` 新增 `--split`、`--variant`；`input_suggestion_eval.rb` 新增 `--variant`。
+  - 新增 `scripts/prompt_rsi_eval.rb`：分两阶段做 baseline 与候选的对照（holdout 只在第一阶段过门后运行），按门禁给出 `candidate_passes` / `rejected` / `overfit` / `non_reproducible` / `needs_human_judging`，报告归档到 `bench/prompt-rsi/`。只判定，不上线。
 - 提示词版本戳：反馈账本每行带 `prompt_bundle`（`main@…` / `worker:<工种>@…` / `input_suggestion@…`，只对提示词中不随运行变化的部分取哈希）；新增 `worker_started` 信号，作为各工种比例的分母；`willdeep feedback bundles` 列出当前各角色的版本号。
 - `willdeep feedback report [--since] [--json] [--candidates PATH]`：跨会话汇总建议采用率（按版本）、各工种的“没有结果”比例、工具失败排行、goal 完成被拒比例和按周的纠正率趋势，并按确定性阈值给出提示词改进候选（JSON 形状对齐 RSI 设计 §8.2）。只有计数与会话 id，不含正文。
 - 内置插件（从 Xedit 移植，`willdeep plugin builtin list|install`）：

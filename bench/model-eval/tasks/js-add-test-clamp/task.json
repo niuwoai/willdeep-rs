@@ -3,6 +3,7 @@
   "title": "给 clamp 补边界测试",
   "kind": "test",
   "language": "javascript",
+  "split": "validation",
   "requires": ["node"],
   "editable": ["test/clamp.test.js"],
   "verify": [["node", "--test"]],

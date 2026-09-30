@@ -3,6 +3,7 @@
   "title": "sum_to 漏掉上界",
   "kind": "fix",
   "language": "rust",
+  "split": "regression",
   "requires": ["cargo"],
   "editable": ["src/lib.rs"],
   "verify": [["cargo", "test", "--offline", "--quiet"]]
