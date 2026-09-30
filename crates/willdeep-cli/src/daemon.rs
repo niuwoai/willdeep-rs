@@ -43,6 +43,7 @@ mod internal_transport;
 mod local_transport;
 mod mobile_cli;
 mod mobile_gateway;
+mod scheduler;
 mod session_store;
 mod steering;
 mod tool_store;
@@ -1956,6 +1957,8 @@ async fn run(home: &Path) -> Result<()> {
     server_state.mobile.bind(&server_state);
     // 上次开着手机中继就接着连：关掉终端、升级 Runtime 都不该让手机掉线。
     server_state.mobile.resume();
+    // 定时任务（willdeep-scheduler 内置插件）：插件启用时按点开新会话。
+    scheduler::spawn(server_state.clone());
     let scheduler_state = server_state.clone();
     tokio::spawn(async move {
         while let Some(session_id) = scheduled_sessions.recv().await {

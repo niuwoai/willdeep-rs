@@ -436,6 +436,13 @@ impl PluginHost {
             // 免得宿主把图写在一处、插件去另一处找。插件自己声明了就不覆盖。
             env.entry("WILLDEEP_HOME".to_owned())
                 .or_insert_with(|| self.home.display().to_string());
+            // 每个插件一个私有数据目录，宿主负责建好并告诉它在哪：插件不必
+            // 自己猜 `plugin-data/<id>` 的约定，也不会写到别的插件那边去。
+            let data_dir = plugin_data_dir(&self.home, plugin_id);
+            if std::fs::create_dir_all(&data_dir).is_ok() {
+                env.entry("WILLDEEP_PLUGIN_DATA".to_owned())
+                    .or_insert_with(|| data_dir.display().to_string());
+            }
             configs.insert(
                 name.clone(),
                 McpServerConfig {
@@ -741,8 +748,22 @@ pub fn qualified_destination(plugin_id: &str, destination_id: &str) -> String {
     format!("{plugin_id}:{destination_id}")
 }
 
-/// 展开 `${pluginRoot}` 与 `${setting:<id>}`。未知变量原样保留——
-/// 静默替换成空串会让一条命令悄悄变成另一条命令。
+/// 插件的私有数据目录 `<home>/plugin-data/<id>`。
+pub fn plugin_data_dir(home: &Path, plugin_id: &str) -> PathBuf {
+    home.join("plugin-data").join(plugin_id)
+}
+
+/// 正在运行的 willdeep 可执行文件。内置插件的 MCP 服务端就是它自己
+/// （`willdeep plugin serve-builtin <id>`），包里写 `${willdeepExe}`，装到哪台
+/// 机器、装在哪个路径都对得上。
+fn willdeep_exe() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "willdeep".to_owned())
+}
+
+/// 展开 `${pluginRoot}`、`${willdeepExe}` 与 `${setting:<id>}`。未知变量原样
+/// 保留——静默替换成空串会让一条命令悄悄变成另一条命令。
 fn expand_variables(value: &str, root: &str, settings: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
@@ -754,6 +775,7 @@ fn expand_variables(value: &str, root: &str, settings: &BTreeMap<String, String>
         let token = &rest[start + 2..start + end];
         match token {
             "pluginRoot" => out.push_str(root),
+            "willdeepExe" => out.push_str(&willdeep_exe()),
             other => match other.strip_prefix("setting:") {
                 Some(key) => out.push_str(settings.get(key).map(String::as_str).unwrap_or("")),
                 None => out.push_str(&rest[start..start + end + 1]),
@@ -913,6 +935,13 @@ mod tests {
         assert_eq!(
             expand_variables("${HOME}/x", "/pkg", &settings),
             "${HOME}/x"
+        ); // 内置插件的服务端就是正在跑的 willdeep 自己。
+        let exe = expand_variables("${willdeepExe}", "/pkg", &settings);
+        assert_eq!(exe, willdeep_exe());
+        assert!(!exe.contains("${"));
+        assert_eq!(
+            plugin_data_dir(Path::new("/h"), "willdeep.scheduler"),
+            Path::new("/h/plugin-data/willdeep.scheduler")
         );
     }
 

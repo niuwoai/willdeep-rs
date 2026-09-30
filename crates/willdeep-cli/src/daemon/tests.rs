@@ -1765,3 +1765,119 @@ async fn daemon_turns_link_ledger_lines_to_their_usage_events() {
     drop(ledger);
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// 定时任务的触发端：插件没启用什么都不做；启用后到期的任务各开一个新会话、
+/// 带 goal 说明的 prompt 排进去、按任务档位设审批；上一次的会话还有没跑完
+/// 的轮次就跳过；运行记录回写到任务上。
+#[tokio::test]
+async fn scheduled_tasks_fire_into_fresh_sessions_only_while_the_plugin_is_enabled() {
+    use willdeep_core::schedule::{Schedule, ScheduleStore, ScheduledTask};
+    let root =
+        std::env::temp_dir().join(format!("willdeep-schedule-fire-{}", uuid::Uuid::new_v4()));
+    let workspace = root.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let events = Arc::new(EventLog::open(root.join("events.ndjson")).unwrap());
+    let agents = test_agent_store(&root);
+    let sessions = Arc::new(
+        session_store::RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root)
+            .unwrap(),
+    );
+    let state = ServerState {
+        home: root.clone(),
+        token: "t".to_owned(),
+        started_at: 0,
+        shutdown: watch::channel(false).0,
+        events: events.clone(),
+        tasks: Arc::new(
+            TaskManager::open(TaskManagerOptions {
+                path: root.join("tasks.json"),
+                interactions_path: root.join("interactions.json"),
+                home: root.clone(),
+                events,
+                agents: agents.clone(),
+                sessions: sessions.clone(),
+                turn_scheduler: test_turn_scheduler(),
+                runtime_url: "http://127.0.0.1:1".to_owned(),
+                runtime_token: "test-token".to_owned(),
+            })
+            .unwrap(),
+        ),
+        agents,
+        agent_commands: Arc::new(
+            AgentCommandStore::open(root.join("agent-commands.json")).unwrap(),
+        ),
+        sessions: sessions.clone(),
+        workspaces: Arc::new(
+            workspace_store::WorkspaceStore::open(root.join("workspaces.json")).unwrap(),
+        ),
+        diff_review_lock: Arc::new(tokio::sync::Mutex::new(())),
+        idempotency: Arc::new(control_api::IdempotencyStore::default()),
+        local_transport: None,
+        tools: Arc::new(tool_store::ToolStore::open(root.join("tools.json")).unwrap()),
+        work_gate: Arc::new(RwLock::new(false)),
+        kernel_store: willdeep_core::kernel_store::KernelStore::new(&root),
+        mobile: Arc::new(mobile_gateway::MobileRelay::new(&root)),
+    };
+    let created_at = 1_790_726_400;
+    let task = ScheduledTask {
+        id: uuid::Uuid::new_v4(),
+        name: "watch CI".to_owned(),
+        prompt: "Check CI on main".to_owned(),
+        workspace: workspace.clone(),
+        schedule: Schedule::Interval { minutes: 30 },
+        goal: Some("CI on main is green".to_owned()),
+        approval_mode: Some("full-access".to_owned()),
+        enabled: true,
+        created_at,
+        last_run_at: None,
+        last_session_id: None,
+        origin_session_id: None,
+    };
+    let store = ScheduleStore::new(&root);
+    store.update(|tasks| tasks.push(task.clone())).unwrap();
+    let due = created_at + 31 * 60;
+
+    assert_eq!(
+        scheduler::fire_due(&state, due, 0).unwrap(),
+        0,
+        "plugin not installed"
+    );
+
+    crate::builtin_plugins::install(&root, "scheduler", true)
+        .await
+        .unwrap();
+    let fired = scheduler::fire_due(&state, due, 0).unwrap();
+    assert_eq!(fired, 1);
+    let stored = store.list().unwrap().remove(0);
+    assert_eq!(stored.last_run_at, Some(due));
+    let session_id = stored.last_session_id.expect("session recorded");
+    let session = sessions.get(session_id).unwrap().unwrap();
+    assert_eq!(
+        willdeep_core::SessionStore::new(&root)
+            .load(session_id)
+            .unwrap()
+            .title,
+        "⏰ watch CI",
+        "the run's own session is named after the task"
+    );
+    assert_eq!(
+        session.approval_mode,
+        Some(workspace_store::WorkspaceAccess::FullAccess)
+    );
+
+    // 上一次的轮次还在排队：下一个周期跳过，不另开会话。
+    let next = due + 31 * 60;
+    assert_eq!(scheduler::fire_due(&state, next, 0).unwrap(), 0);
+    assert_eq!(store.list().unwrap()[0].last_session_id, Some(session_id));
+
+    let claimed = sessions
+        .claim_next(session_id)
+        .unwrap()
+        .expect("queued turn");
+    assert!(claimed.request.prompt.contains("Check CI on main"));
+    assert!(claimed.request.prompt.contains("CI on main is green"));
+    assert!(claimed.request.prompt.contains(&task.id.to_string()));
+    let log = std::fs::read_to_string(root.join("events.ndjson")).unwrap();
+    assert!(log.contains("schedule.fired") && log.contains("schedule.skipped"));
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -88,7 +88,7 @@
 1. **Phase A（已完成）**：三-2/3/4 反馈埋点 + sink；Web 建议生命周期；后续输入、插话、回退、审批、取消信号；保留期；审计汇总。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
 2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。未做：RA3 token/cost 预算、RA4 重启自动续推。
 3. **Phase C（已完成）**：Worker 报告末尾的 `<worker-facts>`、保头保尾截断、`await_agents` 汇合、派工时写集冲突预检、熔断冷却后试探；审计里的纠正率离线标注。详见 [子 Agent](SUBAGENTS.md)「并行派工与汇合」。未做：同一轮多个前台派工并发（审批不能并发）、Worker 间共享黑板（P5）。
-4. **Phase D**：二（宿主 schedules + turn/submit + agent/spawn 反向请求，再做两个插件），需 Xedit 材料。
+4. **Phase D（已完成）**：定时任务与专家圆桌以内置插件形式移植（`willdeep plugin builtin install scheduler|roundtable`），宿主补了 `${willdeepExe}`、`WILLDEEP_PLUGIN_DATA` 与 daemon 调度器。详见 [内置插件](BUILTIN_PLUGINS.md)。未做：圆桌的流式气泡与态势看板、定时任务的 Web / TUI 管理界面。
 5. **Phase E**：黑板、专家团完整版、离线 RSI 优化闭环。
 
 ## 验证

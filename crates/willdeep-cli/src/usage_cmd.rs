@@ -384,24 +384,8 @@ fn local_day(seconds: u64) -> String {
     willdeep_core::format_iso8601(shifted.max(0) as u64)[..10].to_owned()
 }
 
-#[cfg(unix)]
-// `tm_gmtoff` 是 `c_long`：64 位平台上已是 i64，32 位上不是。
-#[allow(clippy::unnecessary_cast)]
 fn local_offset_seconds(seconds: u64) -> i64 {
-    let time = seconds as libc::time_t;
-    // SAFETY: localtime_r only writes the caller-owned `tm`.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let converted = unsafe { libc::localtime_r(&time, &mut tm) };
-    if converted.is_null() {
-        0
-    } else {
-        tm.tm_gmtoff as i64
-    }
-}
-
-#[cfg(not(unix))]
-fn local_offset_seconds(_seconds: u64) -> i64 {
-    0
+    willdeep_core::schedule::local_utc_offset(seconds)
 }
 
 #[cfg(test)]

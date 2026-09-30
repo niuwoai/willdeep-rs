@@ -21,7 +21,7 @@ Swift App 的工具注册表已经超过一百项，但它们并不都属于 Cod
 1. `apply_patch` / `write_file`：提供比精确字符串替换更强的可审计编辑协议。
 2. 会话工具：`search_sessions`、`rename_session`、`list_workspace_sessions`。
 3. MCP 管理：`list_mcp_servers`、`list_mcp_tools`、`search_mcp_servers`、`configure_mcp_server`。
-4. 任务与计划：`list_jobs`、`list_queued_tasks`、`schedule_task`、`complete_scheduled_task`。
+4. 任务与计划：`list_jobs`、`list_queued_tasks`。（`schedule_task` / `complete_scheduled_task` 已由内置插件 `willdeep-scheduler` 提供，另加 `list_scheduled_tasks`；专家圆桌由 `willdeep-roundtable` 提供。见 `docs/BUILTIN_PLUGINS.md`。）
 5. 浏览器自动化：优先实现 `embedded_browser_*` 的状态、导航、DOM 快照、点击、输入、网络和截图；Chrome Extension 工具作为可选连接器。
 6. 媒体基础能力：`generate_image`、`edit_generated_image`、`visual_qa_screenshot`，通过 Provider/Skill 抽象提供。
 7. 外部 Coding Agent：Codex、Claude Code 等应作为可配置子 Agent Provider，而不是写死多个工具名。
