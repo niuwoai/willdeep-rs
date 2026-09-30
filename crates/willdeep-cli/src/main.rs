@@ -41,6 +41,7 @@ mod plugin_gateway;
 mod plugin_host_requests;
 mod plugin_web;
 mod projects;
+mod prompt_cmd;
 mod telemetry;
 mod titling;
 mod tui;
@@ -257,6 +258,11 @@ enum CliCommand {
     Audit {
         #[command(subcommand)]
         action: audit_cmd::AuditAction,
+    },
+    /// Inspect prompt sections, check candidate prompt variants and draft one from a feedback candidate.
+    Prompt {
+        #[command(subcommand)]
+        action: prompt_cmd::PromptAction,
     },
     /// Summarize the local feedback ledger ($WILLDEEP_HOME/feedback) and list prompt bundle ids.
     Feedback {
@@ -555,6 +561,7 @@ async fn run() -> Result<()> {
             None
         }
     };
+    enforce_prompt_variant_scope(cli.command.as_ref(), run_args.as_ref())?;
     if let Some(command) = cli.command.clone() {
         return match command {
             CliCommand::Run(_) => unreachable!("run command is normalized above"),
@@ -594,6 +601,7 @@ async fn run() -> Result<()> {
             }
             CliCommand::Usage { action } => usage_cmd::run(action, &willdeep_home()?),
             CliCommand::Feedback { action } => feedback_cmd::run(action, &willdeep_home()?),
+            CliCommand::Prompt { action } => prompt_cmd::run(action),
             CliCommand::Mcp { action } => {
                 let language = administrative_language(&cli)?;
                 mcp_cmd::run(action, &willdeep_home()?, cli.config.as_deref(), language).await
@@ -894,6 +902,33 @@ async fn run() -> Result<()> {
     if !outcome.stop_reason.is_complete() {
         return Err(HeadlessRuntimeExecutionError(daemon::HeadlessRuntimeStatus::Partial).into());
     }
+    Ok(())
+}
+
+/// 候选提示词（`WILLDEEP_PROMPT_VARIANT`）只给离线评测用：只有进程内执行的
+/// `willdeep run --local` 会套用它，而且变体不合法时直接报错，不退回默认提示词。
+/// 别的入口（TUI、Web、daemon、经 daemon 的 `run`）一律拒绝：daemon 是常驻
+/// 进程，它的提示词不跟着某一次调用的环境变量走，套了也套不上。
+fn enforce_prompt_variant_scope(
+    command: Option<&CliCommand>,
+    run_args: Option<&RunArgs>,
+) -> Result<()> {
+    use willdeep_core::prompt_sections::{VARIANT_ENV, init_from_env};
+    if std::env::var_os(VARIANT_ENV).is_none_or(|value| value.is_empty()) {
+        return Ok(());
+    }
+    if matches!(
+        command,
+        Some(CliCommand::Prompt { .. } | CliCommand::Feedback { .. })
+    ) {
+        return Ok(());
+    }
+    if !run_args.is_some_and(|args| args.local) {
+        return Err(invalid_run_input(format!(
+            "{VARIANT_ENV} is only honored by `willdeep run --local`; unset it for other commands"
+        )));
+    }
+    init_from_env().map_err(invalid_run_input)?;
     Ok(())
 }
 

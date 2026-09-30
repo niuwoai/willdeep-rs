@@ -46,7 +46,8 @@ Delegation contract:
 
 pub fn build_system_prompt(workspace: &Path) -> std::io::Result<String> {
     let mut sections = vec![
-        STABLE_CONTRACT.to_owned(),
+        crate::prompt_sections::main_contract(crate::prompt_sections::active_variant())
+            .into_owned(),
         crate::subagent::public_trade_contract(),
     ];
     if let Some(rules) = global_user_instructions()? {
