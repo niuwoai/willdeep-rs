@@ -996,7 +996,11 @@ pub(crate) async fn build(
     if let Some(judge) = safety_judge.clone() {
         tools = tools.with_safety_judge(judge);
     }
-    let tools = tools;
+    // 父会话的共享黑板：父 Agent 与它派出的每个 Worker 读写同一块。
+    let board = Arc::new(willdeep_core::board::Board::open(
+        willdeep_core::board::Board::path_for(&home.join("workers"), session_id),
+    ));
+    let tools = tools.with_board(board.clone(), "parent");
     let mut system_prompt = willdeep_core::prompt::build_system_prompt(&workspace)?;
     if !skills.list().is_empty() {
         system_prompt.push_str(
@@ -1035,7 +1039,8 @@ pub(crate) async fn build(
         .with_always_allow_store(home.join("always-allow.json"))
         .with_event_sink(sink.clone())
         .with_usage_ledger(usage_ledger.clone())
-        .with_feedback(feedback.clone());
+        .with_feedback(feedback.clone())
+        .with_board(board);
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in resolve_tier_bindings(
         &loaded.file,

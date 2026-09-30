@@ -228,6 +228,8 @@ pub struct ToolRegistry {
     /// `workspace-write` 档单独使用的围栏；见 [`ToolRegistry::effective_sandbox`]。
     workspace_sandbox: Option<SandboxSpec>,
     monitors: Option<monitor::MonitorEventSink>,
+    /// 共享黑板与本注册表的署名，见 [`crate::board`]。
+    board: Option<(Arc<crate::board::Board>, String)>,
     /// 生命周期挂钩。默认空：没配 hook 的用户不该为此付任何成本。
     hooks: HookRegistry,
     /// 只用于 hook 事件的溯源字段，不参与任何判定。
@@ -282,6 +284,7 @@ impl ToolRegistry {
             hooks: HookRegistry::default(),
             session_id: None,
             monitors: None,
+            board: None,
         }
         // Completion evidence belongs to the executor, even when its caller
         // does not subscribe to external verification reports.
@@ -739,7 +742,7 @@ impl ToolRegistry {
             definition(
                 "spawn_agent",
                 format!(
-                    "Delegate a self-contained task to an isolated child. {} Expert requires a runtime-validated escalation ticket after smaller tiers were attempted. Children cannot spawn agents or show approval UI. Commands use static safety rules, then AI review for non-sensitive ambiguity; declined commands can be returned to the parent for exact target_command approval. Pass task with known facts, read/write files and a verifier. To run independent tasks in parallel, start each with run_in_background=true (disjoint write files, at most 5 at once) and join them with await_agents. Every report ends with a runtime <worker-facts> block (verdict, files actually written, tool failures); trust it over the worker's own claims.",
+                    "Delegate a self-contained task to an isolated child. {} Expert requires a runtime-validated escalation ticket after smaller tiers were attempted. Children cannot spawn agents or show approval UI. Commands use static safety rules, then AI review for non-sensitive ambiguity; declined commands can be returned to the parent for exact target_command approval. Pass task with known facts, read/write files and a verifier. To run independent tasks in parallel, start each with run_in_background=true (disjoint write files, at most 5 at once) and join them with await_agents. Parallel workers share findings through the session's board (board_post / board_read). Every report ends with a runtime <worker-facts> block (verdict, files actually written, tool failures); trust it over the worker's own claims.",
                     crate::subagent::public_trade_contract()
                 ),
                 json!({"type":"object","properties":{
@@ -828,6 +831,9 @@ impl ToolRegistry {
             ),
         ];
         tools.extend(self.monitors.as_ref().map(|_| monitor::definition()));
+        if self.board.is_some() {
+            tools.extend(board_tools::definitions());
+        }
         tools.extend(agent_control::definitions());
         if !self.mcp.is_empty() {
             tools.extend([
@@ -928,6 +934,8 @@ impl ToolRegistry {
             "get_job_output" => self.get_job_output(parse(call)?),
             "kill_job" => self.kill_job(parse(call)?).await,
             "monitor" => self.monitor(parse(call)?).await,
+            "board_post" => self.board_post(parse(call)?),
+            "board_read" => self.board_read(parse(call)?),
             "ask_user" => self.ask_user(parse(call)?).await,
             "web_search" => self.web_search(parse(call)?).await,
             "web_fetch" => self.web_fetch(parse(call)?).await,
@@ -2039,6 +2047,7 @@ mod approval;
 use approval::ApprovalReporter;
 pub use approval::{ApprovalMode, ApprovalSource, ApprovalTrace, SharedApprovalMode};
 mod background_shell;
+mod board_tools;
 mod monitor;
 mod verification;
 pub use agent_control::{DEFAULT_AWAIT_SECONDS, MAX_AGENT_MESSAGE_CHARS, MAX_AWAIT_SECONDS};
