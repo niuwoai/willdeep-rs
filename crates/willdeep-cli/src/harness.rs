@@ -1023,6 +1023,12 @@ pub(crate) async fn build(
     tools
         .require_verifications(&loaded.file.agent.verification_commands)
         .map_err(anyhow::Error::msg)?;
+    let goal_continuation = Arc::new(willdeep_core::GoalContinuation::with_default_budget(
+        loaded.file.agent.goal_budget(),
+    ));
+    if let Some(session) = resumed {
+        restore_goal(&goal_continuation, session);
+    }
     let mut catalog = SubagentCatalog::new(&workspace, subagent_profiles, background_tasks.clone())
         .with_sandbox(sandbox)
         // 父会话在 full-access 时 Worker 跟着免审（rocky 2026-09-21 决定）。
@@ -1041,7 +1047,9 @@ pub(crate) async fn build(
         .with_event_sink(sink.clone())
         .with_usage_ledger(usage_ledger.clone())
         .with_feedback(feedback.clone())
-        .with_board(board);
+        .with_board(board)
+        // Worker 的用量同样计入目标的 token 预算。
+        .with_goal(goal_continuation.clone());
     // 档位兑现成哪个模型。准入在 agent 层，这里只负责兑现。
     for (tier, binding) in resolve_tier_bindings(
         &loaded.file,
@@ -1073,12 +1081,6 @@ pub(crate) async fn build(
             "willdeep: quarantined a damaged event log ({reason}); kept at {}",
             path.display()
         );
-    }
-    let goal_continuation = Arc::new(willdeep_core::GoalContinuation::with_default_budget(
-        loaded.file.agent.goal_budget(),
-    ));
-    if let Some(session) = resumed {
-        restore_goal(&goal_continuation, session);
     }
     let mut agent = Agent::new(
         provider.clone(),

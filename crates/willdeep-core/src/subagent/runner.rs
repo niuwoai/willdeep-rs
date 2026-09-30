@@ -34,6 +34,8 @@ struct VerifierOutcome {
 struct ChildEventSink {
     id: uuid::Uuid,
     parent: Arc<dyn EventSink>,
+    /// 父会话的目标：Worker 的用量同样计入目标的 token 预算（RA3）。
+    goal: Option<Arc<crate::goal::GoalContinuation>>,
 }
 
 #[async_trait::async_trait]
@@ -60,7 +62,12 @@ impl EventSink for ChildEventSink {
                     is_error,
                 })
             }
-            AgentEvent::Usage(usage) => Some(AgentEvent::SubagentUsage { id: self.id, usage }),
+            AgentEvent::Usage(usage) => {
+                if let Some(goal) = &self.goal {
+                    goal.record_tokens(usage.billable_tokens());
+                }
+                Some(AgentEvent::SubagentUsage { id: self.id, usage })
+            }
             AgentEvent::ProviderProgress(crate::provider::ProviderEvent::RetryWait {
                 attempt,
                 delay,
@@ -334,6 +341,8 @@ pub(super) struct SubagentRun {
     /// 父会话的共享黑板。有它时 Worker 拿到 `board_post` / `board_read`，
     /// 任务简报里也带上最近的条目。
     pub(super) board: Option<Arc<crate::board::Board>>,
+    /// 父会话的目标；Worker 的用量计入它的 token 预算。
+    pub(super) goal: Option<Arc<crate::goal::GoalContinuation>>,
 }
 
 /// Run a worker to a verdict.
@@ -371,6 +380,7 @@ pub(super) async fn run_subagent(
         usage_ledger,
         feedback,
         board,
+        goal,
     } = run;
     let usage_ledger = usage_ledger.map(|scope| scope.for_subagent(agent_id));
     let feedback = feedback.map(|recorder| {
@@ -477,6 +487,7 @@ pub(super) async fn run_subagent(
             board
                 .as_ref()
                 .map(|board| (board.clone(), board_author.clone())),
+            goal.clone(),
             attempt,
         )
         .await?;
@@ -580,6 +591,7 @@ async fn run_once(
     usage_ledger: Option<&crate::usage_ledger::UsageLedgerScope>,
     feedback: Option<&crate::feedback::FeedbackRecorder>,
     board: Option<(Arc<crate::board::Board>, String)>,
+    goal: Option<Arc<crate::goal::GoalContinuation>>,
     attempt: usize,
 ) -> Result<(String, WorkerFacts), AgentError> {
     let approval = if profile.shell.uses_intelligent_review() {
@@ -686,6 +698,7 @@ async fn run_once(
     .with_event_sink(Arc::new(ChildEventSink {
         id: agent_id,
         parent: lifecycle_sink,
+        goal,
     }));
     if let Some(inbox) = instruction_inbox {
         agent = agent.with_instruction_inbox(inbox);
@@ -889,6 +902,7 @@ mod tests {
         let sink = ChildEventSink {
             id,
             parent: parent.clone(),
+            goal: None,
         };
         sink.emit(AgentEvent::ProviderProgress(
             crate::provider::ProviderEvent::TextDelta("private child text".into()),

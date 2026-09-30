@@ -90,6 +90,7 @@ pub struct SubagentCatalog {
     usage_ledger: Option<crate::usage_ledger::UsageLedgerScope>,
     feedback: Option<crate::feedback::FeedbackRecorder>,
     board: Option<Arc<crate::board::Board>>,
+    goal: Option<Arc<crate::goal::GoalContinuation>>,
 }
 
 /// 见 [`SubagentCatalog::dispatch_model`]。
@@ -151,7 +152,14 @@ impl SubagentCatalog {
             usage_ledger: None,
             feedback: None,
             board: None,
+            goal: None,
         }
+    }
+
+    /// 挂上父会话的目标：Worker 的用量计入目标的 token 预算。
+    pub fn with_goal(mut self, goal: Arc<crate::goal::GoalContinuation>) -> Self {
+        self.goal = Some(goal);
+        self
     }
 
     /// 挂上父会话的共享黑板：派出的每个 Worker 都能读写它。
@@ -820,6 +828,7 @@ impl SubagentCatalog {
             usage_ledger: self.usage_ledger.clone(),
             feedback: self.feedback.clone(),
             board: self.board.clone(),
+            goal: self.goal.clone(),
         };
         if background {
             let runner_sink = self.sink.clone();
@@ -1391,6 +1400,61 @@ mod tests {
         assert_eq!(result.status, BackgroundTaskStatus::Blocked);
         assert_eq!(result.exit_code, None);
         assert_eq!(result.output, "write access needed");
+    }
+
+    /// 一次就交报告、每次报 700 token 的 Worker 模型。
+    struct MeteredProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for MeteredProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::types::Message],
+            _tools: &[crate::types::ToolDefinition],
+        ) -> Result<crate::types::Completion, crate::provider::ProviderError> {
+            Ok(crate::types::Completion {
+                content: "CONCLUSION: done".to_owned(),
+                finish_reason: Some("stop".to_owned()),
+                usage: Some(crate::types::Usage {
+                    input_tokens: Some(600),
+                    output_tokens: Some(100),
+                    total_tokens: None,
+                    cache_read_tokens: None,
+                }),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// RA3：Worker 的用量计入父会话目标的 token 预算；没有激活目标时不记。
+    #[tokio::test]
+    async fn worker_usage_counts_toward_the_parent_goal_budget() {
+        let root =
+            std::env::temp_dir().join(format!("willdeep-goal-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let goal = Arc::new(crate::goal::GoalContinuation::new());
+        let catalog = SubagentCatalog::new(
+            &root,
+            builtin_profiles(Arc::new(MeteredProvider)),
+            Arc::new(BackgroundTaskRegistry::default()),
+        )
+        .with_goal(goal.clone());
+        let spawn = || SpawnAgentArgs {
+            prompt: "inspect".to_owned(),
+            profile: Some("scout".to_owned()),
+            run_in_background: Some(false),
+            ..SpawnAgentArgs::default()
+        };
+        catalog
+            .run(spawn(), None)
+            .await
+            .expect("run without a goal");
+        assert!(goal.snapshot().is_none(), "no goal, nothing recorded");
+
+        goal.activate("audit the parser", goal.default_budget());
+        catalog.run(spawn(), None).await.expect("run under a goal");
+        assert_eq!(goal.snapshot().unwrap().tokens_used, 700);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

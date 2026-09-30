@@ -1050,12 +1050,7 @@ impl Agent {
             if let Some(usage) = completion.usage {
                 input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                 output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
-                let call_tokens = usage.total_tokens.unwrap_or_else(|| {
-                    usage
-                        .input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(usage.output_tokens.unwrap_or(0))
-                });
+                let call_tokens = usage.billable_tokens();
                 used_tokens = used_tokens.saturating_add(call_tokens);
                 // 目标的 token 预算跨轮次累计（RA3），与本轮的 token_budget 分开算。
                 if let Some(goal) = &self.goal_continuation {

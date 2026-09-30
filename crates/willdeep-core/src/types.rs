@@ -266,6 +266,17 @@ pub struct Usage {
     pub cache_read_tokens: Option<u64>,
 }
 
+impl Usage {
+    /// 这次调用计入预算的 token：Provider 报了总数就用总数，否则输入 + 输出。
+    pub fn billable_tokens(&self) -> u64 {
+        self.total_tokens.unwrap_or_else(|| {
+            self.input_tokens
+                .unwrap_or(0)
+                .saturating_add(self.output_tokens.unwrap_or(0))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

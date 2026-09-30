@@ -88,7 +88,7 @@ rs 侧目前**没有立场**——`crates/willdeep-core/src/agent.rs:275` 一旦
   - Web 端 `/goal` 仍是前端状态、随每轮 `<goal>` 信封到达。持久化状态在会话里只「停放」，信封带着同一句目标来才接回，所以关掉的目标不会复活。
 - **wall-clock 跨重启累计**：计时只在轮次运行时走，轮次之间与进程不在时不计。daemon 每轮重建 harness，从 `session.goal_state` 恢复（`harness::restore_goal`），不再每轮从满格预算重来。
 - **RA3 token 预算**：
-  - **记账**：`GoalState.tokens_used` 累计主 Agent 为这个目标用掉的 token（优先 `total_tokens`，否则输入 + 输出），随检查点落盘，跨轮次、跨重启累计。
+  - **记账**：`GoalState.tokens_used` 累计为这个目标用掉的 token，主 Agent 和它派出的 Worker（前台、后台）都算；每次调用优先取 `total_tokens`，否则取输入 + 输出（`Usage::billable_tokens`）。它随检查点落盘，跨轮次、跨重启累计。
   - **收尾**：超过 `GoalBudget.max_tokens` 时，与 wall-clock、续推次数用同一条收尾路径（`SoftStopReason::Tokens` → 交接快照 → `BudgetLimited`）。
   - **配置**：`[agent] goal_token_budget`（缺省不限）、`goal_wall_clock_minutes`（缺省 240）、`goal_max_continuations`（缺省 64）。预算显示在 `<goal-state>` 与续推引导的“态势”一段里。
 - **RA4 重启后自动续推**：`daemon/goal_resume.rs` 在 daemon 启动时跑一次。
@@ -101,7 +101,6 @@ rs 侧目前**没有立场**——`crates/willdeep-core/src/agent.rs:275` 一旦
     - `[agent] goal_auto_resume = false` 关掉。
   - **留下的记录**：事件 `goal.resumed`，反馈账本信号 `goal_resumed`。
 - **尚未做**：
-  - Worker 的 token 不计入目标预算（它们走 `SubagentUsage` 事件）；
   - 只有 token 维度，没有 cost（缺价格表）；
   - 退避阶梯的真实延时。
 
