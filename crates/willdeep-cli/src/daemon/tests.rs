@@ -1546,6 +1546,99 @@ async fn pending_approval_blocks_until_a_valid_resolution_arrives() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 人做的审批决定记 `approval_resolved`（带处置与耗时）；轮次被取消时由
+/// Runtime 代为撤销的审批记成 `cancelled`，不能算作一次人的拒绝。
+#[tokio::test]
+async fn approval_resolutions_reach_the_feedback_ledger() {
+    let root = std::env::temp_dir().join(format!(
+        "willdeep-approval-feedback-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sessions = test_runtime_session_store(&root);
+    let dir = root.join("feedback");
+    let sink = willdeep_core::feedback::FeedbackSink::spawn(&dir);
+    sessions.set_feedback(willdeep_core::feedback::FeedbackRecorder::new(
+        sink.clone(),
+        "unknown",
+        false,
+    ));
+    let manager = TaskManager::open(TaskManagerOptions {
+        path: root.join("tasks.json"),
+        interactions_path: root.join("interactions.json"),
+        home: root.clone(),
+        events: Arc::new(EventLog::open(root.join("events.ndjson")).unwrap()),
+        agents: test_agent_store(&root),
+        sessions,
+        turn_scheduler: test_turn_scheduler(),
+        runtime_url: "http://127.0.0.1:1".to_owned(),
+        runtime_token: "test-token".to_owned(),
+    })
+    .unwrap();
+    let session_id = uuid::Uuid::new_v4();
+    let task_id = uuid::Uuid::new_v4();
+    manager
+        .insert_and_persist(RuntimeTask {
+            origin_client: Some("tui:instance".to_owned()),
+            id: task_id,
+            session_id: Some(session_id),
+            turn_id: None,
+            agent_id: None,
+            event_start_sequence: 0,
+            status: RuntimeTaskStatus::Running,
+            workspace: root.clone(),
+            profile: None,
+            model: None,
+            prompt_excerpt: None,
+            pid: Some(42),
+            created_at: 1,
+            started_at: Some(1),
+            completed_at: None,
+            exit_code: None,
+            failure_domain: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    let approval = InteractionKind::Approval {
+        description: "rm -rf build".to_owned(),
+        always_allow_available: false,
+    };
+    let _first = manager
+        .create_interaction(task_id, approval.clone())
+        .await
+        .unwrap();
+    let first = manager.pending_interactions().await.remove(0);
+    manager
+        .resolve_interaction(first.id, InteractionResolution::Deny)
+        .await
+        .unwrap();
+    let _second = manager.create_interaction(task_id, approval).await.unwrap();
+    manager.cancel_task_interactions(task_id).await.unwrap();
+
+    assert!(sink.flush(std::time::Duration::from_secs(2)));
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        rows.extend(
+            text.lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()),
+        );
+    }
+    let decisions: Vec<&str> = rows
+        .iter()
+        .filter(|row| row["signal"] == "approval_resolved")
+        .map(|row| row["decision"].as_str().unwrap())
+        .collect();
+    assert_eq!(decisions, ["deny", "cancelled"], "{rows:?}");
+    assert!(rows.iter().all(|row| row["client"] == "tui"
+        && row["session_id"] == session_id.to_string()
+        && row["interaction_kind"] == "approval"
+        && row["latency_ms"].is_u64()));
+    assert!(!serde_json::to_string(&rows).unwrap().contains("rm -rf"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// daemon 回合端到端：Agent 经 Runtime 事件宿主跑一轮，每次模型调用在账本
 /// 上恰好一行 `execution=daemon`，`event_sequence` 就是 events.ndjson 里那条
 /// usage 事件的序号；之后的回填据此一条都不重复记。

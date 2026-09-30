@@ -17,6 +17,7 @@
 [feedback]
 enabled = true      # 默认开；只写本机，不上传
 store_text = false  # 默认只记 hash 与长度
+retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清理
 ```
 
 `store_text = true` 时，会额外写入建议文本与发送文本，各截断到 400 字符。含凭据特征的文本（`looks_sensitive`）即使打开也不写。工具失败只记工具名与错误类别，**从不**记参数或输出。
@@ -37,8 +38,14 @@ store_text = false  # 默认只记 hash 与长度
 | `agent_incomplete` | 一次运行未收敛就停了：`max_turns`、`incomplete`、`unverified`、`budget_limited` | `stop_reason`, `turns`, `report_len` | 客观失败；`report_len = 0` 表示没有结果 |
 | `worker_timed_out` | Worker 超时被中止 | `report_len = 0` | 客观失败 |
 | `worker_verifier_exhausted` | Worker 用完全部尝试仍未通过验证命令 | `attempts` | 客观失败 |
+| `user_followup` | 同一会话提交了第二句及以后的话（所有前端经 Runtime 提交的轮次；会话第一句不记） | `prev_status`, `gap_ms`, `queued_behind`, `followup_hint`, `text_hash` | 需结合上一轮结局判读 |
+| `user_steer` | 轮次进行中插话 | `delivered`, `followup_hint` | 模型跑偏或信息不足的信号 |
+| `session_rewound` | 用户回退会话 | `count`（丢掉的轮数）、`decision`（`workspace_restored` / `transcript_only`） | 强负向：那几轮做错了 |
+| `approval_resolved` | 审批 / 提问得到处置 | `interaction_kind`, `decision`, `latency_ms` | `deny` 是负向；`cancelled` 是轮次被停下时自动撤销，**不是**人的拒绝 |
+| `turn_cancelled` | 用户中途停下一轮 | `prev_status` | 负向：方向错或太慢 |
+| `goal_completed` / `goal_completion_rejected` / `goal_budget_limited` | 目标收尾（见 [长程自治](LONG_HORIZON_AUTONOMY.md)） | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 「完成被拒」是虚报完成的强信号 |
 
-同一条建议的各行共享 `suggestion_id`。Worker 的行带 `agent_id` 与 `worker_profile`，主 Agent 的行这两个字段是 `null`。Runtime 轮次的行带 `turn_id`。
+同一条建议的各行共享 `suggestion_id`。Web 端的 `suggestion_id` 由服务端签发，服务端记住建议原文与发出时间，浏览器只回传 id 与信号，所以账本里的原文与停留时长不采信浏览器给的值。Worker 的行带 `agent_id` 与 `worker_profile`，主 Agent 的行这两个字段是 `null`。Runtime 轮次的行带 `turn_id`。
 
 `error_class` 的取值来自 `ToolError::class`，例如 `io`、`invalid_arguments`、`approval_denied`、`hook_denied`、`edit_text_not_found`、`edit_text_not_unique`、`command_timeout`、`network`、`mcp`、`unknown_tool`。
 
@@ -48,10 +55,11 @@ store_text = false  # 默认只记 hash 与长度
 - `dwell_ms` 越短、`edit_distance` 越小，说明建议越接近用户原本想说的话。
 - `tool_failed` 按 `(tool, error_class)` 聚合，可以看出哪类工具描述或提示词让模型反复犯错。`edit_text_not_found` 与 `invalid_arguments` 是最直接的提示词改进目标。
 - `agent_incomplete` 中 `stop_reason = max_turns` 且 `report_len = 0`，就是「轮次耗尽也没有结果」。按 `worker_profile` 聚合，可以看出哪个工种的轮次预算或任务拆分有问题。
+- `user_followup` 的 `followup_hint` 只是入口处的词法粗标签（`correction` / `redo` / `supplement` / `approval` / `other`）。判断上一轮是否做错，要把它和上一轮的结局一起看：`prev_status`、之后有没有 `session_rewound` 或 `turn_cancelled`、审批有没有被 `deny`。`gap_ms` 很短的纠正比隔了一天的纠正更可能是在纠正上一轮。
+- `willdeep audit export` 的「反馈信号」一节按会话汇总以上计数，不出任何正文。
 
-## 尚未覆盖（见路线图 Phase A 后半）
+## 尚未覆盖
 
-- Web 端建议生命周期（需要 `POST /api/feedback`）。
-- 用户后续输入的上下文：纠正、补充或重做，需要记录上一轮结局、间隔、是否 steer。
-- `session.rewound`、steer、`approval_resolved`、带来源的 `turn.cancelled`、轮次后的 git 还原。
-- 保留期（retention）清理，以及 `willdeep audit` 汇总反馈信号。
+- `/local` 进程内轮次不经过 Runtime，没有 `user_followup`。
+- 取消的来源（TUI Esc、Web、手机）：记录来源需要改协议，会让新客户端连不上旧 daemon，暂不做。
+- 轮次结束后的 git 还原（`git restore` 了本轮改过的文件）。

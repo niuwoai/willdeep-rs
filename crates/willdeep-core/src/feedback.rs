@@ -81,6 +81,26 @@ pub enum Signal {
     WorkerTimedOut,
     /// Worker 用完了全部验证尝试也没通过验证命令。
     WorkerVerifierExhausted,
+    /// 用户在上一轮之后又说了一句。`prev_status`、`gap_ms`、`followup_hint`
+    /// 给出上下文：上一轮怎么结束的、隔了多久、这句话像纠正还是补充。
+    /// 精确分类离线做，这里只保证能按会话把前后两轮接起来。
+    UserFollowup,
+    /// 本轮进行中插话（steer）。`delivered` 说明模型有没有收到。
+    UserSteer,
+    /// 用户回退了会话：`count` 为丢掉的轮数。回退几乎总是说明那几轮做错了。
+    SessionRewound,
+    /// 一次审批 / 提问得到处置：`decision`（allow_once / always_allow / deny /
+    /// answer / cancelled），`latency_ms` 为人想了多久。
+    ApprovalResolved,
+    /// 用户中途停下了一轮。`prev_status` 为停下时轮次的状态。
+    TurnCancelled,
+    /// 目标宣告完成并通过了完成门禁。
+    GoalCompleted,
+    /// 模型宣告目标完成，但门禁不认（验收项没做完或 Worker 还在跑）：
+    /// `count` 为未完成的验收项数。虚报完成的强信号。
+    GoalCompletionRejected,
+    /// 目标没做完但预算耗尽，按交接快照收尾。
+    GoalBudgetLimited,
 }
 
 /// 一行反馈。可选字段一律输出、未知即 `null`，从不省略键。
@@ -120,6 +140,27 @@ pub struct FeedbackRecord {
     pub attempts: Option<usize>,
     /// 部分结果 / 报告的字符数；0 表示什么都没交回来。
     pub report_len: Option<usize>,
+    /// 仅 `user_followup` / `turn_cancelled`：上一轮（或被停下那一轮）的状态。
+    pub prev_status: Option<String>,
+    /// 仅 `user_followup`：距上一轮结束过去了多久（毫秒）。
+    pub gap_ms: Option<u64>,
+    /// 仅 `user_followup`：提交时前一轮还没跑完，这句排在它后面。
+    pub queued_behind: Option<bool>,
+    /// 仅 `user_followup` / `user_steer`：入口处的词法粗分类，见 [`followup_hint`]。
+    pub followup_hint: Option<String>,
+    /// 仅 `user_steer`：插话是否送达了正在跑的轮次。
+    pub delivered: Option<bool>,
+    /// 仅 `approval_resolved`：`approval` / `question`。
+    pub interaction_kind: Option<String>,
+    /// `approval_resolved` 的处置；`session_rewound` 为是否还原工作区。
+    pub decision: Option<String>,
+    /// 仅 `approval_resolved`：从提出到处置的毫秒数。
+    pub latency_ms: Option<u64>,
+    /// `session_rewound` 丢掉的轮数；`goal_*` 未完成的验收项数。
+    pub count: Option<usize>,
+    /// 仅 `goal_*`：续跑次数与累计运行时长。
+    pub continuations: Option<u32>,
+    pub elapsed_ms: Option<u64>,
     /// 仅 `store_text` 打开且不含凭据特征时才有。
     pub text: Option<String>,
     pub sent_text: Option<String>,
@@ -150,6 +191,17 @@ impl FeedbackRecord {
             turns: None,
             attempts: None,
             report_len: None,
+            prev_status: None,
+            gap_ms: None,
+            queued_behind: None,
+            followup_hint: None,
+            delivered: None,
+            interaction_kind: None,
+            decision: None,
+            latency_ms: None,
+            count: None,
+            continuations: None,
+            elapsed_ms: None,
             text: None,
             sent_text: None,
         }
@@ -239,6 +291,20 @@ impl FeedbackRecorder {
         self
     }
 
+    /// 换一个前端标识。daemon 用一个记录者服务所有前端，按每轮的
+    /// `origin_client`（`tui:<uuid>`、`web:<uuid>`……）取前缀。
+    pub fn with_client(mut self, origin: Option<&str>) -> Self {
+        let prefix = origin
+            .and_then(|origin| origin.split(':').next())
+            .map(|prefix| prefix.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        self.client = match prefix.as_str() {
+            "cli" | "tui" | "web" | "mobile" => prefix,
+            _ => "unknown".to_owned(),
+        };
+        self
+    }
+
     /// Worker 的记录者：同一出处，行上带 Worker 的 id 与工种。
     pub fn for_worker(&self, agent_id: Uuid, profile: &str) -> Self {
         let mut worker = self.clone();
@@ -316,6 +382,78 @@ impl FeedbackRecorder {
         });
     }
 
+    /// 用户在上一轮之后又说了一句。只记 hash、长度与词法粗分类。
+    pub fn record_followup(&self, event: FollowupEvent<'_>) {
+        let text = self.stored_text(Some(event.prompt));
+        self.record(Signal::UserFollowup, |record| {
+            record.text_hash = Some(text_hash(event.prompt));
+            record.text_len = Some(event.prompt.chars().count());
+            record.followup_hint = Some(followup_hint(event.prompt).to_owned());
+            record.prev_status = event.prev_status.map(str::to_owned);
+            record.gap_ms = event.gap_ms;
+            record.queued_behind = Some(event.queued_behind);
+            record.text = text;
+        });
+    }
+
+    /// 本轮进行中插话。
+    pub fn record_steer(&self, prompt: &str, delivered: bool) {
+        let text = self.stored_text(Some(prompt));
+        self.record(Signal::UserSteer, |record| {
+            record.text_hash = Some(text_hash(prompt));
+            record.text_len = Some(prompt.chars().count());
+            record.followup_hint = Some(followup_hint(prompt).to_owned());
+            record.delivered = Some(delivered);
+            record.text = text;
+        });
+    }
+
+    /// 会话被回退，丢掉了 `dropped_turns` 轮。
+    pub fn record_rewind(&self, dropped_turns: usize, restored_workspace: bool) {
+        self.record(Signal::SessionRewound, |record| {
+            record.count = Some(dropped_turns);
+            record.decision = Some(
+                if restored_workspace {
+                    "workspace_restored"
+                } else {
+                    "transcript_only"
+                }
+                .to_owned(),
+            );
+        });
+    }
+
+    /// 审批 / 提问得到处置。
+    pub fn record_approval(&self, interaction_kind: &str, decision: &str, latency_ms: Option<u64>) {
+        self.record(Signal::ApprovalResolved, |record| {
+            record.interaction_kind = Some(interaction_kind.to_owned());
+            record.decision = Some(decision.to_owned());
+            record.latency_ms = latency_ms;
+        });
+    }
+
+    /// 用户停下了一轮；`status` 为停下时它的状态。
+    pub fn record_cancel(&self, status: &str) {
+        self.record(Signal::TurnCancelled, |record| {
+            record.prev_status = Some(status.to_owned());
+        });
+    }
+
+    /// 目标的收尾：完成、完成被拒、预算耗尽。
+    pub fn record_goal(
+        &self,
+        signal: Signal,
+        open_criteria: usize,
+        continuations: u32,
+        elapsed: Duration,
+    ) {
+        self.record(signal, |record| {
+            record.count = Some(open_criteria);
+            record.continuations = Some(continuations);
+            record.elapsed_ms = Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
+        });
+    }
+
     fn stored_text(&self, text: Option<&str>) -> Option<String> {
         let text = text?;
         if !self.store_text || crate::session_title::looks_sensitive(text) {
@@ -328,6 +466,147 @@ impl FeedbackRecorder {
     pub fn flush(&self, timeout: Duration) -> bool {
         self.sink.as_ref().is_none_or(|sink| sink.flush(timeout))
     }
+}
+
+/// 一次后续输入，交给 [`FeedbackRecorder::record_followup`]。
+pub struct FollowupEvent<'a> {
+    pub prompt: &'a str,
+    /// 上一轮的状态（`completed`、`partial`、`failed`、`cancelled`……）。
+    pub prev_status: Option<&'a str>,
+    /// 距上一轮结束的毫秒数；上一轮还没结束时为 `None`。
+    pub gap_ms: Option<u64>,
+    pub queued_behind: bool,
+}
+
+/// 后续输入的词法粗分类：`correction` / `redo` / `supplement` / `approval` /
+/// `other`。只看开头和少量特征词，中英文都认；按这个顺序判定，先中先得。
+///
+/// 这是入口处的廉价标签，方便快速聚合，不是结论：精确分类离线结合上一轮
+/// 的结局（被停下、被回退、审批被拒）再做。
+pub fn followup_hint(prompt: &str) -> &'static str {
+    let text = prompt.trim().to_lowercase();
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|prefix| text.starts_with(prefix));
+    let contains = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if contains(&[
+        "不对",
+        "错了",
+        "搞错",
+        "不是这样",
+        "不是这个",
+        "不是我要",
+        "理解错",
+        "不要这样",
+        "撤销",
+        "回滚",
+        "改回",
+        "that's wrong",
+        "that is wrong",
+        "not what i",
+        "you misunderstood",
+        "incorrect",
+        "undo that",
+        "revert that",
+    ]) || starts(&[
+        "no,", "no ", "no.", "nope", "wrong", "actually", "revert", "undo", "don't", "do not",
+        "stop", "不是", "别",
+    ]) {
+        return "correction";
+    }
+    if contains(&[
+        "重试",
+        "再试",
+        "再来一次",
+        "重新来",
+        "重新做",
+        "try again",
+        "re-run",
+    ]) || starts(&["retry", "again", "redo", "rerun", "重新", "再来"])
+    {
+        return "redo";
+    }
+    if starts(&[
+        "另外",
+        "补充",
+        "还有",
+        "顺便",
+        "背景",
+        "注意",
+        "also",
+        "additionally",
+        "btw",
+        "by the way",
+        "note that",
+        "context",
+        "fyi",
+        "plus",
+    ]) {
+        return "supplement";
+    }
+    if text.chars().count() <= 20
+        && starts(&[
+            "好",
+            "可以",
+            "继续",
+            "行",
+            "没问题",
+            "对",
+            "谢谢",
+            "ok",
+            "yes",
+            "lgtm",
+            "continue",
+            "go ahead",
+            "sounds good",
+            "thanks",
+            "great",
+            "perfect",
+        ])
+    {
+        return "approval";
+    }
+    "other"
+}
+
+/// 删掉 `retain_months` 个月之前的分片（按文件名 `YYYY-MM.jsonl` 判断），
+/// 返回删掉的文件数。`retain_months == 0` 表示不清理。只动符合命名的文件。
+pub fn prune(dir: &Path, retain_months: u32) -> usize {
+    if retain_months == 0 {
+        return 0;
+    }
+    let Some(current) = month_index(&format_ts(now_millis())) else {
+        return 0;
+    };
+    let cutoff = current.saturating_sub(retain_months);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".jsonl")) else {
+            continue;
+        };
+        if stem.len() != 7 {
+            continue;
+        }
+        if let Some(month) = month_index(stem)
+            && month < cutoff
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// `YYYY-MM…` → 自公元 0 年起的月序号。
+fn month_index(text: &str) -> Option<u32> {
+    let year: u32 = text.get(..4)?.parse().ok()?;
+    if text.get(4..5)? != "-" {
+        return None;
+    }
+    let month: u32 = text.get(5..7)?.parse().ok()?;
+    (1..=12).contains(&month).then_some(year * 12 + month - 1)
 }
 
 /// 发送文本与建议的关系。`sent` 为用户最终提交的话。
@@ -735,6 +1014,114 @@ mod tests {
         );
         let exhausted = find("worker_verifier_exhausted");
         assert_eq!(exhausted["attempts"], 3);
+    }
+
+    #[test]
+    fn followup_hint_separates_corrections_from_supplements() {
+        for (prompt, hint) in [
+            ("不对，应该改 config.rs", "correction"),
+            ("No, I meant the other file", "correction"),
+            ("Actually use the v2 API", "correction"),
+            ("你理解错了我的意思", "correction"),
+            ("revert that change", "correction"),
+            ("重试一下", "redo"),
+            ("try again with more context", "redo"),
+            ("另外，数据库是 Postgres 15", "supplement"),
+            ("Also make sure it runs on Windows", "supplement"),
+            ("好的，继续", "approval"),
+            ("LGTM", "approval"),
+            ("帮我写一个 README", "other"),
+            (
+                "ok but this long message explains a completely new task",
+                "other",
+            ),
+        ] {
+            assert_eq!(followup_hint(prompt), hint, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn prune_removes_only_expired_month_shards() {
+        let dir = temp_dir("prune");
+        let current = format_ts(now_millis())[..7].to_owned();
+        for name in [
+            format!("{current}.jsonl"),
+            "2001-01.jsonl".to_owned(),
+            "2001-02.jsonl".to_owned(),
+            "notes.jsonl".to_owned(),
+            "2001-01.txt".to_owned(),
+        ] {
+            std::fs::write(dir.join(name), "{}\n").expect("write shard");
+        }
+        assert_eq!(prune(&dir, 0), 0, "0 disables pruning");
+        assert_eq!(prune(&dir, 12), 2);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf8")
+            })
+            .collect();
+        left.sort();
+        let mut expected = vec![
+            format!("{current}.jsonl"),
+            "2001-01.txt".to_owned(),
+            "notes.jsonl".to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(left, expected);
+    }
+
+    #[test]
+    fn followup_and_interaction_rows_carry_context_but_not_text() {
+        let dir = temp_dir("followup");
+        let sink = FeedbackSink::spawn(&dir);
+        let recorder = FeedbackRecorder::new(sink, "web", false).with_session(Some(Uuid::nil()));
+        recorder.record_followup(FollowupEvent {
+            prompt: "不对，改回原来的实现",
+            prev_status: Some("completed"),
+            gap_ms: Some(4_200),
+            queued_behind: false,
+        });
+        recorder.record_steer("also check the tests", true);
+        recorder.record_rewind(2, true);
+        recorder.record_approval("approval", "deny", Some(900));
+        recorder.record_cancel("running");
+        recorder.record_goal(
+            Signal::GoalCompletionRejected,
+            3,
+            7,
+            Duration::from_secs(60),
+        );
+        assert!(recorder.flush(Duration::from_secs(2)));
+        let rows = read_rows(&dir);
+        let find = |signal: &str| {
+            rows.iter()
+                .find(|row| row["signal"] == signal)
+                .expect(signal)
+                .clone()
+        };
+        let followup = find("user_followup");
+        assert_eq!(followup["followup_hint"], "correction");
+        assert_eq!(followup["prev_status"], "completed");
+        assert_eq!(followup["gap_ms"], 4_200);
+        assert_eq!(followup["queued_behind"], false);
+        assert!(followup["text"].is_null());
+        assert_eq!(find("user_steer")["delivered"], true);
+        assert_eq!(find("session_rewound")["count"], 2);
+        let approval = find("approval_resolved");
+        assert_eq!(approval["decision"], "deny");
+        assert_eq!(approval["latency_ms"], 900);
+        assert_eq!(find("turn_cancelled")["prev_status"], "running");
+        let goal = find("goal_completion_rejected");
+        assert_eq!(goal["count"], 3);
+        assert_eq!(goal["continuations"], 7);
+        assert_eq!(goal["elapsed_ms"], 60_000);
+        let raw = serde_json::to_string(&rows).expect("json");
+        assert!(!raw.contains("改回原来"), "prompt text leaked: {raw}");
     }
 
     #[test]

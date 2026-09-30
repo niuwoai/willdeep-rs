@@ -69,6 +69,32 @@ pub(crate) enum RuntimeTurnStatus {
     Interrupted,
 }
 
+/// 反馈账本里的状态名，与序列化名一致。
+pub(super) fn turn_status_name(status: RuntimeTurnStatus) -> &'static str {
+    match status {
+        RuntimeTurnStatus::Queued => "queued",
+        RuntimeTurnStatus::Running => "running",
+        RuntimeTurnStatus::WaitingApproval => "waiting_approval",
+        RuntimeTurnStatus::WaitingAnswer => "waiting_answer",
+        RuntimeTurnStatus::Completed => "completed",
+        RuntimeTurnStatus::Partial => "partial",
+        RuntimeTurnStatus::Failed => "failed",
+        RuntimeTurnStatus::Cancelled => "cancelled",
+        RuntimeTurnStatus::Interrupted => "interrupted",
+    }
+}
+
+pub(super) fn turn_status_is_terminal(status: RuntimeTurnStatus) -> bool {
+    matches!(
+        status,
+        RuntimeTurnStatus::Completed
+            | RuntimeTurnStatus::Partial
+            | RuntimeTurnStatus::Failed
+            | RuntimeTurnStatus::Cancelled
+            | RuntimeTurnStatus::Interrupted
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RuntimeTurn {
     pub id: uuid::Uuid,
@@ -247,6 +273,8 @@ pub(super) struct RuntimeSessionStore {
     core: willdeep_core::SessionStore,
     sessions: Mutex<HashMap<uuid::Uuid, RuntimeSession>>,
     turns: Mutex<HashMap<uuid::Uuid, StoredRuntimeTurn>>,
+    /// 反馈账本（`[feedback]`）。daemon 启动时设一次；没设就不记。
+    feedback: std::sync::OnceLock<willdeep_core::feedback::FeedbackRecorder>,
 }
 
 impl RuntimeSessionStore {
@@ -343,7 +371,19 @@ impl RuntimeSessionStore {
             core,
             sessions: Mutex::new(sessions),
             turns: Mutex::new(turns),
+            feedback: std::sync::OnceLock::new(),
         })
+    }
+
+    /// 挂上反馈账本。只认第一次，之后的调用忽略。
+    pub(super) fn set_feedback(&self, recorder: willdeep_core::feedback::FeedbackRecorder) {
+        if recorder.is_enabled() {
+            let _ = self.feedback.set(recorder);
+        }
+    }
+
+    pub(super) fn feedback(&self) -> Option<&willdeep_core::feedback::FeedbackRecorder> {
+        self.feedback.get()
     }
 
     #[cfg(test)]
@@ -1015,6 +1055,27 @@ impl RuntimeSessionStore {
             return Ok((turn.metadata.clone(), false, title_changed));
         }
         let timestamp = now();
+        // 后续输入的上下文（RSI 反馈）：同一会话的上一轮怎么结束的、隔了多久、
+        // 这一句是不是排在还没跑完的轮次后面。会话的第一轮没有可比的对象，不记。
+        let followup = self.feedback().and_then(|_| {
+            let previous = turns
+                .values()
+                .filter(|turn| turn.metadata.session_id == session_id)
+                .max_by_key(|turn| turn.metadata.queue_sequence)?;
+            let queued_behind = turns.values().any(|turn| {
+                turn.metadata.session_id == session_id
+                    && !turn_status_is_terminal(turn.metadata.status)
+            });
+            let gap_ms = previous
+                .metadata
+                .completed_at
+                .map(|completed| timestamp.saturating_sub(completed).saturating_mul(1_000));
+            Some((
+                turn_status_name(previous.metadata.status),
+                gap_ms,
+                queued_behind,
+            ))
+        });
         let queue_sequence = turns
             .values()
             .map(|turn| turn.metadata.queue_sequence)
@@ -1038,6 +1099,21 @@ impl RuntimeSessionStore {
             message_generation: 0,
             workspace_checkpoint: None,
         };
+        if let (Some(recorder), Some((prev_status, gap_ms, queued_behind))) =
+            (self.feedback(), followup)
+        {
+            recorder
+                .clone()
+                .with_client(request.origin_client.as_deref())
+                .with_session(Some(session_id))
+                .with_turn(Some(metadata.id.to_string()))
+                .record_followup(willdeep_core::feedback::FollowupEvent {
+                    prompt: &request.prompt,
+                    prev_status: Some(prev_status),
+                    gap_ms,
+                    queued_behind,
+                });
+        }
         turns.insert(
             metadata.id,
             StoredRuntimeTurn {
@@ -1380,6 +1456,18 @@ impl RuntimeSessionStore {
         let mut turns = self.turns_lock()?;
         let turn = turns.get_mut(&turn_id).context("Runtime Turn not found")?;
         let session_id = turn.metadata.session_id;
+        // 用户中途喊停是强信号：它说明这一轮在往错的方向走（或者太慢）。
+        // 已经结束的轮次再喊停是空操作，不记。
+        if let Some(recorder) = self.feedback()
+            && !turn_status_is_terminal(turn.metadata.status)
+        {
+            recorder
+                .clone()
+                .with_client(turn.origin_client.as_deref())
+                .with_session(Some(session_id))
+                .with_turn(Some(turn_id.to_string()))
+                .record_cancel(turn_status_name(turn.metadata.status));
+        }
         if let Some(task_id) = turn.metadata.active_task_id
             && matches!(
                 turn.metadata.status,

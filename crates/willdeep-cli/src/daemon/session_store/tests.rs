@@ -1379,3 +1379,78 @@ fn partial_turn_preserves_boundary_without_marking_completed() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// 同一会话的第二句话记一行 `user_followup`：带上一轮的状态、是否排在还没跑完的
+/// 轮次后面、词法粗分类；第一句没有可比对象不记。取消还在排队的轮次记
+/// `turn_cancelled`。提示词原文不落盘。
+#[test]
+fn followups_and_cancellations_reach_the_feedback_ledger() {
+    let root = std::env::temp_dir().join(format!("runtime-feedback-{}", uuid::Uuid::new_v4()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = RuntimeSessionStore::open(root.join("runtime-sessions.json"), &root).unwrap();
+    let dir = root.join("feedback");
+    let sink = willdeep_core::feedback::FeedbackSink::spawn(&dir);
+    store.set_feedback(willdeep_core::feedback::FeedbackRecorder::new(
+        sink.clone(),
+        "unknown",
+        false,
+    ));
+    let session = store
+        .create(CreateRuntimeSession {
+            id: None,
+            workspace,
+            profile: None,
+            model: None,
+            config: None,
+            title: None,
+        })
+        .unwrap();
+    let submit = |prompt: &str| {
+        store
+            .enqueue_turn(
+                session.id,
+                CreateRuntimeTurn {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: prompt.into(),
+                    attachments: Vec::new(),
+                    origin_client: Some(format!("web:{}", uuid::Uuid::new_v4())),
+                },
+            )
+            .unwrap()
+            .0
+    };
+    submit("write the parser");
+    let second = submit("不对，parser 要支持注释");
+    store.request_cancel(second.id).unwrap();
+
+    assert!(sink.flush(std::time::Duration::from_secs(2)));
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        rows.extend(
+            text.lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()),
+        );
+    }
+    let signals: Vec<&str> = rows
+        .iter()
+        .map(|row| row["signal"].as_str().unwrap())
+        .collect();
+    assert_eq!(signals, ["user_followup", "turn_cancelled"], "{rows:?}");
+    let followup = &rows[0];
+    assert_eq!(followup["client"], "web");
+    assert_eq!(followup["session_id"], session.id.to_string());
+    assert_eq!(followup["turn_id"], second.id.to_string());
+    assert_eq!(followup["prev_status"], "queued");
+    assert_eq!(followup["queued_behind"], true);
+    assert!(
+        followup["gap_ms"].is_null(),
+        "the previous turn has not finished"
+    );
+    assert_eq!(followup["followup_hint"], "correction");
+    assert_eq!(rows[1]["prev_status"], "queued");
+    let raw = serde_json::to_string(&rows).unwrap();
+    assert!(!raw.contains("parser"), "prompt text leaked: {raw}");
+    let _ = std::fs::remove_dir_all(&root);
+}

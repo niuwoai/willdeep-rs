@@ -262,6 +262,17 @@ impl TaskManager {
         id: uuid::Uuid,
         resolution: InteractionResolution,
     ) -> Result<Option<RuntimeInteraction>> {
+        self.resolve_interaction_as(id, resolution, false).await
+    }
+
+    /// `automatic`：轮次被取消时由 Runtime 代为撤销，不是人做的决定。反馈账本
+    /// 把它记成 `cancelled`，否则会把每次喊停都算成一次「拒绝」。
+    async fn resolve_interaction_as(
+        &self,
+        id: uuid::Uuid,
+        resolution: InteractionResolution,
+        automatic: bool,
+    ) -> Result<Option<RuntimeInteraction>> {
         let _persistence = self.persistence.lock().await;
         let (interaction, interaction_snapshot) = {
             let mut interactions = self.interactions.write().await;
@@ -286,6 +297,33 @@ impl TaskManager {
                 )
             {
                 task.status = RuntimeTaskStatus::Running;
+            }
+            if let (Some(recorder), Some(task)) =
+                (self.sessions.feedback(), tasks.get(&interaction.task_id))
+            {
+                let kind = match interaction.kind {
+                    InteractionKind::Approval { .. } => "approval",
+                    InteractionKind::Question { .. } => "question",
+                };
+                let decision = match (&resolution, automatic) {
+                    (_, true) => "cancelled",
+                    (InteractionResolution::AllowOnce, _) => "allow_once",
+                    (InteractionResolution::AlwaysAllow, _) => "always_allow",
+                    (InteractionResolution::Deny, _) => "deny",
+                    (InteractionResolution::Answer(Some(_)), _) => "answer",
+                    (InteractionResolution::Answer(None), _) => "skip",
+                };
+                let latency_ms = interaction.resolved_at.map(|resolved| {
+                    resolved
+                        .saturating_sub(interaction.created_at)
+                        .saturating_mul(1_000)
+                });
+                recorder
+                    .clone()
+                    .with_client(task.origin_client.as_deref())
+                    .with_session(task.session_id)
+                    .with_turn(task.turn_id.map(|id| id.to_string()))
+                    .record_approval(kind, decision, latency_ms);
             }
             tasks.clone()
         };
@@ -769,7 +807,7 @@ impl TaskManager {
             })
             .collect::<Vec<_>>();
         for (id, resolution) in pending {
-            let _ = self.resolve_interaction(id, resolution).await;
+            let _ = self.resolve_interaction_as(id, resolution, true).await;
         }
         Ok(())
     }

@@ -4,6 +4,10 @@
 
 ### Added
 - 本机反馈账本 `$WILLDEEP_HOME/feedback/YYYY-MM.jsonl`（`willdeep.feedback.v1`，`[feedback]` 配置）：记录下一句建议的展示、Tab 采用、Esc 放弃、无视另打、被顶掉，以及采用后原样 / 改过 / 重写发送；主 Agent 与 Worker 的工具失败（按错误类别）、轮次耗尽等未收敛运行、Worker 超时与验证用尽。默认只记 hash 与长度，`store_text = true` 才写原文。
+- 反馈账本第二批信号：所有前端提交到 Runtime 的后续输入（上一轮状态、间隔、是否排队、纠正 / 补充 / 重做 / 认可的词法粗分类）、插话、会话回退、审批与提问的处置及耗时（轮次取消时的自动撤销记为 `cancelled`，不算人的拒绝）、中途停下的轮次。
+- Web 端下一句建议的完整生命周期进反馈账本：服务端签发 `suggestion_id` 并记住原文，前端只回传 id 与信号（`POST /api/sessions/{id}/input-suggestion/feedback`），原样 / 改过 / 重写由服务端判定。
+- `[feedback] retain_months`（默认 12）：daemon 启动时删掉更早的月份分片。
+- `willdeep audit export` 新增「反馈信号」一节：信号计数、建议采用率与原样发送率、按工具与错误类别的失败、没结果就停下的运行数；不含任何正文。
 - 路线图文档：主 Agent 协调与长任务缺口自查、Xedit 定时任务与专家团插件化、RSI 反馈数据分阶段计划。
 
 ## [0.87.0-rc6] - 2026-09-29

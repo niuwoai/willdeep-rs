@@ -367,6 +367,10 @@ pub async fn serve(config: WebConfig) -> Result<()> {
             "/api/sessions/{id}/input-suggestion",
             post(input_suggestion),
         )
+        .route(
+            "/api/sessions/{id}/input-suggestion/feedback",
+            post(input_suggestion_feedback),
+        )
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/unarchive", post(unarchive_session))
         .route("/api/sessions/{id}/pin", post(pin_session))
@@ -1712,6 +1716,138 @@ struct InputSuggestionRequest {
 struct InputSuggestionResponse {
     suggestion: Option<String>,
     turn_id: Option<uuid::Uuid>,
+    /// 这条建议在反馈账本里的身份。前端上报展示 / 采用 / 放弃 / 发送时带回来。
+    suggestion_id: Option<uuid::Uuid>,
+}
+
+/// 发出去、还没有结局的建议。服务端自己记着原文与发出时间，前端只回传 id：
+/// 账本里的建议原文与停留时长都不采信浏览器给的值。
+struct IssuedSuggestion {
+    id: uuid::Uuid,
+    session_id: uuid::Uuid,
+    text: String,
+    issued_at: std::time::Instant,
+}
+
+/// 在途建议的上限。只影响反馈能不能对上号，满了丢最旧的。
+const MAX_ISSUED_SUGGESTIONS: usize = 256;
+
+fn issued_suggestions() -> &'static std::sync::Mutex<std::collections::VecDeque<IssuedSuggestion>> {
+    static ISSUED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<IssuedSuggestion>>,
+    > = std::sync::OnceLock::new();
+    ISSUED.get_or_init(Default::default)
+}
+
+fn issue_suggestion(session_id: uuid::Uuid, text: &str) -> uuid::Uuid {
+    let id = uuid::Uuid::new_v4();
+    if let Ok(mut issued) = issued_suggestions().lock() {
+        if issued.len() >= MAX_ISSUED_SUGGESTIONS {
+            issued.pop_front();
+        }
+        issued.push_back(IssuedSuggestion {
+            id,
+            session_id,
+            text: text.to_owned(),
+            issued_at: std::time::Instant::now(),
+        });
+    }
+    id
+}
+
+#[derive(Deserialize)]
+struct SuggestionFeedbackRequest {
+    suggestion_id: uuid::Uuid,
+    /// `shown` / `accepted` / `dismissed` / `ignored_typed` / `superseded` / `sent`。
+    signal: String,
+    /// 仅 `sent`：最终发出去的话。原样 / 改过 / 重写由服务端判定。
+    #[serde(default)]
+    sent: Option<String>,
+}
+
+/// Web 端下一句建议的反馈（与 TUI 同一套信号，见 `docs/FEEDBACK_LEDGER.md`）。
+///
+/// 和预测本身一样是装饰：对不上号的 id、未知信号、白名单外的会话、关掉的
+/// 开关一律静默忽略，永远 204，不让一次上报失败打扰输入框。
+async fn input_suggestion_feedback(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<SuggestionFeedbackRequest>,
+) -> StatusCode {
+    record_suggestion_feedback(&state, id, request).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn record_suggestion_feedback(
+    state: &Arc<WebState>,
+    session_id: uuid::Uuid,
+    request: SuggestionFeedbackRequest,
+) {
+    let Ok(loaded) = crate::config::LoadedConfig::load(Some(&state.config_path)) else {
+        return;
+    };
+    if !loaded.file.feedback.enabled || authorized_event_session(state, session_id).await.is_err() {
+        return;
+    }
+    apply_suggestion_feedback(&state.home, &loaded.file.feedback, session_id, &request);
+}
+
+/// 授权之后的那一半：对号、判定、落账。与 I/O 无关的部分单测直接调。
+fn apply_suggestion_feedback(
+    home: &std::path::Path,
+    settings: &crate::config::FeedbackSettings,
+    session_id: uuid::Uuid,
+    request: &SuggestionFeedbackRequest,
+) {
+    use willdeep_core::feedback::Signal;
+    let signal = match request.signal.as_str() {
+        "shown" => Signal::SuggestionShown,
+        "accepted" => Signal::SuggestionAccepted,
+        "dismissed" => Signal::SuggestionDismissed,
+        "ignored_typed" => Signal::SuggestionIgnoredTyped,
+        "superseded" => Signal::SuggestionSuperseded,
+        "sent" => Signal::SuggestionSentVerbatim,
+        _ => return,
+    };
+    let sent = request
+        .sent
+        .as_deref()
+        .filter(|_| signal == Signal::SuggestionSentVerbatim);
+    if signal == Signal::SuggestionSentVerbatim && sent.is_none() {
+        return;
+    }
+    // 展示与采用之后还会有下文，留着；其余信号是结局，对完号就忘掉。
+    let terminal = !matches!(signal, Signal::SuggestionShown | Signal::SuggestionAccepted);
+    let Some((text, dwell)) = issued_suggestions().lock().ok().and_then(|mut issued| {
+        let index = issued.iter().position(|entry| {
+            entry.id == request.suggestion_id && entry.session_id == session_id
+        })?;
+        let entry = &issued[index];
+        let found = (entry.text.clone(), entry.issued_at.elapsed());
+        if terminal {
+            issued.remove(index);
+        }
+        Some(found)
+    }) else {
+        return;
+    };
+    let signal = match sent {
+        Some(sent) => willdeep_core::feedback::classify_sent(&text, sent),
+        None => signal,
+    };
+    willdeep_core::feedback::FeedbackRecorder::new(
+        willdeep_core::feedback::shared_sink(&willdeep_core::feedback::feedback_dir(home)),
+        "web",
+        settings.store_text,
+    )
+    .with_session(Some(session_id))
+    .record_suggestion(willdeep_core::feedback::SuggestionEvent {
+        suggestion_id: request.suggestion_id,
+        signal,
+        suggestion: &text,
+        dwell: Some(dwell),
+        sent,
+    });
 }
 
 /// 轮次收尾后预测用户的下一句（与 TUI 同一契约，见 `input_suggestion` 模块）。
@@ -1724,8 +1860,10 @@ async fn input_suggestion(
     Path(id): Path<uuid::Uuid>,
     Json(request): Json<InputSuggestionRequest>,
 ) -> Json<InputSuggestionResponse> {
+    let suggestion = predict_session_input(&state, id).await;
     Json(InputSuggestionResponse {
-        suggestion: predict_session_input(&state, id).await,
+        suggestion_id: suggestion.as_deref().map(|text| issue_suggestion(id, text)),
+        suggestion,
         turn_id: request.turn_id,
     })
 }
@@ -2774,6 +2912,69 @@ mod tests {
         }
         entries.sort();
         entries
+    }
+
+    /// Web 建议的反馈只认服务端发出去的 id：原文与停留时长取服务端记下的，
+    /// 发送的「原样 / 改过 / 重写」由服务端判定；对不上号、未知信号、
+    /// 别的会话冒用 id 都静默丢弃；结局之后 id 作废，重复上报不再记。
+    #[test]
+    fn suggestion_feedback_trusts_only_server_issued_suggestions() {
+        let home =
+            std::env::temp_dir().join(format!("willdeep-web-feedback-{}", uuid::Uuid::new_v4()));
+        let settings = crate::config::FeedbackSettings::default();
+        let session = uuid::Uuid::new_v4();
+        let id = issue_suggestion(session, "run the tests");
+        let report = |session_id: uuid::Uuid,
+                      suggestion_id: uuid::Uuid,
+                      signal: &str,
+                      sent: Option<&str>| {
+            apply_suggestion_feedback(
+                &home,
+                &settings,
+                session_id,
+                &SuggestionFeedbackRequest {
+                    suggestion_id,
+                    signal: signal.to_owned(),
+                    sent: sent.map(str::to_owned),
+                },
+            );
+        };
+        report(session, id, "shown", None);
+        report(uuid::Uuid::new_v4(), id, "dismissed", None);
+        report(session, uuid::Uuid::new_v4(), "accepted", None);
+        report(session, id, "made_up", None);
+        report(session, id, "accepted", None);
+        report(session, id, "sent", Some("run the tests please"));
+        report(session, id, "sent", Some("run the tests"));
+
+        let dir = willdeep_core::feedback::feedback_dir(&home);
+        assert!(willdeep_core::feedback::shared_sink(&dir).flush(Duration::from_secs(2)));
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            rows.extend(
+                text.lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()),
+            );
+        }
+        let signals: Vec<&str> = rows
+            .iter()
+            .map(|row| row["signal"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            signals,
+            [
+                "suggestion_shown",
+                "suggestion_accepted",
+                "suggestion_sent_edited"
+            ],
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| row["client"] == "web"
+            && row["suggestion_id"] == id.to_string()
+            && row["text_len"] == 13
+            && row["text"].is_null()));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]

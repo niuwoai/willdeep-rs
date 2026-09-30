@@ -305,6 +305,9 @@ pub struct FeedbackSettings {
     pub enabled: bool,
     #[serde(default)]
     pub store_text: bool,
+    /// 保留最近几个月的分片，更早的在 daemon 启动时删掉；0 表示不清理。
+    #[serde(default = "default_feedback_retain_months")]
+    pub retain_months: u32,
 }
 
 impl Default for FeedbackSettings {
@@ -312,8 +315,13 @@ impl Default for FeedbackSettings {
         Self {
             enabled: default_feedback_enabled(),
             store_text: false,
+            retain_months: default_feedback_retain_months(),
         }
     }
+}
+
+fn default_feedback_retain_months() -> u32 {
+    12
 }
 
 fn default_feedback_enabled() -> bool {
@@ -1019,6 +1027,7 @@ context_window = 400000
         let parsed: ConfigFile = toml::from_str("").expect("parse empty");
         assert!(parsed.feedback.enabled);
         assert!(!parsed.feedback.store_text);
+        assert_eq!(parsed.feedback.retain_months, 12);
         let parsed: ConfigFile =
             toml::from_str("[feedback]\nenabled = false\nstore_text = true\n").expect("parse");
         assert!(!parsed.feedback.enabled);

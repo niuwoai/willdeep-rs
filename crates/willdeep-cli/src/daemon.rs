@@ -1899,6 +1899,24 @@ async fn run(home: &Path) -> Result<()> {
         home,
         &paths.tools,
     )?);
+    // 反馈账本（RSI 强反馈）：所有前端的轮次都从这里过，一处挂上即全覆盖。
+    // 配置读不出来就按默认（开、只记 hash），不为它挡启动。
+    let feedback_settings = crate::config::LoadedConfig::load(None)
+        .map(|loaded| loaded.file.feedback)
+        .unwrap_or_default();
+    if feedback_settings.enabled {
+        let dir = willdeep_core::feedback::feedback_dir(home);
+        sessions.set_feedback(willdeep_core::feedback::FeedbackRecorder::new(
+            willdeep_core::feedback::shared_sink(&dir),
+            "unknown",
+            feedback_settings.store_text,
+        ));
+        let retain_months = feedback_settings.retain_months;
+        let _ = tokio::task::spawn_blocking(move || {
+            willdeep_core::feedback::prune(&dir, retain_months)
+        })
+        .await;
+    }
     let (turn_scheduler, mut scheduled_sessions) = tokio::sync::mpsc::unbounded_channel();
     let work_gate = Arc::new(RwLock::new(false));
     let tasks = Arc::new(TaskManager::open(TaskManagerOptions {
