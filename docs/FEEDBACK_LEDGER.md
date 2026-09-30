@@ -57,6 +57,7 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 - `agent_incomplete` 中 `stop_reason = max_turns` 且 `report_len = 0`，就是「轮次耗尽也没有结果」。按 `worker_profile` 聚合，可以看出哪个工种的轮次预算或任务拆分有问题。
 - `user_followup` 的 `followup_hint` 只是入口处的词法粗标签（`correction` / `redo` / `supplement` / `approval` / `other`）。判断上一轮是否做错，要把它和上一轮的结局一起看：`prev_status`、之后有没有 `session_rewound` 或 `turn_cancelled`、审批有没有被 `deny`。`gap_ms` 很短的纠正比隔了一天的纠正更可能是在纠正上一轮。
 - `willdeep audit export` 的「反馈信号」一节按会话汇总以上计数，不出任何正文。
+- 审计里的**纠正率**是离线标注，不调模型：一句后续输入算纠正，条件是词法粗分类为 `correction`，或者从上一句后续输入（最多往前 10 分钟）到它之间出现了 `session_rewound`、`turn_cancelled` 或 `decision=deny` 的 `approval_resolved`（`cancelled` 不算，那是取消时的自动撤销）。其中上一轮以 `completed` 收尾却被纠正的，单独计为「已完成却被纠正」：模型自以为做完、用户不认，是最强的负样本。
 
 ## 尚未覆盖
 

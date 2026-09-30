@@ -165,6 +165,9 @@ pub(crate) struct Summary {
     pub feedback_unparsable: usize,
 }
 
+/// 回退、喊停、拒绝审批之后多久内的下一句话算作在纠正上一轮。
+const CORRECTION_WINDOW_MS: u64 = 10 * 60 * 1_000;
+
 /// 反馈账本（`docs/FEEDBACK_LEDGER.md`）按会话的汇总。只有计数：建议原文、
 /// 发送原文、提示词即使账本里存了（`store_text`）也不进报告。
 #[derive(Debug, Default, Serialize)]
@@ -177,6 +180,14 @@ pub(crate) struct FeedbackSummary {
     pub runs_without_result: usize,
     /// 后续输入的词法粗分类分布。
     pub followup_hints: BTreeMap<String, usize>,
+    /// 后续输入总数（`user_followup` 行数）。
+    pub followups: usize,
+    /// 其中判为「纠正」的：词法上像纠正，或者在它之前的时间窗里用户回退、
+    /// 喊停或拒绝了审批。
+    pub corrective_followups: usize,
+    /// 其中上一轮明明以 `completed` 收尾、却马上被纠正的：模型自以为做完了，
+    /// 用户不认。最强的负样本。
+    pub completed_then_corrected: usize,
 }
 
 impl FeedbackSummary {
@@ -202,6 +213,42 @@ impl FeedbackSummary {
         }
     }
 
+    /// 把每句后续输入与它前面的负反馈关联起来（离线标注，不调模型）。
+    ///
+    /// 一句后续输入算「纠正」：词法粗分类是 `correction`；或者从上一句后续
+    /// 输入（最多往前 [`CORRECTION_WINDOW_MS`]）到它之间，出现了会话回退、
+    /// 中途喊停或人拒绝审批。`rows` 须按时间排好序、只含同一会话。
+    fn label_followups(&mut self, rows: &[&FeedbackRow]) {
+        let mut window_start = 0_u64;
+        for (index, row) in rows.iter().enumerate() {
+            if row.signal != "user_followup" {
+                continue;
+            }
+            self.followups += 1;
+            let floor = window_start.max(row.ts_ms.saturating_sub(CORRECTION_WINDOW_MS));
+            let negative_before = rows[..index].iter().any(|earlier| {
+                earlier.ts_ms >= floor
+                    && (matches!(
+                        earlier.signal.as_str(),
+                        "session_rewound" | "turn_cancelled"
+                    ) || (earlier.signal == "approval_resolved"
+                        && earlier.decision.as_deref() == Some("deny")))
+            });
+            let corrective = row.followup_hint.as_deref() == Some("correction") || negative_before;
+            if corrective {
+                self.corrective_followups += 1;
+                if row.prev_status.as_deref() == Some("completed") {
+                    self.completed_then_corrected += 1;
+                }
+            }
+            window_start = row.ts_ms;
+        }
+    }
+
+    fn correction_rate(&self) -> Option<f64> {
+        (self.followups > 0).then(|| self.corrective_followups as f64 / self.followups as f64)
+    }
+
     fn merge(&mut self, other: &FeedbackSummary) {
         for (key, count) in &other.signals {
             *self.signals.entry(key.clone()).or_default() += count;
@@ -213,6 +260,9 @@ impl FeedbackSummary {
             *self.followup_hints.entry(key.clone()).or_default() += count;
         }
         self.runs_without_result += other.runs_without_result;
+        self.followups += other.followups;
+        self.corrective_followups += other.corrective_followups;
+        self.completed_then_corrected += other.completed_then_corrected;
     }
 
     fn count(&self, signal: &str) -> usize {
@@ -388,11 +438,15 @@ struct ApprovalRecord {
 /// 反馈账本里审计用得到的那几个键；其余字段（含可能存了的正文）不读。
 struct FeedbackRow {
     session_id: Option<Uuid>,
+    /// 行的时间（Unix 毫秒）；解析不了为 0，只影响「纠正」的时间窗关联。
+    ts_ms: u64,
     signal: String,
     tool: Option<String>,
     error_class: Option<String>,
     report_len: Option<u64>,
     followup_hint: Option<String>,
+    prev_status: Option<String>,
+    decision: Option<String>,
 }
 
 struct Sources {
@@ -489,6 +543,11 @@ fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
             };
             rows.push(FeedbackRow {
                 session_id: text("session_id").and_then(|value| Uuid::parse_str(&value).ok()),
+                ts_ms: text("ts")
+                    .and_then(|ts| willdeep_core::usage_ledger::parse_ts(&ts))
+                    .unwrap_or_default(),
+                prev_status: text("prev_status"),
+                decision: text("decision"),
                 signal,
                 tool: text("tool"),
                 error_class: text("error_class"),
@@ -868,14 +927,22 @@ fn audit_session(session: &Session, sources: &Sources) -> SessionAudit {
         files_changed,
         reviews,
         reverts,
-        feedback: sources
-            .feedback
-            .iter()
-            .filter(|row| row.session_id == Some(session.id))
-            .fold(FeedbackSummary::default(), |mut summary, row| {
-                summary.add(row);
-                summary
-            }),
+        feedback: {
+            let mut rows = sources
+                .feedback
+                .iter()
+                .filter(|row| row.session_id == Some(session.id))
+                .collect::<Vec<_>>();
+            rows.sort_by_key(|row| row.ts_ms);
+            let mut summary = rows
+                .iter()
+                .fold(FeedbackSummary::default(), |mut summary, row| {
+                    summary.add(row);
+                    summary
+                });
+            summary.label_followups(&rows);
+            summary
+        },
     }
 }
 
@@ -1284,6 +1351,31 @@ fn render_session(out: &mut String, audit: &SessionAudit, language: Language, no
             )
             .to_owned(),
             format!("{:.0}% / {:.0}%", accepted * 100.0, verbatim * 100.0),
+        ]);
+    }
+    if let Some(rate) = feedback.correction_rate() {
+        feedback_rows.push(vec![
+            t(
+                "纠正率（后续输入）",
+                "Correction rate (follow-ups)",
+                "訂正率（後続入力）",
+            )
+            .to_owned(),
+            format!(
+                "{:.0}% ({}/{})",
+                rate * 100.0,
+                feedback.corrective_followups,
+                feedback.followups
+            ),
+        ]);
+        feedback_rows.push(vec![
+            t(
+                "已完成却被纠正的轮次",
+                "Completed turns then corrected",
+                "完了後に訂正されたターン",
+            )
+            .to_owned(),
+            feedback.completed_then_corrected.to_string(),
         ]);
     }
     if feedback.runs_without_result > 0 {
@@ -2048,7 +2140,27 @@ mod tests {
             ),
             row(
                 session.id,
-                serde_json::json!({"signal": "user_followup", "followup_hint": "correction"}),
+                serde_json::json!({"signal": "user_followup", "followup_hint": "correction", "prev_status": "completed", "ts": "2026-09-30T10:00:00.000Z"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "session_rewound", "ts": "2026-09-30T10:05:00.000Z"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "user_followup", "followup_hint": "other", "prev_status": "completed", "ts": "2026-09-30T10:06:00.000Z"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "user_followup", "followup_hint": "approval", "prev_status": "completed", "ts": "2026-09-30T11:00:00.000Z"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "approval_resolved", "decision": "cancelled", "ts": "2026-09-30T11:01:00.000Z"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "user_followup", "followup_hint": "other", "prev_status": "cancelled", "ts": "2026-09-30T11:02:00.000Z"}),
             ),
             row(
                 other,
@@ -2076,6 +2188,11 @@ mod tests {
         assert_eq!(feedback.tool_failures.len(), 1, "other sessions stay out");
         assert_eq!(feedback.runs_without_result, 1);
         assert_eq!(feedback.followup_hints.get("correction"), Some(&1));
+        // 4 句后续输入：第一句词法上是纠正；第二句前面刚回退过；第三句是认可；
+        // 第四句前面只有一次「取消时自动撤销」的审批，那不是人的拒绝。
+        assert_eq!(feedback.followups, 4);
+        assert_eq!(feedback.corrective_followups, 2);
+        assert_eq!(feedback.completed_then_corrected, 2);
         assert_eq!(report.summary.feedback_unparsable, 2);
         let json = serde_json::to_string(&report).unwrap();
         let markdown = render_markdown(&report, Language::En);
@@ -2087,6 +2204,8 @@ mod tests {
         }
         assert!(markdown.contains("Feedback signals"));
         assert!(markdown.contains("| Suggestion accept / verbatim rate | 50% / 50% |"));
+        assert!(markdown.contains("| Correction rate (follow-ups) | 50% (2/4) |"));
+        assert!(markdown.contains("| Completed turns then corrected | 2 |"));
     }
 
     #[test]
