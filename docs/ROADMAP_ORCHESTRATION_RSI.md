@@ -1,6 +1,16 @@
 # 路线图：主 Agent 协调、长任务、Xedit 插件移植与 RSI 反馈数据
 
-状态：讨论稿（2026-09-29）。依据是代码的只读审查。Phase A 的第一部分已经实现，见 [本机反馈账本](FEEDBACK_LEDGER.md)。
+状态：已完成（2026-09-30 定稿）。Phase A–I 全部落地，后面各节保留当时的分析，作为设计依据。还没做的事项统一列在文末的“有意不做”一节，并写明了理由；它们不是待办。
+
+## 最终状态
+
+| 诉求 | 交付的能力 | 入口 | 文档 |
+|---|---|---|---|
+| 1. 主 Agent 协调 Worker | Worker 报告附运行时事实 `<worker-facts>`；后台并行派工 + `await_agents` 汇合；派工时检查写集冲突；工种熔断冷却后自动试探；Worker 间共享黑板 | `spawn_agent`、`await_agents`、`board_post` / `board_read` | [子 Agent](SUBAGENTS.md) |
+| 1. 长任务 / goal | 持久化的目标状态、验收清单与完成门禁；时间 / 次数 / token 三道预算（Worker 用量也计入），用尽时有序交接；daemon 重启后自动续推 | `/goal`、`update_plan`、`[agent] goal_*` | [长程自治](LONG_HORIZON_AUTONOMY.md) |
+| 2. Xedit 插件移植 | 定时任务（四种调度方式，可带自我完成的 goal）、专家圆桌（10 位专家，产出决策文档），均以内置插件形式提供 | `willdeep plugin builtin install scheduler\|roundtable` | [内置插件](BUILTIN_PLUGINS.md) |
+| 3. RSI 强反馈 | 反馈账本：建议 Tab 采用 / 原样 / 改写、后续输入的纠正与补充、回退、审批、工具失败、Worker 没有结果、goal 收尾，默认只记 hash 与长度 | `[feedback]` | [反馈账本](FEEDBACK_LEDGER.md) |
+| 3. RSI 闭环 | 提示词版本戳；跨会话报告；失败链与危害度；改进候选；分段的提示词变体与结构 / 安全门；模型起草变体；分组对照评测与晋升门禁（永不自动上线） | `willdeep feedback report`、`willdeep prompt …`、`scripts/prompt_rsi_eval.rb` | [操作手册](PROMPT_RSI_OPERATIONS.md) |
 
 本文覆盖三件事：
 
@@ -87,15 +97,14 @@
 ## 建议的推进顺序
 1. **Phase A（已完成）**：三-2/3/4 反馈埋点 + sink；Web 建议生命周期；后续输入、插话、回退、审批、取消信号；保留期；审计汇总。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
 2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。RA3 / RA4 已在 Phase H 完成。
-3. **Phase C（已完成）**：Worker 报告末尾的 `<worker-facts>`、保头保尾截断、`await_agents` 汇合、派工时写集冲突预检、熔断冷却后试探；审计里的纠正率离线标注。详见 [子 Agent](SUBAGENTS.md)「并行派工与汇合」。未做：同一轮多个前台派工并发（审批不能并发）、Worker 间共享黑板（P5）。
-4. **Phase D（已完成）**：定时任务与专家圆桌以内置插件形式移植（`willdeep plugin builtin install scheduler|roundtable`），宿主补了 `${willdeepExe}`、`WILLDEEP_PLUGIN_DATA` 与 daemon 调度器。详见 [内置插件](BUILTIN_PLUGINS.md)。未做：圆桌的流式气泡与态势看板、定时任务的 Web / TUI 管理界面。
-5. **Phase E（进行中）**：
+3. **Phase C（已完成）**：Worker 报告末尾的 `<worker-facts>`、保头保尾截断、`await_agents` 汇合、派工时写集冲突预检、熔断冷却后试探；审计里的纠正率离线标注。详见 [子 Agent](SUBAGENTS.md)「并行派工与汇合」。Worker 间共享黑板（P5）后来在 Phase E 完成。
+4. **Phase D（已完成）**：定时任务与专家圆桌以内置插件形式移植（`willdeep plugin builtin install scheduler|roundtable`），宿主补了 `${willdeepExe}`、`WILLDEEP_PLUGIN_DATA` 与 daemon 调度器。详见 [内置插件](BUILTIN_PLUGINS.md)。
+5. **Phase E（已完成）**：
    - 已完成：Worker 共享黑板 `board_post` / `board_read`（P5），详见 [子 Agent](SUBAGENTS.md)。
    - 已完成：反馈行的提示词版本戳 `prompt_bundle`，以及 `willdeep feedback bundles`。
    - 已完成：跨会话报告与确定性改进候选 `willdeep feedback report [--candidates]`，对应 RSI §8.1 优化器的输入。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
-   - 未做：专家圆桌的流式看板。
-6. **Phase F（已完成）**：提示词分段与单段变体（`willdeep prompt sections|show|check|draft`），带结构门，只在 `run --local` 中通过 `WILLDEEP_PROMPT_VARIANT` 加载；任务集按 train / validation / holdout / regression 分组；`scripts/prompt_rsi_eval.rb` 做 baseline 与候选的对照评测，并按 §8.4 门禁给出结论，永不自动上线。详见 [操作手册](PROMPT_RSI_OPERATIONS.md)。未做：服务端数据接收与 canary 灰度。
-7. **Phase G（已完成）**：`willdeep prompt propose` 由会话主模型按 §8.2/§8.3 的约束起草最多 3 个单段变体。起草时只给计数，不给会话正文和 holdout；每个变体过同一道结构门，没过就带着问题修一次。结构门同时新增“不得削弱安全”检查。未做：相似失败聚类。
+6. **Phase F（已完成）**：提示词分段与单段变体（`willdeep prompt sections|show|check|draft`），带结构门，只在 `run --local` 中通过 `WILLDEEP_PROMPT_VARIANT` 加载；任务集按 train / validation / holdout / regression 分组；`scripts/prompt_rsi_eval.rb` 做 baseline 与候选的对照评测，并按 §8.4 门禁给出结论，永不自动上线。详见 [操作手册](PROMPT_RSI_OPERATIONS.md)。
+7. **Phase G（已完成）**：`willdeep prompt propose` 由会话主模型按 §8.2/§8.3 的约束起草最多 3 个单段变体。起草时只给计数，不给会话正文和 holdout；每个变体过同一道结构门，没过就带着问题修一次。结构门同时新增“不得削弱安全”检查。失败聚类在 Phase I 完成。
 8. **Phase H（已完成）**：长任务续航。
    - RA3：goal 的 token 预算，跨轮次、跨重启累计，用尽时有序收尾（`[agent] goal_token_budget` / `goal_wall_clock_minutes` / `goal_max_continuations`）。
    - RA4：daemon 重启后，被打断的进行中目标自动续推一轮；有防崩溃循环与幂等兜底，可用 `goal_auto_resume` 关掉。
@@ -104,6 +113,19 @@
    - Worker 的用量计入目标的 token 预算；
    - `feedback report` 新增失败链：按用户反应切段、按签名聚类，计算各失败的危害度（坏结局率及其相对基线的倍数）；
    - 改进候选按危害排序，新增 `harmful_failure:*` 候选。
+
+## 有意不做
+
+以下各项评估过，结论是现在不做。它们都不是待办，重新提出之前先看这里的理由。
+
+| 事项 | 为什么不做 | 已有的替代 |
+|---|---|---|
+| 同一轮里多个前台 Worker 并发 | 前台派工要逐个审批，并发审批需要改审批模型，收益小 | 后台派工 + `await_agents` 汇合，加上派工时的写集冲突预检（Phase C） |
+| 失败的语义聚类 | 按标记聚类加危害度已经能指出该改哪段；语义合并需要模型判断，噪声大 | 失败链与危害度（Phase I） |
+| 专家圆桌的流式看板、定时任务的管理界面 | 纯展示层 | 圆桌以文本返回每轮立场与决策文档；`list_scheduled_tasks` 可以列出任务 |
+| 按费用设预算 | 需要维护各模型的价格表 | token 预算，主 Agent 与 Worker 都计入（Phase H/I） |
+| 服务端数据接收、canary 灰度 | 需要 some.im 服务端配合，不在本仓库 | 本地评测门禁 + 人工 PR 上线 |
+| 退避阶梯的真实延时 | 目前只改变引导话术，没有观察到空转问题 | 续推次数、时间与 token 预算兜底 |
 
 ## 验证
 - 单元测试：GoalState 序列化/resume 预算累计、完成门（有在飞 worker 不得完成）、sink 行大小与脱敏 keyset 测试（仿 usage ledger）。
