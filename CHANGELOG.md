@@ -22,6 +22,10 @@
   - 工种熔断打开 10 分钟后放行一次试探，成功即恢复，不再整个会话都关不上。
 - `willdeep audit export` 的反馈信号新增纠正率与「已完成却被纠正」的轮次数：把后续输入与其前的回退、喊停、拒绝审批关联起来离线标注。
 - Worker 共享黑板（`board_post` / `board_read`）：父 Agent 与同一会话的所有 Worker 读写同一块板，写入的是事实、发现、决定、疑问；每条最多 500 字符，写入前先脱敏；作者由运行时填写。新派出的 Worker 在任务简报里带上最近条目，`await_agents` 也会附上新条目。
+- `willdeep feedback report` 新增失败链：
+  - 按用户的每一次反应把会话切段，按失败签名聚类，计算每种失败的坏结局率及其相对基线的倍数；
+  - 改进候选按危害排序：已有候选补上危害证据，高危害但次数不多的失败新起 `harmful_failure:*` 候选；
+  - 只有计数与标识，不含正文。
 - 长任务续航：
   - 目标（`/goal`）新增 token 预算，主 Agent 与 Worker 的用量都计入，跨轮次、跨重启累计，用尽时与 wall-clock 同样有序收尾；`[agent]` 新增 `goal_token_budget`、`goal_wall_clock_minutes`、`goal_max_continuations`。
   - daemon 重启打断了进行中的目标时，自动排一轮续推：提示词要求先核对实际状态再继续。已完成、在收尾、预算用尽的目标不续推，连续 3 次被重启打断就停手，同一次中断只排一轮；`goal_auto_resume = false` 可关。

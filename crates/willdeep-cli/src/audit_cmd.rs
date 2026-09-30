@@ -461,6 +461,7 @@ pub(crate) struct FeedbackRow {
     pub tool: Option<String>,
     pub error_class: Option<String>,
     pub report_len: Option<u64>,
+    pub stop_reason: Option<String>,
     pub followup_hint: Option<String>,
     pub prev_status: Option<String>,
     pub decision: Option<String>,
@@ -572,6 +573,7 @@ pub(crate) fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
                 tool: text("tool"),
                 error_class: text("error_class"),
                 report_len: value.get("report_len").and_then(|value| value.as_u64()),
+                stop_reason: text("stop_reason"),
                 followup_hint: text("followup_hint"),
             });
         }
