@@ -52,7 +52,7 @@ pub struct SubagentCatalog {
     profiles: BTreeMap<String, SubagentProfile>,
     background: Arc<BackgroundTaskRegistry>,
     sink: Arc<dyn EventSink>,
-    failures: Arc<Mutex<BTreeMap<String, usize>>>,
+    failures: Arc<Mutex<BTreeMap<String, CircuitState>>>,
     model_overrides: Arc<Mutex<BTreeMap<uuid::Uuid, String>>>,
     worktrees: Option<SubagentWorktreeManager>,
     /// Files currently claimed by a running writing worker. Two workers whose
@@ -669,20 +669,18 @@ impl SubagentCatalog {
                 "target_command did not receive matching parent authorization".to_owned(),
             ));
         }
-        let failure_count = self
-            .failures
-            .lock()
-            .map_err(|_| {
+        {
+            let mut failures = self.failures.lock().map_err(|_| {
                 AgentError::Subagent("subagent failure tracker is unavailable".to_owned())
-            })?
-            .get(&profile.id)
-            .copied()
-            .unwrap_or(0);
-        if failure_count >= profile.max_consecutive_failures {
-            return Err(AgentError::Subagent(format!(
-                "profile {} circuit is open after {} consecutive failures",
-                profile.id, failure_count
-            )));
+            })?;
+            circuit_admit(
+                &mut failures,
+                &profile.id,
+                profile.max_consecutive_failures,
+                CIRCUIT_COOLDOWN,
+                std::time::Instant::now(),
+            )
+            .map_err(AgentError::Subagent)?;
         }
         if profile.write_scope.requires_declared_targets()
             && approved_targets.as_ref().is_none_or(BTreeSet::is_empty)
@@ -691,6 +689,27 @@ impl SubagentCatalog {
                 "profile {} may write, so it requires an approved file set: pass target_file, or task.write_files for a file-set profile",
                 profile.id
             )));
+        }
+        // 写集与正在跑的 Worker 冲突就在派工这一刻说清楚，而不是派出一个注定
+        // 在认领时失败的后台任务。判定与 runner 的认领同一份名单、同一条规则。
+        if let Some(targets) = approved_targets
+            .as_ref()
+            .filter(|targets| !targets.is_empty())
+        {
+            let held = self.claimed_files.lock().map_err(|_| {
+                AgentError::Subagent("subagent file claims are unavailable".to_owned())
+            })?;
+            let conflicts = targets.intersection(&held).collect::<Vec<_>>();
+            if !conflicts.is_empty() {
+                return Err(AgentError::Subagent(format!(
+                    "another running subagent is already writing {}; wait for it (await_agents) or dispatch this work over different files",
+                    conflicts
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
         }
         let task = args.task;
         let verifier = match task.as_ref().and_then(|task| task.verifier.clone()) {
@@ -1135,8 +1154,53 @@ fn subagent_task_result(result: Result<String, AgentError>) -> TaskResult {
     }
 }
 
+/// 熔断打开后多久放行一次试探。没有这一档，熔断一旦打开就永远关不上：
+/// 只有成功才能清零，而打开期间根本不会有成功。
+const CIRCUIT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// 一个工种的熔断状态：连续失败次数、最后一次失败的时刻、是否有试探在跑。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CircuitState {
+    count: usize,
+    last_failure: std::time::Instant,
+    probing: bool,
+}
+
+/// 派工前过熔断：关着就放行；开着且冷却未到就拒；冷却已到放行**一次**试探
+/// （半开），试探在跑时其余派工照旧被拒，免得并行派工一起冲过去。
+fn circuit_admit(
+    failures: &mut BTreeMap<String, CircuitState>,
+    profile: &str,
+    max_consecutive_failures: usize,
+    cooldown: std::time::Duration,
+    now: std::time::Instant,
+) -> Result<(), String> {
+    let Some(state) = failures.get_mut(profile) else {
+        return Ok(());
+    };
+    if state.count < max_consecutive_failures {
+        return Ok(());
+    }
+    if state.probing {
+        return Err(format!(
+            "profile {profile} circuit is open after {} consecutive failures; a trial run is already in flight",
+            state.count
+        ));
+    }
+    let waited = now.saturating_duration_since(state.last_failure);
+    if waited < cooldown {
+        return Err(format!(
+            "profile {profile} circuit is open after {} consecutive failures; one trial run is allowed in {}s. Use another profile or handle the task directly meanwhile",
+            state.count,
+            (cooldown - waited).as_secs().max(1)
+        ));
+    }
+    state.probing = true;
+    Ok(())
+}
+
 fn record_profile_result(
-    failures: &Mutex<BTreeMap<String, usize>>,
+    failures: &Mutex<BTreeMap<String, CircuitState>>,
     profile: &str,
     result: &Result<String, AgentError>,
 ) {
@@ -1146,8 +1210,15 @@ fn record_profile_result(
     if result.is_ok() {
         failures.remove(profile);
     } else {
-        let count = failures.entry(profile.to_owned()).or_default();
-        *count = count.saturating_add(1);
+        let now = std::time::Instant::now();
+        let state = failures.entry(profile.to_owned()).or_insert(CircuitState {
+            count: 0,
+            last_failure: now,
+            probing: false,
+        });
+        state.count = state.count.saturating_add(1);
+        state.last_failure = now;
+        state.probing = false;
     }
 }
 
@@ -1185,6 +1256,96 @@ mod tests {
             super::super::runner::acquire_file_claim_for_test(&claimed, &files).is_err(),
             "同一个文件的第二个认领必须被拒，哪怕并发数还没到上限"
         );
+    }
+
+    /// 写集与正在跑的 Worker 冲突：派工当场被拒，点名冲突文件，不调模型、
+    /// 也不起一个注定失败的后台任务。
+    #[tokio::test]
+    async fn overlapping_write_sets_are_refused_at_dispatch() {
+        let root = std::env::temp_dir().join(format!("willdeep-overlap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(super::super::test_support::ModelProvider {
+            model: "local-test".into(),
+            seen: seen.clone(),
+        });
+        let background = Arc::new(BackgroundTaskRegistry::default());
+        let mut profiles = crate::subagent::builtin_profiles(provider);
+        profiles
+            .iter_mut()
+            .find(|profile| profile.id == "implementer")
+            .unwrap()
+            .worktree = crate::subagent_worktree::SubagentWorktreePolicy::Shared;
+        let catalog = SubagentCatalog::new(&root, profiles, background.clone());
+        let target = root.join("code.rs");
+        catalog.claimed_files.lock().unwrap().insert(target.clone());
+        let error = catalog
+            .run(
+                SpawnAgentArgs {
+                    profile: Some("implementer".into()),
+                    prompt: "edit code.rs".into(),
+                    run_in_background: Some(true),
+                    task: Some(crate::subagent::TaskPacket {
+                        goal: "edit code.rs".into(),
+                        verifier: Some(crate::subagent::TaskVerifier {
+                            command: "true".into(),
+                            expected_exit_code: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Some(BTreeSet::from([target.clone()])),
+            )
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("already writing"), "{message}");
+        assert!(message.contains("code.rs"), "{message}");
+        assert!(seen.lock().unwrap().is_empty(), "no model call");
+        assert!(
+            background.snapshots().is_empty(),
+            "no doomed background task"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_open_circuit_allows_one_trial_after_the_cooldown() {
+        let failures = Mutex::new(BTreeMap::new());
+        let cooldown = std::time::Duration::from_secs(600);
+        let failed: Result<String, AgentError> = Err(AgentError::Subagent("boom".into()));
+        for _ in 0..3 {
+            record_profile_result(&failures, "tester", &failed);
+        }
+        let opened = failures.lock().unwrap()["tester"].last_failure;
+        let admit = |at: std::time::Instant| {
+            circuit_admit(&mut failures.lock().unwrap(), "tester", 3, cooldown, at)
+        };
+        let error = admit(opened + std::time::Duration::from_secs(60)).unwrap_err();
+        assert!(error.contains("circuit is open"), "{error}");
+        assert!(error.contains("540s"), "{error}");
+        assert!(
+            admit(opened + cooldown).is_ok(),
+            "one trial after the cooldown"
+        );
+        assert!(
+            admit(opened + cooldown)
+                .unwrap_err()
+                .contains("already in flight"),
+            "only one trial at a time"
+        );
+        // 试探失败：重新计时，仍然开着。
+        record_profile_result(&failures, "tester", &failed);
+        let reopened = failures.lock().unwrap()["tester"].last_failure;
+        assert!(admit(reopened + std::time::Duration::from_secs(1)).is_err());
+        // 试探成功：清零。
+        assert!(admit(reopened + cooldown).is_ok());
+        record_profile_result(&failures, "tester", &Ok("fixed".into()));
+        assert!(admit(reopened).is_ok());
+        assert!(failures.lock().unwrap().is_empty());
+        // 别的工种不受影响。
+        assert!(circuit_admit(&mut BTreeMap::new(), "scout", 3, cooldown, opened).is_ok());
     }
 
     #[test]
@@ -1237,7 +1398,12 @@ mod tests {
             )
             .await
             .expect("run");
-        assert_eq!(report, "subagent report");
+        assert!(report.starts_with("subagent report\n\n"), "{report}");
+        assert!(
+            report.ends_with("</worker-facts>"),
+            "the runtime trailer closes every report: {report}"
+        );
+        assert!(report.contains(r#"profile="scout" verdict="unverified""#));
         let events = sink.0.lock().unwrap();
         let started = events.iter().find_map(|event| match event {
             AgentEvent::SubagentStarted {

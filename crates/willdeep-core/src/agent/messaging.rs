@@ -19,6 +19,15 @@ struct StopArgs {
     agent_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AwaitArgs {
+    #[serde(default)]
+    agent_ids: Vec<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
 fn parse<T: serde::de::DeserializeOwned>(call: &ToolCall) -> Result<T, ToolError> {
     serde_json::from_str(&call.arguments).map_err(|source| ToolError::InvalidArguments {
         tool: call.name.clone(),
@@ -27,6 +36,25 @@ fn parse<T: serde::de::DeserializeOwned>(call: &ToolCall) -> Result<T, ToolError
 }
 
 impl Agent {
+    /// `await_agents`：等本会话的后台子 Agent，把报告一次交回。
+    pub(super) async fn execute_await_agents(&self, call: &ToolCall) -> Result<String, ToolError> {
+        let Some(catalog) = &self.subagents else {
+            return Err(ToolError::UnknownTool(call.name.clone()));
+        };
+        let args = parse::<AwaitArgs>(call)?;
+        let seconds = args
+            .timeout_seconds
+            .unwrap_or(crate::tools::DEFAULT_AWAIT_SECONDS)
+            .clamp(1, crate::tools::MAX_AWAIT_SECONDS);
+        catalog
+            .await_agents(&args.agent_ids, std::time::Duration::from_secs(seconds))
+            .await
+            .map_err(|message| ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                source: <serde_json::Error as serde::de::Error>::custom(message),
+            })
+    }
+
     pub(super) fn execute_agent_control_tool(
         &self,
         call: &ToolCall,
@@ -253,5 +281,132 @@ mod tests {
         );
         assert!(audited[2].command.starts_with("stop_agent "));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 所有子 Agent 都卡在第一轮，直到放行后一起交报告。
+    struct HeldChildren {
+        release: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Provider for HeldChildren {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            while !self.release.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Ok(Completion {
+                content: "CONCLUSION: looked around".into(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".into()),
+                usage: None,
+            })
+        }
+    }
+
+    /// 并行派工的汇合：两个后台 Worker 同时跑，`await_agents` 超时时如实列出
+    /// 还在跑的；放行后一次拿回两份报告（带运行时尾注），且这两份报告不再
+    /// 作为完成通知投第二遍。
+    #[tokio::test]
+    async fn await_agents_joins_parallel_background_workers() {
+        let root = std::env::temp_dir().join(format!("willdeep-await-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let release = Arc::new(AtomicBool::new(false));
+        let child: Arc<dyn Provider> = Arc::new(HeldChildren {
+            release: release.clone(),
+        });
+        let background = Arc::new(BackgroundTaskRegistry::default());
+        let catalog = SubagentCatalog::new(
+            &root,
+            crate::subagent::builtin_profiles(child.clone()),
+            background.clone(),
+        );
+        let tools = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .unwrap()
+            .with_background_tasks(background.clone());
+        let agent = Agent::new(
+            child,
+            tools,
+            AgentConfig {
+                max_turns: 4,
+                system_prompt: "parent".into(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_subagents(Arc::new(catalog));
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        };
+        let mut agent_ids = Vec::new();
+        for prompt in ["inspect src", "inspect docs"] {
+            let started = agent
+                .execute_tool(&call(
+                    "spawn_agent",
+                    serde_json::json!({"prompt": prompt, "profile": "scout", "run_in_background": true}),
+                ))
+                .await
+                .expect("spawn background child");
+            agent_ids.push(
+                started
+                    .split("agent_id=")
+                    .nth(1)
+                    .and_then(|rest| rest.split(',').next())
+                    .expect("agent id")
+                    .to_owned(),
+            );
+        }
+
+        let waited = agent
+            .execute_tool(&call(
+                "await_agents",
+                serde_json::json!({"timeout_seconds": 1}),
+            ))
+            .await
+            .expect("await with timeout");
+        assert!(waited.contains("Timed out"), "{waited}");
+        for id in &agent_ids {
+            assert!(waited.contains(id.as_str()), "{waited}");
+        }
+
+        release.store(true, Ordering::SeqCst);
+        let joined = agent
+            .execute_tool(&call(
+                "await_agents",
+                serde_json::json!({"agent_ids": agent_ids, "timeout_seconds": 30}),
+            ))
+            .await
+            .expect("join");
+        assert_eq!(joined.matches("<agent-report").count(), 2, "{joined}");
+        assert_eq!(joined.matches("CONCLUSION: looked around").count(), 2);
+        assert_eq!(joined.matches("<worker-facts").count(), 2);
+        assert!(!joined.contains("Timed out"));
+        assert!(
+            background.drain_pending().is_empty(),
+            "reports handed over by await_agents are not delivered again"
+        );
+
+        let nothing = agent
+            .execute_tool(&call("await_agents", serde_json::json!({})))
+            .await
+            .expect("nothing running");
+        assert!(nothing.contains("nothing to wait for"), "{nothing}");
+        assert!(
+            agent
+                .execute_tool(&call(
+                    "await_agents",
+                    serde_json::json!({"agent_ids": ["agent_zzzzzz"]})
+                ))
+                .await
+                .is_err(),
+            "ids this session did not start are not found"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

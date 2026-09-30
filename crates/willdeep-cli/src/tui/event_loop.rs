@@ -1418,6 +1418,8 @@ pub(super) async fn event_loop(
             Ok(event)=background_rx.recv()=>{
                 let _=runtime.background_tasks.drain_pending();
                 app.background_tasks=runtime.background_tasks.snapshots();
+                // 报告已经由 await_agents 交给了模型：不再发通知，也不为它唤醒一轮。
+                if runtime.background_tasks.is_delivered(&event.snapshot.id) {continue;}
                 // 后台结果交给内核，不再自己排一条通知：两条路同时向模型投递
                 // 会让同一个结果讲两遍。正文由内核按来源净化后在 turn 边界注入。
                 runtime.kernel.publish(
