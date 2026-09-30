@@ -77,6 +77,18 @@ rs 侧目前**没有立场**——`crates/willdeep-core/src/agent.rs:275` 一旦
 
 ## 3. rs 侧落地步骤与代码锚点（develop @ 0.21.0-rc67）
 
+### 落地状态（2026-09-30）
+
+- **RA1 已落地**：`crates/willdeep-core/src/goal.rs` 的 `GoalContinuation::evaluate`，在 `agent.rs` 的无工具调用分支里判定。
+- **RA2 已落地（持久化 + 清单部分）**：
+  - `GoalState`（目标、验收标准、步骤、阻塞原因、状态、已用时长、续推计数）随检查点与消息同一次写入 `Session.goal_state`。它属于执行快照，并发合并时计数取单调较大者。`Session.goal` 单字符串保留，作为向后兼容的目标语句。
+  - `update_plan` 工具只在有激活目标时出现在主 Agent 的工具面里，属于 `PARENT_ONLY_TOOLS`。`steps` / `checklist` / `blocked_reason` / `merge` 与 §2.3 同构。另有一个本端扩展 `criteria`，用来写下验收标准本身，因为 canonical 只规定了按序号勾选。没有证据的勾选会被拒绝，校验失败不消耗续推预算，清单有变化算作一次进展。
+  - **完成门禁**：模型声明完成时，只要还有未带证据的验收标准，或还有在跑的委派 Worker（只数 `Subagent`，不数 shell / monitor），就返回 `CompletionRejected` 并点名缺什么。这一次计入续推预算，免得虚报完成绕开预算。没有定义验收标准时行为不变。
+  - **压缩固定区**：`<goal-state>` 块每轮重建进 system 消息。system 消息不参与压缩摘要，所以目标、清单与在飞 Worker 不会被摘要掉；本地摘要提示也附上它，避免摘要与之矛盾。
+  - Web 端 `/goal` 仍是前端状态、随每轮 `<goal>` 信封到达。持久化状态在会话里只「停放」，信封带着同一句目标来才接回，所以关掉的目标不会复活。
+- **wall-clock 跨重启累计**：计时只在轮次运行时走，轮次之间与进程不在时不计。daemon 每轮重建 harness，从 `session.goal_state` 恢复（`harness::restore_goal`），不再每轮从满格预算重来。
+- **尚未做**：RA3 的 token / cost 维度；RA4 的「重启后按计划态自动续推」（daemon 仍把动过工具的中断轮次标成 `Interrupted`，但下次运行的预算与清单已经接得上）；退避阶梯的真实延时。
+
 | 步骤 | 内容 | 关键位点 |
 |---|---|---|
 | RA1 | 停止条件改造：goal 激活时 `tool_calls.is_empty()` 先过目标判定，未达则注入 continuation；goal 模式下改写早停引导。**建议复用既有续推钩子**：`append_pending_instructions` 已是现成的「给出终稿但 inbox 非空则 continue」通道 | `crates/willdeep-core/src/agent.rs:244`（主循环 `for turn in 1..=max_turns`）、`:275`（现停止条件）、`:312`（续推钩子）、`crates/willdeep-core/src/prompt.rs:30`（早停引导） |

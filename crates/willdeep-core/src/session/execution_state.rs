@@ -43,6 +43,7 @@ pub(super) fn fingerprint(session: &Session) -> Result<[u8; 32], SessionError> {
             &session.compression_checkpoint,
             &session.manual_compression_usage,
             &session.execution_checkpoint,
+            &session.goal_state,
         ),
     )?;
     Ok(writer.0.finalize().into())
@@ -61,4 +62,5 @@ pub(super) fn copy(source: &Session, target: &mut Session) {
     target.compression_checkpoint = source.compression_checkpoint.clone();
     target.manual_compression_usage = source.manual_compression_usage.clone();
     target.execution_checkpoint = source.execution_checkpoint.clone();
+    target.goal_state = source.goal_state.clone();
 }

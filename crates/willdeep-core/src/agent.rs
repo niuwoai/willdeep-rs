@@ -690,6 +690,61 @@ impl Agent {
         self
     }
 
+    fn execute_update_plan(&self, call: &ToolCall) -> Result<String, ToolError> {
+        let continuation = self
+            .goal_continuation
+            .as_ref()
+            .ok_or_else(|| ToolError::UnknownTool(call.name.clone()))?;
+        let update: crate::goal::PlanUpdate =
+            serde_json::from_value(call.parsed_arguments().map_err(|source| {
+                ToolError::InvalidArguments {
+                    tool: call.name.clone(),
+                    source,
+                }
+            })?)
+            .map_err(|source| ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                source,
+            })?;
+        // 校验不过是模型的输入问题，按参数错误回给它，不消耗续推预算。
+        continuation
+            .update_plan(update)
+            .map_err(|message| ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                source: <serde_json::Error as serde::de::Error>::custom(message),
+            })
+    }
+
+    fn record_goal_feedback(
+        &self,
+        continuation: &GoalContinuation,
+        signal: crate::feedback::Signal,
+        open: usize,
+    ) {
+        let (Some(feedback), Some(state)) = (&self.feedback, continuation.snapshot()) else {
+            return;
+        };
+        let open = if signal == crate::feedback::Signal::GoalCompletionRejected {
+            open
+        } else {
+            state.open_criteria().len()
+        };
+        feedback.record_goal(
+            signal,
+            open,
+            u32::try_from(state.continuations).unwrap_or(u32::MAX),
+            state.elapsed(),
+        );
+    }
+
+    /// 还在跑的委派 Worker 数，目标完成门禁用。
+    fn workers_in_flight(&self) -> usize {
+        self.background_tasks
+            .as_ref()
+            .map(|tasks| tasks.running_subagents())
+            .unwrap_or(0)
+    }
+
     fn background_active(&self) -> bool {
         self.background_tasks
             .as_ref()
@@ -740,7 +795,15 @@ impl Agent {
                 .try_verification_baseline()
                 .map_err(AgentError::VerificationSnapshot)?,
         )?;
+        recorder.watch_goal(self.goal_continuation.as_deref());
+        // 目标的计时只在跑的时候走：轮次之间、进程不在的时候都不算。
+        if let Some(goal) = &self.goal_continuation {
+            goal.resume();
+        }
         let result = self.run_inner(messages, user_message, &mut recorder).await;
+        if let Some(goal) = &self.goal_continuation {
+            goal.pause();
+        }
         if let (Some(feedback), Ok(outcome)) = (&self.feedback, &result)
             && !outcome.stop_reason.is_complete()
         {
@@ -798,7 +861,15 @@ impl Agent {
         // destructive one is permitted.
         self.tools.set_task_context(&user_message.content);
         messages.push(user_message);
-        let definitions = self.tools.definitions();
+        let mut definitions = self.tools.definitions();
+        // 有目标时才给 `update_plan`：清单是目标的一部分，没有目标就无从谈起。
+        if self
+            .goal_continuation
+            .as_ref()
+            .is_some_and(|goal| goal.is_active())
+        {
+            definitions.push(crate::tools::update_plan_definition());
+        }
         let mut compressed: Option<context::SummaryCache> = None;
         let mut used_tokens = 0_u64;
         // 分别累计输入/输出，供 AgentOutcome 上报——`used_tokens` 是预算判定用的
@@ -822,6 +893,16 @@ impl Agent {
                 rules.render(),
                 self.tools.required_verification_prompt()
             );
+            // 目标状态钉在 system 消息里：每轮重建、不进压缩摘要，所以目标、
+            // 验收清单与在飞 Worker 永远不会被摘要掉。
+            if let Some(pin) = self
+                .goal_continuation
+                .as_ref()
+                .and_then(|goal| goal.pin(self.workers_in_flight()))
+            {
+                messages[0].content.push_str("\n\n");
+                messages[0].content.push_str(&pin);
+            }
             self.append_pending_instructions(&mut messages);
             checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
             // 事件在这里进对话，而不是在工具与工具之间：一次 assistant 的
@@ -1066,6 +1147,7 @@ impl Agent {
                     let observation = RoundObservation {
                         tools_executed: tools_since_check,
                         background_active: self.background_active(),
+                        workers_in_flight: self.workers_in_flight(),
                     };
                     let was_wrapping_up = continuation.wrap_up_pending();
                     match continuation.evaluate(&content, observation) {
@@ -1085,7 +1167,31 @@ impl Agent {
                             tools_since_check = 0;
                             continue;
                         }
+                        Some(ContinuationDecision::CompletionRejected {
+                            steering,
+                            open_criteria,
+                            workers_in_flight,
+                        }) => {
+                            // 虚报完成：RSI 最想要的负样本之一。
+                            self.record_goal_feedback(
+                                &continuation,
+                                crate::feedback::Signal::GoalCompletionRejected,
+                                open_criteria.max(workers_in_flight),
+                            );
+                            messages.push(Message::host_instruction(steering));
+                            tools_since_check = 0;
+                            continue;
+                        }
                         Some(ContinuationDecision::Complete) => {
+                            self.record_goal_feedback(
+                                &continuation,
+                                if was_wrapping_up {
+                                    crate::feedback::Signal::GoalBudgetLimited
+                                } else {
+                                    crate::feedback::Signal::GoalCompleted
+                                },
+                                0,
+                            );
                             return Ok(AgentOutcome {
                                 final_text: content,
                                 turns: turn,
@@ -1298,6 +1404,9 @@ impl Agent {
             }
             if let Some(result) = self.execute_agent_control_tool(call) {
                 return result;
+            }
+            if call.name == "update_plan" {
+                return self.execute_update_plan(call);
             }
             if call.name != "spawn_agent" {
                 let result = self.tools.execute(call).await;

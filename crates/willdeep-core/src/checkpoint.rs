@@ -42,6 +42,9 @@ pub struct VerificationEvidence {
 pub struct RunCheckpoint {
     pub metadata: CheckpointMetadata,
     pub messages: Vec<Message>,
+    /// 当前目标的快照（没有目标时为 `None`）。与消息同一次写入：重启后预算与
+    /// 验收清单接着算，不会和对话脱节。
+    pub goal: Option<crate::goal::GoalState>,
 }
 
 pub trait CheckpointSink: Send + Sync {
@@ -72,6 +75,7 @@ pub(crate) struct CheckpointRecorder<'a> {
     stream_dirty: bool,
     pending_stream_bytes: usize,
     evidence_source: Option<&'a crate::tools::ToolRegistry>,
+    goal_source: Option<&'a crate::goal::GoalContinuation>,
 }
 
 pub(crate) const STREAM_CHECKPOINT_INTERVAL: std::time::Duration =
@@ -89,7 +93,17 @@ impl<'a> CheckpointRecorder<'a> {
             stream_dirty: false,
             pending_stream_bytes: 0,
             evidence_source: None,
+            goal_source: None,
         }
+    }
+
+    /// 每次落检查点时顺带写目标快照。
+    pub fn watch_goal(&mut self, goal: Option<&'a crate::goal::GoalContinuation>) {
+        self.goal_source = goal;
+    }
+
+    fn goal_snapshot(&self) -> Option<crate::goal::GoalState> {
+        self.goal_source.and_then(|goal| goal.snapshot())
     }
 
     pub fn initialize_evidence(
@@ -183,6 +197,7 @@ impl<'a> CheckpointRecorder<'a> {
                 pending_call_ids,
             },
             messages: messages.to_vec(),
+            goal: self.goal_snapshot(),
         };
         sink.save(&checkpoint).map_err(AgentError::Checkpoint)?;
         self.latest = Some(checkpoint);
@@ -252,7 +267,12 @@ impl<'a> CheckpointRecorder<'a> {
                 outcome.output_tokens,
             )?;
         }
+        let goal = self.goal_snapshot();
         if let (Some(sink), Some(checkpoint)) = (self.sink, self.latest.as_mut()) {
+            // 目标的最终状态（完成 / 预算耗尽）只在这里才定下来。
+            if goal.is_some() {
+                checkpoint.goal = goal;
+            }
             checkpoint.metadata.status = match result {
                 Ok(outcome)
                     if matches!(
@@ -411,6 +431,10 @@ impl CheckpointSink for SessionCheckpointSink {
             .update(self.session_id, |session| {
                 session.messages = checkpoint.messages.clone();
                 session.execution_checkpoint = Some(checkpoint.metadata.clone());
+                if let Some(goal) = &checkpoint.goal {
+                    session.goal_state =
+                        Some(goal.clone().merged_over(session.goal_state.as_ref()));
+                }
             })
             .map(|_| ())
             .map_err(|error| error.to_string())

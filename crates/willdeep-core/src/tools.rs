@@ -2042,7 +2042,7 @@ mod background_shell;
 mod monitor;
 mod verification;
 pub use agent_control::MAX_AGENT_MESSAGE_CHARS;
-pub(crate) use agent_control::PARENT_ONLY_TOOLS;
+pub(crate) use agent_control::{PARENT_ONLY_TOOLS, update_plan_definition};
 use background_shell::run_background_shell;
 pub use background_shell::run_background_supervisor;
 use verification::{capture_verification_snapshot, report_verification, verification_status};

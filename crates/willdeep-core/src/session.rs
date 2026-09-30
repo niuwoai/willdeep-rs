@@ -81,6 +81,10 @@ pub struct Session {
     pub runtime_managed: bool,
     #[serde(default)]
     pub goal: Option<String>,
+    /// `goal` 的执行状态：验收清单、步骤、已用预算。随检查点与消息一起写，
+    /// 所以归在执行快照里。旧会话文件没有它，按 `goal` 重新开始计。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_state: Option<crate::goal::GoalState>,
     #[serde(default)]
     pub compression_generation: u64,
     #[serde(default)]
@@ -134,6 +138,7 @@ impl Session {
             runtime_event_cursor: 0,
             runtime_managed: false,
             goal: None,
+            goal_state: None,
             compression_generation: 0,
             compression_checkpoint: None,
             manual_compression_usage: CompressionUsage::default(),
@@ -827,6 +832,7 @@ fn swift_session(path: &Path) -> Result<Session, SessionError> {
         runtime_event_cursor: 0,
         runtime_managed: false,
         goal: None,
+        goal_state: None,
         compression_generation: 0,
         compression_checkpoint: None,
         manual_compression_usage: CompressionUsage::default(),

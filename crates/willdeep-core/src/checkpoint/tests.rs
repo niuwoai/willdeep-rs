@@ -602,3 +602,70 @@ fn unresolved_calls_are_uncertain_and_completed_siblings_are_preserved() {
     assert_eq!(history[0].tool_calls[0].id, "done");
     assert_eq!(history[1].content, "saved");
 }
+
+/// 目标状态随检查点落进会话：一轮跑完，续推次数、验收清单都在会话文件里；
+/// 较旧的一份写回来不会把计数拨回去；旧会话文件（没有 `goal_state`）照常加载。
+#[test]
+fn goal_state_is_persisted_with_the_checkpoint_and_never_rewound() {
+    let (_, sink, session) = fixture(false);
+    let mut state = crate::goal::GoalState::new("ship rc7");
+    state.continuations = 7;
+    state.elapsed_ms = 120_000;
+    state.criteria.push(crate::goal::GoalCriterion {
+        text: "tests pass".to_owned(),
+        done: true,
+        evidence: Some("cargo test".to_owned()),
+    });
+    let save = |goal: crate::goal::GoalState| {
+        sink.save(&RunCheckpoint {
+            metadata: CheckpointMetadata::default(),
+            messages: Vec::new(),
+            goal: Some(goal),
+        })
+        .unwrap();
+    };
+    save(state.clone());
+    let loaded = sink.store.load(session.id).unwrap();
+    assert_eq!(loaded.goal_state.as_ref(), Some(&state));
+
+    let mut stale = crate::goal::GoalState::new("ship rc7");
+    stale.continuations = 2;
+    stale.elapsed_ms = 10_000;
+    save(stale);
+    let merged = sink.store.load(session.id).unwrap().goal_state.unwrap();
+    assert_eq!((merged.continuations, merged.elapsed_ms), (7, 120_000));
+
+    // 没有 goal_state 键的旧会话文件。
+    let path = session
+        .workspace
+        .parent()
+        .unwrap()
+        .join("sessions")
+        .join(format!("{}.json", session.id));
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    raw.as_object_mut().unwrap().remove("goal_state");
+    std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+    assert!(sink.store.load(session.id).unwrap().goal_state.is_none());
+}
+
+/// 一次真实的目标运行在中途出错（provider 第二次请求失败）：会话里的目标
+/// 状态仍是进行中——下次运行从这里接着算，而不是从满格预算重来。
+#[tokio::test]
+async fn a_goal_run_leaves_its_state_in_the_session() {
+    let (agent, sink, session) = fixture(false);
+    let continuation = Arc::new(crate::GoalContinuation::new());
+    continuation.activate("write the file", crate::GoalBudget::default());
+    let agent = agent.with_goal_continuation(continuation);
+    let _ = agent
+        .run_checkpointed(Vec::new(), crate::types::Message::user("go"), Some(&sink))
+        .await;
+    let state = sink
+        .store
+        .load(session.id)
+        .unwrap()
+        .goal_state
+        .expect("goal state persisted");
+    assert_eq!(state.statement, "write the file");
+    assert_eq!(state.status, crate::goal::GoalStatus::Active);
+}
