@@ -35,7 +35,7 @@ willdeep --language en audit export                     # 报告语言跟全局 
 | 改动归属 | `runtime/diff-attributions.json` | 记录自带 `session_id`：时间、根 / 子 Agent、工具、文件、快照 |
 | 审阅 / 回滚 | `runtime/diff-reviews.json`、`runtime/recovery/<快照>-*` | 按本会话的快照 id |
 | 检查点回退 | `runtime/recovery/rewind-<会话>-*`、事件流 `session.rewound` | 按本会话 id |
-| 反馈信号 | `feedback/YYYY-MM.jsonl`（[本机反馈账本](FEEDBACK_LEDGER.md)） | 记录自带 `session_id`。只出计数：各信号次数、建议采用率与原样发送率、按 `工具/错误类别` 的失败次数、没结果就停下的运行数、后续输入的粗分类分布；坏行与别的 schema 计入 `summary.feedback_unparsable` |
+| 反馈信号 | `feedback/YYYY-MM.jsonl`（[本机反馈账本](FEEDBACK_LEDGER.md)） | 记录自带 `session_id`。只出计数：各信号次数、建议采用率与原样发送率、按 `工具/错误类别` 的失败次数、没结果就停下的运行数、后续输入的粗分类分布、纠正率与「已完成却被纠正」的轮次数（口径见反馈账本文档）；坏行与别的 schema 计入 `summary.feedback_unparsable` |
 
 JSON 的 `schema_version` 为 1，顶层 `summary` 与每个 `sessions[]` 项的字段名和 Markdown 各段一一对应。
 
