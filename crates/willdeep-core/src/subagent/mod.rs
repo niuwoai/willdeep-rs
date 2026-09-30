@@ -26,6 +26,7 @@ mod dispatch_store;
 mod file_leases;
 mod profiles;
 mod runner;
+pub(crate) use runner::worker_prompt_parts;
 mod text;
 mod types;
 

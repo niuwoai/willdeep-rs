@@ -89,7 +89,11 @@
 2. **Phase B（已完成 P1/P2）**：GoalState 持久化 + 验收清单 + `update_plan` + 完成门禁 + system 消息固定区。详见 [长程自治 §3 落地状态](LONG_HORIZON_AUTONOMY.md)。未做：RA3 token/cost 预算、RA4 重启自动续推。
 3. **Phase C（已完成）**：Worker 报告末尾的 `<worker-facts>`、保头保尾截断、`await_agents` 汇合、派工时写集冲突预检、熔断冷却后试探；审计里的纠正率离线标注。详见 [子 Agent](SUBAGENTS.md)「并行派工与汇合」。未做：同一轮多个前台派工并发（审批不能并发）、Worker 间共享黑板（P5）。
 4. **Phase D（已完成）**：定时任务与专家圆桌以内置插件形式移植（`willdeep plugin builtin install scheduler|roundtable`），宿主补了 `${willdeepExe}`、`WILLDEEP_PLUGIN_DATA` 与 daemon 调度器。详见 [内置插件](BUILTIN_PLUGINS.md)。未做：圆桌的流式气泡与态势看板、定时任务的 Web / TUI 管理界面。
-5. **Phase E**：黑板、专家团完整版、离线 RSI 优化闭环。
+5. **Phase E（进行中）**：
+   - 已完成：Worker 共享黑板 `board_post` / `board_read`（P5），详见 [子 Agent](SUBAGENTS.md)。
+   - 已完成：反馈行的提示词版本戳 `prompt_bundle`，以及 `willdeep feedback bundles`。
+   - 已完成：跨会话报告与确定性改进候选 `willdeep feedback report [--candidates]`，对应 RSI §8.1 优化器的输入。详见 [本机反馈账本](FEEDBACK_LEDGER.md)。
+   - 未做：由候选自动生成并评测提示词变体（§8.2–§11 的晋升门禁）、专家圆桌的流式看板。
 
 ## 验证
 - 单元测试：GoalState 序列化/resume 预算累计、完成门（有在飞 worker 不得完成）、sink 行大小与脱敏 keyset 测试（仿 usage ledger）。

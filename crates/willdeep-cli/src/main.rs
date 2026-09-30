@@ -22,6 +22,7 @@ mod detached_delivery;
 mod doctor;
 mod editor;
 mod event_cmd;
+mod feedback_cmd;
 mod handoff_cmd;
 mod harness;
 mod i18n;
@@ -256,6 +257,11 @@ enum CliCommand {
     Audit {
         #[command(subcommand)]
         action: audit_cmd::AuditAction,
+    },
+    /// Summarize the local feedback ledger ($WILLDEEP_HOME/feedback) and list prompt bundle ids.
+    Feedback {
+        #[command(subcommand)]
+        action: feedback_cmd::FeedbackAction,
     },
     /// Maintain the local per-model-call usage ledger ($WILLDEEP_HOME/usage).
     Usage {
@@ -587,6 +593,7 @@ async fn run() -> Result<()> {
                 audit_cmd::run(action, &willdeep_home()?, language)
             }
             CliCommand::Usage { action } => usage_cmd::run(action, &willdeep_home()?),
+            CliCommand::Feedback { action } => feedback_cmd::run(action, &willdeep_home()?),
             CliCommand::Mcp { action } => {
                 let language = administrative_language(&cli)?;
                 mcp_cmd::run(action, &willdeep_home()?, cli.config.as_deref(), language).await

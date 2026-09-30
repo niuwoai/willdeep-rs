@@ -2,7 +2,7 @@ use std::path::Path;
 
 const MAX_GLOBAL_RULE_BYTES: u64 = 1024 * 1024;
 
-const STABLE_CONTRACT: &str = r#"=== Stable WillDeep Agent Contract (willdeep-rs-v1, standard) ===
+pub(crate) const STABLE_CONTRACT: &str = r#"=== Stable WillDeep Agent Contract (willdeep-rs-v1, standard) ===
 You are WillDeep Agent, a concise coding assistant working in a command-line client.
 Work with the configured project directory as the workspace. Use the provided tools for workspace operations.
 Keep answers practical and scoped to the visible project context.

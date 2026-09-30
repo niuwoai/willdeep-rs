@@ -24,7 +24,7 @@ const ASSISTANT_TAIL_CLIP: usize = 1500;
 pub const MAX_SUGGESTION_CHARS: usize = 120;
 
 /// 固定英文；输出语言靠「跟用户走」这条规则，不另做 i18n——它是给模型看的。
-const SYSTEM_PROMPT: &str = "\
+pub(crate) const SYSTEM_PROMPT: &str = "\
 You predict the USER's next message in a chat with a coding agent.
 You are given the USER's most recent messages and the tail of the ASSISTANT's latest reply.
 Write the single most likely message the USER would send next, in the USER's own voice.
