@@ -28,6 +28,25 @@ pub(crate) enum PromptAction {
     ///
     /// The draft's text is the current section, to be rewritten by hand; the
     /// draft does not pass `prompt check` until it changes something.
+    /// Have the session model write up to three variants for one improvement candidate.
+    ///
+    /// Each draft is written independently and must pass the same structure and
+    /// safety gate as a hand-written variant (one repair round is allowed).
+    /// Valid variants are written to files; nothing is evaluated or applied.
+    Propose {
+        /// The candidates JSON file from `willdeep feedback report --candidates`.
+        #[arg(long, value_name = "PATH")]
+        candidates: PathBuf,
+        /// Which candidate (0-based).
+        #[arg(long, default_value_t = 0)]
+        index: usize,
+        /// How many independent variants to draft (1-3).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Where to write the valid variants (default: the current directory).
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+    },
     Draft {
         /// The candidates JSON file.
         #[arg(long, value_name = "PATH")]
@@ -41,8 +60,42 @@ pub(crate) enum PromptAction {
     },
 }
 
-pub(crate) fn run(action: PromptAction) -> Result<()> {
+/// 每轮最多起草几个候选（设计文档 §8.3）。
+const MAX_PROPOSALS: usize = 3;
+/// 一个候选最多请求几次模型：起草一次，没过结构门再修一次。
+const PROPOSAL_ATTEMPTS: usize = 2;
+
+pub(crate) async fn run(action: PromptAction, cli: &crate::Cli) -> Result<()> {
+    if let PromptAction::Propose {
+        candidates,
+        index,
+        count,
+        out_dir,
+    } = action
+    {
+        if !(1..=MAX_PROPOSALS).contains(&count) {
+            bail!("--count must be between 1 and {MAX_PROPOSALS}");
+        }
+        let loaded = crate::config::LoadedConfig::load(cli.config.as_deref())?;
+        let config = crate::harness::resolve_parent_provider_config(cli, &loaded, None)?;
+        let provider = willdeep_core::provider::build_provider(config)
+            .context("initialize the provider that drafts prompt variants")?;
+        let provider =
+            crate::harness::standalone_usage_ledger(&crate::config::willdeep_home()?, None, None)
+                .auxiliary(provider);
+        let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
+        let written = propose(provider, &candidates, index, count, &out_dir).await?;
+        if written.is_empty() {
+            bail!("no drafted variant passed the structure and safety gate");
+        }
+        return Ok(());
+    }
+    run_offline(action)
+}
+
+fn run_offline(action: PromptAction) -> Result<()> {
     match action {
+        PromptAction::Propose { .. } => unreachable!("handled by run"),
         PromptAction::Sections { role } => {
             let roles = match role {
                 Some(role) => vec![parse_role(&role)?],
@@ -93,6 +146,80 @@ pub(crate) fn run(action: PromptAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// 起草 `count` 个变体，合法的写进 `out_dir`，返回写出的文件。
+async fn propose(
+    provider: std::sync::Arc<dyn willdeep_core::provider::Provider>,
+    candidates: &Path,
+    index: usize,
+    count: usize,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    use willdeep_core::prompt_optimizer::{OptimizerInput, ProposalOutcome};
+    use willdeep_core::prompt_sections::{invariant_fragments, max_chars};
+
+    let draft = draft_from_candidates(candidates, index)?;
+    let role = parse_role(&draft.role)?;
+    let source = draft.source.clone().unwrap_or_default();
+    let input = OptimizerInput {
+        role: draft.role.clone(),
+        section: draft.section.clone(),
+        parent_bundle: draft.parent_bundle.clone(),
+        signal: source["signal"].as_str().unwrap_or_default().to_owned(),
+        evidence_count: source["evidence"]["count"].as_u64().unwrap_or_default(),
+        evidence_rate: source["evidence"]["rate"].as_f64(),
+        suggestion: draft.reason.clone(),
+        invariants: invariant_fragments(&role, &draft.section)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        max_chars: max_chars(&draft.text),
+        original: draft.text.clone(),
+    };
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    let mut written = Vec::new();
+    for number in 1..=count {
+        let id = format!("{}-p{number}", draft.id);
+        match willdeep_core::prompt_optimizer::propose(
+            provider.clone(),
+            &input,
+            &id,
+            PROPOSAL_ATTEMPTS,
+        )
+        .await
+        {
+            ProposalOutcome::Valid(variant) => {
+                let path = out_dir.join(format!("{id}.json"));
+                std::fs::write(
+                    &path,
+                    format!("{}\n", serde_json::to_string_pretty(&variant)?),
+                )
+                .with_context(|| format!("write {}", path.display()))?;
+                let (report, _) = check_report(&path)?;
+                println!(
+                    "{report}  change: {}\n  written to {}\n",
+                    variant.reason,
+                    path.display()
+                );
+                written.push(path);
+            }
+            ProposalOutcome::Invalid(problems) => {
+                println!("variant {id} was discarded:");
+                for problem in problems {
+                    println!("  error: {problem}");
+                }
+                println!();
+            }
+        }
+    }
+    if let Some(first) = written.first() {
+        println!(
+            "Next: ruby scripts/prompt_rsi_eval.rb --model <model> --variant {}",
+            first.display()
+        );
+    }
+    Ok(written)
 }
 
 fn parse_role(role: &str) -> Result<PromptRole> {
@@ -269,6 +396,65 @@ mod tests {
             std::env::temp_dir().join(format!("willdeep-prompt-cmd-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    struct Scripted(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl willdeep_core::provider::Provider for Scripted {
+        async fn complete(
+            &self,
+            _messages: &[willdeep_core::Message],
+            _tools: &[willdeep_core::types::ToolDefinition],
+        ) -> Result<willdeep_core::types::Completion, willdeep_core::provider::ProviderError>
+        {
+            Ok(willdeep_core::types::Completion {
+                content: self.0.lock().unwrap().remove(0),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn proposals_that_pass_the_gate_are_written_and_the_rest_are_discarded() {
+        let candidates = temp("candidates.json");
+        std::fs::write(
+            &candidates,
+            serde_json::json!({"candidates": [{
+                "target": {"role": "main", "bundle": null, "section": "tool_rules:edit"},
+                "signal": "tool_failed:edit_file/edit_text_not_found",
+                "evidence": {"count": 6, "rate": null, "examples": []},
+                "suggestion": "strengthen the read-before-edit rule"
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        let original = base_section(&PromptRole::Main, "tool_rules").unwrap();
+        let answer = |text: String| {
+            serde_json::json!({"text": text, "change": "re-read first", "expected_effect": "", "risk": ""}).to_string()
+        };
+        let good = answer(format!(
+            "{original}\n- Re-read the exact lines before edit_file."
+        ));
+        let weak = answer(format!("{original}\n- Retry commits with --no-verify."));
+        let provider = std::sync::Arc::new(Scripted(std::sync::Mutex::new(vec![
+            good,
+            weak.clone(),
+            weak,
+        ])));
+        let out = candidates.with_file_name("out");
+        let written = propose(provider, &candidates, 0, 2, &out).await.unwrap();
+        assert_eq!(written.len(), 1, "the second draft never passes");
+        assert_eq!(
+            written[0].file_name().unwrap(),
+            "main-tool-failed-edit-file-edit-text-not-found-p1.json"
+        );
+        let (report, valid) = check_report(&written[0]).unwrap();
+        assert!(valid, "{report}");
+        let saved: PromptVariant =
+            serde_json::from_str(&std::fs::read_to_string(&written[0]).unwrap()).unwrap();
+        assert_eq!(saved.source.unwrap()["created_by"], "optimizer");
+        let _ = std::fs::remove_dir_all(candidates.parent().unwrap());
     }
 
     #[test]

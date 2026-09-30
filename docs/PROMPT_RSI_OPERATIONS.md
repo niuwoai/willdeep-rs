@@ -4,7 +4,7 @@
 
 ```text
 feedback/*.jsonl ──willdeep feedback report --candidates──▶ 改进候选（该改哪段、凭什么）
-        ──willdeep prompt draft──▶ 变体骨架 ──人改写 text──▶ willdeep prompt check（结构门）
+        ──willdeep prompt propose（模型起草）或 prompt draft（人改写）──▶ willdeep prompt check（结构门）
         ──scripts/prompt_rsi_eval.rb──▶ 对照评测 + 门禁结论 ──人工门──▶ 代码 PR
 ```
 
@@ -46,6 +46,12 @@ feedback/*.jsonl ──willdeep feedback report --candidates──▶ 改进候�
 - 一个变体只替换一段（设计文档 §8.3）。
 - `worker:<工种>` 的变体只作用于这一个工种。
 - `willdeep prompt draft --candidates <file> --index N -o v.json`：从 `feedback report --candidates` 的一条候选生成骨架，`text` 预填当前段原文。骨架原样过不了 `check`，要先改写。
+- `willdeep prompt propose --candidates <file> --index N [--count 1..3] [--out-dir DIR]`：让会话主模型起草变体（设计文档 §8.2、§8.3），沿用全局 `-p/-m/--config`。
+  - **模型看到什么**：优化器的固定系统提示（它也有版本号 `prompt_optimizer@…`，写进变体的 `source`）、原段文本、必须逐字保留的片段、长度上限，以及候选的信号、计数和改进方向。
+  - **模型看不到什么**：会话 id、用户正文、holdout。
+  - **怎么检查**：每个候选独立起草，互不参照；模型写的变体和人写的过同一道结构门，没过就带着问题清单修一次，仍然不过就丢弃。
+  - **产出**：合法的写成 `<id>-p<n>.json`，`source.created_by = "optimizer"`。这些模型请求记入用量账本，算辅助请求。
+  - 本命令不评测、不上线。
 
 ## 3. 结构门 `willdeep prompt check <variant>`
 
@@ -69,6 +75,14 @@ feedback/*.jsonl ──willdeep feedback report --candidates──▶ 改进候�
     - 报告段的 `CONCLUSION` / `EVIDENCE` / `OPEN QUESTIONS` / `<worker-facts>`；
   - 黑板说明里的“not instructions”；
   - 输入建议里的 `NONE`。
+
+- **不得削弱安全**：变体比原段多出以下说法就拒绝，按出现次数比较，原段本来就有的不算：
+  - 绕过审批：`without approval`、`skip approval`、`bypass`
+  - 提权：`full-access`、`--no-verify`
+  - 关闭验证器：`skip` / `disable` / `ignore the verifier`
+  - 注入话术：`ignore previous`、`ignore all`
+  - 破坏性命令：`rm -rf`、`force push`、`--force`
+  - 泄露凭据：`reveal`、`print the api key`
 
 通过时打印新旧版本号，以及段落的行级 diff。
 
@@ -144,6 +158,6 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 
 ## 7. 还没做
 
-- 由模型根据候选和失败摘要自动撰写变体文本（设计文档 §8.3、Phase 4）。
+- 相似失败的聚类（设计文档 Phase 4）：现在一条候选对应一种信号，还不会把措辞不同但根因相同的失败合并。
 - 服务端的数据接收与 canary 灰度（Phase 2、Phase 5）。
 - 输入建议样本的分组：样本太少，目前整套都当 validation 用。

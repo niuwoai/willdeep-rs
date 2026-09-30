@@ -110,3 +110,66 @@ fn a_prompt_variant_reaches_the_model_only_through_a_valid_local_run() {
         "other sections stay"
     );
 }
+
+/// `prompt propose` 走会话主模型：模型答不出合规 JSON 时两次请求后放弃、
+/// 不写文件、退出码非零；候选数超过 3 直接拒绝，一个请求都不发。
+#[test]
+fn prompt_propose_asks_the_configured_model_and_writes_nothing_invalid() {
+    let _serial = process_test_guard();
+    let root = temporary_root();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let provider = MockProvider::start();
+    let config = root.join("config.toml");
+    write_private_config(&config, provider.api_base());
+    let _guard = TestGuard::new(root.clone(), home.clone());
+    let candidates = root.join("candidates.json");
+    write_json(
+        &candidates,
+        serde_json::json!({"candidates": [{
+            "target": {"role": "main", "bundle": null, "section": "tool_rules:edit"},
+            "signal": "tool_failed:edit_file/edit_text_not_found",
+            "evidence": {"count": 6, "rate": null, "examples": []},
+            "suggestion": "strengthen the read-before-edit rule"
+        }]}),
+    );
+    let out = root.join("variants");
+    let propose = |count: &str| {
+        willdeep(&home)
+            .args([
+                "--config",
+                path_text(&config),
+                "prompt",
+                "propose",
+                "--candidates",
+                path_text(&candidates),
+                "--count",
+                count,
+                "--out-dir",
+                path_text(&out),
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let too_many = propose("4");
+    assert!(!too_many.status.success());
+    assert!(String::from_utf8_lossy(&too_many.stderr).contains("--count must be between 1 and 3"));
+    assert_eq!(provider.requests(), 0);
+
+    let discarded = propose("1");
+    assert!(!discarded.status.success());
+    assert!(
+        stdout_text(&discarded).contains("was discarded"),
+        "{}",
+        stdout_text(&discarded)
+    );
+    assert_eq!(provider.requests(), 2, "one draft and one repair round");
+    let requests = provider.captured_requests.lock().unwrap().clone();
+    let user = requests[1]["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains("rejected by the structure gate"), "{user}");
+    assert!(
+        !out.join("main-tool-failed-edit-file-edit-text-not-found-p1.json")
+            .exists()
+    );
+}

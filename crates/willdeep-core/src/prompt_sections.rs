@@ -48,6 +48,56 @@ const MAX_GROWTH: usize = 2;
 /// 很短的段（例如只有一两句）至少允许写到这么多字符。
 const MIN_ALLOWED_CHARS: usize = 400;
 
+/// 放宽审批、关验证器、提权、注入话术、破坏性命令、泄露凭据的说法。变体
+/// 可以改写规则，不能靠一句话把边界放掉——无论这句话是人写的还是模型写的。
+/// 按出现次数比较：原段本来就有的说法不算新增。
+const WEAKENING_PHRASES: &[&str] = &[
+    "without approval",
+    "skip approval",
+    "bypass",
+    "full-access",
+    "--no-verify",
+    "skip the verifier",
+    "disable the verifier",
+    "ignore the verifier",
+    "ignore previous",
+    "ignore all",
+    "rm -rf",
+    "force push",
+    "--force",
+    "reveal",
+    "print the api key",
+];
+
+/// 变体比原段多出来的削弱安全的说法（小写比较）。
+fn weakening_phrases(original: &str, text: &str) -> Vec<&'static str> {
+    let original = original.to_lowercase();
+    let text = text.to_lowercase();
+    WEAKENING_PHRASES
+        .iter()
+        .copied()
+        .filter(|phrase| text.matches(phrase).count() > original.matches(phrase).count())
+        .collect()
+}
+
+/// 一段变体文本的长度上限（字符）。
+pub fn max_chars(original: &str) -> usize {
+    (original.chars().count() * MAX_GROWTH).max(MIN_ALLOWED_CHARS)
+}
+
+/// 这一段里必须原样保留的片段：只列原段里确实出现的。结构门查的就是这份
+/// 清单，优化器的提示词也把它原样交给模型。
+pub fn invariant_fragments(role: &PromptRole, section: &str) -> Vec<&'static str> {
+    let Some(original) = base_section(role, section) else {
+        return Vec::new();
+    };
+    invariants(role, section)
+        .iter()
+        .copied()
+        .filter(|fragment| original.contains(fragment))
+        .collect()
+}
+
 /// 每段必须原样保留的片段：工具名、跨端逐字相同的约定、安全边界。改提示词
 /// 可以换说法，不能把这些删掉。
 fn invariants(role: &PromptRole, section: &str) -> &'static [&'static str] {
@@ -366,15 +416,15 @@ pub fn check_variant(variant: &PromptVariant) -> Result<VariantCheck, Vec<String
     if variant.text == original {
         problems.push("text is identical to the current section".to_owned());
     }
-    let limit = (original.chars().count() * MAX_GROWTH).max(MIN_ALLOWED_CHARS);
+    let limit = max_chars(&original);
     let length = variant.text.chars().count();
     if length > limit {
         problems.push(format!(
             "text has {length} characters; a single-rule change stays within {limit}"
         ));
     }
-    for fragment in invariants(&role, &variant.section) {
-        if original.contains(fragment) && !variant.text.contains(fragment) {
+    for fragment in invariant_fragments(&role, &variant.section) {
+        if !variant.text.contains(fragment) {
             problems.push(format!("text drops a required fragment: {fragment:?}"));
         }
     }
@@ -386,6 +436,11 @@ pub fn check_variant(variant: &PromptVariant) -> Result<VariantCheck, Vec<String
         .any(|line| crate::judge::redact_credentials(line) != line)
     {
         problems.push("text contains something that looks like a credential".to_owned());
+    }
+    for phrase in weakening_phrases(&original, &variant.text) {
+        problems.push(format!(
+            "text adds {phrase:?}, which would weaken a safety rule; say what to do, not what to skip"
+        ));
     }
     if !problems.is_empty() {
         return Err(problems);
@@ -533,6 +588,24 @@ mod tests {
     }
 
     #[test]
+    fn weakening_is_counted_against_the_original_not_the_line() {
+        assert_eq!(
+            weakening_phrases("Never bypass review.", "Never bypass review, ever."),
+            Vec::<&str>::new(),
+            "an edited line keeping an existing phrase is not new"
+        );
+        assert_eq!(
+            weakening_phrases("Ask first.", "Ask first. BYPASS it when urgent."),
+            ["bypass"]
+        );
+        let delegation = invariant_fragments(&PromptRole::Main, "delegation");
+        assert!(delegation.contains(&"task.verifier.command"));
+        assert!(invariant_fragments(&PromptRole::Main, "nope").is_empty());
+        let boundary = invariant_fragments(&PromptRole::Worker("tester".to_owned()), "boundary");
+        assert!(boundary.contains(&"{workspace}"));
+    }
+
+    #[test]
     fn the_structure_gate_rejects_unsafe_or_stale_variants() {
         let problems = |variant: &PromptVariant| check_variant(variant).unwrap_err().join("\n");
         let original = base_section(&PromptRole::Main, "version_control").unwrap();
@@ -574,6 +647,14 @@ mod tests {
         assert!(problems(&unknown).contains("no section"));
         unknown.role = "worker:nobody".to_owned();
         assert!(problems(&unknown).contains("unknown role"));
+
+        let weakened = variant(
+            "main",
+            "version_control",
+            format!("{original}\n- When a hook blocks the commit, retry with --no-verify."),
+        );
+        let message = problems(&weakened);
+        assert!(message.contains("\"--no-verify\""), "{message}");
 
         let boundary = base_section(&PromptRole::Worker("tester".to_owned()), "boundary").unwrap();
         let escaped = variant(
