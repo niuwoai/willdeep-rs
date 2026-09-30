@@ -1907,11 +1907,15 @@ async fn run(home: &Path) -> Result<()> {
         .unwrap_or_default();
     if feedback_settings.enabled {
         let dir = willdeep_core::feedback::feedback_dir(home);
-        sessions.set_feedback(willdeep_core::feedback::FeedbackRecorder::new(
-            willdeep_core::feedback::shared_sink(&dir),
-            "unknown",
-            feedback_settings.store_text,
-        ));
+        sessions.set_feedback(
+            willdeep_core::feedback::FeedbackRecorder::new(
+                willdeep_core::feedback::shared_sink(&dir),
+                "unknown",
+                feedback_settings.store_text,
+            )
+            // 追问、纠正、中断都是对主 Agent 输出的反应。
+            .with_prompt_bundle(willdeep_core::prompt_bundle::main_bundle()),
+        );
         let retain_months = feedback_settings.retain_months;
         let _ = tokio::task::spawn_blocking(move || {
             willdeep_core::feedback::prune(&dir, retain_months)

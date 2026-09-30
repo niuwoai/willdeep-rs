@@ -25,6 +25,7 @@ pub mod monitor_notice;
 pub mod plugin;
 mod project_rules;
 pub mod prompt;
+pub mod prompt_bundle;
 pub mod provider;
 pub mod routing;
 pub mod safety;

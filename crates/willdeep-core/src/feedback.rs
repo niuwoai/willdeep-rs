@@ -77,6 +77,8 @@ pub enum Signal {
     /// 一次 Agent 运行没有收敛就停了（轮次耗尽、输出被截断、改动未验证……），
     /// `stop_reason` 说明是哪一种，`report_len` 为 0 表示连部分结果都没有。
     AgentIncomplete,
+    /// 一次 Worker 运行开始。按工种算「没有结果」比例时的分母。
+    WorkerStarted,
     /// Worker 超时被掐断，没有交回任何结果。
     WorkerTimedOut,
     /// Worker 用完了全部验证尝试也没通过验证命令。
@@ -118,6 +120,10 @@ pub struct FeedbackRecord {
     pub agent_id: Option<Uuid>,
     /// Worker 的工种（`implementer`、`tester`……）；主 Agent 为 `null`。
     pub worker_profile: Option<String>,
+    /// 产生这一行的提示词版本（[`crate::prompt_bundle`]）：`main@…`、
+    /// `worker:<工种>@…`、`input_suggestion@…`；未知为 `null`。
+    #[serde(default)]
+    pub prompt_bundle: Option<String>,
     pub signal: Signal,
     /// 把同一条建议的多个信号串起来。
     pub suggestion_id: Option<Uuid>,
@@ -177,6 +183,7 @@ impl FeedbackRecord {
             turn_id: None,
             agent_id: None,
             worker_profile: None,
+            prompt_bundle: None,
             signal,
             suggestion_id: None,
             text_hash: None,
@@ -240,6 +247,7 @@ pub struct FeedbackRecorder {
     turn_id: Option<String>,
     agent_id: Option<Uuid>,
     worker_profile: Option<String>,
+    prompt_bundle: Option<String>,
 }
 
 impl std::fmt::Debug for FeedbackRecorder {
@@ -264,6 +272,7 @@ impl FeedbackRecorder {
             turn_id: None,
             agent_id: None,
             worker_profile: None,
+            prompt_bundle: None,
         }
     }
 
@@ -313,6 +322,12 @@ impl FeedbackRecorder {
         worker
     }
 
+    /// 给这个记录者写出的行打上提示词版本戳。
+    pub fn with_prompt_bundle(mut self, bundle: impl Into<String>) -> Self {
+        self.prompt_bundle = Some(bundle.into());
+        self
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.sink.is_some()
     }
@@ -330,6 +345,7 @@ impl FeedbackRecorder {
         record.turn_id = self.turn_id.clone();
         record.agent_id = self.agent_id;
         record.worker_profile = self.worker_profile.clone();
+        record.prompt_bundle = self.prompt_bundle.clone();
         fill(&mut record);
         sink.submit(record);
     }
@@ -345,6 +361,8 @@ impl FeedbackRecorder {
         let text = self.stored_text(Some(suggestion));
         let sent_text = self.stored_text(sent);
         self.record(signal, |record| {
+            // 建议由输入建议的提示词生成，与记录者所属的 Agent 无关。
+            record.prompt_bundle = Some(crate::prompt_bundle::input_suggestion_bundle());
             record.suggestion_id = Some(suggestion_id);
             record.text_hash = Some(text_hash(suggestion));
             record.text_len = Some(suggestion.chars().count());
@@ -372,6 +390,11 @@ impl FeedbackRecorder {
             record.turns = Some(turns);
             record.report_len = Some(report.trim().chars().count());
         });
+    }
+
+    /// 一次 Worker 运行开始（每次派工一行，与重试次数无关）。
+    pub fn record_worker_started(&self) {
+        self.record(Signal::WorkerStarted, |_| {});
     }
 
     /// Worker 超时或验证用尽这类「没有结果」的收尾。
@@ -983,11 +1006,22 @@ mod tests {
         let sink = FeedbackSink::spawn(&dir);
         let recorder = FeedbackRecorder::new(sink, "tui", false)
             .with_session(Some(Uuid::nil()))
-            .with_turn(Some("turn-1".to_owned()));
+            .with_turn(Some("turn-1".to_owned()))
+            .with_prompt_bundle("main@000000000000");
         let worker_id = Uuid::new_v4();
-        let worker = recorder.for_worker(worker_id, "implementer");
+        let worker = recorder
+            .for_worker(worker_id, "implementer")
+            .with_prompt_bundle("worker:implementer@111111111111");
         assert!(worker.is_worker() && !recorder.is_worker());
         recorder.record_tool_failure("run_command", "command_timeout");
+        worker.record_worker_started();
+        recorder.record_suggestion(SuggestionEvent {
+            suggestion_id: Uuid::new_v4(),
+            signal: Signal::SuggestionShown,
+            suggestion: "run the tests",
+            dwell: None,
+            sent: None,
+        });
         worker.record_incomplete("max_turns", 16, "  ");
         worker.record_worker_failure(Signal::WorkerVerifierExhausted, Some(3));
         assert!(recorder.flush(Duration::from_secs(2)));
@@ -1003,6 +1037,16 @@ mod tests {
         assert_eq!(tool["error_class"], "command_timeout");
         assert!(tool["agent_id"].is_null());
         assert_eq!(tool["turn_id"], "turn-1");
+        assert_eq!(tool["prompt_bundle"], "main@000000000000");
+        assert_eq!(
+            find("worker_started")["prompt_bundle"],
+            "worker:implementer@111111111111"
+        );
+        assert_eq!(
+            find("suggestion_shown")["prompt_bundle"],
+            crate::prompt_bundle::input_suggestion_bundle(),
+            "suggestion rows carry the suggestion prompt's bundle"
+        );
         let incomplete = find("agent_incomplete");
         assert_eq!(incomplete["agent_id"], worker_id.to_string());
         assert_eq!(incomplete["worker_profile"], "implementer");

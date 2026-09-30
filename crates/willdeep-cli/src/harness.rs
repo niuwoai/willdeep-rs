@@ -275,6 +275,7 @@ pub(crate) fn feedback_recorder(
     )
     .with_session(context.session_id)
     .with_turn(context.turn_id.clone())
+    .with_prompt_bundle(willdeep_core::prompt_bundle::main_bundle())
 }
 
 fn usage_ledger_context(

@@ -113,7 +113,7 @@ pub(crate) fn run(action: AuditAction, home: &Path, language: Language) -> Resul
     Ok(())
 }
 
-fn parse_time(text: &str) -> Result<u64> {
+pub(crate) fn parse_time(text: &str) -> Result<u64> {
     if let Ok(unix) = text.trim().parse::<u64>() {
         return Ok(unix);
     }
@@ -213,35 +213,17 @@ impl FeedbackSummary {
         }
     }
 
-    /// 把每句后续输入与它前面的负反馈关联起来（离线标注，不调模型）。
-    ///
-    /// 一句后续输入算「纠正」：词法粗分类是 `correction`；或者从上一句后续
-    /// 输入（最多往前 [`CORRECTION_WINDOW_MS`]）到它之间，出现了会话回退、
-    /// 中途喊停或人拒绝审批。`rows` 须按时间排好序、只含同一会话。
+    /// 把每句后续输入与它前面的负反馈关联起来（离线标注，不调模型），
+    /// 规则见 [`classify_followups`]。
     fn label_followups(&mut self, rows: &[&FeedbackRow]) {
-        let mut window_start = 0_u64;
-        for (index, row) in rows.iter().enumerate() {
-            if row.signal != "user_followup" {
-                continue;
-            }
+        for (index, corrective) in classify_followups(rows) {
             self.followups += 1;
-            let floor = window_start.max(row.ts_ms.saturating_sub(CORRECTION_WINDOW_MS));
-            let negative_before = rows[..index].iter().any(|earlier| {
-                earlier.ts_ms >= floor
-                    && (matches!(
-                        earlier.signal.as_str(),
-                        "session_rewound" | "turn_cancelled"
-                    ) || (earlier.signal == "approval_resolved"
-                        && earlier.decision.as_deref() == Some("deny")))
-            });
-            let corrective = row.followup_hint.as_deref() == Some("correction") || negative_before;
             if corrective {
                 self.corrective_followups += 1;
-                if row.prev_status.as_deref() == Some("completed") {
+                if rows[index].prev_status.as_deref() == Some("completed") {
                     self.completed_then_corrected += 1;
                 }
             }
-            window_start = row.ts_ms;
         }
     }
 
@@ -279,6 +261,36 @@ impl FeedbackSummary {
             )
         })
     }
+}
+
+/// 逐句标注后续输入：`(在 rows 里的下标, 是否算纠正)`。
+///
+/// 一句后续输入算「纠正」：词法粗分类是 `correction`；或者从上一句后续
+/// 输入（最多往前 [`CORRECTION_WINDOW_MS`]）到它之间，出现了会话回退、
+/// 中途喊停或人拒绝审批。`rows` 须按时间排好序、只含同一会话。
+pub(crate) fn classify_followups(rows: &[&FeedbackRow]) -> Vec<(usize, bool)> {
+    let mut labels = Vec::new();
+    let mut window_start = 0_u64;
+    for (index, row) in rows.iter().enumerate() {
+        if row.signal != "user_followup" {
+            continue;
+        }
+        let floor = window_start.max(row.ts_ms.saturating_sub(CORRECTION_WINDOW_MS));
+        let negative_before = rows[..index].iter().any(|earlier| {
+            earlier.ts_ms >= floor
+                && (matches!(
+                    earlier.signal.as_str(),
+                    "session_rewound" | "turn_cancelled"
+                ) || (earlier.signal == "approval_resolved"
+                    && earlier.decision.as_deref() == Some("deny")))
+        });
+        labels.push((
+            index,
+            row.followup_hint.as_deref() == Some("correction") || negative_before,
+        ));
+        window_start = row.ts_ms;
+    }
+    labels
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -435,18 +447,23 @@ struct ApprovalRecord {
     command: String,
 }
 
-/// 反馈账本里审计用得到的那几个键；其余字段（含可能存了的正文）不读。
-struct FeedbackRow {
-    session_id: Option<Uuid>,
+/// 反馈账本里审计与 `feedback report` 用得到的那几个键；其余字段（含可能
+/// 存了的正文）不读。
+pub(crate) struct FeedbackRow {
+    pub session_id: Option<Uuid>,
+    /// Worker 的 id；主 Agent 为 `None`。
+    pub agent_id: Option<Uuid>,
     /// 行的时间（Unix 毫秒）；解析不了为 0，只影响「纠正」的时间窗关联。
-    ts_ms: u64,
-    signal: String,
-    tool: Option<String>,
-    error_class: Option<String>,
-    report_len: Option<u64>,
-    followup_hint: Option<String>,
-    prev_status: Option<String>,
-    decision: Option<String>,
+    pub ts_ms: u64,
+    pub signal: String,
+    pub worker_profile: Option<String>,
+    pub prompt_bundle: Option<String>,
+    pub tool: Option<String>,
+    pub error_class: Option<String>,
+    pub report_len: Option<u64>,
+    pub followup_hint: Option<String>,
+    pub prev_status: Option<String>,
+    pub decision: Option<String>,
 }
 
 struct Sources {
@@ -502,7 +519,7 @@ impl Sources {
 }
 
 /// 反馈账本的全部月份分片。坏行与不认识的 schema 跳过并计数。
-fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
+pub(crate) fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok((Vec::new(), 0));
     };
@@ -543,6 +560,9 @@ fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
             };
             rows.push(FeedbackRow {
                 session_id: text("session_id").and_then(|value| Uuid::parse_str(&value).ok()),
+                agent_id: text("agent_id").and_then(|value| Uuid::parse_str(&value).ok()),
+                worker_profile: text("worker_profile"),
+                prompt_bundle: text("prompt_bundle"),
                 ts_ms: text("ts")
                     .and_then(|ts| willdeep_core::usage_ledger::parse_ts(&ts))
                     .unwrap_or_default(),

@@ -22,6 +22,8 @@
   - 工种熔断打开 10 分钟后放行一次试探，成功即恢复，不再整个会话都关不上。
 - `willdeep audit export` 的反馈信号新增纠正率与「已完成却被纠正」的轮次数：把后续输入与其前的回退、喊停、拒绝审批关联起来离线标注。
 - Worker 共享黑板（`board_post` / `board_read`）：父 Agent 与同一会话的所有 Worker 读写同一块板，写入的是事实、发现、决定、疑问；每条最多 500 字符，写入前先脱敏；作者由运行时填写。新派出的 Worker 在任务简报里带上最近条目，`await_agents` 也会附上新条目。
+- 提示词版本戳：反馈账本每行带 `prompt_bundle`（`main@…` / `worker:<工种>@…` / `input_suggestion@…`，只对提示词中不随运行变化的部分取哈希）；新增 `worker_started` 信号，作为各工种比例的分母；`willdeep feedback bundles` 列出当前各角色的版本号。
+- `willdeep feedback report [--since] [--json] [--candidates PATH]`：跨会话汇总建议采用率（按版本）、各工种的“没有结果”比例、工具失败排行、goal 完成被拒比例和按周的纠正率趋势，并按确定性阈值给出提示词改进候选（JSON 形状对齐 RSI 设计 §8.2）。只有计数与会话 id，不含正文。
 - 内置插件（从 Xedit 移植，`willdeep plugin builtin list|install`）：
   - `willdeep-scheduler`：`schedule_task`（每 N 分钟 / 每天 / 工作日 / 每周，可带自我完成的 goal 与无人值守审批档位）、`complete_scheduled_task`、`list_scheduled_tasks`。daemon 每 30 秒检查，到期任务各开一个全新会话；插件停用即全部停触发，错过的触发只补一次，上一次没跑完就跳过。
   - `willdeep-roundtable`：专家圆桌，10 位带鲜明人设的专家，强制点名回应与明确表态，每轮小结判断收敛，产出决策文档；专家可反问主持人（`roundtable_continue` 续跑）。模型调用经宿主的 `willdeep/ai/complete`。
