@@ -35,6 +35,7 @@ willdeep --language en audit export                     # 报告语言跟全局 
 | 改动归属 | `runtime/diff-attributions.json` | 记录自带 `session_id`：时间、根 / 子 Agent、工具、文件、快照 |
 | 审阅 / 回滚 | `runtime/diff-reviews.json`、`runtime/recovery/<快照>-*` | 按本会话的快照 id |
 | 检查点回退 | `runtime/recovery/rewind-<会话>-*`、事件流 `session.rewound` | 按本会话 id |
+| 反馈信号 | `feedback/YYYY-MM.jsonl`（[本机反馈账本](FEEDBACK_LEDGER.md)） | 记录自带 `session_id`。只出计数：各信号次数、建议采用率与原样发送率、按 `工具/错误类别` 的失败次数、没结果就停下的运行数、后续输入的粗分类分布；坏行与别的 schema 计入 `summary.feedback_unparsable` |
 
 JSON 的 `schema_version` 为 1，顶层 `summary` 与每个 `sessions[]` 项的字段名和 Markdown 各段一一对应。
 
@@ -45,12 +46,13 @@ JSON 的 `schema_version` 为 1，顶层 `summary` 与每个 `sessions[]` 项的
 - **验证计数去重。** 检查点证据和快照级记录常常是同一次验证的两份记录，按（快照，命令）去重后再计数。
 - **「没验证」不是「没通过」。** 子 Agent 的 verifier 结论分通过 / 失败 / 未验证三档；验证命令分通过 / 失败 / 其它（超时、没启动起来）。
 - **改动归属只认工具调用窗口内真实变化的路径。** 调用前已有的脏文件不算，见 `docs/RUNTIME_DAEMON.md` 的 Diff 一节。
-- **报告里没有的东西：** 提示词、模型正文、工具入参、凭据（命令按审批同一套规则打码）、子 Agent 的 verifier 命令行（可能带路径参数，留在 Runtime 私有状态里）。
+- **报告里没有的东西：** 提示词、模型正文、反馈账本里的建议 / 发送原文（即使 `store_text` 打开也不出）、工具入参、凭据（命令按审批同一套规则打码）、子 Agent 的 verifier 命令行（可能带路径参数，留在 Runtime 私有状态里）。
 
 ## 已知缺口
 
 - hook 拦截没有独立日志，只能从会话记录里的工具结果反推；hook 自己收到的载荷在 hook 那边，
-  `approval_resolved` 事件也还没接线（见 `docs/HOOKS.md`）。
+  hook 侧的 `approval_resolved` 事件也还没接线（见 `docs/HOOKS.md`）。人的审批处置与耗时
+  已经进了反馈账本（`approval_resolved` 信号），在「反馈信号」一节里计数。
 - 只回滚已跟踪文件的撤销不留痕：`git restore` 之后没有任何文件记得这件事。只有把未跟踪文件
   挪进回收区的撤销能从目录名反推出来。
 - `runtime/events.ndjson` 还没并进来：它的会话关联靠消息文本，且 `diff-attributions.json`

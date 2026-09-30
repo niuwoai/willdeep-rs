@@ -10,6 +10,7 @@
 //! | 验证证据 | 会话检查点 + `runtime/diff-verifications.json` | 检查点直接带；快照级的按本会话改过的快照 id 关联 |
 //! | 改动归属 | `runtime/diff-attributions.json` | 记录自带 `session_id` |
 //! | 审阅 / 回滚 | `runtime/diff-reviews.json`、`runtime/recovery/<快照>-*` | 按本会话的快照 id |
+//! | 反馈信号 | `feedback/YYYY-MM.jsonl` | 记录自带 `session_id`；只汇总计数，不出正文 |
 //!
 //! 只读磁盘上的状态文件：不需要 Runtime 在跑，不调 Provider，不走
 //! `AgentStore::open`（它会把运行中的 Agent 标成中断——审计不能有副作用）。
@@ -160,6 +161,74 @@ pub(crate) struct Summary {
     pub reverts: usize,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub feedback: FeedbackSummary,
+    pub feedback_unparsable: usize,
+}
+
+/// 反馈账本（`docs/FEEDBACK_LEDGER.md`）按会话的汇总。只有计数：建议原文、
+/// 发送原文、提示词即使账本里存了（`store_text`）也不进报告。
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct FeedbackSummary {
+    /// 每种信号各多少行。
+    pub signals: BTreeMap<String, usize>,
+    /// `工具/错误类别` → 失败次数。
+    pub tool_failures: BTreeMap<String, usize>,
+    /// 没收敛且一个字都没交回来的运行（含 Worker 超时、验证用尽）。
+    pub runs_without_result: usize,
+    /// 后续输入的词法粗分类分布。
+    pub followup_hints: BTreeMap<String, usize>,
+}
+
+impl FeedbackSummary {
+    fn add(&mut self, row: &FeedbackRow) {
+        *self.signals.entry(row.signal.clone()).or_default() += 1;
+        match row.signal.as_str() {
+            "tool_failed" => {
+                *self
+                    .tool_failures
+                    .entry(format!(
+                        "{}/{}",
+                        row.tool.as_deref().unwrap_or("?"),
+                        row.error_class.as_deref().unwrap_or("?")
+                    ))
+                    .or_default() += 1;
+            }
+            "agent_incomplete" if row.report_len == Some(0) => self.runs_without_result += 1,
+            "worker_timed_out" | "worker_verifier_exhausted" => self.runs_without_result += 1,
+            _ => {}
+        }
+        if let Some(hint) = &row.followup_hint {
+            *self.followup_hints.entry(hint.clone()).or_default() += 1;
+        }
+    }
+
+    fn merge(&mut self, other: &FeedbackSummary) {
+        for (key, count) in &other.signals {
+            *self.signals.entry(key.clone()).or_default() += count;
+        }
+        for (key, count) in &other.tool_failures {
+            *self.tool_failures.entry(key.clone()).or_default() += count;
+        }
+        for (key, count) in &other.followup_hints {
+            *self.followup_hints.entry(key.clone()).or_default() += count;
+        }
+        self.runs_without_result += other.runs_without_result;
+    }
+
+    fn count(&self, signal: &str) -> usize {
+        self.signals.get(signal).copied().unwrap_or_default()
+    }
+
+    /// 采用过（Tab）的建议占展示过的比例，以及原样发送占展示的比例。
+    fn suggestion_rates(&self) -> Option<(f64, f64)> {
+        let shown = self.count("suggestion_shown");
+        (shown > 0).then(|| {
+            (
+                self.count("suggestion_accepted") as f64 / shown as f64,
+                self.count("suggestion_sent_verbatim") as f64 / shown as f64,
+            )
+        })
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -211,6 +280,7 @@ pub(crate) struct SessionAudit {
     pub files_changed: Vec<String>,
     pub reviews: Vec<ReviewEntry>,
     pub reverts: Vec<RevertEntry>,
+    pub feedback: FeedbackSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,9 +385,21 @@ struct ApprovalRecord {
     command: String,
 }
 
+/// 反馈账本里审计用得到的那几个键；其余字段（含可能存了的正文）不读。
+struct FeedbackRow {
+    session_id: Option<Uuid>,
+    signal: String,
+    tool: Option<String>,
+    error_class: Option<String>,
+    report_len: Option<u64>,
+    followup_hint: Option<String>,
+}
+
 struct Sources {
     approvals: Vec<ApprovalRecord>,
     approvals_unparsable: usize,
+    feedback: Vec<FeedbackRow>,
+    feedback_unparsable: usize,
     tasks: Vec<RuntimeTask>,
     interactions: Vec<RuntimeInteraction>,
     agents: Vec<StoredAgent>,
@@ -331,9 +413,13 @@ impl Sources {
     fn load(home: &Path) -> Result<Self> {
         let paths = DaemonPaths::new(home);
         let (approvals, approvals_unparsable) = load_approvals(&home.join("approvals.jsonl"))?;
+        let (feedback, feedback_unparsable) =
+            load_feedback(&willdeep_core::feedback::feedback_dir(home))?;
         Ok(Self {
             approvals,
             approvals_unparsable,
+            feedback,
+            feedback_unparsable,
             tasks: crate::daemon::load_tasks(&paths.tasks)
                 .context("read runtime/tasks.json")?
                 .into_values()
@@ -359,6 +445,59 @@ impl Sources {
             recovery_dirs: list_directories(&diff_review::recovery_root(home))?,
         })
     }
+}
+
+/// 反馈账本的全部月份分片。坏行与不认识的 schema 跳过并计数。
+fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok((Vec::new(), 0));
+    };
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut rows = Vec::new();
+    let mut unparsable = 0;
+    for path in paths {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                unparsable += 1;
+                continue;
+            };
+            if value.get("schema").and_then(|value| value.as_str())
+                != Some(willdeep_core::feedback::SCHEMA)
+            {
+                unparsable += 1;
+                continue;
+            }
+            let text = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            };
+            let Some(signal) = text("signal") else {
+                unparsable += 1;
+                continue;
+            };
+            rows.push(FeedbackRow {
+                session_id: text("session_id").and_then(|value| Uuid::parse_str(&value).ok()),
+                signal,
+                tool: text("tool"),
+                error_class: text("error_class"),
+                report_len: value.get("report_len").and_then(|value| value.as_u64()),
+                followup_hint: text("followup_hint"),
+            });
+        }
+    }
+    Ok((rows, unparsable))
 }
 
 /// 一行一条 JSON；坏行跳过并计数，不让一次写坏让整份审计出不来。
@@ -420,7 +559,11 @@ pub(crate) fn build_report(home: &Path, scope: &Scope) -> Result<AuditReport> {
         .iter()
         .map(|session| audit_session(session, &sources))
         .collect::<Vec<_>>();
-    let summary = summarize(&audits, sources.approvals_unparsable);
+    let summary = summarize(
+        &audits,
+        sources.approvals_unparsable,
+        sources.feedback_unparsable,
+    );
     Ok(AuditReport {
         schema_version: SCHEMA_VERSION,
         generated_at: format_iso8601(now()),
@@ -725,6 +868,14 @@ fn audit_session(session: &Session, sources: &Sources) -> SessionAudit {
         files_changed,
         reviews,
         reverts,
+        feedback: sources
+            .feedback
+            .iter()
+            .filter(|row| row.session_id == Some(session.id))
+            .fold(FeedbackSummary::default(), |mut summary, row| {
+                summary.add(row);
+                summary
+            }),
     }
 }
 
@@ -793,10 +944,15 @@ fn resolution_label(resolution: &InteractionResolution) -> &'static str {
     }
 }
 
-fn summarize(audits: &[SessionAudit], approvals_unparsable: usize) -> Summary {
+fn summarize(
+    audits: &[SessionAudit],
+    approvals_unparsable: usize,
+    feedback_unparsable: usize,
+) -> Summary {
     let mut summary = Summary {
         sessions: audits.len(),
         approvals_unparsable,
+        feedback_unparsable,
         ..Default::default()
     };
     for audit in audits {
@@ -848,6 +1004,7 @@ fn summarize(audits: &[SessionAudit], approvals_unparsable: usize) -> Summary {
         summary.reverts += audit.reverts.len();
         summary.input_tokens += audit.input_tokens.unwrap_or_default();
         summary.output_tokens += audit.output_tokens.unwrap_or_default();
+        summary.feedback.merge(&audit.feedback);
     }
     summary
 }
@@ -1110,6 +1267,51 @@ fn render_session(out: &mut String, audit: &SessionAudit, language: Language, no
                 ]
             })
             .collect(),
+        none,
+    );
+    let feedback = &audit.feedback;
+    let mut feedback_rows = feedback
+        .signals
+        .iter()
+        .map(|(signal, count)| vec![signal.clone(), count.to_string()])
+        .collect::<Vec<_>>();
+    if let Some((accepted, verbatim)) = feedback.suggestion_rates() {
+        feedback_rows.push(vec![
+            t(
+                "建议采用率 / 原样发送率",
+                "Suggestion accept / verbatim rate",
+                "提案の採用率 / そのまま送信率",
+            )
+            .to_owned(),
+            format!("{:.0}% / {:.0}%", accepted * 100.0, verbatim * 100.0),
+        ]);
+    }
+    if feedback.runs_without_result > 0 {
+        feedback_rows.push(vec![
+            t(
+                "没有结果就停下的运行",
+                "Runs that stopped with no result",
+                "結果なしで停止した実行",
+            )
+            .to_owned(),
+            feedback.runs_without_result.to_string(),
+        ]);
+    }
+    for (tool, count) in &feedback.tool_failures {
+        feedback_rows.push(vec![format!("tool_failed · {tool}"), count.to_string()]);
+    }
+    for (hint, count) in &feedback.followup_hints {
+        feedback_rows.push(vec![format!("followup · {hint}"), count.to_string()]);
+    }
+    section(
+        out,
+        &format!(
+            "{}（{}）",
+            t("反馈信号", "Feedback signals", "フィードバック信号"),
+            feedback.signals.values().sum::<usize>()
+        ),
+        &[t("信号", "Signal", "信号"), t("次数", "Count", "回数")],
+        feedback_rows,
         none,
     );
     section(
@@ -1798,6 +2000,93 @@ mod tests {
         assert_eq!(parse_time("2026-09-20").unwrap(), 1_789_862_400);
         assert_eq!(parse_time("1789862400").unwrap(), 1_789_862_400);
         assert!(parse_time("last week").is_err());
+    }
+
+    /// 反馈账本按 `session_id` 归入会话，只出计数：即使账本里存了正文
+    /// （`store_text`），报告里也不出现；坏行与别的 schema 计入 unparsable。
+    #[test]
+    fn feedback_signals_are_counted_per_session_without_text() {
+        let (home, session, _workspace) = seeded_home();
+        let dir = willdeep_core::feedback::feedback_dir(&home.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = Uuid::new_v4();
+        let row = |session_id: Uuid, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "schema": willdeep_core::feedback::SCHEMA,
+                "session_id": session_id.to_string(),
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value.to_string()
+        };
+        let lines = [
+            row(
+                session.id,
+                serde_json::json!({"signal": "suggestion_shown", "text": "private suggestion"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "suggestion_shown"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "suggestion_accepted"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "suggestion_sent_verbatim", "sent_text": "private sent"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "tool_failed", "tool": "edit_file", "error_class": "edit_text_not_found"}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "agent_incomplete", "stop_reason": "max_turns", "report_len": 0}),
+            ),
+            row(
+                session.id,
+                serde_json::json!({"signal": "user_followup", "followup_hint": "correction"}),
+            ),
+            row(
+                other,
+                serde_json::json!({"signal": "tool_failed", "tool": "x", "error_class": "io"}),
+            ),
+            "{not json".to_owned(),
+            r#"{"schema":"someone.else.v9","signal":"x"}"#.to_owned(),
+        ];
+        std::fs::write(dir.join("2026-09.jsonl"), lines.join("\n") + "\n").unwrap();
+        let report = build_report(
+            &home.0,
+            &Scope {
+                session: Some(session.id.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let feedback = &report.sessions[0].feedback;
+        assert_eq!(feedback.signals.get("suggestion_shown"), Some(&2));
+        assert_eq!(feedback.suggestion_rates(), Some((0.5, 0.5)));
+        assert_eq!(
+            feedback.tool_failures.get("edit_file/edit_text_not_found"),
+            Some(&1)
+        );
+        assert_eq!(feedback.tool_failures.len(), 1, "other sessions stay out");
+        assert_eq!(feedback.runs_without_result, 1);
+        assert_eq!(feedback.followup_hints.get("correction"), Some(&1));
+        assert_eq!(report.summary.feedback_unparsable, 2);
+        let json = serde_json::to_string(&report).unwrap();
+        let markdown = render_markdown(&report, Language::En);
+        for output in [&json, &markdown] {
+            assert!(
+                !output.contains("private"),
+                "feedback text leaked into the report"
+            );
+        }
+        assert!(markdown.contains("Feedback signals"));
+        assert!(markdown.contains("| Suggestion accept / verbatim rate | 50% / 50% |"));
     }
 
     #[test]

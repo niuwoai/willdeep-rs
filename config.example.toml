@@ -86,6 +86,7 @@ webhook_on_attention_required = true
 [feedback]
 enabled = true
 store_text = false
+retain_months = 12 # daemon 启动时删掉更早的月份分片；0 = 不清理
 
 [providers.some-im]
 provider = "some-im"

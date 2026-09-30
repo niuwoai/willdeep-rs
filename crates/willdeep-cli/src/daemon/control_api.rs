@@ -1340,6 +1340,14 @@ async fn session_rewind(state: &ServerState, request: &ApiRequest) -> ApiResult 
         .sessions
         .commit_rewind(&plan)
         .map_err(|error| ApiFailure::invalid(format!("cannot rewind Session: {error}")))?;
+    // 回退几乎总是在说「这几轮做错了」：RSI 最直接的负反馈之一。
+    if let Some(recorder) = state.sessions.feedback() {
+        recorder
+            .clone()
+            .with_session(Some(plan.session_id))
+            .with_turn(plan.through_turn_id.map(|id| id.to_string()))
+            .record_rewind(plan.dropped_turn_ids.len(), params.restore_workspace);
+    }
     state
         .events
         .append(
@@ -1645,6 +1653,13 @@ fn turn_steer(state: &ServerState, request: &ApiRequest) -> ApiResult {
         )));
     }
     let task_id = state.tasks.steer(params.session_id, message.to_owned());
+    // 插话本身就是反馈：模型跑着跑着用户忍不住要纠正或补充。
+    if let Some(recorder) = state.sessions.feedback() {
+        recorder
+            .clone()
+            .with_session(Some(params.session_id))
+            .record_steer(message, task_id.is_some());
+    }
     if let Some(task_id) = task_id {
         state
             .events

@@ -900,6 +900,8 @@ export function App() {
       if (busy) { setPrompt(""); return; }
     }
     const content = goalToStart || typed || (attachments.length ? t.attachmentPrompt : ""); if (!content || !workspace) return;
+    // 采用过的建议在真正发出去这一刻结算（插话也算）：原样 / 改过 / 重写由服务端判定。
+    inputSuggestion.settleSent(typed);
     // 本轮在跑时回车不是排队也不是被吞：直接送进正在跑的这一轮，下一次调模型前注入。
     if (busy) { await steer(content); return; }
     const activeGoal = goalToStart || goal;
@@ -1112,9 +1114,9 @@ export function App() {
         {skillQuery !== undefined && <Box className="suggestions"><Text className="suggestion-title">{t.skills}</Text><Input className="skill-search" size="sm" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t.searchSkills} aria-label={t.searchSkills} />{skillMatches.length ? skillMatches.map((skill) => <button key={skill.identifier} type="button" onMouseDown={(event) => { event.preventDefault(); setSkillSearch(""); setPrompt((current) => current.replace(/\$[\w-]*$/, `$${skill.identifier} `)); }}><strong>${skill.identifier}</strong><small>{skill.name} · {skill.description}</small></button>) : <Text className="suggestion-empty">{t.noSkills}</Text>}</Box>}
         {attachments.length > 0 && <Flex className="attachment-row">{attachments.map((attachment, index) => <Box key={`${attachment.name}-${index}`} className="attachment-chip">{attachment.kind === "image" ? <img src={`data:${attachment.media_type};base64,${attachment.data}`} alt={attachment.name} /> : <Box className="text-attachment">TXT</Box>}<Text title={attachment.name}>{attachment.name}</Text><button type="button" aria-label={t.removeAttachment} title={t.removeAttachment} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></Box>)}</Flex>}
         {ghostSuggestion && <Box className="input-suggestion" aria-hidden="true" pt={attachments.length ? "2" : "4"}><Text as="span">{ghostSuggestion}</Text><Text as="span" className="input-suggestion-hint">{t.inputSuggestionAccept}</Text></Box>}
-        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => { if (event.target.value) inputSuggestion.clear(); setPrompt(event.target.value); }} onKeyDown={(event) => {
-          if (event.key === "Tab" && !event.shiftKey && ghostSuggestion) { event.preventDefault(); setPrompt(ghostSuggestion); inputSuggestion.clear(); return; }
-          if (event.key === "Escape" && ghostSuggestion) { event.preventDefault(); inputSuggestion.clear(); return; }
+        <Textarea value={prompt} onPaste={handlePaste} onChange={(event) => { if (event.target.value && ghostSuggestion) inputSuggestion.clear("ignored_typed"); setPrompt(event.target.value); }} onKeyDown={(event) => {
+          if (event.key === "Tab" && !event.shiftKey && ghostSuggestion) { event.preventDefault(); setPrompt(ghostSuggestion); inputSuggestion.accept(); return; }
+          if (event.key === "Escape" && ghostSuggestion) { event.preventDefault(); inputSuggestion.clear("dismissed"); return; }
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
         }} aria-description={ghostSuggestion ? `${ghostSuggestion} · ${t.inputSuggestionAccept}` : undefined} placeholder={ghostSuggestion ? "" : busy ? t.steerPlaceholder : t.promptPlaceholder} minH="104px" maxH="240px" resize="vertical" border="0" outline="none" lineHeight="1.5" _focus={{ boxShadow: "none", outline: "none" }} _focusVisible={{ boxShadow: "none", outline: "none" }} px="4" pt={attachments.length ? "2" : "4"} pb="12" />
         {composerEntries.length > 0 && (
