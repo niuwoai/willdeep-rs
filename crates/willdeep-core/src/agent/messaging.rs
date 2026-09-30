@@ -409,4 +409,148 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// 第一个 Worker 往黑板写一条发现；第二个 Worker 的任务简报里就有它。
+    struct BoardChildren {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for BoardChildren {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            let transcript = messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let offered = tools.iter().any(|tool| tool.name == "board_post");
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("offered={offered}\n{transcript}"));
+            let posted = messages
+                .iter()
+                .any(|message| message.content.starts_with("Posted to the shared board"));
+            if transcript.contains("map the config") && !posted {
+                return Ok(Completion {
+                    content: String::new(),
+                    reasoning: None,
+                    tool_calls: vec![ToolCall {
+                        id: "post".into(),
+                        name: "board_post".into(),
+                        arguments:
+                            r#"{"kind":"fact","text":"config is loaded in src/config.rs:42"}"#
+                                .into(),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    usage: None,
+                });
+            }
+            Ok(Completion {
+                content: "CONCLUSION: done".into(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".into()),
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn workers_share_findings_through_the_board() {
+        let root = std::env::temp_dir().join(format!("willdeep-board-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let child: Arc<dyn Provider> = Arc::new(BoardChildren { seen: seen.clone() });
+        let board = Arc::new(crate::board::Board::in_memory());
+        let background = Arc::new(BackgroundTaskRegistry::default());
+        let catalog = SubagentCatalog::new(
+            &root,
+            crate::subagent::builtin_profiles(child.clone()),
+            background.clone(),
+        )
+        .with_board(board.clone());
+        let tools = ToolRegistry::new(&root, ApprovalMode::Strict)
+            .unwrap()
+            .with_background_tasks(background.clone())
+            .with_board(board.clone(), "parent");
+        let agent = Agent::new(
+            child,
+            tools,
+            AgentConfig {
+                max_turns: 4,
+                system_prompt: "parent".into(),
+                context_window: 128_000,
+                token_budget: None,
+            },
+        )
+        .with_subagents(Arc::new(catalog));
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        };
+
+        let first = agent
+            .execute_tool(&call(
+                "spawn_agent",
+                serde_json::json!({"prompt": "map the config", "profile": "scout", "run_in_background": true}),
+            ))
+            .await
+            .expect("spawn first");
+        assert!(first.contains("agent_id="));
+        let joined = agent
+            .execute_tool(&call(
+                "await_agents",
+                serde_json::json!({"timeout_seconds": 30}),
+            ))
+            .await
+            .expect("join first");
+        assert!(joined.contains("New notes on the shared board"), "{joined}");
+        assert!(joined.contains("[fact] worker:scout:"), "{joined}");
+        assert!(joined.contains("src/config.rs:42"));
+
+        agent
+            .execute_tool(&call(
+                "spawn_agent",
+                serde_json::json!({"prompt": "fix the loader", "profile": "scout"}),
+            ))
+            .await
+            .expect("second worker");
+        {
+            let transcripts = seen.lock().unwrap();
+            let second = transcripts
+                .iter()
+                .find(|text| text.contains("fix the loader"))
+                .expect("second worker ran");
+            assert!(
+                second.starts_with("offered=true"),
+                "workers get the board tools"
+            );
+            assert!(
+                second.contains("<board note="),
+                "the brief carries the board"
+            );
+            assert!(second.contains("src/config.rs:42"));
+        }
+
+        let read = agent
+            .execute_tool(&call("board_read", serde_json::json!({"since_seq": 0})))
+            .await
+            .expect("parent reads");
+        assert!(read.contains("src/config.rs:42"));
+        let plain = ToolRegistry::new(&root, ApprovalMode::Strict).unwrap();
+        assert!(
+            !plain
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "board_post"),
+            "no board, no board tools"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

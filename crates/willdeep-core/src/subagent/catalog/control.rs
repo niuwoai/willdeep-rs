@@ -119,6 +119,15 @@ impl SubagentCatalog {
             ));
             self.background.mark_delivered(&snapshot.id);
         }
+        // 这段时间里 Worker 们往黑板上写了什么，一并交回。
+        if let Some(notes) = self
+            .board()
+            .and_then(|board| crate::board::render(&board.read("parent", None)))
+        {
+            out.push_str("New notes on the shared board:\n");
+            out.push_str(&notes);
+            out.push_str("\n\n");
+        }
         if !still_running.is_empty() {
             out.push_str(&format!(
                 "Timed out after {}s; still running: {}. Call await_agents again, keep working, or stop_agent.\n",
