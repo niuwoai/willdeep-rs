@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.88.0-rc1] - 2026-09-30
+
 ### Added
 - 本机反馈账本 `$WILLDEEP_HOME/feedback/YYYY-MM.jsonl`（`willdeep.feedback.v1`，`[feedback]` 配置）：记录下一句建议的展示、Tab 采用、Esc 放弃、无视另打、被顶掉，以及采用后原样 / 改过 / 重写发送；主 Agent 与 Worker 的工具失败（按错误类别）、轮次耗尽等未收敛运行、Worker 超时与验证用尽。默认只记 hash 与长度，`store_text = true` 才写原文。
 - 反馈账本第二批信号：所有前端提交到 Runtime 的后续输入（上一轮状态、间隔、是否排队、纠正 / 补充 / 重做 / 认可的词法粗分类）、插话、会话回退、审批与提问的处置及耗时（轮次取消时的自动撤销记为 `cancelled`，不算人的拒绝）、中途停下的轮次。
