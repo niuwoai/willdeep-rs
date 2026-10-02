@@ -80,9 +80,12 @@ module PromptRsiEval
     File.file?(path) ? JSON.parse(File.read(path, encoding: 'UTF-8'))['rows'] : []
   end
 
-  # 任务清单（任务 id → 分组）：门禁拿它逐题核对报告，不从报告本身推断该有哪些题。
+  # 任务清单（任务 id → 分组与内容哈希）：门禁拿它逐题核对报告，不从报告本身推断
+  # 该有哪些题；内容哈希用来核对每一轮实际跑的是不是同一份题。
   def task_manifest
-    ModelEval::Task.load_all(File.dirname(TASKS)).to_h { |task| [task.id, task.split] }
+    ModelEval::Task.load_all(File.dirname(TASKS)).to_h do |task|
+      [task.id, { 'split' => task.split, 'sha256' => task.content_sha256 }]
+    end
   end
 
   def run_model_eval(options, provenance)

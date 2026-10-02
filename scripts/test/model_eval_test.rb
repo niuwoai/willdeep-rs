@@ -75,6 +75,20 @@ module TaskFixture
 end
 
 class TaskLoadingTest < Minitest::Test
+  # 内容哈希每次读现盘：改 fixture、加文件都会变，对照评测靠它发现题被改过。
+  def test_content_digest_follows_every_file_in_the_task
+    Dir.mktmpdir do |root|
+      task = TaskFixture.test_task(root)
+      first = task.content_sha256
+      assert_equal first, task.content_sha256
+      TaskFixture.write(task.dir, 'fixture/lib/adder.rb', TaskFixture::LIB)
+      edited = task.content_sha256
+      refute_equal first, edited
+      TaskFixture.write(task.dir, 'fixture/notes.txt', 'stray')
+      refute_equal edited, task.content_sha256
+    end
+  end
+
   def test_solution_must_stay_inside_editable
     Dir.mktmpdir do |root|
       dir = File.join(root, 'tasks', 'bad')

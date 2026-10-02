@@ -119,6 +119,8 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 1. 用 baseline 和 candidate 各跑一遍 validation + regression；
 2. 第一阶段通过门禁后，再各跑一遍 holdout。
 
+任务集要在几轮之间保持不变。驱动开跑前读出任务清单，每题记下分组和整个任务目录的内容哈希；`model_eval.rb` 在每题开跑前把内容哈希写进报告行，跑完再算一遍，中途被改过的那一题记为 `error`。门禁逐题核对：每一轮报告行的哈希都必须等于清单里的哈希，否则结论是 `non_reproducible`。所以跑对照评测期间不要切分支，也不要编辑 `bench/model-eval/tasks/`。
+
 门禁（`scripts/lib/prompt_rsi/gate.rb`，阈值即设计文档 §8.4）：
 
 | 检查 | 条件 |
@@ -137,7 +139,7 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 | `candidate_passes` | 通过门禁，交给人工门 |
 | `rejected` | 第一阶段有检查没过，或 holdout 的底线没守住 |
 | `overfit` | validation 提升、holdout 底线都守住，但 holdout 通过率下降 |
-| `non_reproducible` | 出处不全（commit、模型、二进制版本、构建 commit、数据集哈希、变体哈希、新旧版本号缺一项）；工作区有未提交改动（`crates`、`scripts`、`bench`、`web/src`、`Cargo.*` 下的未跟踪文件也算）；二进制不是从这个 commit 的干净源码构建的；报告行与任务清单对不上（缺题、多题、重复、分组不符、未知状态）；实际生效的提示词对不上（baseline 套了变体、候选没套上预期那份，或者执行完的任务没报告）；或有任务没真正执行（error / skipped / 整轮没跑成，holdout 也一样） |
+| `non_reproducible` | 出处不全（commit、模型、二进制版本、构建 commit、数据集哈希、变体哈希、新旧版本号缺一项）；工作区有未提交改动（`crates`、`scripts`、`bench`、`web/src`、`Cargo.*` 下的未跟踪文件也算）；二进制不是从这个 commit 的干净源码构建的；报告行与任务清单对不上（缺题、多题、重复、分组不符、未知状态，或者同一个 id 的任务内容与开跑前不一致）；实际生效的提示词对不上（baseline 套了变体、候选没套上预期那份，或者执行完的任务没报告）；或有任务没真正执行（error / skipped / 整轮没跑成，holdout 也一样） |
 
 **input-suggestion 套件**：沿用该套件的及格线，并要求候选不比 baseline 差：
 - reject 100%、无泄漏；

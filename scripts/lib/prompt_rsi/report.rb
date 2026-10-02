@@ -2,13 +2,13 @@
 
 require 'digest'
 require 'fileutils'
-require 'find'
 require 'json'
 require 'securerandom'
 require 'time'
 
 require_relative 'gate'
 require_relative '../suggestion_report'
+require_relative '../tree_digest'
 
 module PromptRsi
   # 对照评测报告的组装、渲染与归档。只含计数、任务 id 与出处，不含模型正文
@@ -35,16 +35,7 @@ module PromptRsi
 
     # 任务集的内容哈希：路径与内容都算，任务集一改结果就不可比。
     def dataset_sha256(root)
-      digest = Digest::SHA256.new
-      files = []
-      Find.find(root) { |path| files << path if File.file?(path) }
-      files.sort.each do |path|
-        digest.update(path.delete_prefix(root))
-        digest.update("\0")
-        digest.update(File.binread(path))
-        digest.update("\0")
-      end
-      digest.hexdigest
+      TreeDigest.sha256(root)
     end
 
     # 逐任务的对照（只给 validation 与 regression；holdout 不出逐题结果）。

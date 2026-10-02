@@ -30,7 +30,8 @@ class PromptRsiGateTest < Minitest::Test
   def row(task, split, status, overrides = {})
     { 'task' => task, 'split' => split, 'status' => status, 'false_completion' => false,
       'input_tokens' => 1000, 'output_tokens' => 200, 'elapsed_seconds' => 10.0,
-      'prompt_variant_reported' => true, 'prompt_variant_bundle' => nil }.merge(overrides)
+      'prompt_variant_reported' => true, 'prompt_variant_bundle' => nil,
+      'task_sha256' => "sha-#{task}" }.merge(overrides)
   end
 
   # 候选一行：willdeep 报告套上的正是 provenance 里的候选版本。
@@ -56,7 +57,9 @@ class PromptRsiGateTest < Minitest::Test
 
   # 任务清单：validation 10、regression 2、holdout 4，外加一道不参与对照的 train。
   def tasks
-    (baseline_rows + holdout(0, 0)[:baseline]).to_h { |row| [row['task'], row['split']] }.merge('t0' => 'train')
+    (baseline_rows + holdout(0, 0)[:baseline] + [row('t0', 'train', 'passed')]).to_h do |item|
+      [item['task'], { 'split' => item['split'], 'sha256' => item['task_sha256'] }]
+    end
   end
 
   def evaluate(candidate, holdout: holdout(2, 2), provenance: PROVENANCE)
@@ -141,6 +144,21 @@ class PromptRsiGateTest < Minitest::Test
     result = evaluate(candidate_rows, holdout: truncated)
     assert_equal 'non_reproducible', result['verdict']
     assert_includes result['problems'], 'holdout candidate 缺任务：h1, h2, h3'
+  end
+
+  # 同一个任务 id、内容却变了：两轮之间有人改了题（切分支、编辑 fixture），
+  # 或者报告行压根没记内容哈希。id 和分组都对得上也不能比。
+  def test_a_task_whose_content_changed_between_runs_is_not_reproducible
+    edited = candidate_rows.map { |item| item['task'] == 'v3' ? item.merge('task_sha256' => 'sha-edited') : item }
+    result = evaluate(edited)
+    assert_equal 'non_reproducible', result['verdict']
+    assert_includes result['problems'], 'candidate 的任务内容与开跑前不一致：v3'
+    legacy = candidate_rows.map { |item| item.reject { |key, _| key == 'task_sha256' } }
+    assert(evaluate(legacy)['problems'].any? { |text| text.start_with?('candidate 的任务内容与开跑前不一致：') })
+    holdout_edited = holdout(2, 2)
+    holdout_edited[:baseline][0] = holdout_edited[:baseline][0].merge('task_sha256' => 'sha-edited')
+    assert_includes evaluate(candidate_rows, holdout: holdout_edited)['problems'],
+                    'holdout baseline 的任务内容与开跑前不一致：h0'
   end
 
   def test_holdout_that_never_ran_is_not_reproducible_rather_than_overfit
