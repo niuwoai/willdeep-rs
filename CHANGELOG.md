@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.89.0-rc1] - 2026-10-03
+
+### Added
+- 反馈账本新增信号 `run_verified`：每次 Agent 运行收尾记一行，`verification` 为 `passed` / `failed` / `stale` / `unverified`，`count` 为这次运行实际跑过的验证命令数，判定与完成门禁同一口径。
+- `user_followup` 新增 `prev_turn_id`，记下这句话反应的是哪一轮。
+
+### Changed
+- `willdeep feedback report` 的失败链（RSI 复核 R5 后续）：
+  - Runtime 下的新账本按轮次切段，失败标记只取这一轮的行，反应绑定到它指向的那一轮；进程内执行与旧账本仍按时间切段。
+  - 主 Agent 的验证结论进入结局判定：验证失败记 bad，验证通过记 good，没有用户反应也能定结局；纠正、回退、喊停仍然优先。
+  - `chains` 新增 `sources`，按证据来源计数；文本报告新增 `outcome evidence` 一行。
+
 ## [0.88.0-rc8] - 2026-10-03
 
 ### Fixed

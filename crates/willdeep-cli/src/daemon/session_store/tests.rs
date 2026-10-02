@@ -1420,7 +1420,7 @@ fn followups_and_cancellations_reach_the_feedback_ledger() {
             .unwrap()
             .0
     };
-    submit("write the parser");
+    let first = submit("write the parser");
     let second = submit("不对，parser 要支持注释");
     store.request_cancel(second.id).unwrap();
 
@@ -1442,6 +1442,11 @@ fn followups_and_cancellations_reach_the_feedback_ledger() {
     assert_eq!(followup["client"], "web");
     assert_eq!(followup["session_id"], session.id.to_string());
     assert_eq!(followup["turn_id"], second.id.to_string());
+    assert_eq!(
+        followup["prev_turn_id"],
+        first.id.to_string(),
+        "the reaction is bound to the turn it answers"
+    );
     assert_eq!(followup["prev_status"], "queued");
     assert_eq!(followup["queued_behind"], true);
     assert!(

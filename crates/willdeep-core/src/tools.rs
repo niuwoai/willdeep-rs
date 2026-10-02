@@ -2054,6 +2054,7 @@ pub use agent_control::{DEFAULT_AWAIT_SECONDS, MAX_AGENT_MESSAGE_CHARS, MAX_AWAI
 pub(crate) use agent_control::{PARENT_ONLY_TOOLS, update_plan_definition};
 use background_shell::run_background_shell;
 pub use background_shell::run_background_supervisor;
+pub use verification::RunVerification;
 use verification::{capture_verification_snapshot, report_verification, verification_status};
 
 fn validate_workspace_relative(requested: &str) -> Result<(), ToolError> {

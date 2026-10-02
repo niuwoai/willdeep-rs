@@ -199,5 +199,18 @@ N4 随后修好（0.88.0-rc7）：
   - 门禁 `suggestion` 新增必填参数 `samples:`，逐条核对：缺样本、多样本、内容变了、没记哈希、清单为空，都记为 `non_reproducible`。
   - 样本清单随报告存为 `sample_manifest`，`--rescore` 用它核对，不重读样本目录。
 
-还没做的：
-- **R5 的后续**：按 turn 关联用户反应，并接入运行时 verifier 的 passed / failed 事实。这需要账本里有 turn 级的 verifier 结果，目前没有。
+R5 的后续随后完成（0.89.0-rc1）：
+
+- **账本**：
+  - `user_followup` 新增 `prev_turn_id`，记下这句话反应的是哪一轮。daemon 里本来就拿得到上一轮，只是以前丢掉了 id。
+  - 新增信号 `run_verified`：每次 Agent 运行收尾记一行，`verification` 为 `passed` / `failed` / `stale` / `unverified`，`count` 为这次运行实际跑过的验证命令数。判定与完成门禁同一口径，只算这次运行跑过的验证；Runtime 下自动带 `turn_id`、bundle、Worker 身份。
+- **失败链**：
+  - 后续输入都带 `prev_turn_id` 的会话按轮次切段：失败标记只取这一轮的行，反应取指向这一轮的后续输入。旧账本与进程内执行仍按时间切段。
+  - 主 Agent 的 `run_verified` 进入结局判定：`failed` 记 bad，`passed` 记 good，用户不说话也成立。明确的纠正、回退、喊停仍然优先。
+  - 报表新增 `sources`，按证据来源计数。
+- **仍是局限**：
+  - 词法认可（`approval`）依旧是启发式。
+  - `run_verified` 只说明 Agent 跑过的检查是否通过，不说明检查本身够不够。
+  - `session_rewound` 记的是保留下来的最后一轮，被丢掉的轮次还要靠时间窗关联。
+
+复核文档 R1–R8 与 N1–N5 的修复到此全部完成。

@@ -480,6 +480,7 @@ struct ApprovalRecord {
 
 /// 反馈账本里审计与 `feedback report` 用得到的那几个键；其余字段（含可能
 /// 存了的正文）不读。
+#[derive(Clone)]
 pub(crate) struct FeedbackRow {
     pub session_id: Option<Uuid>,
     /// Worker 的 id；主 Agent 为 `None`。
@@ -500,6 +501,12 @@ pub(crate) struct FeedbackRow {
     /// 失败链据此判断这句话能不能算作对上一轮结果的反应。
     pub gap_ms: Option<u64>,
     pub queued_behind: Option<bool>,
+    /// Runtime 轮次 id；进程内执行为 `None`。
+    pub turn_id: Option<String>,
+    /// 仅 `user_followup`：这句话反应的是哪一轮。
+    pub prev_turn_id: Option<String>,
+    /// 仅 `run_verified`：`passed` / `failed` / `stale` / `unverified`。
+    pub verification: Option<String>,
 }
 
 struct Sources {
@@ -612,6 +619,9 @@ pub(crate) fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
                 followup_hint: text("followup_hint"),
                 gap_ms: value.get("gap_ms").and_then(|value| value.as_u64()),
                 queued_behind: value.get("queued_behind").and_then(|value| value.as_bool()),
+                turn_id: text("turn_id"),
+                prev_turn_id: text("prev_turn_id"),
+                verification: text("verification"),
             });
         }
     }
