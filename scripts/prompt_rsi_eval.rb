@@ -37,6 +37,8 @@ module PromptRsiEval
   TASKS = File.join(ROOT, 'bench', 'model-eval', 'tasks')
   SAMPLES = File.join(ROOT, 'bench', 'input-suggestion', 'samples')
   ARCHIVE = File.join(ROOT, 'bench', 'prompt-rsi')
+  # 复评报告的 run_id 里带这个标记，一眼能和原始运行区分开。
+  RESCORED_TAG = 'rescored'
 
   module_function
 
@@ -123,12 +125,12 @@ module PromptRsiEval
                                     version: provenance['version'], ran_at: ran_at)
   end
 
-  def judge_suggestion(provenance, raws, ran_at: {})
+  def judge_suggestion(provenance, raws, ran_at: {}, tag: nil)
     summaries = raws.to_h { |side, raw| [side, summarize_suggestion(raw, provenance, ran_at: ran_at[side])] }
     result = PromptRsi::Gate.suggestion(provenance: provenance, baseline: summaries['baseline'],
                                         candidate: summaries['candidate'])
     result['stats'] = summaries
-    PromptRsi::Report.build(suite: 'input-suggestion', provenance: provenance, result: result)
+    PromptRsi::Report.build(suite: 'input-suggestion', provenance: provenance, result: result, tag: tag)
   end
 
   # 返回 [报告, 双方原始报告]；双方原始报告随后存进归档，供人工判定与 `--rescore`。
@@ -154,13 +156,11 @@ module PromptRsiEval
       abort("样本除 judged 以外被改过（或报告没有指纹）：#{changed.keys.join('、')}。只能填 judged，不能改模型输出与样本。")
     end
     ran_at = original['stats'].to_h.transform_values { |summary| summary['ran_at'] }
-    report = judge_suggestion(original['provenance'], raws, ran_at: ran_at)
+    report = judge_suggestion(original['provenance'], raws, ran_at: ran_at, tag: RESCORED_TAG)
     report['evidence'] = original['evidence']
     report['evidence_sha256'] = original['evidence_sha256']
     report['rescored_from'] = path.delete_prefix("#{archive}/")
-    name = "#{original['provenance']['variant_id']}-#{original['provenance']['model']}-rescored-" \
-           "#{report['generated_at'].delete('-:')}"
-    saved = PromptRsi::Report.archive(report, archive, history: options[:history], name: name)
+    saved = PromptRsi::Report.archive(report, archive, history: options[:history])
     puts PromptRsi::Report.markdown(report)
     puts "报告：#{saved}"
     report['verdict'] == 'candidate_passes' ? 0 : 1

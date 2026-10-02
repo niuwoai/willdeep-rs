@@ -146,14 +146,14 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 `plausible` 需要人工判定。两边都判完之后，要求 wrong-voice 为 0、plausible 不下降。「判完」的意思是：每一侧给出了建议的 suggest 样本，逐条都有合法的 `judged`（`plausible` / `wrong-voice` / `off-topic` / `wrong-language`）。只判了一部分、baseline 没判，或者填了不认识的值，结论都是 `needs_human_judging`，报告里会列出每一侧还差哪些样本。两边样本数不一致时记为 `non_reproducible`。
 
 人工判定的流程：
-1. 实弹跑完后，双方的原始样本存在 `bench/prompt-rsi/suggestion-runs/<时间>-<变体>-<模型>/{baseline,candidate}.json`，报告的 `evidence` 字段指向这里，每条 suggest 样本都带一个 `judged: null`。
+1. 实弹跑完后，双方的原始样本存在 `bench/prompt-rsi/suggestion-runs/<run_id>/{baseline,candidate}.json`，报告的 `evidence` 字段指向这里，每条 suggest 样本都带一个 `judged: null`。
 2. 在这两份文件里填 `judged`。只能改这个字段：报告里记了样本其余内容的指纹（`evidence_sha256`），改了模型输出、样本 id 或生效的变体，复评会直接拒绝。
-3. 运行 `ruby scripts/prompt_rsi_eval.rb --rescore bench/prompt-rsi/reports/<日期>/<报告>.json`。它只读归档重算门禁，不请求模型、不调二进制。结论另存为 `<变体>-<模型>-rescored-<时间>.{json,md}`，带 `rescored_from` 指回原报告，原报告保持不变；history 追加一行，同样带 `rescored_from`。
+3. 运行 `ruby scripts/prompt_rsi_eval.rb --rescore bench/prompt-rsi/reports/<日期>/<报告>.json`。它只读归档重算门禁，不请求模型、不调二进制。结论另存为一份新报告（`run_id` 里带 `rescored`），带 `rescored_from` 指回原报告，原报告保持不变；history 追加一行，同样带 `rescored_from`。
 
 判的时候最好先不看是哪一侧，判完再对文件名，避免偏向候选；脚本目前不做盲评。
 
 **产出**：
-- 报告写到 `bench/prompt-rsi/reports/<日期>/<变体>-<模型>.{json,md}`，并向 `bench/prompt-rsi/history.jsonl` 追加一行（只追加，不改旧行）。
+- 报告写到 `bench/prompt-rsi/reports/<日期>/<run_id>.{json,md}`，并向 `bench/prompt-rsi/history.jsonl` 追加一行（只追加，不改旧行）。`run_id` 带随机后缀，同一天同一变体同一模型重跑也各存一份；目标文件已存在时脚本报错，不覆盖。history 每行记下 `run_id`、`report`（报告路径）和 `report_sha256`，可以据此找回并核对原件。
 - 报告只含计数、任务 id 和出处，不含模型正文，也不含变体正文（只记变体文件的 sha256）。输入建议套件另存双方原始样本供人工判定（见上），与 `bench/input-suggestion/runs/` 同一口径：样本是合成的，里面有模型对样本给出的建议原文。
 - 带变体的运行不会进 `bench/model-eval` 与 `bench/input-suggestion` 的模型趋势历史。
 

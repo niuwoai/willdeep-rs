@@ -4,6 +4,7 @@ require 'digest'
 require 'fileutils'
 require 'find'
 require 'json'
+require 'securerandom'
 require 'time'
 
 require_relative 'gate'
@@ -16,6 +17,11 @@ module PromptRsi
     SCHEMA = 'willdeep.prompt-rsi-report.v1'
     # 输入建议套件双方原始样本的归档子目录（相对归档根目录）。
     EVIDENCE_DIR = 'suggestion-runs'
+    # run_id 随机后缀的字节数（十六进制后是它的两倍长）。
+    RUN_ID_RANDOM_BYTES = 3
+
+    # 归档目标已存在：报告与样本都是证据，只新增、不覆盖。
+    class ArchiveExists < StandardError; end
 
     # §11.2 第 4 道：门禁通过后仍要人来做的事。
     HUMAN_GATE = [
@@ -53,9 +59,19 @@ module PromptRsi
       end
     end
 
-    def build(suite:, provenance:, result:, baseline_rows: [], candidate_rows: [], generated_at: Time.now.utc)
+    # 一次评测（或一次复评）的唯一标识：时间、变体、模型，外加随机后缀——
+    # 同一秒、同一变体、同一模型跑两遍也不会撞名。`tag` 标出复评之类的派生结论。
+    def run_id(provenance, generated_at, tag: nil)
+      parts = [generated_at.strftime('%Y%m%dT%H%M%SZ'), provenance['variant_id'], provenance['model'], tag,
+               SecureRandom.hex(RUN_ID_RANDOM_BYTES)]
+      parts.compact.join('-').gsub(/[^A-Za-z0-9._-]/, '_')
+    end
+
+    def build(suite:, provenance:, result:, baseline_rows: [], candidate_rows: [], generated_at: Time.now.utc,
+              tag: nil)
       report = {
         'schema' => SCHEMA,
+        'run_id' => run_id(provenance, generated_at, tag: tag),
         'suite' => suite,
         'generated_at' => generated_at.strftime('%Y-%m-%dT%H:%M:%SZ'),
         'verdict' => result['verdict'],
@@ -72,10 +88,9 @@ module PromptRsi
     # 输入建议套件双方的原始样本（含模型输出，与 `bench/input-suggestion/runs/`
     # 同一口径），人工判定就填在这两份文件里。返回相对归档目录的路径。
     def save_suggestion_evidence(dir, report, baseline:, candidate:)
-      provenance = report['provenance']
-      stamp = report['generated_at'].delete('-:')
-      run = "#{stamp}-#{provenance['variant_id']}-#{provenance['model']}".gsub(/[^A-Za-z0-9._-]/, '_')
-      relative = File.join(EVIDENCE_DIR, run)
+      relative = File.join(EVIDENCE_DIR, report.fetch('run_id'))
+      raise ArchiveExists, "样本目录已存在，不覆盖：#{File.join(dir, relative)}" if File.exist?(File.join(dir, relative))
+
       FileUtils.mkdir_p(File.join(dir, relative))
       { 'baseline' => baseline, 'candidate' => candidate }.each do |side, raw|
         # suggest 样本都带上 `judged` 键（初值 null），人工判定就填在这里。
@@ -107,6 +122,7 @@ module PromptRsi
       provenance = report['provenance']
       lines = ["# 提示词对照评测：#{provenance['variant_id']}", '']
       lines << "- 结论：**#{report['verdict']}**"
+      lines << "- 运行：`#{report['run_id']}`#{report['rescored_from'] ? "（复评自 `#{report['rescored_from']}`）" : ''}"
       lines << "- 套件：#{report['suite']} · 模型：#{provenance['model']} · 生成于 #{report['generated_at']}"
       lines << "- 变体：#{provenance['role']} / #{provenance['section']}（`#{provenance['parent_bundle']}` → `#{provenance['candidate_bundle']}`）"
       lines << "- 出处：commit #{provenance['commit'] || '—'}#{provenance['dirty'] ? '（dirty）' : ''} · " \
@@ -146,27 +162,36 @@ module PromptRsi
       lines
     end
 
-    # 写 `<dir>/<date>/<name>.{json,md}`（`name` 缺省为 `<variant>-<model>`），
-    # 并向 history.jsonl 追加一行。
-    def archive(report, dir, history: true, name: nil)
+    # 写 `<dir>/reports/<date>/<run_id>.{json,md}`，并向 history.jsonl 追加一行，
+    # 记下 run_id、报告路径和报告内容的 sha256。已归档的报告是证据，不覆盖：
+    # 同名文件已存在就抛 `ArchiveExists`。
+    def archive(report, dir, history: true)
       provenance = report['provenance']
-      name = (name || "#{provenance['variant_id']}-#{provenance['model']}").gsub(/[^A-Za-z0-9._-]/, '_')
       day = File.join(dir, 'reports', report['generated_at'][0, 10])
       FileUtils.mkdir_p(day)
-      json = File.join(day, "#{name}.json")
-      File.write(json, "#{JSON.pretty_generate(report)}\n")
-      File.write(File.join(day, "#{name}.md"), markdown(report))
+      json = File.join(day, "#{report.fetch('run_id')}.json")
+      content = "#{JSON.pretty_generate(report)}\n"
+      write_new(json, content)
+      write_new(json.sub(/\.json\z/, '.md'), markdown(report))
       if history
-        row = { 'ran_at' => report['generated_at'], 'suite' => report['suite'], 'verdict' => report['verdict'],
-                'variant_id' => provenance['variant_id'], 'role' => provenance['role'],
+        row = { 'run_id' => report['run_id'], 'ran_at' => report['generated_at'], 'suite' => report['suite'],
+                'verdict' => report['verdict'], 'variant_id' => provenance['variant_id'], 'role' => provenance['role'],
                 'section' => provenance['section'], 'parent_bundle' => provenance['parent_bundle'],
                 'candidate_bundle' => provenance['candidate_bundle'], 'model' => provenance['model'],
                 'commit' => provenance['commit'], 'dirty' => provenance['dirty'],
-                'failed_checks' => report['checks'].to_a.reject { |item| item['ok'] }.map { |item| item['name'] } }
+                'failed_checks' => report['checks'].to_a.reject { |item| item['ok'] }.map { |item| item['name'] },
+                'report' => json.delete_prefix("#{dir}/"), 'report_sha256' => Digest::SHA256.hexdigest(content) }
         row['rescored_from'] = report['rescored_from'] if report['rescored_from']
         File.open(File.join(dir, 'history.jsonl'), 'a') { |file| file.puts(JSON.generate(row)) }
       end
       json
+    end
+
+    # 独占创建：文件已存在就失败，不会悄悄覆盖旧证据。
+    def write_new(path, content)
+      File.open(path, File::WRONLY | File::CREAT | File::EXCL, encoding: 'UTF-8') { |file| file.write(content) }
+    rescue Errno::EEXIST
+      raise ArchiveExists, "归档文件已存在，不覆盖：#{path}"
     end
   end
 end
