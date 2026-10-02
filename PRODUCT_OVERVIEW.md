@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-10-02 | 当前版本：v0.88.0-rc5（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-03 | 当前版本：v0.88.0-rc6（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 产品概览最多 20,000 个 Unicode 字符；预算内作为参考资料直接注入 Agent 提示，超限后主文档只保留摘要与子文档索引，运行时只注入索引提示并按需读取详情。完整项目指令仍限于适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
 
