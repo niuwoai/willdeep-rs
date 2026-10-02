@@ -2,9 +2,9 @@
 
 **敢让它自己跑，因为跑完你能查账。**
 
-自托管的 AI Coding Agent。模型可以不出国，每一行改动能追溯到是哪个 Agent、哪次工具调用改的，小模型交上来的活由退出码裁决而不是自我声明。一个二进制，终端 / 浏览器 / 手机三种界面，关掉窗口任务照跑。
+自托管的 AI Coding Agent。模型可以不出国，每一行改动能追溯到是哪个 Agent、哪次工具调用改的，小模型交上来的活由退出码裁决而不是自我声明，检查点回退把对话和文件一起退回去。目标（`/goal`）是带 token 预算和验收清单的长任务，跨轮次、跨重启累计，daemon 被打断会自己接着跑；每笔模型用量和每次人对 Agent 的纠正都留在本地账本里，跑完能逐条复盘。一个二进制，终端 / 浏览器 / 手机三种界面，关掉窗口任务照跑。
 
-> **WillDeep** is a self-hosted AI coding agent for people who have to answer for what the agent did: every changed line is attributed to the agent and tool call that wrote it, dangerous commands never reach the model for a verdict, sub-agent work is judged by exit codes, and sessions outlive your terminal. Works with any OpenAI-compatible or Anthropic-style endpoint, including models that never leave your datacenter.
+> **WillDeep** is a self-hosted AI coding agent for people who have to answer for what the agent did: every changed line is attributed to the agent and tool call that wrote it, dangerous commands never reach the model for a verdict, sub-agent work is judged by exit codes, and sessions and goals outlive your terminal — token budgets and acceptance checklists survive a daemon restart too. Usage and feedback ledgers stay on your machine, so every model call and every correction the agent had to be given is reviewable later. Works with any OpenAI-compatible or Anthropic-style endpoint, including models that never leave your datacenter.
 
 [![CI](https://github.com/niuwoai/willdeep-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/niuwoai/willdeep-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/niuwoai/willdeep-rs)](https://github.com/niuwoai/willdeep-rs/releases/latest)
