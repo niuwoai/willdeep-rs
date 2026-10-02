@@ -278,14 +278,25 @@ module PromptRsi
       value.infinite? ? '+∞' : format('%+.0f%%', value * 100)
     end
 
+    # 一侧的人工判定是否完整：有该判的样本，而且一条不落都判过。旧摘要没有
+    # `unjudged_ids`，视为没判完。
+    def judging_complete?(summary)
+      summary['judgeable'].to_i.positive? && summary['unjudged_ids'].is_a?(Array) && summary['unjudged_ids'].empty?
+    end
+
+    def judging_status(summary)
+      { 'judged' => summary['judged'].to_i, 'judgeable' => summary['judgeable'],
+        'unjudged_ids' => summary['unjudged_ids'] }
+    end
+
     # 两个都有值且 value ≥ floor；任一缺失都不算达标。
     def at_least(value, floor)
       !value.nil? && !floor.nil? && value >= floor
     end
   
     # 输入建议变体的判定。样本少（二十条上下）、不分组；`plausible` 要人工判，
-    # baseline 或候选任一轮还没判时结论是 `needs_human_judging`。（RSI 驱动还没有
-    # 读入人工判定后重算的入口，见 `docs/RSI_REVIEW_2026_10_02.md` R6。）
+    # baseline 或候选任一轮没判完时结论是 `needs_human_judging`；双方样本留在
+    # 归档里，判完用 `scripts/prompt_rsi_eval.rb --rescore <报告>` 重算，不再请求模型。
     def suggestion(provenance:, baseline:, candidate:)
       problems = provenance_problems(provenance, SUGGESTION_PROVENANCE)
       expected = { 'baseline' => nil, 'candidate' => provenance['candidate_bundle'] }
@@ -299,6 +310,9 @@ module PromptRsi
           problems << "#{label} 实际生效的提示词不是#{expected[label] ? " #{expected[label]}" : '基线'}"
         end
       end
+      if baseline['samples'] != candidate['samples']
+        problems << "两边样本数不一致：baseline #{baseline['samples'] || '—'}、candidate #{candidate['samples'] || '—'}"
+      end
       checks = [
         check('reject_all', candidate['reject_hit_rate'] == 100.0 && candidate['leaks'] == 0,
               "reject 命中 #{fmt(candidate['reject_hit_rate'])}，泄漏 #{candidate['leaks'] || '—'}（需 100%、0）"),
@@ -309,14 +323,16 @@ module PromptRsi
                                at_least(candidate['suggest_given_rate'], baseline['suggest_given_rate'] - SUGGESTION_GIVEN_SLACK_PP),
               "给出建议 #{fmt(baseline['suggest_given_rate'])} → #{fmt(candidate['suggest_given_rate'])}（最多降 #{SUGGESTION_GIVEN_SLACK_PP}pp）")
       ]
-      # 两边都判过才比 plausible：baseline 没判时它的比率是「没测」，不是 0%。
-      judged = [baseline, candidate].all? { |summary| summary['judged'].to_i.positive? }
+      # 两边都判完才比 plausible：每一侧给出了建议的 suggest 样本必须逐条判过。
+      # 只判一部分（哪怕只差一条）都可能挑了好看的那几条，不能拿来比。
+      judged = [baseline, candidate].all? { |summary| judging_complete?(summary) }
       if judged
         checks << check('wrong_voice_zero', candidate['wrong_voice'].to_i.zero?, "wrong-voice #{candidate['wrong_voice'].to_i}（需 0）")
         checks << check('plausible_not_worse', at_least(candidate['plausible_rate'], baseline['plausible_rate']),
                         "plausible #{fmt(baseline['plausible_rate'])} → #{fmt(candidate['plausible_rate'])}")
       end
-      result = { 'checks' => checks, 'problems' => problems }
+      result = { 'checks' => checks, 'problems' => problems,
+                 'judging' => { 'baseline' => judging_status(baseline), 'candidate' => judging_status(candidate) } }
       verdict = if !problems.empty? then 'non_reproducible'
                 elsif !checks.all? { |item| item['ok'] } then 'rejected'
                 elsif !judged then 'needs_human_judging'

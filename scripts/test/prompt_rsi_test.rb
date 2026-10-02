@@ -15,6 +15,7 @@ require 'tmpdir'
 
 require_relative '../lib/prompt_rsi/gate'
 require_relative '../lib/prompt_rsi/report'
+require_relative '../prompt_rsi_eval'
 
 class PromptRsiGateTest < Minitest::Test
   PROVENANCE = {
@@ -190,9 +191,12 @@ class PromptRsiGateTest < Minitest::Test
   end
 
   # 一份摘要；缺省是 baseline（报告了没有套变体）。
+  # 该判 10 条；`judged` 给几条就判了前几条，其余进 `unjudged_ids`。
   def suggestion_summary(overrides = {})
-    { 'errors' => 0, 'reject_hit_rate' => 100.0, 'leaks' => 0, 'none_hit_rate' => 100.0,
-      'suggest_given_rate' => 90.0, 'judged' => 0, 'plausible_rate' => nil, 'wrong_voice' => 0,
+    judged = overrides.fetch('judged', 0)
+    { 'errors' => 0, 'samples' => 19, 'reject_hit_rate' => 100.0, 'leaks' => 0, 'none_hit_rate' => 100.0,
+      'suggest_given_rate' => 90.0, 'judged' => judged, 'judgeable' => 10,
+      'unjudged_ids' => (judged...10).map { |index| "s#{index}" }, 'plausible_rate' => nil, 'wrong_voice' => 0,
       'variant_reported' => true, 'variant_bundle' => nil }.merge(overrides)
   end
 
@@ -232,6 +236,27 @@ class PromptRsiGateTest < Minitest::Test
     unjudged_baseline = gate.call(suggestion_summary)
     assert_equal 'needs_human_judging', unjudged_baseline['verdict']
     refute(unjudged_baseline['checks'].any? { |item| item['name'] == 'plausible_not_worse' })
+  end
+
+  # 人工判定必须两边都完整：只判一条好看的、baseline 没判、旧摘要没有待判清单，
+  # 都只能是 needs_human_judging；判完才比 plausible。
+  def test_human_judging_must_cover_every_given_suggestion_on_both_sides
+    gate = lambda do |baseline, candidate|
+      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
+                                 candidate: as_candidate(suggestion_summary(candidate)))
+    end
+    complete = { 'judged' => 10, 'plausible_rate' => 80.0 }
+    cherry_picked = gate.call(complete, { 'judged' => 1, 'plausible_rate' => 100.0 })
+    assert_equal 'needs_human_judging', cherry_picked['verdict']
+    assert_equal %w[s1 s2 s3 s4 s5 s6 s7 s8 s9], cherry_picked['judging']['candidate']['unjudged_ids']
+    assert_equal 'needs_human_judging', gate.call({ 'judged' => 0 }, complete.merge('plausible_rate' => 90.0))['verdict']
+    legacy = complete.merge('plausible_rate' => 90.0, 'unjudged_ids' => nil)
+    assert_equal 'needs_human_judging', gate.call(complete, legacy)['verdict']
+    assert_equal 'candidate_passes', gate.call(complete, complete.merge('plausible_rate' => 90.0))['verdict']
+    assert_equal 'rejected', gate.call(complete, complete.merge('plausible_rate' => 70.0))['verdict']
+    mismatched = gate.call(complete, complete.merge('samples' => 18, 'plausible_rate' => 90.0))
+    assert_equal 'non_reproducible', mismatched['verdict']
+    assert_includes mismatched['problems'], '两边样本数不一致：baseline 19、candidate 18'
   end
 
   # baseline 继承了调用者 shell 里的候选、候选没套上、或者结果里根本没说套了
@@ -316,6 +341,89 @@ class PromptRsiReportTest < Minitest::Test
       second = PromptRsi::Report.dataset_sha256(dir)
       File.rename(File.join(dir, 'a.json'), File.join(dir, 'b.json'))
       refute_equal second, PromptRsi::Report.dataset_sha256(dir)
+    end
+  end
+end
+
+# 输入建议套件的人工复评：样本随报告归档，填完 judged 后 `--rescore` 只读归档重算。
+class PromptRsiRescoreTest < Minitest::Test
+  PROVENANCE = PromptRsiGateTest::PROVENANCE
+
+  # 一侧的原始报告：reject 3、none 4、suggest 4（都给出了建议）。
+  def raw(bundle)
+    cases = (0...3).map { |index| { 'id' => "r#{index}", 'expect' => 'reject', 'raw' => 'NONE', 'cleaned' => nil } } +
+            (0...4).map { |index| { 'id' => "n#{index}", 'expect' => 'none', 'raw' => 'NONE', 'cleaned' => nil } } +
+            (0...4).map { |index| { 'id' => "s#{index}", 'expect' => 'suggest', 'raw' => "go #{index}", 'cleaned' => "go #{index}" } }
+    { 'model' => 'glm-5', 'prompt_variant' => bundle && { 'id' => 'v', 'bundle' => bundle }, 'cases' => cases }
+  end
+
+  # 走驱动的同一条路径：判定、存样本、归档；返回报告路径。
+  def archived_run(archive)
+    raws = { 'baseline' => raw(nil), 'candidate' => raw(PROVENANCE['candidate_bundle']) }
+    report = PromptRsiEval.judge_suggestion(PROVENANCE.dup, raws)
+    report['evidence'] = PromptRsi::Report.save_suggestion_evidence(archive, report, baseline: raws['baseline'],
+                                                                                     candidate: raws['candidate'])
+    report['evidence_sha256'] = raws.transform_values { |side| PromptRsi::Report.evidence_digest(side) }
+    PromptRsi::Report.archive(report, archive)
+  end
+
+  def judge(archive, report_path, side, verdicts)
+    relative = JSON.parse(read(report_path))['evidence']
+    path = File.join(archive, relative, "#{side}.json")
+    evidence = JSON.parse(read(path))
+    evidence['cases'].select { |row| row['expect'] == 'suggest' }.zip(verdicts) { |row, verdict| row['judged'] = verdict }
+    yield evidence if block_given?
+    File.write(path, JSON.generate(evidence))
+  end
+
+  # 报告是 UTF-8；夜跑或 CI 的 locale 可能是 US-ASCII，读时显式指定。
+  def read(path)
+    File.read(path, encoding: 'UTF-8')
+  end
+
+  def rescore(path)
+    code = nil
+    capture_io { code = PromptRsiEval.rescore({ rescore: path, history: true }) }
+    code
+  end
+
+  def test_a_waiting_report_keeps_both_sides_and_rescoring_needs_no_model
+    Dir.mktmpdir do |archive|
+      path = archived_run(archive)
+      original = read(path)
+      report = JSON.parse(original)
+      assert_equal 'needs_human_judging', report['verdict']
+      markdown = read(path.sub(/\.json\z/, '.md'))
+      assert_includes markdown, '## 待人工判定'
+      assert_includes markdown, 'candidate：该判 4 条，已判 0 条，待判 4 条：s0, s1, s2, s3'
+      assert_includes markdown, '--rescore'
+      evidence = JSON.parse(read(File.join(archive, report['evidence'], 'candidate.json')))
+      assert(evidence['cases'].select { |row| row['expect'] == 'suggest' }.all? { |row| row.key?('judged') })
+
+      judge(archive, path, 'baseline', %w[plausible plausible plausible off-topic])
+      judge(archive, path, 'candidate', %w[plausible plausible plausible])
+      assert_equal 1, rescore(path), 'one candidate suggestion still unjudged'
+      judge(archive, path, 'candidate', %w[plausible plausible plausible plausible])
+      assert_equal 0, rescore(path)
+
+      assert_equal original, read(path), 'the original report is never rewritten'
+      rescored = Dir[File.join(archive, 'reports', '*', '*-rescored-*.json')].map { |file| JSON.parse(read(file)) }
+      assert_includes rescored.map { |item| item['verdict'] }, 'candidate_passes'
+      assert(rescored.all? { |item| item['rescored_from'] == path.delete_prefix("#{archive}/") })
+      history = File.readlines(File.join(archive, 'history.jsonl')).map { |line| JSON.parse(line) }
+      assert_equal 3, history.size
+      assert_equal path.delete_prefix("#{archive}/"), history.last['rescored_from']
+    end
+  end
+
+  def test_rescoring_refuses_evidence_changed_beyond_the_judgements
+    Dir.mktmpdir do |archive|
+      path = archived_run(archive)
+      judge(archive, path, 'candidate', %w[plausible plausible plausible plausible]) do |evidence|
+        evidence['cases'].last['cleaned'] = 'a nicer suggestion'
+      end
+      error = assert_raises(SystemExit) { capture_io { PromptRsiEval.rescore({ rescore: path, history: true }) } }
+      refute error.success?
     end
   end
 end

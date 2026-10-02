@@ -103,8 +103,8 @@ module PromptRsiEval
                             baseline_rows: baseline, candidate_rows: candidate)
   end
 
-  # 跑一遍输入建议实弹，返回摘要。
-  def suggestion_run(options, label, variant, provenance)
+  # 跑一遍输入建议实弹，返回原始报告（跑不成返回 nil）。
+  def suggestion_run(options, label, variant)
     out = File.join(options[:work], label)
     command = [RbConfig.ruby, File.join(__dir__, 'input_suggestion_eval.rb'), '--model', options[:model],
                '--no-history', '--out', out]
@@ -113,30 +113,79 @@ module PromptRsiEval
     warn "== #{label}"
     system(*command)
     path = File.join(out, 'report.json')
-    return { 'errors' => 1 } unless File.file?(path)
-
-    report = JSON.parse(File.read(path, encoding: 'UTF-8'))
-    SuggestionReport.summarize(report, commit: provenance['commit'], dirty: provenance['dirty'],
-                                       version: provenance['version'])
+    File.file?(path) ? JSON.parse(File.read(path, encoding: 'UTF-8')) : nil
   end
 
-  def run_suggestion(options, provenance)
-    provenance['dataset_sha256'] = PromptRsi::Report.dataset_sha256(SAMPLES)
-    baseline = suggestion_run(options, 'baseline', nil, provenance)
-    candidate = suggestion_run(options, 'candidate', options[:variant], provenance)
-    result = PromptRsi::Gate.suggestion(provenance: provenance, baseline: baseline, candidate: candidate)
-    result['stats'] = { 'baseline' => baseline, 'candidate' => candidate }
+  def summarize_suggestion(raw, provenance, ran_at: nil)
+    return { 'errors' => 1 } unless raw
+
+    SuggestionReport.summarize(raw, commit: provenance['commit'], dirty: provenance['dirty'],
+                                    version: provenance['version'], ran_at: ran_at)
+  end
+
+  def judge_suggestion(provenance, raws, ran_at: {})
+    summaries = raws.to_h { |side, raw| [side, summarize_suggestion(raw, provenance, ran_at: ran_at[side])] }
+    result = PromptRsi::Gate.suggestion(provenance: provenance, baseline: summaries['baseline'],
+                                        candidate: summaries['candidate'])
+    result['stats'] = summaries
     PromptRsi::Report.build(suite: 'input-suggestion', provenance: provenance, result: result)
   end
 
+  # 返回 [报告, 双方原始报告]；双方原始报告随后存进归档，供人工判定与 `--rescore`。
+  def run_suggestion(options, provenance)
+    provenance['dataset_sha256'] = PromptRsi::Report.dataset_sha256(SAMPLES)
+    raws = { 'baseline' => suggestion_run(options, 'baseline', nil),
+             'candidate' => suggestion_run(options, 'candidate', options[:variant]) }
+    [judge_suggestion(provenance, raws), raws]
+  end
+
+  # 人工在归档样本里填完 `judged` 之后重算：只读归档，不请求模型、不重跑二进制。
+  # 结论另存一份带 `rescored_from` 的报告，原报告不动。
+  def rescore(options)
+    path = File.expand_path(options[:rescore])
+    original = JSON.parse(File.read(path, encoding: 'UTF-8'))
+    abort('--rescore 只适用于 input-suggestion 套件的报告') unless original['suite'] == 'input-suggestion'
+    abort('这份报告没有保存双方样本（evidence），无法复评') unless original['evidence']
+    # 报告在 `<归档>/reports/<日期>/` 下，样本路径相对归档根目录。
+    archive = File.expand_path('../../..', path)
+    raws = PromptRsi::Report.load_suggestion_evidence(archive, original['evidence'])
+    changed = raws.reject { |side, raw| PromptRsi::Report.evidence_digest(raw) == original.dig('evidence_sha256', side) }
+    unless changed.empty?
+      abort("样本除 judged 以外被改过（或报告没有指纹）：#{changed.keys.join('、')}。只能填 judged，不能改模型输出与样本。")
+    end
+    ran_at = original['stats'].to_h.transform_values { |summary| summary['ran_at'] }
+    report = judge_suggestion(original['provenance'], raws, ran_at: ran_at)
+    report['evidence'] = original['evidence']
+    report['evidence_sha256'] = original['evidence_sha256']
+    report['rescored_from'] = path.delete_prefix("#{archive}/")
+    name = "#{original['provenance']['variant_id']}-#{original['provenance']['model']}-rescored-" \
+           "#{report['generated_at'].delete('-:')}"
+    saved = PromptRsi::Report.archive(report, archive, history: options[:history], name: name)
+    puts PromptRsi::Report.markdown(report)
+    puts "报告：#{saved}"
+    report['verdict'] == 'candidate_passes' ? 0 : 1
+  end
+
   def main(options)
+    return rescore(options) if options[:rescore]
+
     variant = check_variant(options[:binary], options[:variant])
     context = ModelEval::Report.git_context(ROOT)
     provenance = variant.merge('model' => options[:model], 'commit' => context[:commit], 'dirty' => context[:dirty],
                                'binary_version' => binary_version(options[:binary]))
     warn '工作区不干净：结论会是 non_reproducible。' if context[:dirty]
     options[:work] = Dir.mktmpdir('prompt-rsi-')
-    report = options[:suite] == 'input-suggestion' ? run_suggestion(options, provenance) : run_model_eval(options, provenance)
+    if options[:suite] == 'input-suggestion'
+      report, raws = run_suggestion(options, provenance)
+      if raws.values.all?
+        report['evidence'] = PromptRsi::Report.save_suggestion_evidence(options[:archive], report,
+                                                                        baseline: raws['baseline'],
+                                                                        candidate: raws['candidate'])
+        report['evidence_sha256'] = raws.transform_values { |raw| PromptRsi::Report.evidence_digest(raw) }
+      end
+    else
+      report = run_model_eval(options, provenance)
+    end
     path = PromptRsi::Report.archive(report, options[:archive], history: options[:history])
     puts PromptRsi::Report.markdown(report)
     puts "报告：#{path}"
@@ -165,8 +214,11 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--archive DIR', '归档目录，缺省 bench/prompt-rsi') { |v| options[:archive] = File.expand_path(v) }
     parser.on('--no-history', '不向 history.jsonl 追加') { options[:history] = false }
     parser.on('--keep', '保留临时运行目录') { options[:keep] = true }
+    parser.on('--rescore REPORT', 'input-suggestion 报告：人工填完 judged 后重算，不请求模型') do |v|
+      options[:rescore] = v
+    end
   end.parse!
-  abort('需要 --model 与 --variant') unless options[:model] && options[:variant]
+  abort('需要 --model 与 --variant（或 --rescore）') unless options[:rescore] || (options[:model] && options[:variant])
   abort('--suite 只能是 model-eval 或 input-suggestion') unless %w[model-eval input-suggestion].include?(options[:suite])
 
   exit(PromptRsiEval.main(options))
