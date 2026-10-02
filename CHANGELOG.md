@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.88.0-rc4] - 2026-10-02
+
+### Fixed
+- 输入建议套件的人工判定流程接通（RSI 复核 R4、R6）：
+  - 实弹跑完后，双方原始样本存进 `bench/prompt-rsi/suggestion-runs/`，报告记下路径和样本指纹；
+  - 新增 `scripts/prompt_rsi_eval.rb --rescore <报告>`：人工填完 `judged` 后只读归档重算，不请求模型；样本除 `judged` 以外被改过就拒绝；复评结论另存一份，带 `rescored_from`；
+  - 两边给出了建议的 suggest 样本都逐条判完才比 plausible，只判一部分或 baseline 没判都是 `needs_human_judging`，报告列出待判样本；两边样本数不一致记为 `non_reproducible`。
+
 ## [0.88.0-rc3] - 2026-10-02
 
 ### Fixed
