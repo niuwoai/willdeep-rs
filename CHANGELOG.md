@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.88.0-rc3] - 2026-10-02
+
+### Fixed
+- 提示词对照评测的环境隔离与出处（RSI 复核 R3、N3）：
+  - `model_eval.rb` 和 `input_suggestion_eval.rb` 给子进程传环境时总是显式写出 `WILLDEEP_PROMPT_VARIANT`，没有变体时清掉它，shell 里 export 过的候选不再被 baseline 继承；
+  - `willdeep run --output json` 的结果和输入建议实弹报告新增 `prompt_variant` 字段，报告实际生效的变体；评测逐行记录，门禁核对 baseline 确实没套变体、候选确实套上了预期那一份；
+  - `willdeep prompt check` 新增一行 `build <commit>`，内容是构建二进制时的完整 commit，构建时源码有改动则带 `-dirty`；门禁要求它与仓库 commit 一致且干净，输入建议套件同样要求；
+  - 判断工作区是否干净时，`crates`、`scripts`、`bench`、`web/src`、`Cargo.*` 下的未跟踪文件也算改动。
+
 ## [0.88.0-rc2] - 2026-10-02
 
 ### Fixed
