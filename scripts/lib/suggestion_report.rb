@@ -32,6 +32,8 @@ module SuggestionReport
     # 清洗拒绝率：模型给了一句正经的话（不是 NONE），清洗却把它拦下了。
     offered = answered.reject { |row| row['raw'].to_s.strip.empty? || row['raw'].to_s.strip.casecmp('NONE').zero? }
     judged = suggest.select { |row| JUDGEMENTS.include?(row['judged']) }
+    # 该判的：给出了建议的 suggest 样本。没给的无从判对错，由 suggest_given_rate 管。
+    judgeable = suggest.select { |row| row['cleaned'] }
     tokens_in = answered.map { |row| row['input_tokens'] }.compact
     tokens_out = answered.map { |row| row['output_tokens'] }.compact
 
@@ -52,6 +54,8 @@ module SuggestionReport
       'suggest_given_rate' => rate(suggest.count { |row| row['cleaned'] }, suggest.size),
       'sanitize_reject_rate' => rate(offered.count { |row| row['cleaned'].nil? }, offered.size),
       'judged' => judged.size,
+      'judgeable' => judgeable.size,
+      'unjudged_ids' => judgeable.reject { |row| JUDGEMENTS.include?(row['judged']) }.map { |row| row['id'] },
       'plausible_rate' => rate(judged.count { |row| row['judged'] == 'plausible' }, judged.size),
       'wrong_voice' => judged.count { |row| row['judged'] == 'wrong-voice' },
       'avg_elapsed_ms' => answered.empty? ? nil : (answered.sum { |row| row['elapsed_ms'].to_i } / answered.size),
@@ -71,7 +75,7 @@ module SuggestionReport
     lines << "- 模型：`#{summary['model']}` · commit `#{summary['commit'] || '-'}`#{summary['dirty'] ? '（工作区不干净）' : ''} · #{summary['ran_at']}"
     lines << "- 样本 #{summary['samples']}，请求失败 #{summary['errors']}"
     lines << "- reject 命中 #{pct(summary['reject_hit_rate'])}（泄漏 #{summary['leaks']}）· none 命中 #{pct(summary['none_hit_rate'])} · suggest 给出 #{pct(summary['suggest_given_rate'])} · 清洗拒绝 #{pct(summary['sanitize_reject_rate'])}"
-    lines << "- 人工判定 #{summary['judged']} 条：plausible #{pct(summary['plausible_rate'])} · wrong-voice #{summary['wrong_voice']}"
+    lines << "- 人工判定 #{summary['judged']} 条（待判 #{summary['unjudged_ids'].to_a.size} 条）：plausible #{pct(summary['plausible_rate'])} · wrong-voice #{summary['wrong_voice']}"
     lines << "- 平均耗时 #{summary['avg_elapsed_ms'] || '-'} ms · 平均 token 入 #{summary['avg_input_tokens'] || '-'} / 出 #{summary['avg_output_tokens'] || '-'}"
     lines << ''
     lines << '| 样本 | 期望 | 原始输出 | 清洗后 | 判定 | 耗时 |'

@@ -159,7 +159,13 @@ R1–R8 八项**全部确认**，没有需要反驳的。其中 R2 比首轮描�
 - **N3**：`build.rs` 把构建 commit 编进二进制，`prompt check` 打印 `build <commit>[-dirty]`；门禁要求它以仓库 commit 开头且不带 `-dirty`，两个套件都要求。`git_context` 把源码相关路径下的未跟踪文件也算作改动。
 - **已知局限**：`-dirty` 只看 `crates`、`web/src`、`Cargo.toml`、`Cargo.lock`。这些路径之外、同样会影响二进制的改动（`.cargo/config.toml`、工具链文件、前端构建配置等）不会被标出。反过来的情况偏保守：带着改动构建后又撤销改动、但没有重新构建时，二进制仍标着 `-dirty`，会被拦下。
 
+第三组的 R4、R6 随后修好（0.88.0-rc4）：
+
+- **R6**：输入建议套件跑完后，双方原始样本存进 `bench/prompt-rsi/suggestion-runs/<时间>-<变体>-<模型>/`，每条 suggest 样本带 `judged: null`；报告记下 `evidence` 路径和「除 judged 以外内容」的指纹。新增 `prompt_rsi_eval.rb --rescore <报告>`：只读归档重算门禁，不请求模型；样本除 judged 以外被改过就拒绝；结论另存为 `-rescored-<时间>` 报告并带 `rescored_from`，原报告不动。`needs_human_judging` 的报告会列出每一侧还差哪些样本，以及怎么重算。
+- **R4**：摘要新增 `judgeable`（给出了建议的 suggest 样本数）和 `unjudged_ids`。只有两边都一条不落地判完，才比 plausible；只判一部分、baseline 没判、旧摘要没有待判清单，结论都是 `needs_human_judging`。两边样本数不一致记为 `non_reproducible`。
+- **口径说明**：两边各判自己给出的建议，所以判定的样本集合可能不同（一边给了、另一边没给）。这部分差异由 `suggest_given` 检查管，没有强行要求同一批样本配对。
+- **已知局限**：不做盲评，判的人能从文件名看出哪边是候选。同一秒内对同一份报告复评两次，后一份会覆盖前一份，留给第四组（R8 唯一 run id）一起解决。
+
 还没做的：
 - **N4**：两轮之间的数据集哈希仍然只算一次。现在能拦住「任务 id 或分组变了」，拦不住「同一 id 的内容变了」。
-- **R4 的其余部分**：固定判哪些样本、要求判到一定数量。
-- 第 3 到第 5 组。
+- 第 4、5 组。

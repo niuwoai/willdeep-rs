@@ -50,6 +50,18 @@ class SuggestionReportTest < Minitest::Test
     assert_equal 1, summary['wrong_voice']
   end
 
+  # 该判的是给出了建议的 suggest 样本；没给的、请求失败的、判了个错别字的分别处理。
+  def test_unjudged_ids_list_every_given_suggestion_without_a_valid_judgement
+    given = row('suggest', '继续').merge('id' => 'given')
+    typo = row('suggest', '提交', judged: 'plausable').merge('id' => 'typo')
+    summary = SuggestionReport.summarize({ 'cases' => [
+      row('suggest', '好的', judged: 'plausible'), given, typo,
+      row('suggest', nil), row('suggest', nil, error: 'timeout'), row('none', nil)
+    ] })
+    assert_equal 3, summary['judgeable']
+    assert_equal %w[given typo], summary['unjudged_ids']
+  end
+
   def test_markdown_escapes_pipes_and_prints_dash_for_empty_ratios
     summary = SuggestionReport.summarize({ 'cases' => [row('suggest', 'a | b')] })
     text = SuggestionReport.markdown(summary, [row('suggest', 'a | b')])
