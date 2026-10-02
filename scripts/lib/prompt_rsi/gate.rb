@@ -157,12 +157,13 @@ module PromptRsi
       [not_worse, floor_checks.all? { |item| item['ok'] }, checks, { 'baseline' => base, 'candidate' => cand }]
     end
 
-    # 任务集合完整性：报告行必须与任务清单（任务 id → 分组）在这些分组上一一对应，
-    # 状态必须是已知值。`tasks` 由驱动从任务目录读出，不从报告里推断。
+    # 任务集合完整性：报告行必须与任务清单（任务 id → `{split, sha256}`）在这些
+    # 分组上一一对应，内容哈希一致，状态必须是已知值。`tasks` 由驱动在开跑前从
+    # 任务目录读出，不从报告里推断。
     def integrity(label, rows, tasks, splits)
       return [] if rows.empty? # 整轮没跑成另有一条问题，不再逐题列缺失。
 
-      expected = tasks.select { |_, split| splits.include?(split) }
+      expected = tasks.select { |_, task| splits.include?(task['split']) }
       return ["任务清单里没有 #{splits.join(' / ')} 分组的任务"] if expected.empty?
 
       ids = rows.map { |row| row['task'] }
@@ -173,8 +174,13 @@ module PromptRsi
       problems << "#{label} 有任务清单之外的任务：#{named(unexpected)}" unless unexpected.empty?
       missing = expected.keys - ids
       problems << "#{label} 缺任务：#{named(missing)}" unless missing.empty?
-      moved = rows.select { |row| expected.key?(row['task']) && expected[row['task']] != row['split'] }
+      moved = rows.select { |row| expected.key?(row['task']) && expected[row['task']]['split'] != row['split'] }
       problems << "#{label} 的任务分组与清单不符：#{named(moved.map { |row| row['task'] })}" unless moved.empty?
+      # 同一个 id、内容却变了（两轮之间有人改了题），或者行里没记内容哈希（旧报告）。
+      changed = rows.select do |row|
+        expected.key?(row['task']) && (row['task_sha256'].nil? || row['task_sha256'] != expected[row['task']]['sha256'])
+      end
+      problems << "#{label} 的任务内容与开跑前不一致：#{named(changed.map { |row| row['task'] })}" unless changed.empty?
       unknown = rows.reject { |row| KNOWN_STATUSES.include?(row['status']) }
       problems << "#{label} 有未知状态的任务：#{named(unknown.map { |row| row['task'] })}" unless unknown.empty?
       problems

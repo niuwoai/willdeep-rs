@@ -151,8 +151,10 @@ module ModelEval
     end
 
     def run_task(task, model)
+      # 开跑前的任务内容哈希进报告行；跑完再算一遍，中途被改了这一题就不作数。
+      digest = task.content_sha256
       missing = task.missing_requirements
-      return base_row(task).merge(status: 'skipped', missing: missing) if missing.any?
+      return base_row(task, digest).merge(status: 'skipped', missing: missing) if missing.any?
 
       slot = File.join(@run_root, model.gsub(/[^A-Za-z0-9._-]/, '_'), task.id)
       workspace = File.join(slot, 'workspace')
@@ -165,7 +167,7 @@ module ModelEval
         # 铺不起工作区是宿主的事，不是模型的事：记成 error，别把整轮带崩。
         @hints << e.message
         warn "[#{model}] #{e.message}"
-        return base_row(task).merge(status: 'error', exit_code: nil)
+        return base_row(task, digest).merge(status: 'error', exit_code: nil)
       end
       before = Verifier.snapshot(workspace, task.editable)
       command = [@binary, '--config', @config, '--workspace', workspace, '--full-auto',
@@ -180,20 +182,26 @@ module ModelEval
       result = AgentEvalObservation.object(File.join(logs, 'stdout.log'))
       intact = before == Verifier.snapshot(workspace, task.editable)
       verdict = Verifier.evaluate(task, workspace)
-      status = if timed_out then 'timeout'
+      task_changed = task.content_sha256 != digest
+      if task_changed
+        @hints << "#{task.id}：任务内容在运行中被改了"
+        warn "[#{model}] #{task.id} 的任务内容在运行中被改了，这一题记为 error"
+      end
+      status = if task_changed then 'error'
+               elsif timed_out then 'timeout'
                elsif INFRASTRUCTURE_EXITS.include?(code) then 'error'
                elsif verdict[:passed] && intact then 'passed'
                elsif verdict[:verifier_passed] && !intact then 'cheated'
                else 'failed'
                end
-      if status == 'error'
+      if status == 'error' && !task_changed
         hint = Report.error_hint(read_log(File.join(logs, 'stderr.log')))
         @hints << hint
         warn format('[%s] %-30s 退出码 %s：%s', model, task.id, code.inspect, hint || '（stderr 为空）')
       end
       claimed = result.empty? ? nil : result['type'] == 'completed'
       tokens = AgentEvalObservation.checkpoint(home, result)
-      row = base_row(task).merge(
+      row = base_row(task, digest).merge(
         status: status, exit_code: code, stop_reason: result['stop_reason'], claimed: claimed,
         false_completion: claimed == true && status != 'passed',
         verifier_passed: verdict[:verifier_passed], protected_intact: intact,
@@ -226,8 +234,9 @@ module ModelEval
       File.file?(path) ? File.binread(path).force_encoding('UTF-8').scrub : ''
     end
 
-    def base_row(task)
-      { task: task.id, kind: task.kind, language: task.language, split: task.split, status: nil, missing: [] }
+    def base_row(task, digest)
+      { task: task.id, kind: task.kind, language: task.language, split: task.split, task_sha256: digest,
+        status: nil, missing: [] }
     end
 
     # 行为指标只认 `session_metrics.rb` 这一条算路，不在这里另算一遍。

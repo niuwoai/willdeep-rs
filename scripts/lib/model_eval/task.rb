@@ -3,6 +3,8 @@
 require 'json'
 require 'find'
 
+require_relative '../tree_digest'
+
 module ModelEval
   KINDS = %w[fix feature test lint].freeze
   # 提示词对照评测（`scripts/prompt_rsi_eval.rb`）的分组，设计文档 §8.4：
@@ -67,6 +69,12 @@ module ModelEval
 
     def prompt_path
       File.join(dir, 'prompt.md')
+    end
+
+    # 整个任务目录（说明书、提示、fixture、答案、变异）的内容哈希。每次读现盘，
+    # 不缓存：对照评测要靠它发现两轮之间、乃至一题跑到一半时任务被改了。
+    def content_sha256
+      TreeDigest.sha256(dir)
     end
 
     def fixture_dir
