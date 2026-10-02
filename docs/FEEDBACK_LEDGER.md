@@ -39,12 +39,13 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 | `worker_started` | 一次 Worker 派工开始（重试不另记） | | 分母：按工种算「没有结果」比例 |
 | `worker_timed_out` | Worker 超时被中止 | `report_len = 0` | 客观失败 |
 | `worker_verifier_exhausted` | Worker 用完全部尝试仍未通过验证命令 | `attempts` | 客观失败 |
-| `user_followup` | 同一会话提交了第二句及以后的话（所有前端经 Runtime 提交的轮次；会话第一句不记） | `prev_status`, `gap_ms`, `queued_behind`, `followup_hint`, `text_hash` | 需结合上一轮结局判读 |
+| `user_followup` | 同一会话提交了第二句及以后的话（所有前端经 Runtime 提交的轮次；会话第一句不记） | `prev_status`, `gap_ms`, `queued_behind`, `prev_turn_id`（这句话反应的那一轮；本行 `turn_id` 是新提交的一轮）, `followup_hint`, `text_hash` | 需结合上一轮结局判读 |
 | `user_steer` | 轮次进行中插话 | `delivered`, `followup_hint` | 模型跑偏或信息不足的信号 |
 | `session_rewound` | 用户回退会话 | `count`（丢掉的轮数）、`decision`（`workspace_restored` / `transcript_only`） | 强负向：那几轮做错了 |
 | `approval_resolved` | 审批 / 提问得到处置 | `interaction_kind`, `decision`, `latency_ms` | `deny` 是负向；`cancelled` 是轮次被停下时自动撤销，**不是**人的拒绝 |
 | `turn_cancelled` | 用户中途停下一轮 | `prev_status` | 负向：方向错或太慢 |
 | `goal_resumed` | daemon 重启打断了进行中的目标，运行时自动排了一轮续推 | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 中性：用来看重启续推之后的结局 |
+| `run_verified` | 每次 Agent 运行（主 Agent 与 Worker）收尾，不论成败 | `verification`（`passed` / `failed` / `stale` / `unverified`）、`count`（这次运行实际跑过的验证命令数） | 运行时事实：`passed` 正向、`failed` 负向；`stale`（验证后又改了文件）与 `unverified` 中性 |
 | `goal_completed` / `goal_completion_rejected` / `goal_budget_limited` | 目标收尾（见 [长程自治](LONG_HORIZON_AUTONOMY.md)） | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 「完成被拒」是虚报完成的强信号 |
 
 同一条建议的各行共享 `suggestion_id`。Web 端的 `suggestion_id` 由服务端签发，服务端记住建议原文与发出时间，浏览器只回传 id 与信号，所以账本里的原文与停留时长不采信浏览器给的值。Worker 的行带 `agent_id` 与 `worker_profile`，主 Agent 的行这两个字段是 `null`。Runtime 轮次的行带 `turn_id`。
@@ -91,13 +92,21 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 ### 失败链与危害度
 
 按次数排行只说明“什么失败得多”，不说明“什么失败真的坏事”。报告的“失败链”一节回答后一个问题：
-- **分段**：每个会话以用户的每一句后续输入为界切段。一段的结局由结束它的那句话判定：
-  - `bad`：这句话之前的时间窗里有会话回退或中途喊停（不看间隔），或者这句话是纠正（`correction`）或要求重做（`redo`）；
-  - `good`：这句话是明确认可（`approval`），而且上一轮是 `completed`；或者段内有目标通过了完成门禁（`goal_completed`）；
-  - `unknown`：其余所有情况，包括普通追问和补充（`other` / `supplement`）、只拒绝了审批（那是人的决定，不一定说明做得不好）、在“继续”之类的认可之前上一轮并没有完成，以及这句话算不上对这一段结果的反应：距上一轮结束超过 30 分钟、排在还没跑完的上一轮后面（`queued_behind`），或者旧账本没有 `gap_ms`；
-  - `open`：会话的最后一段，还没有反应。
+- **分段**：
+  - **按轮次**：会话里的每一句后续输入都带 `prev_turn_id` 时（Runtime 下的新账本），一段就是一轮。这一轮的失败标记只取 `turn_id` 等于它的行；对它的反应，是 `prev_turn_id` 指向它的那句后续输入。排队、并行的轮次不会把别的轮次的失败算到自己头上。
+  - **按时间**：进程内执行、旧账本（有后续输入没带 `prev_turn_id`）时，退回以每一句后续输入为界切段，口径与之前相同。
+- **结局**：按下面的顺序判定，先命中的为准：
+  1. 对这一段的反应之前的时间窗里有会话回退或中途喊停（不看间隔），或者这一轮本身被停下 → `bad`（`rewind_or_cancel`）；
+  2. 反应是纠正（`correction`）或要求重做（`redo`）→ `bad`（`correction`）；
+  3. 这一段主 Agent 的 `run_verified` 为 `failed` → `bad`（`verifier_failed`）；
+  4. 反应是明确认可（`approval`），而且上一轮是 `completed` → `good`（`acceptance`）；
+  5. 段内有目标通过了完成门禁（`goal_completed`）→ `good`（`goal_completed`）；
+  6. 这一段主 Agent 的 `run_verified` 为 `passed` → `good`（`verifier_passed`）；
+  7. 有后续输入但以上都没有 → `unknown`（`no_clear_signal`），包括普通追问和补充、只拒绝了审批（那是人的决定）、在“继续”之类的认可之前上一轮并没有完成；没有后续输入 → `open`（`no_reaction`）。
 
-  只有 `good` 和 `bad` 算“有结局”，进入坏结局率和危害统计；`unknown` 单独计数，不当作成功。这些比率都是词法启发式的关联指标，不能当作因果结论。注意这里的口径与上面的纠正率不同：纠正率仍把拒绝审批算作纠正，也不看间隔。
+  词法反应只有在算得上是对这一段结果的反应时才算数：距上一轮结束超过 30 分钟、排在还没跑完的上一轮后面（`queued_behind`）、或者旧账本没有 `gap_ms`，都不算。第 3、5、6 条是运行时事实，用户不说话也成立，所以没有后续输入的段也可能有结局；Worker 的 `run_verified` 不代表这一轮，Worker 的验证失败另有 `worker:*:verifier_exhausted` 标记。
+
+  只有 `good` 和 `bad` 算“有结局”，进入坏结局率和危害统计；`unknown` 单独计数，不当作成功。报表的 `sources` 给出每种证据各定了多少段，可以看出坏结局率有多少来自运行时事实、多少来自词法启发式。这些比率仍是关联指标，不能当作因果结论。注意这里的口径与上面的纠正率不同：纠正率仍把拒绝审批算作纠正，也不看间隔。
 - **失败标记**：只用计数和标识：
   - `tool_failed:<工具>/<类别>`（人拒绝审批、hook 拦下不算）；
   - `incomplete:<stop_reason>`（主 Agent）；

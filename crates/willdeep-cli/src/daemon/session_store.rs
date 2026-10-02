@@ -1088,6 +1088,8 @@ impl RuntimeSessionStore {
                 turn_status_name(previous.metadata.status),
                 gap_ms,
                 queued_behind,
+                // 这一句是对哪一轮的反应：失败链按它把反应绑到那一轮上。
+                previous.metadata.id.to_string(),
             ))
         });
         let queue_sequence = turns
@@ -1113,7 +1115,7 @@ impl RuntimeSessionStore {
             message_generation: 0,
             workspace_checkpoint: None,
         };
-        if let (Some(recorder), Some((prev_status, gap_ms, queued_behind))) =
+        if let (Some(recorder), Some((prev_status, gap_ms, queued_behind, prev_turn_id))) =
             (self.feedback(), followup)
         {
             recorder
@@ -1126,6 +1128,7 @@ impl RuntimeSessionStore {
                     prev_status: Some(prev_status),
                     gap_ms,
                     queued_behind,
+                    prev_turn_id: Some(&prev_turn_id),
                 });
         }
         turns.insert(

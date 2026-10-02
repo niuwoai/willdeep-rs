@@ -1424,6 +1424,56 @@ async fn verification_evidence_is_recorded_without_an_external_reporter() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 反馈账本的 `run_verified`：只看这次运行跑过的验证，结论与完成门禁同一口径。
+#[tokio::test]
+async fn run_verification_summarizes_only_this_run() {
+    let root = std::env::temp_dir().join(format!("willdeep-run-verdict-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let snapshot = Arc::new(Mutex::new("current".to_owned()));
+    let current = snapshot.clone();
+    let tools = ToolRegistry::new(&root, ApprovalMode::WorkspaceAccess)
+        .unwrap()
+        .with_approver(Arc::new(AllowApprover))
+        .with_verification_snapshot(move || Some(current.lock().unwrap().clone()));
+    let run = || CommandArgs {
+        command: "ruby test".into(),
+        timeout_seconds: None,
+        label: None,
+        run_in_background: None,
+        network: None,
+    };
+    let start = tools.verification_count();
+    assert_eq!(
+        tools.run_verification(Some("current"), start),
+        (RunVerification::Unverified, 0)
+    );
+    std::fs::write(root.join("test"), "exit 0\n").unwrap();
+    tools.run_command(run()).await.unwrap();
+    assert_eq!(
+        tools.run_verification(Some("current"), start),
+        (RunVerification::Passed, 1)
+    );
+    *snapshot.lock().unwrap() = "edited".to_owned();
+    assert_eq!(
+        tools.run_verification(Some("current"), start).0,
+        RunVerification::Stale,
+        "files changed after the passing check"
+    );
+    std::fs::write(root.join("test"), "exit 1\n").unwrap();
+    let _ = tools.run_command(run()).await;
+    assert_eq!(
+        tools.run_verification(Some("current"), start),
+        (RunVerification::Failed, 2)
+    );
+    let next_run = tools.verification_count();
+    assert_eq!(
+        tools.run_verification(Some("current"), next_run),
+        (RunVerification::Unverified, 0),
+        "a later run that verifies nothing says so, whatever earlier runs did"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn a_verification_launch_error_invalidates_previous_success() {
     let root =

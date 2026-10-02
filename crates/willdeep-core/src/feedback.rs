@@ -105,6 +105,10 @@ pub enum Signal {
     GoalBudgetLimited,
     /// daemon 重启打断了一个还在进行的目标，运行时自动排了一轮续推。
     GoalResumed,
+    /// 一次 Agent 运行结束时的验证结论：`verification` 为 `passed` / `failed` /
+    /// `stale` / `unverified`（见 `tools::RunVerification`），`count` 为这次运行
+    /// 实际跑过的验证命令数。运行时的事实，不靠用户怎么说。
+    RunVerified,
 }
 
 /// 一行反馈。可选字段一律输出、未知即 `null`，从不省略键。
@@ -154,6 +158,13 @@ pub struct FeedbackRecord {
     pub gap_ms: Option<u64>,
     /// 仅 `user_followup`：提交时前一轮还没跑完，这句排在它后面。
     pub queued_behind: Option<bool>,
+    /// 仅 `user_followup`：上一轮的 Runtime 轮次 id。本行的 `turn_id` 是新提交
+    /// 的这一轮；这句话是对 `prev_turn_id` 那一轮结果的反应。
+    #[serde(default)]
+    pub prev_turn_id: Option<String>,
+    /// 仅 `run_verified`：这次运行的验证结论。
+    #[serde(default)]
+    pub verification: Option<String>,
     /// 仅 `user_followup` / `user_steer`：入口处的词法粗分类，见 [`followup_hint`]。
     pub followup_hint: Option<String>,
     /// 仅 `user_steer`：插话是否送达了正在跑的轮次。
@@ -203,6 +214,8 @@ impl FeedbackRecord {
             prev_status: None,
             gap_ms: None,
             queued_behind: None,
+            prev_turn_id: None,
+            verification: None,
             followup_hint: None,
             delivered: None,
             interaction_kind: None,
@@ -417,7 +430,16 @@ impl FeedbackRecorder {
             record.prev_status = event.prev_status.map(str::to_owned);
             record.gap_ms = event.gap_ms;
             record.queued_behind = Some(event.queued_behind);
+            record.prev_turn_id = event.prev_turn_id.map(str::to_owned);
             record.text = text;
+        });
+    }
+
+    /// 一次 Agent 运行结束时的验证结论（`run_verified`）。
+    pub fn record_run_verification(&self, verification: crate::tools::RunVerification, ran: usize) {
+        self.record(Signal::RunVerified, |record| {
+            record.verification = Some(verification.as_str().to_owned());
+            record.count = Some(ran);
         });
     }
 
@@ -501,6 +523,8 @@ pub struct FollowupEvent<'a> {
     /// 距上一轮结束的毫秒数；上一轮还没结束时为 `None`。
     pub gap_ms: Option<u64>,
     pub queued_behind: bool,
+    /// 上一轮的 Runtime 轮次 id。
+    pub prev_turn_id: Option<&'a str>,
 }
 
 /// 后续输入的词法粗分类：`correction` / `redo` / `supplement` / `approval` /
@@ -1131,7 +1155,9 @@ mod tests {
             prev_status: Some("completed"),
             gap_ms: Some(4_200),
             queued_behind: false,
+            prev_turn_id: Some("turn-0"),
         });
+        recorder.record_run_verification(crate::tools::RunVerification::Failed, 2);
         recorder.record_steer("also check the tests", true);
         recorder.record_rewind(2, true);
         recorder.record_approval("approval", "deny", Some(900));
@@ -1155,7 +1181,11 @@ mod tests {
         assert_eq!(followup["prev_status"], "completed");
         assert_eq!(followup["gap_ms"], 4_200);
         assert_eq!(followup["queued_behind"], false);
+        assert_eq!(followup["prev_turn_id"], "turn-0");
         assert!(followup["text"].is_null());
+        let verified = find("run_verified");
+        assert_eq!(verified["verification"], "failed");
+        assert_eq!(verified["count"], 2);
         assert_eq!(find("user_steer")["delivered"], true);
         assert_eq!(find("session_rewound")["count"], 2);
         let approval = find("approval_resolved");

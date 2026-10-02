@@ -631,6 +631,15 @@ async fn tool_failures_and_exhausted_turns_reach_the_feedback_ledger() {
     assert_eq!(incomplete[0]["report_len"], 0);
     assert_eq!(incomplete[0]["agent_id"], worker_id.to_string());
     assert_eq!(incomplete[0]["worker_profile"], "implementer");
+    // 每次运行收尾都记一行验证结论；这次一条验证命令都没跑。
+    let verified: Vec<_> = rows
+        .iter()
+        .filter(|row| row["signal"] == "run_verified")
+        .collect();
+    assert_eq!(verified.len(), 1, "{rows:?}");
+    assert_eq!(verified[0]["verification"], "unverified");
+    assert_eq!(verified[0]["count"], 0);
+    assert_eq!(verified[0]["agent_id"], worker_id.to_string());
     let raw = serde_json::to_string(&rows).expect("json");
     assert!(
         !raw.contains("missing.txt"),

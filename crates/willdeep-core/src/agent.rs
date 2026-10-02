@@ -799,6 +799,7 @@ impl Agent {
         if let Some(goal) = &self.goal_continuation {
             goal.resume();
         }
+        let verifications_before = self.tools.verification_count();
         let result = self.run_inner(messages, user_message, &mut recorder).await;
         if let Some(goal) = &self.goal_continuation {
             goal.pause();
@@ -811,6 +812,13 @@ impl Agent {
                 outcome.turns,
                 &outcome.final_text,
             );
+        }
+        // 这次运行的验证结论进账本：失败链据此判结局，不只看用户怎么说。
+        if let (Some(feedback), Ok(_)) = (&self.feedback, &result) {
+            let (verification, ran) = self
+                .tools
+                .run_verification(recorder.verification_baseline(), verifications_before);
+            feedback.record_run_verification(verification, ran);
         }
         recorder.finish(&result)?;
         result

@@ -21,10 +21,38 @@ pub(super) struct EvidenceRecords {
         Option<String>,
         std::collections::BTreeMap<String, VerificationStatus>,
     >,
+    /// 本进程里实际跑过的验证命令总数（从检查点恢复的不算）。按运行做差，就知道
+    /// 这一次运行有没有亲自验证过。
+    total: usize,
+}
+
+/// 一次运行结束时的验证结论，记进反馈账本（`run_verified`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunVerification {
+    /// 这次运行跑过验证，当前文件快照上的检查全部通过。
+    Passed,
+    /// 有检查失败（或超时、没启动起来），而且在当前快照上没有重新通过。
+    Failed,
+    /// 跑过的检查都通过了，但之后文件又改了，当前快照没有重新验证。
+    Stale,
+    /// 这次运行没跑任何验证命令。
+    Unverified,
+}
+
+impl RunVerification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Stale => "stale",
+            Self::Unverified => "unverified",
+        }
+    }
 }
 
 impl EvidenceRecords {
     pub(super) fn record(&mut self, record: CommandVerification) {
+        self.total += 1;
         self.latest
             .entry(record.snapshot_id.clone())
             .or_default()
@@ -190,6 +218,49 @@ impl ToolRegistry {
             .as_ref()
             .map(|capture| capture())
             .unwrap_or(Ok(None))
+    }
+
+    /// 本进程里实际跑过的验证命令总数。运行开始时记一次，结束时用
+    /// [`Self::run_verification`] 做差。
+    pub fn verification_count(&self) -> usize {
+        self.verification_records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .total
+    }
+
+    /// 一次运行的验证结论与这次运行跑过的验证命令数。`since` 是运行开始时的
+    /// [`Self::verification_count`]。判定与完成门禁同一口径：当前快照上没有
+    /// 未解决的检查才算通过。
+    pub fn run_verification(
+        &self,
+        baseline: Option<&str>,
+        since: usize,
+    ) -> (RunVerification, usize) {
+        let ran = self.verification_count().saturating_sub(since);
+        if ran == 0 {
+            return (RunVerification::Unverified, 0);
+        }
+        if self.completion_verification_feedback(baseline).is_none() {
+            return (RunVerification::Passed, ran);
+        }
+        let current = self.try_verification_baseline().ok().flatten();
+        let records = self
+            .verification_records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let failed = records
+            .outstanding_checks(&current)
+            .values()
+            .any(|(status, _)| status.is_some_and(|status| status != VerificationStatus::Passed));
+        (
+            if failed {
+                RunVerification::Failed
+            } else {
+                RunVerification::Stale
+            },
+            ran,
+        )
     }
 
     #[cfg(test)]

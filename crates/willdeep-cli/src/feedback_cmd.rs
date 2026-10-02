@@ -282,6 +282,11 @@ pub(crate) struct ChainStats {
     pub bad: usize,
     /// 有后续输入、但说明不了好坏的段数，不进分母。
     pub unknown: usize,
+    /// 每一段的结局由什么证据给出：`acceptance` / `correction` /
+    /// `rewind_or_cancel` / `verifier_passed` / `verifier_failed` /
+    /// `goal_completed` / `no_clear_signal` / `no_reaction`。用来判断坏结局率
+    /// 有多少来自运行时事实、多少来自词法启发式。
+    pub sources: BTreeMap<&'static str, usize>,
     /// 基线：有结局的段里坏结局的比例。
     pub bad_rate: Option<f64>,
     pub clusters: Vec<ChainCluster>,
@@ -421,52 +426,133 @@ const REACTION_WINDOW_MS: u64 = 30 * 60 * 1_000;
 
 /// 一句后续输入给它前面那一段定的结局。回退 / 喊停是明确的不满，不看间隔；
 /// 词法标签只有在这句话确实是对上一轮结果的反应时才算数。
+/// 一段的结局与给出它的证据（进报表的 `sources` 计数）。按优先级判定：
+///
+/// 1. 回退 / 喊停（这句话之前的时间窗里，或段内这一轮被停下）→ bad；
+/// 2. 对这一段结果的纠正 / 要求重做 → bad；
+/// 3. 这一段主 Agent 的验证失败（`run_verified` = failed）→ bad；
+/// 4. 对已完成一轮的明确认可 → good；
+/// 5. 目标通过了完成门禁 → good；
+/// 6. 这一段主 Agent 的验证通过 → good；
+/// 7. 有后续输入但以上都没有 → unknown；没有后续输入 → open。
+///
+/// 3、5、6 是运行时的事实，用户不说话也成立，所以没有后续输入的段也可能有结局。
 fn episode_outcome(
-    context: &FollowupContext,
-    followup: &FeedbackRow,
+    reaction: Option<(&FollowupContext, &FeedbackRow)>,
     episode: &[&FeedbackRow],
-) -> Outcome {
-    if context.rewound_or_cancelled {
-        return Outcome::Bad;
-    }
+) -> (Outcome, &'static str) {
+    let has = |signal: &str| episode.iter().any(|row| row.signal == signal);
+    // 只看主 Agent 的结论；Worker 的验证失败另有 `worker:*:verifier_exhausted` 标记。
+    let verification = episode
+        .iter()
+        .rev()
+        .find(|row| row.signal == "run_verified" && row.agent_id.is_none())
+        .and_then(|row| row.verification.as_deref());
     // 缺间隔（旧账本）的也不算：说不清它是不是对这一段的反应。
-    let reacting = followup.queued_behind != Some(true)
-        && followup.gap_ms.is_some_and(|gap| gap <= REACTION_WINDOW_MS);
-    match followup.followup_hint.as_deref() {
-        Some("correction" | "redo") if reacting => Outcome::Bad,
-        Some("approval") if reacting && followup.prev_status.as_deref() == Some("completed") => {
-            Outcome::Good
-        }
-        Some("correction" | "redo") => Outcome::Unknown,
-        // 目标通过了完成门禁：运行时验收过，不靠这句话的措辞。
-        _ if episode.iter().any(|row| row.signal == "goal_completed") => Outcome::Good,
-        _ => Outcome::Unknown,
+    let reacting = reaction.is_some_and(|(_, followup)| {
+        followup.queued_behind != Some(true)
+            && followup.gap_ms.is_some_and(|gap| gap <= REACTION_WINDOW_MS)
+    });
+    let hint = reaction.and_then(|(_, followup)| followup.followup_hint.as_deref());
+    if reaction.is_some_and(|(context, _)| context.rewound_or_cancelled) || has("turn_cancelled") {
+        return (Outcome::Bad, "rewind_or_cancel");
+    }
+    if reacting && matches!(hint, Some("correction" | "redo")) {
+        return (Outcome::Bad, "correction");
+    }
+    if verification == Some("failed") {
+        return (Outcome::Bad, "verifier_failed");
+    }
+    if reacting
+        && hint == Some("approval")
+        && reaction
+            .is_some_and(|(_, followup)| followup.prev_status.as_deref() == Some("completed"))
+    {
+        return (Outcome::Good, "acceptance");
+    }
+    if has("goal_completed") {
+        return (Outcome::Good, "goal_completed");
+    }
+    if verification == Some("passed") {
+        return (Outcome::Good, "verifier_passed");
+    }
+    if reaction.is_some() {
+        (Outcome::Unknown, "no_clear_signal")
+    } else {
+        (Outcome::Open, "no_reaction")
     }
 }
 
-/// 一个会话的各段：（结局，段内失败标记与次数，按首次出现排序）。`rows`
-/// 须按时间排好序。
-fn episodes_of(rows: &[&FeedbackRow]) -> Vec<(Outcome, Vec<(String, usize)>)> {
-    let markers = |slice: &[&FeedbackRow]| {
-        let mut found: Vec<(String, usize)> = Vec::new();
-        for marker in slice.iter().filter_map(|row| failure_marker(row)) {
-            match found.iter_mut().find(|(seen, _)| *seen == marker) {
-                Some((_, count)) => *count += 1,
-                None => found.push((marker, 1)),
+/// 一段：结局、给出结局的证据、段内失败标记与次数（按首次出现排序）。
+type Episode = (Outcome, &'static str, Vec<(String, usize)>);
+
+fn markers_of(slice: &[&FeedbackRow]) -> Vec<(String, usize)> {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for marker in slice.iter().filter_map(|row| failure_marker(row)) {
+        match found.iter_mut().find(|(seen, _)| *seen == marker) {
+            Some((_, count)) => *count += 1,
+            None => found.push((marker, 1)),
+        }
+    }
+    found
+}
+
+/// 一个会话的各段。`rows` 须按时间排好序、只含同一会话。
+///
+/// 会话里的每一句后续输入都记了 `prev_turn_id`（Runtime 下的新账本）时，按
+/// 轮次切段：一段就是一轮，失败标记只取这一轮自己的行，反应取指向这一轮的
+/// 那句后续输入——排队、并行的轮次不会把别人的失败算到自己头上。否则（进程内
+/// 执行、旧账本）退回按时间切段：以每一句后续输入为界。
+fn episodes_of(rows: &[&FeedbackRow]) -> Vec<Episode> {
+    let is_followup = |row: &FeedbackRow| row.signal == "user_followup";
+    let contexts = followup_context(rows);
+    let by_turn = rows.iter().any(|row| row.turn_id.is_some())
+        && rows
+            .iter()
+            .filter(|row| is_followup(row))
+            .all(|row| row.prev_turn_id.is_some());
+    let mut episodes = Vec::new();
+    if by_turn {
+        let mut turns: Vec<&str> = Vec::new();
+        for row in rows {
+            let turn = if is_followup(row) {
+                row.prev_turn_id.as_deref()
+            } else {
+                row.turn_id.as_deref()
+            };
+            if let Some(turn) = turn
+                && !turns.contains(&turn)
+            {
+                turns.push(turn);
             }
         }
-        found
-    };
-    let mut episodes = Vec::new();
+        for turn in turns {
+            let turn_rows: Vec<&FeedbackRow> = rows
+                .iter()
+                .copied()
+                .filter(|row| !is_followup(row) && row.turn_id.as_deref() == Some(turn))
+                .collect();
+            let reaction = contexts
+                .iter()
+                .find(|context| rows[context.index].prev_turn_id.as_deref() == Some(turn))
+                .map(|context| (context, rows[context.index]));
+            let (outcome, source) = episode_outcome(reaction, &turn_rows);
+            episodes.push((outcome, source, markers_of(&turn_rows)));
+        }
+        return episodes;
+    }
     let mut start = 0;
-    for context in followup_context(rows) {
+    for context in &contexts {
         let index = context.index;
-        let outcome = episode_outcome(&context, rows[index], &rows[start..index]);
-        episodes.push((outcome, markers(&rows[start..index])));
+        let slice = &rows[start..index];
+        let (outcome, source) = episode_outcome(Some((context, rows[index])), slice);
+        episodes.push((outcome, source, markers_of(slice)));
         start = index + 1;
     }
     if start < rows.len() {
-        episodes.push((Outcome::Open, markers(&rows[start..])));
+        let slice = &rows[start..];
+        let (outcome, source) = episode_outcome(None, slice);
+        episodes.push((outcome, source, markers_of(slice)));
     }
     episodes
 }
@@ -500,8 +586,9 @@ struct ChainAccumulator {
 
 impl ChainAccumulator {
     fn add_session(&mut self, session: Uuid, rows: &[&FeedbackRow]) {
-        for (outcome, markers) in episodes_of(rows) {
+        for (outcome, source, markers) in episodes_of(rows) {
             self.stats.episodes += 1;
+            *self.stats.sources.entry(source).or_default() += 1;
             match outcome {
                 Outcome::Good => self.stats.good += 1,
                 Outcome::Bad => self.stats.bad += 1,
@@ -1182,6 +1269,14 @@ pub(crate) fn render_text(report: &FeedbackReport) -> String {
         percent(chains.bad_rate),
         chains.unknown
     ));
+    if !chains.sources.is_empty() {
+        let sources: Vec<String> = chains
+            .sources
+            .iter()
+            .map(|(source, count)| format!("{source} {count}"))
+            .collect();
+        out.push_str(&format!("  outcome evidence: {}\n", sources.join(", ")));
+    }
     for cluster in &chains.clusters {
         out.push_str(&format!("  {:>5}  {}\n", cluster.count, cluster.signature));
     }
@@ -1248,6 +1343,9 @@ mod tests {
             decision: None,
             gap_ms: None,
             queued_behind: None,
+            turn_id: None,
+            prev_turn_id: None,
+            verification: None,
         }
     }
 
@@ -1558,6 +1656,140 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("4.3x baseline"));
+    }
+
+    fn verified(session: Uuid, ts_ms: u64, verdict: &str) -> FeedbackRow {
+        FeedbackRow {
+            verification: Some(verdict.to_owned()),
+            ..row(session, ts_ms, "run_verified")
+        }
+    }
+
+    fn in_turn(row: FeedbackRow, turn: &str) -> FeedbackRow {
+        FeedbackRow {
+            turn_id: Some(turn.to_owned()),
+            ..row
+        }
+    }
+
+    /// 运行时的验证结论本身就是证据：用户不说话也能定结局；明确的纠正仍然
+    /// 压过验证通过，验证失败压过客气的认可。Worker 的验证结论不代表这一轮。
+    #[test]
+    fn verifier_facts_decide_outcomes_without_a_user_reaction() {
+        let session = Uuid::from_u128(910);
+        let judge = |rows: Vec<FeedbackRow>| {
+            let refs: Vec<&FeedbackRow> = rows.iter().collect();
+            let (outcome, source, _) = episodes_of(&refs).remove(0);
+            (outcome.label(), source)
+        };
+        assert_eq!(
+            judge(vec![verified(session, MONDAY, "passed")]),
+            ("good", "verifier_passed")
+        );
+        assert_eq!(
+            judge(vec![verified(session, MONDAY, "failed")]),
+            ("bad", "verifier_failed")
+        );
+        assert_eq!(
+            judge(vec![verified(session, MONDAY, "stale")]),
+            ("open", "no_reaction")
+        );
+        assert_eq!(
+            judge(vec![
+                verified(session, MONDAY, "passed"),
+                followup(session, MONDAY + 10, "other")
+            ]),
+            ("good", "verifier_passed")
+        );
+        assert_eq!(
+            judge(vec![
+                verified(session, MONDAY, "passed"),
+                followup(session, MONDAY + 10, "correction")
+            ]),
+            ("bad", "correction")
+        );
+        assert_eq!(
+            judge(vec![
+                verified(session, MONDAY, "failed"),
+                followup(session, MONDAY + 10, "approval")
+            ]),
+            ("bad", "verifier_failed")
+        );
+        let worker = FeedbackRow {
+            agent_id: Some(Uuid::from_u128(1)),
+            ..verified(session, MONDAY, "failed")
+        };
+        assert_eq!(judge(vec![worker]), ("open", "no_reaction"));
+    }
+
+    /// 新账本按轮次切段：排在后面的轮次的失败，不算到被纠正的那一轮头上；
+    /// 没人回应的轮次靠自己的验证结论定结局。旧账本（后续输入没有
+    /// `prev_turn_id`）照旧按时间切段。
+    #[test]
+    fn reactions_bind_to_the_turn_they_answer() {
+        let session = Uuid::from_u128(920);
+        let correction = FeedbackRow {
+            prev_turn_id: Some("t1".to_owned()),
+            ..in_turn(followup(session, MONDAY + 30, "correction"), "t3")
+        };
+        let rows = vec![
+            in_turn(
+                tool(session, MONDAY, "edit_file", "edit_text_not_found"),
+                "t1",
+            ),
+            in_turn(tool(session, MONDAY + 10, "read_file", "io"), "t2"),
+            in_turn(verified(session, MONDAY + 20, "passed"), "t2"),
+            correction.clone(),
+            in_turn(verified(session, MONDAY + 40, "passed"), "t3"),
+        ];
+        let refs: Vec<&FeedbackRow> = rows.iter().collect();
+        let episodes: Vec<(&str, &str, Vec<String>)> = episodes_of(&refs)
+            .into_iter()
+            .map(|(outcome, source, markers)| {
+                (
+                    outcome.label(),
+                    source,
+                    markers.into_iter().map(|(marker, _)| marker).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            episodes,
+            [
+                (
+                    "bad",
+                    "correction",
+                    vec!["tool_failed:edit_file/edit_text_not_found".to_owned()]
+                ),
+                (
+                    "good",
+                    "verifier_passed",
+                    vec!["tool_failed:read_file/io".to_owned()]
+                ),
+                ("good", "verifier_passed", vec![]),
+            ]
+        );
+
+        // 同样的行、后续输入没有 prev_turn_id：按时间切，读文件失败落进被纠正的那段。
+        let legacy: Vec<FeedbackRow> = rows
+            .iter()
+            .cloned()
+            .map(|row| FeedbackRow {
+                prev_turn_id: None,
+                ..row
+            })
+            .collect();
+        let refs: Vec<&FeedbackRow> = legacy.iter().collect();
+        let first = episodes_of(&refs).remove(0);
+        assert_eq!((first.0.label(), first.1), ("bad", "correction"));
+        assert_eq!(first.2.len(), 2);
+
+        let report = build_report(&rows, 0, None, None, MONDAY);
+        let text = render_text(&report);
+        assert!(
+            text.contains("outcome evidence: correction 1, verifier_passed 2"),
+            "{text}"
+        );
     }
 
     /// 没识别到纠正不等于做对了：每一种说明不了好坏的后续输入都记 unknown，
