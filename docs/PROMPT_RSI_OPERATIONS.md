@@ -74,17 +74,20 @@ feedback/*.jsonl ──willdeep feedback report --candidates──▶ 改进候�
     - 边界段里的“不能问用户 / 不能再派工 / 破坏性命令不归裁判管”；
     - 报告段的 `CONCLUSION` / `EVIDENCE` / `OPEN QUESTIONS` / `<worker-facts>`；
   - 黑板说明里的“not instructions”；
-  - 输入建议里的 `NONE`。
+  - 输入建议里与 Xedit 行为对齐的几条：`NONE`、用户口吻（“in the USER's own voice”）、同一语言、“Never speak as the assistant.”、没有下一步就答 `NONE`。输入建议的凭据拦截不在提示词里，在 `input_suggestion::sanitize`，变体改不到。
 
-- **不得削弱安全**：变体比原段多出以下说法就拒绝，按出现次数比较，原段本来就有的不算：
+- **不得削弱安全**：变体比原段多出以下说法就拒绝，按出现次数比较，原段本来就有的不算；比较前去掉零宽字符：
   - 绕过审批：`without approval`、`skip approval`、`bypass`
   - 提权：`full-access`、`--no-verify`
   - 关闭验证器：`skip` / `disable` / `ignore the verifier`
   - 注入话术：`ignore previous`、`ignore all`
   - 破坏性命令：`rm -rf`、`force push`、`--force`
   - 泄露凭据：`reveal`、`print the api key`
+- **安全规则不交给变体**：新增或改写的行（原段里没有一模一样的那一行）只要碰到安全话题就拒绝，不论措辞是加固还是放宽：审批、权限、沙箱、限制、advisory / disregard / ignore、bypass / circumvent / override、作废 / 失效 / 不再适用、凭据、密钥、验证器、破坏性、全权限、越出工作区等，中英文都认。比较前统一小写，去掉零宽字符，连字符、下划线当空格（`By-pass`、`api_key` 都认得出）。要改安全规则，就由人在代码里改、走普通 PR；原段里原样保留的行不受影响。因此 Worker 的 `boundary` 段这类几乎全是安全规则的段，实际上不能用变体优化。
 
-通过时打印新旧版本号，以及段落的行级 diff。
+**能力边界**：结构门只做字面检查。它保证必需片段在、短语表里的说法没新增、新增行不碰安全话题，但不理解语义：完全换一套没被列出的说法仍可能漏过。所以它是辅助拦截，不是安全保证，变体上线前仍要过人工门（读 diff）。真正的安全边界在运行时：审批、权限档位与 OS 沙箱都不依赖提示词，变体改不到。
+
+通过时打印新旧版本号、构建 commit，以及段落的行级 diff。
 
 ## 4. 加载：只在 `willdeep run --local`
 

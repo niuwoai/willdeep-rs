@@ -269,28 +269,59 @@ impl FeedbackSummary {
 /// 输入（最多往前 [`CORRECTION_WINDOW_MS`]）到它之间，出现了会话回退、
 /// 中途喊停或人拒绝审批。`rows` 须按时间排好序、只含同一会话。
 pub(crate) fn classify_followups(rows: &[&FeedbackRow]) -> Vec<(usize, bool)> {
-    let mut labels = Vec::new();
+    followup_context(rows)
+        .into_iter()
+        .map(|context| {
+            (
+                context.index,
+                rows[context.index].followup_hint.as_deref() == Some("correction")
+                    || context.rewound_or_cancelled
+                    || context.denied,
+            )
+        })
+        .collect()
+}
+
+/// 一句后续输入之前（同 [`classify_followups`] 的时间窗）发生了什么。
+pub(crate) struct FollowupContext {
+    /// 在 rows 里的下标。
+    pub index: usize,
+    /// 会话回退或中途喊停：人对结果明确不满。
+    pub rewound_or_cancelled: bool,
+    /// 人拒绝了审批：是人的决定，不一定说明结果做得不好。
+    pub denied: bool,
+}
+
+/// 逐句给出后续输入之前的负面信号，供纠正率与失败链各自取用。`rows` 须按
+/// 时间排好序、只含同一会话。
+pub(crate) fn followup_context(rows: &[&FeedbackRow]) -> Vec<FollowupContext> {
+    let mut contexts = Vec::new();
     let mut window_start = 0_u64;
     for (index, row) in rows.iter().enumerate() {
         if row.signal != "user_followup" {
             continue;
         }
         let floor = window_start.max(row.ts_ms.saturating_sub(CORRECTION_WINDOW_MS));
-        let negative_before = rows[..index].iter().any(|earlier| {
-            earlier.ts_ms >= floor
-                && (matches!(
+        let recent = || {
+            rows[..index]
+                .iter()
+                .filter(|earlier| earlier.ts_ms >= floor)
+        };
+        contexts.push(FollowupContext {
+            index,
+            rewound_or_cancelled: recent().any(|earlier| {
+                matches!(
                     earlier.signal.as_str(),
                     "session_rewound" | "turn_cancelled"
-                ) || (earlier.signal == "approval_resolved"
-                    && earlier.decision.as_deref() == Some("deny")))
+                )
+            }),
+            denied: recent().any(|earlier| {
+                earlier.signal == "approval_resolved" && earlier.decision.as_deref() == Some("deny")
+            }),
         });
-        labels.push((
-            index,
-            row.followup_hint.as_deref() == Some("correction") || negative_before,
-        ));
         window_start = row.ts_ms;
     }
-    labels
+    contexts
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -465,6 +496,10 @@ pub(crate) struct FeedbackRow {
     pub followup_hint: Option<String>,
     pub prev_status: Option<String>,
     pub decision: Option<String>,
+    /// 仅 `user_followup`：距上一轮结束多久、是不是排在还没跑完的上一轮后面。
+    /// 失败链据此判断这句话能不能算作对上一轮结果的反应。
+    pub gap_ms: Option<u64>,
+    pub queued_behind: Option<bool>,
 }
 
 struct Sources {
@@ -575,6 +610,8 @@ pub(crate) fn load_feedback(dir: &Path) -> Result<(Vec<FeedbackRow>, usize)> {
                 report_len: value.get("report_len").and_then(|value| value.as_u64()),
                 stop_reason: text("stop_reason"),
                 followup_hint: text("followup_hint"),
+                gap_ms: value.get("gap_ms").and_then(|value| value.as_u64()),
+                queued_behind: value.get("queued_behind").and_then(|value| value.as_bool()),
             });
         }
     }
