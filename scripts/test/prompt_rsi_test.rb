@@ -320,14 +320,46 @@ class PromptRsiReportTest < Minitest::Test
     assert_includes markdown, '结论：**candidate_passes**'
     assert_includes markdown, 'v6（validation）：failed → passed'
     assert_includes markdown, '## 人工门'
+    assert_match(/\A20260930T120000Z-tone-conclusion-first-glm-5-\h{6}\z/, report['run_id'])
+    assert_includes markdown, "运行：`#{report['run_id']}`"
     Dir.mktmpdir do |dir|
       path = PromptRsi::Report.archive(report, dir)
-      assert_equal File.join(dir, 'reports', '2026-09-30', 'tone-conclusion-first-glm-5.json'), path
+      assert_equal File.join(dir, 'reports', '2026-09-30', "#{report['run_id']}.json"), path
       history = File.readlines(File.join(dir, 'history.jsonl')).map { |line| JSON.parse(line) }
       assert_equal 'candidate_passes', history.last['verdict']
       assert_equal [], history.last['failed_checks']
-      PromptRsi::Report.archive(report, dir, history: false)
+      assert_equal report['run_id'], history.last['run_id']
+      assert_equal path.delete_prefix("#{dir}/"), history.last['report']
+      assert_equal Digest::SHA256.file(path).hexdigest, history.last['report_sha256']
+      again = PromptRsi::Report.build(suite: 'model-eval', provenance: PromptRsiGateTest::PROVENANCE, result: result,
+                                      generated_at: Time.utc(2026, 9, 30, 12))
+      PromptRsi::Report.archive(again, dir, history: false)
       assert_equal 1, File.readlines(File.join(dir, 'history.jsonl')).size
+    end
+  end
+
+  # 同一天、同一变体、同一模型重跑：每次各占一份报告，history 能逐行指回原件；
+  # 同一份报告再归档一次是撞名，拒绝覆盖。
+  def test_reruns_never_overwrite_earlier_evidence
+    provenance = PromptRsiGateTest::PROVENANCE
+    at = Time.utc(2026, 10, 2, 1)
+    first = PromptRsi::Report.build(suite: 'model-eval', provenance: provenance, generated_at: at,
+                                    result: { 'verdict' => 'candidate_passes', 'checks' => [], 'problems' => [] })
+    second = PromptRsi::Report.build(suite: 'model-eval', provenance: provenance, generated_at: at,
+                                     result: { 'verdict' => 'rejected', 'checks' => [], 'problems' => [] })
+    refute_equal first['run_id'], second['run_id']
+    Dir.mktmpdir do |dir|
+      paths = [first, second].map { |report| PromptRsi::Report.archive(report, dir) }
+      assert_equal %w[candidate_passes rejected], paths.map { |path| JSON.parse(File.read(path, encoding: 'UTF-8'))['verdict'] }
+      history = File.readlines(File.join(dir, 'history.jsonl')).map { |line| JSON.parse(line) }
+      assert_equal(paths.map { |path| path.delete_prefix("#{dir}/") }, history.map { |row| row['report'] })
+      before = File.read(paths.first, encoding: 'UTF-8')
+      assert_raises(PromptRsi::Report::ArchiveExists) { PromptRsi::Report.archive(first.merge('verdict' => 'rejected'), dir) }
+      assert_equal before, File.read(paths.first, encoding: 'UTF-8')
+      assert_equal 2, history.size
+      assert_raises(PromptRsi::Report::ArchiveExists) do
+        2.times { PromptRsi::Report.save_suggestion_evidence(dir, first, baseline: { 'cases' => [] }, candidate: { 'cases' => [] }) }
+      end
     end
   end
 
@@ -408,7 +440,8 @@ class PromptRsiRescoreTest < Minitest::Test
 
       assert_equal original, read(path), 'the original report is never rewritten'
       rescored = Dir[File.join(archive, 'reports', '*', '*-rescored-*.json')].map { |file| JSON.parse(read(file)) }
-      assert_includes rescored.map { |item| item['verdict'] }, 'candidate_passes'
+      assert_equal %w[candidate_passes needs_human_judging], rescored.map { |item| item['verdict'] }.sort,
+                   'each rescore keeps its own report, even within the same second'
       assert(rescored.all? { |item| item['rescored_from'] == path.delete_prefix("#{archive}/") })
       history = File.readlines(File.join(archive, 'history.jsonl')).map { |line| JSON.parse(line) }
       assert_equal 3, history.size
