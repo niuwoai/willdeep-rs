@@ -27,6 +27,7 @@ require 'rbconfig'
 require 'tmpdir'
 
 require_relative 'lib/model_eval/report'
+require_relative 'lib/model_eval/task'
 require_relative 'lib/prompt_rsi/gate'
 require_relative 'lib/prompt_rsi/report'
 require_relative 'lib/suggestion_report'
@@ -73,20 +74,27 @@ module PromptRsiEval
     File.file?(path) ? JSON.parse(File.read(path, encoding: 'UTF-8'))['rows'] : []
   end
 
+  # 任务清单（任务 id → 分组）：门禁拿它逐题核对报告，不从报告本身推断该有哪些题。
+  def task_manifest
+    ModelEval::Task.load_all(File.dirname(TASKS)).to_h { |task| [task.id, task.split] }
+  end
+
   def run_model_eval(options, provenance)
     provenance['dataset_sha256'] = PromptRsi::Report.dataset_sha256(TASKS)
-    first = %w[validation regression]
+    tasks = task_manifest
+    first = PromptRsi::Gate::STAGE_ONE_SPLITS
     baseline = model_eval(options, 'baseline', first, nil)
     candidate = model_eval(options, 'candidate', first, options[:variant])
     passed_one, = PromptRsi::Gate.stage_one(baseline, candidate)
-    reproducible = PromptRsi::Gate.reproducibility(provenance, baseline, candidate).empty?
+    reproducible = PromptRsi::Gate.reproducibility(provenance, baseline, candidate, tasks: tasks).empty?
     holdout = nil
     if passed_one && reproducible
-      holdout = { baseline: model_eval(options, 'holdout-baseline', ['holdout'], nil),
-                  candidate: model_eval(options, 'holdout-candidate', ['holdout'], options[:variant]) }
+      splits = PromptRsi::Gate::HOLDOUT_SPLITS
+      holdout = { baseline: model_eval(options, 'holdout-baseline', splits, nil),
+                  candidate: model_eval(options, 'holdout-candidate', splits, options[:variant]) }
     end
     result = PromptRsi::Gate.evaluate(provenance: provenance, baseline: baseline, candidate: candidate,
-                                      holdout: holdout)
+                                      tasks: tasks, holdout: holdout)
     PromptRsi::Report.build(suite: 'model-eval', provenance: provenance, result: result,
                             baseline_rows: baseline, candidate_rows: candidate)
   end
