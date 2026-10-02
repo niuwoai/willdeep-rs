@@ -86,6 +86,18 @@ fn a_prompt_variant_reaches_the_model_only_through_a_valid_local_run() {
         .unwrap();
     assert_success(&check, "prompt check");
     assert!(stdout_text(&check).contains(&format!("+ {ADDED_RULE}")));
+    let candidate_bundle = stdout_text(&check)
+        .lines()
+        .find_map(|line| line.strip_prefix("bundle "))
+        .and_then(|line| line.split(" → ").nth(1))
+        .expect("candidate bundle line")
+        .to_owned();
+    assert!(
+        stdout_text(&check)
+            .lines()
+            .any(|line| line.starts_with("build ")),
+        "prompt check names the build commit"
+    );
 
     let through_daemon = run(&valid, false);
     assert!(!through_daemon.status.success());
@@ -109,6 +121,11 @@ fn a_prompt_variant_reaches_the_model_only_through_a_valid_local_run() {
         system.contains("Stable tool contract:"),
         "other sections stay"
     );
+    // 评测报告据此核对实际生效的是哪份提示词。
+    let completion: serde_json::Value =
+        serde_json::from_str(stdout_text(&local).trim()).expect("run --output json envelope");
+    assert_eq!(completion["prompt_variant"]["id"], "tone-conclusion-first");
+    assert_eq!(completion["prompt_variant"]["bundle"], candidate_bundle);
 }
 
 /// `prompt propose` 走会话主模型：模型答不出合规 JSON 时两次请求后放弃、

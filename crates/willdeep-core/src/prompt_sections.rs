@@ -320,6 +320,24 @@ pub fn active_variant() -> Option<&'static PromptVariant> {
     init_from_env().ok().flatten()
 }
 
+/// 本进程实际生效的变体，给评测报告逐条记录用：没有变体时为 `null`，否则是
+/// 变体 id、角色、段名与套上它之后的版本号。对照评测拿它核对 baseline 真的
+/// 没套变体、候选真的套上了预期那一份——环境变量会被子进程继承，光看命令行
+/// 参数说明不了实际跑的是哪份提示词。
+pub fn active_variant_report() -> serde_json::Value {
+    let Some((variant, check)) =
+        active_variant().and_then(|variant| Some((variant, check_variant(variant).ok()?)))
+    else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "id": variant.id,
+        "role": variant.role,
+        "section": variant.section,
+        "bundle": check.candidate_bundle,
+    })
+}
+
 /// 加载并校验 [`VARIANT_ENV`] 指向的变体，结果在进程内缓存。
 pub fn init_from_env() -> Result<Option<&'static PromptVariant>, String> {
     static ACTIVE: OnceLock<Result<Option<PromptVariant>, String>> = OnceLock::new();

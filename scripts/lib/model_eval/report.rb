@@ -75,10 +75,19 @@ module ModelEval
       total.to_i.zero? ? nil : (part * 100.0 / total).round(1)
     end
 
+    # 未跟踪文件也会改变结果的路径：源码（`cargo test` 现编现跑）、评测脚本、任务集。
+    # 别处的未跟踪文件（草稿文档之类）不算工作区不干净。
+    SOURCE_PATHS = %w[crates scripts bench web/src Cargo.toml Cargo.lock].freeze
+
     def git_context(root)
       commit = git_output(root, 'rev-parse', '--short', 'HEAD')
-      dirty = commit && !system('git', '-C', root, 'diff', '--quiet', 'HEAD', out: File::NULL, err: File::NULL)
+      dirty = commit && (!system('git', '-C', root, 'diff', '--quiet', 'HEAD', out: File::NULL, err: File::NULL) ||
+                         !untracked_sources(root).empty?)
       { commit: commit, dirty: dirty ? true : false }
+    end
+
+    def untracked_sources(root)
+      git_output(root, 'ls-files', '--others', '--exclude-standard', '--', *SOURCE_PATHS).to_s.lines.map(&:strip)
     end
 
     def git_output(root, *args)

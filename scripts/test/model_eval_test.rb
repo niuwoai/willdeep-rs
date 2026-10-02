@@ -287,6 +287,23 @@ class ReportTest < Minitest::Test
     assert_nil ModelEval::Report.unusable_reason([row, row(status: 'error', exit_code: 3)])
   end
 
+  # 未跟踪文件只在会改变结果的路径下才算不干净：草稿文档不算，新的源码或任务算。
+  def test_untracked_sources_make_the_tree_dirty_but_stray_notes_do_not
+    Dir.mktmpdir do |root|
+      git = ->(*args) { system('git', '-C', root, '-c', 'user.name=t', '-c', 'user.email=t@t', *args, out: File::NULL, err: File::NULL) }
+      git.call('init', '-q')
+      File.write(File.join(root, 'Cargo.toml'), "[workspace]\n")
+      git.call('add', 'Cargo.toml')
+      git.call('commit', '-q', '-m', 'init')
+      refute ModelEval::Report.git_context(root)[:dirty]
+      File.write(File.join(root, 'notes.md'), 'draft')
+      refute ModelEval::Report.git_context(root)[:dirty], 'stray notes outside source paths'
+      FileUtils.mkdir_p(File.join(root, 'bench', 'model-eval', 'tasks', 'new-task'))
+      File.write(File.join(root, 'bench', 'model-eval', 'tasks', 'new-task', 'task.json'), '{}')
+      assert ModelEval::Report.git_context(root)[:dirty], 'an untracked task changes the run'
+    end
+  end
+
   def test_three_leading_errors_abort_the_model_but_a_later_error_does_not
     errors = Array.new(3) { row(status: 'error', exit_code: 3) }
     refute ModelEval::Report.abort_early?(errors.first(2))

@@ -147,13 +147,19 @@ R1–R8 八项**全部确认**，没有需要反驳的。其中 R2 比首轮描�
 
 ## 修复进度
 
-2026-10-02，第一组的 R1、R2、N1、N2 已在工作区修好，还没有提交：
+2026-10-02，第一组的 R1、R2、N1、N2 已修好，见 [niuwoai/willdeep-rs#41](https://github.com/niuwoai/willdeep-rs/pull/41)（0.88.0-rc2）：
 
 - `gate.rb`：新增 `integrity`，按任务清单逐题核对；新增 `floors` 和 `resource_check`，两个阶段共用，token 和耗时只比两边都测到的题；新增 `holdout_problems`；输入建议的指标缺失记为问题，不再当 0 比较，plausible 要两边都判过才比。`evaluate` 和 `reproducibility` 现在必须传入 `tasks:`。
 - `prompt_rsi_eval.rb`：从 `bench/model-eval/tasks` 读出任务清单，传给门禁。
 - `prompt_rsi_test.rb`：新增 5 个测试，对应上文的反例。这 5 个测试在旧门禁上全部失败，在新门禁上全部通过。
 
+第二组的 R3、N3 随后修好（0.88.0-rc3）：
+
+- **R3**：两个驱动给子进程的环境总是显式写出变体变量，没有变体时传 nil 把它清掉。`run --output json` 和输入建议实弹报告新增 `prompt_variant`（实际生效的变体，没有则为 null），评测逐行记录；门禁核对 baseline 没套变体、候选套上了预期的 bundle，执行完却没报告的任务也拦下（超时的除外）。另用假二进制做了端到端检查：父进程 export 了候选时，baseline 子进程收到的仍是 nil。
+- **N3**：`build.rs` 把构建 commit 编进二进制，`prompt check` 打印 `build <commit>[-dirty]`；门禁要求它以仓库 commit 开头且不带 `-dirty`，两个套件都要求。`git_context` 把源码相关路径下的未跟踪文件也算作改动。
+- **已知局限**：`-dirty` 只看 `crates`、`web/src`、`Cargo.toml`、`Cargo.lock`。这些路径之外、同样会影响二进制的改动（`.cargo/config.toml`、工具链文件、前端构建配置等）不会被标出。反过来的情况偏保守：带着改动构建后又撤销改动、但没有重新构建时，二进制仍标着 `-dirty`，会被拦下。
+
 还没做的：
 - **N4**：两轮之间的数据集哈希仍然只算一次。现在能拦住「任务 id 或分组变了」，拦不住「同一 id 的内容变了」。
 - **R4 的其余部分**：固定判哪些样本、要求判到一定数量。
-- 第 2 到第 5 组。
+- 第 3 到第 5 组。

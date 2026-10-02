@@ -47,8 +47,12 @@ module PromptRsiEval
     match = output.match(/^bundle (\S+) → (\S+)$/)
     abort("看不懂 `willdeep prompt check` 的输出：\n#{output}") unless match
     spec = JSON.parse(File.read(path, encoding: 'UTF-8'))
+    # 构建 commit：旧二进制没有这一行，或者构建时不在 git 仓库里（`unknown`），
+    # 都记为缺失，门禁据此判 non_reproducible。
+    built = output[/^build (\S+)$/, 1]
     { 'variant_id' => spec['id'], 'role' => spec['role'], 'section' => spec['section'],
       'parent_bundle' => match[1], 'candidate_bundle' => match[2],
+      'binary_commit' => built == 'unknown' ? nil : built,
       'variant_sha256' => Digest::SHA256.file(path).hexdigest }
   end
 

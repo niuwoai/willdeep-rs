@@ -99,7 +99,8 @@ env = {
   'WILLDEEP_RANGE_MODEL' => options[:model],
   'WILLDEEP_SUGGEST_OUT' => json_path
 }
-env['WILLDEEP_PROMPT_VARIANT'] = options[:variant] if options[:variant]
+# 没有变体时传 nil，把调用者 shell 里可能 export 过的候选清掉。
+env['WILLDEEP_PROMPT_VARIANT'] = options[:variant]
 command = %w[cargo test -p willdeep-core --lib input_suggestion_livefire::input_suggestion_live_fire --
              --ignored --nocapture --test-threads=1]
 ok = system(env, *command)
@@ -120,7 +121,9 @@ if options[:history]
   stamp = summary['ran_at'].tr(':', '').tr('-', '')
   run_path = File.join(options[:history], 'runs', "#{stamp}-#{options[:model].gsub(/[^\w.-]/, '_')}.json")
   FileUtils.mkdir_p(File.dirname(run_path))
-  File.write(run_path, "#{JSON.pretty_generate({ 'summary' => summary, 'model' => report['model'], 'cases' => report['cases'] })}\n")
+  run = { 'summary' => summary, 'model' => report['model'], 'prompt_variant' => report['prompt_variant'],
+          'cases' => report['cases'] }
+  File.write(run_path, "#{JSON.pretty_generate(run)}\n")
   append_history(options[:history], summary)
   puts "归档：#{run_path}"
 end
