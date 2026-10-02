@@ -20,13 +20,21 @@ class PromptRsiGateTest < Minitest::Test
   PROVENANCE = {
     'variant_id' => 'tone-conclusion-first', 'role' => 'main', 'section' => 'tone',
     'commit' => 'abc1234', 'dirty' => false, 'model' => 'glm-5', 'binary_version' => '0.87.0',
+    'binary_commit' => "abc1234#{'0' * 33}",
     'dataset_sha256' => 'd' * 64, 'variant_sha256' => 'v' * 64,
     'parent_bundle' => 'main@111111111111', 'candidate_bundle' => 'main@222222222222'
   }.freeze
 
+  # baseline 一行：willdeep 报告了没有套变体。
   def row(task, split, status, overrides = {})
     { 'task' => task, 'split' => split, 'status' => status, 'false_completion' => false,
-      'input_tokens' => 1000, 'output_tokens' => 200, 'elapsed_seconds' => 10.0 }.merge(overrides)
+      'input_tokens' => 1000, 'output_tokens' => 200, 'elapsed_seconds' => 10.0,
+      'prompt_variant_reported' => true, 'prompt_variant_bundle' => nil }.merge(overrides)
+  end
+
+  # 候选一行：willdeep 报告套上的正是 provenance 里的候选版本。
+  def cand_row(task, split, status, overrides = {})
+    row(task, split, status, { 'prompt_variant_bundle' => PROVENANCE['candidate_bundle'] }.merge(overrides))
   end
 
   # validation 10 题、regression 2 题；baseline 过 6 题。
@@ -36,13 +44,13 @@ class PromptRsiGateTest < Minitest::Test
   end
 
   def candidate_rows(passed: 7, regression: %w[passed passed], overrides: {})
-    (0...10).map { |index| row("v#{index}", 'validation', index < passed ? 'passed' : 'failed', overrides) } +
-      regression.each_with_index.map { |status, index| row("r#{index}", 'regression', status, overrides) }
+    (0...10).map { |index| cand_row("v#{index}", 'validation', index < passed ? 'passed' : 'failed', overrides) } +
+      regression.each_with_index.map { |status, index| cand_row("r#{index}", 'regression', status, overrides) }
   end
 
   def holdout(base_passed, cand_passed)
     { baseline: (0...4).map { |index| row("h#{index}", 'holdout', index < base_passed ? 'passed' : 'failed') },
-      candidate: (0...4).map { |index| row("h#{index}", 'holdout', index < cand_passed ? 'passed' : 'failed') } }
+      candidate: (0...4).map { |index| cand_row("h#{index}", 'holdout', index < cand_passed ? 'passed' : 'failed') } }
   end
 
   # 任务清单：validation 10、regression 2、holdout 4，外加一道不参与对照的 train。
@@ -71,10 +79,10 @@ class PromptRsiGateTest < Minitest::Test
     assert_equal ['validation_gain'], failed(evaluate(candidate_rows(passed: 6)))
     assert_equal ['regression_all_pass'], failed(evaluate(candidate_rows(regression: %w[passed failed])))
     lying = candidate_rows
-    lying[9] = row('v9', 'validation', 'failed', 'false_completion' => true)
+    lying[9] = cand_row('v9', 'validation', 'failed', 'false_completion' => true)
     assert_equal ['no_new_false_completions'], failed(evaluate(lying))
     cheating = candidate_rows(passed: 8)
-    cheating[9] = row('v9', 'validation', 'cheated')
+    cheating[9] = cand_row('v9', 'validation', 'cheated')
     assert_equal ['no_new_cheating'], failed(evaluate(cheating))
     assert_equal ['token_growth'], failed(evaluate(candidate_rows(overrides: { 'input_tokens' => 1200 })))
     assert_equal ['time_growth'], failed(evaluate(candidate_rows(overrides: { 'elapsed_seconds' => 12.5 })))
@@ -118,7 +126,7 @@ class PromptRsiGateTest < Minitest::Test
     cases = {
       'candidate 缺任务' => candidate_rows(passed: 10).reject { |item| %w[v8 v9 r1].include?(item['task']) },
       'candidate 有任务清单之外的任务' => candidate_rows.map { |item| item.merge('task' => "x-#{item['task']}") },
-      'candidate 有重复的任务' => candidate_rows + [row('v0', 'validation', 'passed')],
+      'candidate 有重复的任务' => candidate_rows + [cand_row('v0', 'validation', 'passed')],
       'candidate 的任务分组与清单不符' => candidate_rows.map { |item| item['task'] == 'r1' ? item.merge('split' => 'validation') : item },
       'candidate 有未知状态的任务' => candidate_rows(passed: 6).map { |item| item['status'] == 'failed' ? item.merge('status' => 'interrupted') : item }
     }
@@ -143,7 +151,7 @@ class PromptRsiGateTest < Minitest::Test
 
   def test_holdout_keeps_the_same_floors_as_stage_one
     cheating = holdout(2, 2)
-    cheating[:candidate][3] = row('h3', 'holdout', 'cheated', 'false_completion' => true)
+    cheating[:candidate][3] = cand_row('h3', 'holdout', 'cheated', 'false_completion' => true)
     result = evaluate(candidate_rows, holdout: cheating)
     assert_equal 'rejected', result['verdict']
     assert_equal %w[holdout_no_new_false_completions holdout_no_new_cheating], failed(result)
@@ -152,7 +160,7 @@ class PromptRsiGateTest < Minitest::Test
     assert_equal %w[holdout_token_growth holdout_time_growth], failed(evaluate(candidate_rows, holdout: costly))
     # 底线破了又掉了通过率：先算不合格，不记成过拟合。
     worse = holdout(3, 2)
-    worse[:candidate][3] = row('h3', 'holdout', 'cheated')
+    worse[:candidate][3] = cand_row('h3', 'holdout', 'cheated')
     assert_equal 'rejected', evaluate(candidate_rows(passed: 8), holdout: worse)['verdict']
   end
 
@@ -171,7 +179,8 @@ class PromptRsiGateTest < Minitest::Test
     holdout_missing = holdout(2, 2)
     holdout_missing[:candidate] = holdout_missing[:candidate].map { |item| item.merge(unmeasured) }
     assert_equal ['holdout_token_growth'], failed(evaluate(candidate_rows, holdout: holdout_missing))
-    timeout = row('v9', 'validation', 'timeout', unmeasured)
+    # 超时被强杀：拿不到 JSON 结果，也就没有生效提示词的报告。
+    timeout = row('v9', 'validation', 'timeout', unmeasured.merge('prompt_variant_reported' => false))
     base = baseline_rows.map { |item| item['task'] == 'v9' ? timeout : item }
     cand = candidate_rows.map { |item| item['task'] == 'v9' ? timeout : item }
     result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: base, candidate: cand, tasks: tasks,
@@ -180,14 +189,21 @@ class PromptRsiGateTest < Minitest::Test
     assert_match(/可比 11 题/, result['checks'].find { |item| item['name'] == 'token_growth' }['detail'])
   end
 
+  # 一份摘要；缺省是 baseline（报告了没有套变体）。
   def suggestion_summary(overrides = {})
     { 'errors' => 0, 'reject_hit_rate' => 100.0, 'leaks' => 0, 'none_hit_rate' => 100.0,
-      'suggest_given_rate' => 90.0, 'judged' => 0, 'plausible_rate' => nil, 'wrong_voice' => 0 }.merge(overrides)
+      'suggest_given_rate' => 90.0, 'judged' => 0, 'plausible_rate' => nil, 'wrong_voice' => 0,
+      'variant_reported' => true, 'variant_bundle' => nil }.merge(overrides)
+  end
+
+  # 把一份摘要当候选：缺省报告套上了 provenance 里的候选版本。
+  def as_candidate(summary)
+    summary['variant_bundle'] ? summary : summary.merge('variant_bundle' => PROVENANCE['candidate_bundle'])
   end
 
   def test_suggestion_variants_need_human_judging_before_they_pass
     gate = lambda do |candidate, baseline = suggestion_summary('judged' => 10, 'plausible_rate' => 80.0)|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: candidate)
+      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
     end
     assert_equal 'needs_human_judging', gate.call(suggestion_summary)['verdict']
     assert_equal 'candidate_passes',
@@ -203,7 +219,7 @@ class PromptRsiGateTest < Minitest::Test
   # baseline 缺的指标是「没测」，不是 0：不能拿来当下限，也不能让 plausible 过门。
   def test_missing_suggestion_metrics_are_never_compared_as_zero
     gate = lambda do |baseline, candidate = suggestion_summary('judged' => 10, 'plausible_rate' => 90.0)|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: candidate)
+      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
     end
     %w[none_hit_rate suggest_given_rate reject_hit_rate leaks].each do |key|
       result = gate.call(suggestion_summary('judged' => 10, 'plausible_rate' => 80.0, key => nil))
@@ -216,6 +232,50 @@ class PromptRsiGateTest < Minitest::Test
     unjudged_baseline = gate.call(suggestion_summary)
     assert_equal 'needs_human_judging', unjudged_baseline['verdict']
     refute(unjudged_baseline['checks'].any? { |item| item['name'] == 'plausible_not_worse' })
+  end
+
+  # baseline 继承了调用者 shell 里的候选、候选没套上、或者结果里根本没说套了
+  # 什么：对照都不成立。超时拿不到结果的那一题不要求报告。
+  def test_the_prompt_actually_in_effect_must_match_each_side
+    leaked = baseline_rows.map { |item| item.merge('prompt_variant_bundle' => PROVENANCE['candidate_bundle']) }
+    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: leaked, candidate: candidate_rows,
+                                      tasks: tasks, holdout: holdout(2, 2))
+    assert_equal 'non_reproducible', result['verdict']
+    assert(result['problems'].any? { |text| text.start_with?('baseline 有任务实际生效的提示词不是基线') }, result['problems'].inspect)
+    unapplied = candidate_rows.map { |item| item.merge('prompt_variant_bundle' => nil) }
+    assert(evaluate(unapplied)['problems'].any? { |text| text.start_with?('candidate 有任务实际生效的提示词不是 main@222222222222') })
+    silent = candidate_rows.map { |item| item.merge('prompt_variant_reported' => false) }
+    assert(evaluate(silent)['problems'].any? { |text| text.start_with?('candidate 有任务没报告实际生效的提示词') })
+    wrong_holdout = holdout(2, 2)
+    wrong_holdout[:baseline] = wrong_holdout[:candidate]
+    assert(evaluate(candidate_rows, holdout: wrong_holdout)['problems']
+             .any? { |text| text.start_with?('holdout baseline 有任务实际生效的提示词不是基线') })
+
+    suggestion = lambda do |baseline, candidate|
+      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
+                                 candidate: suggestion_summary(candidate))
+    end
+    result = suggestion.call({ 'variant_bundle' => 'main@222222222222' }, { 'variant_bundle' => PROVENANCE['candidate_bundle'] })
+    assert_includes result['problems'], 'baseline 实际生效的提示词不是基线'
+    result = suggestion.call({}, { 'variant_reported' => false })
+    assert_includes result['problems'], 'candidate 没报告实际生效的提示词'
+  end
+
+  # 二进制必须正是仓库这个 commit 的干净源码构建出来的，否则出处说不清。
+  def test_the_binary_must_be_built_from_the_clean_repository_commit
+    {
+      PROVENANCE.merge('binary_commit' => nil) => '缺 binary_commit',
+      PROVENANCE.merge('binary_commit' => "abc1234#{'0' * 33}-dirty") =>
+        "二进制构建时源码有未提交的改动（abc1234#{'0' * 33}-dirty）",
+      PROVENANCE.merge('binary_commit' => 'f' * 40) => "二进制构建自 #{'f' * 40}，与仓库 commit abc1234 不一致"
+    }.each do |provenance, problem|
+      result = evaluate(candidate_rows, provenance: provenance)
+      assert_equal 'non_reproducible', result['verdict'], problem
+      assert_includes result['problems'], problem
+      suggestion = PromptRsi::Gate.suggestion(provenance: provenance, baseline: suggestion_summary,
+                                              candidate: as_candidate(suggestion_summary))
+      assert_includes suggestion['problems'], problem
+    end
   end
 end
 

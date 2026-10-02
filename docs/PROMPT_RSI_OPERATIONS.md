@@ -93,6 +93,8 @@ feedback/*.jsonl ──willdeep feedback report --candidates──▶ 改进候�
 - **其他入口一律拒绝**：TUI、Web、daemon，以及经过 daemon 的 `run`，都会拒绝这个变量。daemon 是常驻进程，它的提示词不跟着某一次调用的环境变量走。
 - **账本里的效果**：变体生效后，该角色的 `prompt_bundle` 变成候选版本号，反馈行天然能区分 baseline 和 candidate。
 - **实弹测试**：`input_suggestion_live_fire` 和 `skill_worker_range` 也认这个变量，同样在变体不合法时失败。
+- **报告实际生效的变体**：`willdeep run --output json` 的结果和输入建议实弹报告都带 `prompt_variant` 字段，没有变体时为 `null`，否则是 `{id, role, section, bundle}`。对照评测据此核对 baseline 真的没有套变体、候选真的套上了预期那一份。驱动给子进程传环境时总是显式写出这个变量（没有变体就传 nil 把它清掉），shell 里 export 过的候选不会被 baseline 继承。
+- **构建 commit**：`willdeep prompt check` 通过时还会打印 `build <commit>`。这是构建这份二进制时的完整 commit；构建时 `crates`、`web/src`、`Cargo.toml`、`Cargo.lock` 下有未提交改动（包括未跟踪文件）就带 `-dirty`；不在 git 仓库里构建（例如源码包）时为 `unknown`。
 
 ## 5. 对照评测 `scripts/prompt_rsi_eval.rb`
 
@@ -132,7 +134,7 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 | `candidate_passes` | 通过门禁，交给人工门 |
 | `rejected` | 第一阶段有检查没过，或 holdout 的底线没守住 |
 | `overfit` | validation 提升、holdout 底线都守住，但 holdout 通过率下降 |
-| `non_reproducible` | 出处不全（commit、模型、二进制版本、数据集哈希、变体哈希、新旧版本号缺一项）、工作区有未提交改动、报告行与任务清单对不上（缺题、多题、重复、分组不符、未知状态），或有任务没真正执行（error / skipped / 整轮没跑成，holdout 也一样） |
+| `non_reproducible` | 出处不全（commit、模型、二进制版本、构建 commit、数据集哈希、变体哈希、新旧版本号缺一项）；工作区有未提交改动（`crates`、`scripts`、`bench`、`web/src`、`Cargo.*` 下的未跟踪文件也算）；二进制不是从这个 commit 的干净源码构建的；报告行与任务清单对不上（缺题、多题、重复、分组不符、未知状态）；实际生效的提示词对不上（baseline 套了变体、候选没套上预期那份，或者执行完的任务没报告）；或有任务没真正执行（error / skipped / 整轮没跑成，holdout 也一样） |
 
 **input-suggestion 套件**：沿用该套件的及格线，并要求候选不比 baseline 差：
 - reject 100%、无泄漏；

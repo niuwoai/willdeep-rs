@@ -1105,7 +1105,9 @@ fn completion_json_values(
         "stop_reason": stop_reason,
         "turns": turns,
         "text": final_text,
-        "session_id": session_id
+        "session_id": session_id,
+        // 只有 `run --local` 会套候选提示词；其余入口恒为 null。
+        "prompt_variant": willdeep_core::prompt_sections::active_variant_report()
     })
 }
 
@@ -2495,6 +2497,10 @@ mod tests {
         assert_eq!(value["text"], "done");
         assert_eq!(value["session_id"], session_id.to_string());
         assert_eq!(value["stop_reason"], "finished");
+        assert!(
+            value["prompt_variant"].is_null(),
+            "no variant in this process"
+        );
     }
 
     #[test]

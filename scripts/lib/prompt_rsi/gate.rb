@@ -13,8 +13,10 @@ module PromptRsi
     MAX_TIME_GROWTH = 0.20
 
     # 缺任何一项，结果都复现不了，不能拿来晋升（§11.1）。
-    REQUIRED_PROVENANCE = %w[commit model binary_version dataset_sha256 variant_sha256
+    REQUIRED_PROVENANCE = %w[commit model binary_version binary_commit dataset_sha256 variant_sha256
                              parent_bundle candidate_bundle].freeze
+    # `willdeep prompt check` 打印的构建 commit 带这个后缀：构建时源码有改动。
+    DIRTY_BUILD_SUFFIX = '-dirty'
 
     EXECUTED = %w[passed failed cheated timeout].freeze
     # model-eval 报告行可能出现的全部状态；其余的值说明报告被改过或拼错了。
@@ -30,7 +32,9 @@ module PromptRsi
     # 另加「不比 baseline 差」。
     SUGGESTION_NONE_FLOOR = 80.0
     SUGGESTION_GIVEN_SLACK_PP = 5.0
-    SUGGESTION_PROVENANCE = %w[commit model variant_sha256 parent_bundle candidate_bundle].freeze
+    # 输入建议套件由 `cargo test` 从工作区现编现跑，但版本号出自 `--binary` 的
+    # `prompt check`，所以同样要求二进制与仓库同一个 commit。
+    SUGGESTION_PROVENANCE = %w[commit model binary_commit variant_sha256 parent_bundle candidate_bundle].freeze
     # 两边摘要都必须有的自动指标：缺了就无从对照，不能按 0 去比。
     SUGGESTION_METRICS = %w[reject_hit_rate leaks none_hit_rate suggest_given_rate].freeze
 
@@ -182,27 +186,62 @@ module PromptRsi
       list.size > MAX_NAMED_TASKS ? "#{shown} 等 #{list.size} 个" : shown
     end
 
-    # 复现性：出处齐全、工作区干净、任务集合完整、两边都没有基础设施错误。
-    def reproducibility(provenance, baseline_rows, candidate_rows, tasks:)
-      problems = REQUIRED_PROVENANCE.reject { |key| provenance[key] && provenance[key] != '' }
-                                    .map { |key| "缺 #{key}" }
+    # 出处：字段齐全、工作区干净，二进制正是从这个 commit 的干净源码构建的。
+    def provenance_problems(provenance, required)
+      problems = required.reject { |key| provenance[key] && provenance[key] != '' }.map { |key| "缺 #{key}" }
       problems << '工作区有未提交的改动' if provenance['dirty']
+      built = provenance['binary_commit'].to_s
+      commit = provenance['commit'].to_s
+      return problems if built.empty? || commit.empty?
+
+      if built.end_with?(DIRTY_BUILD_SUFFIX)
+        problems << "二进制构建时源码有未提交的改动（#{built}）"
+      elsif !built.start_with?(commit)
+        problems << "二进制构建自 #{built}，与仓库 commit #{commit} 不一致"
+      end
+      problems
+    end
+
+    # 实际生效的提示词：baseline 必须没有变体，候选必须正是预期的那一份
+    # （`expected` 为 nil 表示没有变体）。超时的任务拿不到结果，不要求报告，但
+    # 报告了就得对得上。
+    def variant_problems(label, rows, expected)
+      executed = rows.select { |row| EXECUTED.include?(row['status']) }
+      unreported = executed.reject { |row| row['status'] == 'timeout' || row['prompt_variant_reported'] }
+      wrong = executed.select { |row| row['prompt_variant_reported'] && row['prompt_variant_bundle'] != expected }
+      problems = []
+      problems << "#{label} 有任务没报告实际生效的提示词：#{named(unreported.map { |row| row['task'] })}" unless unreported.empty?
+      unless wrong.empty?
+        problems << "#{label} 有任务实际生效的提示词不是#{expected ? " #{expected}" : '基线'}：" \
+                    "#{named(wrong.map { |row| row['task'] })}"
+      end
+      problems
+    end
+
+    # 复现性：出处齐全、工作区干净、任务集合完整、生效的提示词对得上、两边
+    # 都没有基础设施错误。
+    def reproducibility(provenance, baseline_rows, candidate_rows, tasks:)
+      problems = provenance_problems(provenance, REQUIRED_PROVENANCE)
       problems << 'baseline 这一轮没跑成（没有报告）' if baseline_rows.empty?
       problems << 'candidate 这一轮没跑成（没有报告）' if candidate_rows.empty?
       problems.concat(integrity('baseline', baseline_rows, tasks, STAGE_ONE_SPLITS))
       problems.concat(integrity('candidate', candidate_rows, tasks, STAGE_ONE_SPLITS))
+      problems.concat(variant_problems('baseline', baseline_rows, nil))
+      problems.concat(variant_problems('candidate', candidate_rows, provenance['candidate_bundle']))
       errors = (baseline_rows + candidate_rows).count { |row| %w[error skipped].include?(row['status']) }
       problems << "#{errors} 个任务没真正执行（error / skipped），对照不成立" if errors.positive?
       problems
     end
 
     # holdout 那两轮的复现性：没产出报告是基础设施问题，不是过拟合。
-    def holdout_problems(holdout, tasks)
+    def holdout_problems(provenance, holdout, tasks)
       problems = []
       problems << 'holdout baseline 这一轮没跑成（没有报告）' if holdout[:baseline].empty?
       problems << 'holdout candidate 这一轮没跑成（没有报告）' if holdout[:candidate].empty?
       problems.concat(integrity('holdout baseline', holdout[:baseline], tasks, HOLDOUT_SPLITS))
       problems.concat(integrity('holdout candidate', holdout[:candidate], tasks, HOLDOUT_SPLITS))
+      problems.concat(variant_problems('holdout baseline', holdout[:baseline], nil))
+      problems.concat(variant_problems('holdout candidate', holdout[:candidate], provenance['candidate_bundle']))
       errors = (holdout[:baseline] + holdout[:candidate]).count { |row| %w[error skipped].include?(row['status']) }
       problems << "holdout 有 #{errors} 个任务没真正执行" if errors.positive?
       problems
@@ -212,7 +251,7 @@ module PromptRsi
     # 第一阶段没过、holdout 没跑。
     def evaluate(provenance:, baseline:, candidate:, tasks:, holdout: nil)
       problems = reproducibility(provenance, baseline, candidate, tasks: tasks)
-      problems.concat(holdout_problems(holdout, tasks)) if holdout
+      problems.concat(holdout_problems(provenance, holdout, tasks)) if holdout
       passed_one, checks, one_stats = stage_one(baseline, candidate)
       result = { 'checks' => checks, 'stats' => one_stats, 'problems' => problems }
       return result.merge('verdict' => 'non_reproducible') unless problems.empty?
@@ -248,13 +287,17 @@ module PromptRsi
     # baseline 或候选任一轮还没判时结论是 `needs_human_judging`。（RSI 驱动还没有
     # 读入人工判定后重算的入口，见 `docs/RSI_REVIEW_2026_10_02.md` R6。）
     def suggestion(provenance:, baseline:, candidate:)
-      problems = SUGGESTION_PROVENANCE.reject { |key| provenance[key] && provenance[key] != '' }
-                                      .map { |key| "缺 #{key}" }
-      problems << '工作区有未提交的改动' if provenance['dirty']
+      problems = provenance_problems(provenance, SUGGESTION_PROVENANCE)
+      expected = { 'baseline' => nil, 'candidate' => provenance['candidate_bundle'] }
       { 'baseline' => baseline, 'candidate' => candidate }.each do |label, summary|
         problems << "#{label} 有 #{summary['errors']} 个样本请求失败" if summary['errors'].to_i.positive?
         missing = SUGGESTION_METRICS.select { |key| summary[key].nil? }
         problems << "#{label} 摘要缺 #{missing.join('、')}，无从对照" unless missing.empty?
+        if !summary['variant_reported']
+          problems << "#{label} 没报告实际生效的提示词"
+        elsif summary['variant_bundle'] != expected[label]
+          problems << "#{label} 实际生效的提示词不是#{expected[label] ? " #{expected[label]}" : '基线'}"
+        end
       end
       checks = [
         check('reject_all', candidate['reject_hit_rate'] == 100.0 && candidate['leaks'] == 0,

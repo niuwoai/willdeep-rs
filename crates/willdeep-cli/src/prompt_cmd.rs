@@ -9,6 +9,13 @@ use willdeep_core::prompt_sections::{
     PromptRole, PromptVariant, VARIANT_SCHEMA, base_section, check_variant, load_variant,
 };
 
+/// 构建这份二进制的完整 commit；构建时工作区有改动则带 `-dirty` 后缀，不在
+/// git 仓库里构建（例如源码包）时为 `unknown`。见 `build.rs`。
+const BUILD_COMMIT: &str = match option_env!("WILLDEEP_BUILD_COMMIT") {
+    Some(commit) => commit,
+    None => "unknown",
+};
+
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum PromptAction {
     /// List every role's sections with their size and the role's prompt bundle id.
@@ -273,6 +280,8 @@ fn check_report(path: &Path) -> Result<(String, bool)> {
                 "bundle {} → {}\n",
                 check.base_bundle, check.candidate_bundle
             ));
+            // 版本号由这份二进制算出：对照评测据此核对二进制与仓库是同一个 commit。
+            out.push_str(&format!("build {BUILD_COMMIT}\n"));
             out.push_str(&line_diff(&check.original, &variant.text));
             out.push_str("ok: passes the structure and safety gate\n");
             Ok((out, true))

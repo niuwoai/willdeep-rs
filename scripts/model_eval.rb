@@ -172,8 +172,9 @@ module ModelEval
                  '--max-turns', @options[:turns].to_s, '--model', model]
       command += ['--profile', @options[:profile]] if @options[:profile]
       command += ['run', '--local', '--output', 'json', '--input', task.prompt_path]
-      env = { 'WILLDEEP_HOME' => home }
-      env['WILLDEEP_PROMPT_VARIANT'] = @options[:variant] if @options[:variant]
+      # 变体变量总是显式给出：没有变体时传 nil，让子进程里没有这个变量。
+      # 只是不设的话，调用者 shell 里 export 过的候选会被 baseline 继承。
+      env = { 'WILLDEEP_HOME' => home, 'WILLDEEP_PROMPT_VARIANT' => @options[:variant] }
       code, timed_out, elapsed = AgentEvalProcess.run(command, env, workspace,
                                                       @options[:timeout], logs)
       result = AgentEvalObservation.object(File.join(logs, 'stdout.log'))
@@ -198,7 +199,11 @@ module ModelEval
         verifier_passed: verdict[:verifier_passed], protected_intact: intact,
         content_violations: verdict[:content_violations],
         mutants_caught: verdict[:mutants_caught], mutants_total: verdict[:mutants_total],
-        elapsed_seconds: elapsed.round(1), input_tokens: tokens['input_tokens'], output_tokens: tokens['output_tokens']
+        elapsed_seconds: elapsed.round(1), input_tokens: tokens['input_tokens'], output_tokens: tokens['output_tokens'],
+        # 实际生效的提示词变体：willdeep 在 JSON 结果里报告（null 即没有变体）；
+        # 没拿到结果（超时、崩溃）时 reported 为 false。
+        prompt_variant_reported: result.key?('prompt_variant'),
+        prompt_variant_bundle: result['prompt_variant'].is_a?(Hash) ? result['prompt_variant']['bundle'] : nil
       ).merge(session_metrics(home, result['session_id']))
       warn format('[%s] %-30s %-8s %6.1fs', model, task.id, status, elapsed)
       row

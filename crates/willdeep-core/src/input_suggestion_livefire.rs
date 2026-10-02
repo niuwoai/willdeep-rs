@@ -229,7 +229,11 @@ async fn input_suggestion_live_fire() {
         results.push(result);
     }
 
-    let report = serde_json::json!({ "model": model, "cases": results });
+    let report = serde_json::json!({
+        "model": model,
+        "prompt_variant": crate::prompt_sections::active_variant_report(),
+        "cases": results,
+    });
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).expect("report directory");
     }

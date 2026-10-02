@@ -41,6 +41,9 @@ module SuggestionReport
       'commit' => commit,
       'dirty' => dirty,
       'version' => version,
+      # 实际生效的提示词变体（willdeep-core 写进报告；旧报告没有这一项）。
+      'variant_reported' => report.key?('prompt_variant'),
+      'variant_bundle' => report['prompt_variant'].is_a?(Hash) ? report['prompt_variant']['bundle'] : nil,
       'samples' => cases.size,
       'errors' => cases.size - answered.size,
       'reject_hit_rate' => rate(reject.count { |row| !leaked?(row) }, reject.size),
