@@ -284,6 +284,21 @@ module PromptRsi
       value.infinite? ? '+∞' : format('%+.0f%%', value * 100)
     end
 
+    # 一侧实际跑的样本（id → 内容哈希）与开跑前的清单逐条对照：缺的、多的、
+    # 同一个 id 内容却变了的、没记哈希的（旧实弹报告）都不能比。
+    def sample_problems(label, ran, samples)
+      return ["#{label} 没记录样本内容哈希"] unless ran.is_a?(Hash)
+
+      problems = []
+      missing = samples.keys - ran.keys
+      problems << "#{label} 缺样本：#{named(missing)}" unless missing.empty?
+      unexpected = ran.keys - samples.keys
+      problems << "#{label} 有样本清单之外的样本：#{named(unexpected)}" unless unexpected.empty?
+      changed = ran.select { |id, sha| samples.key?(id) && sha != samples[id] }.keys
+      problems << "#{label} 的样本内容与开跑前不一致：#{named(changed)}" unless changed.empty?
+      problems
+    end
+
     # 一侧的人工判定是否完整：有该判的样本，而且一条不落都判过。旧摘要没有
     # `unjudged_ids`，视为没判完。
     def judging_complete?(summary)
@@ -303,7 +318,10 @@ module PromptRsi
     # 输入建议变体的判定。样本少（二十条上下）、不分组；`plausible` 要人工判，
     # baseline 或候选任一轮没判完时结论是 `needs_human_judging`；双方样本留在
     # 归档里，判完用 `scripts/prompt_rsi_eval.rb --rescore <报告>` 重算，不再请求模型。
-    def suggestion(provenance:, baseline:, candidate:)
+    #
+    # `samples` 是开跑前的样本清单（样本 id → 内容 sha256），每一侧摘要的
+    # `sample_sha256` 必须与它逐条一致。
+    def suggestion(provenance:, baseline:, candidate:, samples:)
       problems = provenance_problems(provenance, SUGGESTION_PROVENANCE)
       expected = { 'baseline' => nil, 'candidate' => provenance['candidate_bundle'] }
       { 'baseline' => baseline, 'candidate' => candidate }.each do |label, summary|
@@ -318,6 +336,10 @@ module PromptRsi
       end
       if baseline['samples'] != candidate['samples']
         problems << "两边样本数不一致：baseline #{baseline['samples'] || '—'}、candidate #{candidate['samples'] || '—'}"
+      end
+      problems << '样本清单为空，无从核对样本内容' if samples.empty?
+      { 'baseline' => baseline, 'candidate' => candidate }.each do |label, summary|
+        problems.concat(sample_problems(label, summary['sample_sha256'], samples)) unless samples.empty?
       end
       checks = [
         check('reject_all', candidate['reject_hit_rate'] == 100.0 && candidate['leaks'] == 0,

@@ -150,6 +150,8 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 
 `plausible` 需要人工判定。两边都判完之后，要求 wrong-voice 为 0、plausible 不下降。「判完」的意思是：每一侧给出了建议的 suggest 样本，逐条都有合法的 `judged`（`plausible` / `wrong-voice` / `off-topic` / `wrong-language`）。只判了一部分、baseline 没判，或者填了不认识的值，结论都是 `needs_human_judging`，报告里会列出每一侧还差哪些样本。两边样本数不一致时记为 `non_reproducible`。
 
+样本也要逐条一致：驱动开跑前读出样本清单（样本 id → 文件原始字节的 sha256）。实弹测试读样本时，对同样的字节算哈希，写进每条结果的 `sample_sha256`。门禁逐条核对：缺样本、多样本、同一个 id 内容却变了、结果里没记哈希，都记为 `non_reproducible`。样本清单随报告存为 `sample_manifest`，`--rescore` 用这份清单核对，不重读样本目录。跑对照评测期间不要编辑 `bench/input-suggestion/samples/`。
+
 人工判定的流程：
 1. 实弹跑完后，双方的原始样本存在 `bench/prompt-rsi/suggestion-runs/<run_id>/{baseline,candidate}.json`，报告的 `evidence` 字段指向这里，每条 suggest 样本都带一个 `judged: null`。
 2. 在这两份文件里填 `judged`。只能改这个字段：报告里记了样本其余内容的指纹（`evidence_sha256`），改了模型输出、样本 id 或生效的变体，复评会直接拒绝。
