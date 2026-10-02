@@ -208,14 +208,21 @@ class PromptRsiGateTest < Minitest::Test
     assert_match(/可比 11 题/, result['checks'].find { |item| item['name'] == 'token_growth' }['detail'])
   end
 
-  # 一份摘要；缺省是 baseline（报告了没有套变体）。
+  # 开跑前的样本清单：19 条样本各自的内容哈希。
+  SAMPLE_DIGESTS = (0...19).to_h { |index| ["s#{index}", "sha-s#{index}"] }.freeze
+
+  # 一份摘要；缺省是 baseline（报告了没有套变体），跑的正是清单里那 19 条。
   # 该判 10 条；`judged` 给几条就判了前几条，其余进 `unjudged_ids`。
   def suggestion_summary(overrides = {})
     judged = overrides.fetch('judged', 0)
     { 'errors' => 0, 'samples' => 19, 'reject_hit_rate' => 100.0, 'leaks' => 0, 'none_hit_rate' => 100.0,
       'suggest_given_rate' => 90.0, 'judged' => judged, 'judgeable' => 10,
       'unjudged_ids' => (judged...10).map { |index| "s#{index}" }, 'plausible_rate' => nil, 'wrong_voice' => 0,
-      'variant_reported' => true, 'variant_bundle' => nil }.merge(overrides)
+      'variant_reported' => true, 'variant_bundle' => nil, 'sample_sha256' => SAMPLE_DIGESTS }.merge(overrides)
+  end
+
+  def suggestion_gate(samples: SAMPLE_DIGESTS, **arguments)
+    PromptRsi::Gate.suggestion(samples: samples, **arguments)
   end
 
   # 把一份摘要当候选：缺省报告套上了 provenance 里的候选版本。
@@ -225,7 +232,7 @@ class PromptRsiGateTest < Minitest::Test
 
   def test_suggestion_variants_need_human_judging_before_they_pass
     gate = lambda do |candidate, baseline = suggestion_summary('judged' => 10, 'plausible_rate' => 80.0)|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
+      suggestion_gate(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
     end
     assert_equal 'needs_human_judging', gate.call(suggestion_summary)['verdict']
     assert_equal 'candidate_passes',
@@ -241,7 +248,7 @@ class PromptRsiGateTest < Minitest::Test
   # baseline 缺的指标是「没测」，不是 0：不能拿来当下限，也不能让 plausible 过门。
   def test_missing_suggestion_metrics_are_never_compared_as_zero
     gate = lambda do |baseline, candidate = suggestion_summary('judged' => 10, 'plausible_rate' => 90.0)|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
+      suggestion_gate(provenance: PROVENANCE, baseline: baseline, candidate: as_candidate(candidate))
     end
     %w[none_hit_rate suggest_given_rate reject_hit_rate leaks].each do |key|
       result = gate.call(suggestion_summary('judged' => 10, 'plausible_rate' => 80.0, key => nil))
@@ -260,8 +267,8 @@ class PromptRsiGateTest < Minitest::Test
   # 都只能是 needs_human_judging；判完才比 plausible。
   def test_human_judging_must_cover_every_given_suggestion_on_both_sides
     gate = lambda do |baseline, candidate|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
-                                 candidate: as_candidate(suggestion_summary(candidate)))
+      suggestion_gate(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
+                      candidate: as_candidate(suggestion_summary(candidate)))
     end
     complete = { 'judged' => 10, 'plausible_rate' => 80.0 }
     cherry_picked = gate.call(complete, { 'judged' => 1, 'plausible_rate' => 100.0 })
@@ -295,13 +302,31 @@ class PromptRsiGateTest < Minitest::Test
              .any? { |text| text.start_with?('holdout baseline 有任务实际生效的提示词不是基线') })
 
     suggestion = lambda do |baseline, candidate|
-      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
-                                 candidate: suggestion_summary(candidate))
+      suggestion_gate(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
+                      candidate: suggestion_summary(candidate))
     end
     result = suggestion.call({ 'variant_bundle' => 'main@222222222222' }, { 'variant_bundle' => PROVENANCE['candidate_bundle'] })
     assert_includes result['problems'], 'baseline 实际生效的提示词不是基线'
     result = suggestion.call({}, { 'variant_reported' => false })
     assert_includes result['problems'], 'candidate 没报告实际生效的提示词'
+  end
+
+  # 输入建议样本逐条核对：同一个 id 内容变了、缺样本、多样本、旧实弹报告没记
+  # 哈希、清单为空，都不能比。
+  def test_suggestion_samples_must_match_the_manifest_one_by_one
+    gate = ->(baseline, candidate = {}, samples: SAMPLE_DIGESTS) do
+      suggestion_gate(provenance: PROVENANCE, baseline: suggestion_summary(baseline),
+                      candidate: as_candidate(suggestion_summary(candidate)), samples: samples)
+    end
+    edited = gate.call({}, { 'sample_sha256' => SAMPLE_DIGESTS.merge('s3' => 'sha-edited') })
+    assert_equal 'non_reproducible', edited['verdict']
+    assert_includes edited['problems'], 'candidate 的样本内容与开跑前不一致：s3'
+    assert_includes gate.call({ 'sample_sha256' => SAMPLE_DIGESTS.except('s0') })['problems'], 'baseline 缺样本：s0'
+    assert_includes gate.call({ 'sample_sha256' => SAMPLE_DIGESTS.merge('extra' => 'x') })['problems'],
+                    'baseline 有样本清单之外的样本：extra'
+    assert_includes gate.call({ 'sample_sha256' => nil })['problems'], 'baseline 没记录样本内容哈希'
+    assert_includes gate.call({}, samples: {})['problems'], '样本清单为空，无从核对样本内容'
+    assert_equal 'needs_human_judging', gate.call({})['verdict'], 'matching samples are fine'
   end
 
   # 二进制必须正是仓库这个 commit 的干净源码构建出来的，否则出处说不清。
@@ -315,8 +340,8 @@ class PromptRsiGateTest < Minitest::Test
       result = evaluate(candidate_rows, provenance: provenance)
       assert_equal 'non_reproducible', result['verdict'], problem
       assert_includes result['problems'], problem
-      suggestion = PromptRsi::Gate.suggestion(provenance: provenance, baseline: suggestion_summary,
-                                              candidate: as_candidate(suggestion_summary))
+      suggestion = suggestion_gate(provenance: provenance, baseline: suggestion_summary,
+                                   candidate: as_candidate(suggestion_summary))
       assert_includes suggestion['problems'], problem
     end
   end
@@ -404,13 +429,16 @@ class PromptRsiRescoreTest < Minitest::Test
     cases = (0...3).map { |index| { 'id' => "r#{index}", 'expect' => 'reject', 'raw' => 'NONE', 'cleaned' => nil } } +
             (0...4).map { |index| { 'id' => "n#{index}", 'expect' => 'none', 'raw' => 'NONE', 'cleaned' => nil } } +
             (0...4).map { |index| { 'id' => "s#{index}", 'expect' => 'suggest', 'raw' => "go #{index}", 'cleaned' => "go #{index}" } }
+    cases = cases.map { |row| row.merge('sample_sha256' => "sha-#{row['id']}") }
     { 'model' => 'glm-5', 'prompt_variant' => bundle && { 'id' => 'v', 'bundle' => bundle }, 'cases' => cases }
   end
 
   # 走驱动的同一条路径：判定、存样本、归档；返回报告路径。
   def archived_run(archive)
     raws = { 'baseline' => raw(nil), 'candidate' => raw(PROVENANCE['candidate_bundle']) }
-    report = PromptRsiEval.judge_suggestion(PROVENANCE.dup, raws)
+    samples = raws['baseline']['cases'].to_h { |row| [row['id'], row['sample_sha256']] }
+    report = PromptRsiEval.judge_suggestion(PROVENANCE.dup, raws, samples: samples)
+    assert_equal samples, report['sample_manifest'], 'the manifest travels with the report for --rescore'
     report['evidence'] = PromptRsi::Report.save_suggestion_evidence(archive, report, baseline: raws['baseline'],
                                                                                      candidate: raws['candidate'])
     report['evidence_sha256'] = raws.transform_values { |side| PromptRsi::Report.evidence_digest(side) }

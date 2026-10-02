@@ -21,6 +21,7 @@
 
 require 'English'
 require 'fileutils'
+require 'digest'
 require 'json'
 require 'optparse'
 require 'rbconfig'
@@ -121,27 +122,40 @@ module PromptRsiEval
     File.file?(path) ? JSON.parse(File.read(path, encoding: 'UTF-8')) : nil
   end
 
+  # 样本清单（样本 id → 文件原始字节的 sha256），开跑前读出。实弹测试读样本时
+  # 对同样的字节算哈希写进每条结果，门禁逐条核对两轮跑的是不是同一份样本。
+  def sample_manifest(dir = SAMPLES)
+    Dir[File.join(dir, '*.json')].sort.to_h do |path|
+      [JSON.parse(File.read(path, encoding: 'UTF-8'))['id'], Digest::SHA256.hexdigest(File.binread(path))]
+    end
+  end
+
+  # 摘要另带每条样本实际跑的内容哈希（只给门禁用，不进输入建议套件自己的 history）。
   def summarize_suggestion(raw, provenance, ran_at: nil)
     return { 'errors' => 1 } unless raw
 
-    SuggestionReport.summarize(raw, commit: provenance['commit'], dirty: provenance['dirty'],
-                                    version: provenance['version'], ran_at: ran_at)
+    summary = SuggestionReport.summarize(raw, commit: provenance['commit'], dirty: provenance['dirty'],
+                                              version: provenance['version'], ran_at: ran_at)
+    summary.merge('sample_sha256' => raw['cases'].to_a.to_h { |row| [row['id'], row['sample_sha256']] })
   end
 
-  def judge_suggestion(provenance, raws, ran_at: {}, tag: nil)
+  def judge_suggestion(provenance, raws, samples:, ran_at: {}, tag: nil)
     summaries = raws.to_h { |side, raw| [side, summarize_suggestion(raw, provenance, ran_at: ran_at[side])] }
     result = PromptRsi::Gate.suggestion(provenance: provenance, baseline: summaries['baseline'],
-                                        candidate: summaries['candidate'])
+                                        candidate: summaries['candidate'], samples: samples)
     result['stats'] = summaries
-    PromptRsi::Report.build(suite: 'input-suggestion', provenance: provenance, result: result, tag: tag)
+    report = PromptRsi::Report.build(suite: 'input-suggestion', provenance: provenance, result: result, tag: tag)
+    # 复评时用开跑前的这份清单，不重读样本目录：要比的是当时跑的那份。
+    report.merge('sample_manifest' => samples)
   end
 
   # 返回 [报告, 双方原始报告]；双方原始报告随后存进归档，供人工判定与 `--rescore`。
   def run_suggestion(options, provenance)
     provenance['dataset_sha256'] = PromptRsi::Report.dataset_sha256(SAMPLES)
+    samples = sample_manifest
     raws = { 'baseline' => suggestion_run(options, 'baseline', nil),
              'candidate' => suggestion_run(options, 'candidate', options[:variant]) }
-    [judge_suggestion(provenance, raws), raws]
+    [judge_suggestion(provenance, raws, samples: samples), raws]
   end
 
   # 人工在归档样本里填完 `judged` 之后重算：只读归档，不请求模型、不重跑二进制。
@@ -159,7 +173,8 @@ module PromptRsiEval
       abort("样本除 judged 以外被改过（或报告没有指纹）：#{changed.keys.join('、')}。只能填 judged，不能改模型输出与样本。")
     end
     ran_at = original['stats'].to_h.transform_values { |summary| summary['ran_at'] }
-    report = judge_suggestion(original['provenance'], raws, ran_at: ran_at, tag: RESCORED_TAG)
+    report = judge_suggestion(original['provenance'], raws, samples: original['sample_manifest'].to_h,
+                                                            ran_at: ran_at, tag: RESCORED_TAG)
     report['evidence'] = original['evidence']
     report['evidence_sha256'] = original['evidence_sha256']
     report['rescored_from'] = path.delete_prefix("#{archive}/")

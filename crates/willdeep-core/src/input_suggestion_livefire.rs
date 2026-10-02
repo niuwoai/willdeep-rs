@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
+
 use crate::input_suggestion::{payload, request_messages, sanitize};
 use crate::provider::{ApiDialect, Provider, ProviderConfig, ProviderKind, build_provider};
 use crate::types::Message;
@@ -24,6 +26,10 @@ struct Sample {
     /// `suggest` / `none` / `reject`。
     expect: String,
     messages: Vec<SampleMessage>,
+    /// 样本文件原始字节的 SHA-256，读文件时算。对照评测据此核对两轮跑的是
+    /// 同一份样本，而不只是同样的 id。
+    #[serde(skip)]
+    sha256: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -35,6 +41,7 @@ struct SampleMessage {
 #[derive(serde::Serialize)]
 struct SampleResult {
     id: String,
+    sample_sha256: String,
     language: String,
     expect: String,
     raw: Option<String>,
@@ -64,8 +71,10 @@ fn load_samples(dir: &std::path::Path) -> Vec<Sample> {
         .map(|path| {
             let text = std::fs::read_to_string(path)
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-            serde_json::from_str(&text)
-                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+            let mut sample: Sample = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+            sample.sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+            sample
         })
         .collect()
 }
@@ -101,6 +110,11 @@ fn every_sample_is_well_formed() {
         assert!(
             ids.insert(sample.id.clone()),
             "重复的样本 id：{}",
+            sample.id
+        );
+        assert!(
+            sample.sha256.len() == 64 && sample.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{}: 样本内容哈希应是 64 位十六进制",
             sample.id
         );
         assert!(
@@ -196,6 +210,7 @@ async fn input_suggestion_live_fire() {
                     .as_ref()
                     .and_then(|usage| usage.output_tokens),
                 id: sample.id,
+                sample_sha256: sample.sha256,
                 language: sample.language,
                 expect: sample.expect,
             },
@@ -207,6 +222,7 @@ async fn input_suggestion_live_fire() {
                 input_tokens: None,
                 output_tokens: None,
                 id: sample.id,
+                sample_sha256: sample.sha256,
                 language: sample.language,
                 expect: sample.expect,
             },
