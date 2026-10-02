@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.88.0-rc2] - 2026-10-02
+
+### Fixed
+- 提示词对照评测门禁（`scripts/lib/prompt_rsi/gate.rb`）堵上几处误放行（RSI 复核 R1、R2、N1、N2）：
+  - 报告行逐题对照任务清单，缺题、多题、重复、分组不符、未知状态一律记为 `non_reproducible`；
+  - holdout 也检查虚报完成、作弊、token 与耗时增长，底线没守住记为 `rejected`；
+  - token 与耗时只比两边都测到的同一批任务；缺测不再按 0 相加，候选缺测的题比 baseline 多、或者没有可比的题，都算不过；
+  - holdout 没产出报告时记为 `non_reproducible`，不再误记为 `overfit`；
+  - 输入建议套件：baseline 或候选摘要缺自动指标时记为 `non_reproducible`，不再按 0 比较；两边都人工判过之后才比 plausible。
+
 ## [0.88.0-rc1] - 2026-09-30
 
 ### Added
