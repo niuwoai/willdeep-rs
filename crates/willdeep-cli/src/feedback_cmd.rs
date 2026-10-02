@@ -13,7 +13,9 @@ use clap::Subcommand;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::audit_cmd::{FeedbackRow, classify_followups, load_feedback, parse_time};
+use crate::audit_cmd::{
+    FeedbackRow, FollowupContext, classify_followups, followup_context, load_feedback, parse_time,
+};
 
 /// 同一 `(工具, 错误类别)` 至少这么多次才成为候选。
 const TOOL_FAILURE_MIN: usize = 5;
@@ -268,15 +270,19 @@ pub(crate) struct Harm {
 }
 
 /// 失败链：会话按用户的每一句后续输入切段，一段的结局由结束它的那句话
-/// 判定（纠正、或段内有回退 / 喊停 / 拒绝审批即 `bad`）。最后一段还没有
-/// 反应，结局为 `open`，不进危害统计。
+/// 判定（规则见 `episode_outcome`）：`good`、`bad`、`unknown`，最后一段还没有
+/// 反应为 `open`。只有 good / bad 进坏结局率与危害统计——普通追问记 unknown，
+/// 不当作成功；这些比率是词法启发式的关联指标，不是因果结论。
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct ChainStats {
     pub episodes: usize,
-    /// 有结局（ok / bad）的段数。
+    /// 有结局（good / bad）的段数。
     pub judged: usize,
+    pub good: usize,
     pub bad: usize,
-    /// 基线：所有有结局的段里坏结局的比例。
+    /// 有后续输入、但说明不了好坏的段数，不进分母。
+    pub unknown: usize,
+    /// 基线：有结局的段里坏结局的比例。
     pub bad_rate: Option<f64>,
     pub clusters: Vec<ChainCluster>,
     pub harm: Vec<FailureHarm>,
@@ -380,20 +386,61 @@ fn failure_marker(row: &FeedbackRow) -> Option<String> {
     }
 }
 
+/// 一段的结局。只有 `Good` 与 `Bad` 算「有结局」；没识别到纠正不等于做对了，
+/// 那是 `Unknown`。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
-    Ok,
+    /// 结束这段的那句话明确认可了已完成的一轮，或段内目标通过了完成门禁。
+    Good,
+    /// 纠正、要求重做，或段内有回退 / 喊停。
     Bad,
+    /// 有后续输入，但说明不了结果好坏：普通追问、补充，只拒绝了审批（人的
+    /// 决定），隔得太久或排在没跑完的上一轮后面（不是对这段结果的反应）。
+    Unknown,
+    /// 还没有后续输入。
     Open,
 }
 
 impl Outcome {
     fn label(self) -> &'static str {
         match self {
-            Self::Ok => "ok",
+            Self::Good => "good",
             Self::Bad => "bad",
+            Self::Unknown => "unknown",
             Self::Open => "open",
         }
+    }
+
+    fn judged(self) -> bool {
+        matches!(self, Self::Good | Self::Bad)
+    }
+}
+
+/// 后续输入离上一轮结束超过这么久，就不再当作对那一轮结果的反应。
+const REACTION_WINDOW_MS: u64 = 30 * 60 * 1_000;
+
+/// 一句后续输入给它前面那一段定的结局。回退 / 喊停是明确的不满，不看间隔；
+/// 词法标签只有在这句话确实是对上一轮结果的反应时才算数。
+fn episode_outcome(
+    context: &FollowupContext,
+    followup: &FeedbackRow,
+    episode: &[&FeedbackRow],
+) -> Outcome {
+    if context.rewound_or_cancelled {
+        return Outcome::Bad;
+    }
+    // 缺间隔（旧账本）的也不算：说不清它是不是对这一段的反应。
+    let reacting = followup.queued_behind != Some(true)
+        && followup.gap_ms.is_some_and(|gap| gap <= REACTION_WINDOW_MS);
+    match followup.followup_hint.as_deref() {
+        Some("correction" | "redo") if reacting => Outcome::Bad,
+        Some("approval") if reacting && followup.prev_status.as_deref() == Some("completed") => {
+            Outcome::Good
+        }
+        Some("correction" | "redo") => Outcome::Unknown,
+        // 目标通过了完成门禁：运行时验收过，不靠这句话的措辞。
+        _ if episode.iter().any(|row| row.signal == "goal_completed") => Outcome::Good,
+        _ => Outcome::Unknown,
     }
 }
 
@@ -412,12 +459,9 @@ fn episodes_of(rows: &[&FeedbackRow]) -> Vec<(Outcome, Vec<(String, usize)>)> {
     };
     let mut episodes = Vec::new();
     let mut start = 0;
-    for (index, corrective) in classify_followups(rows) {
-        let outcome = if corrective {
-            Outcome::Bad
-        } else {
-            Outcome::Ok
-        };
+    for context in followup_context(rows) {
+        let index = context.index;
+        let outcome = episode_outcome(&context, rows[index], &rows[start..index]);
         episodes.push((outcome, markers(&rows[start..index])));
         start = index + 1;
     }
@@ -458,11 +502,14 @@ impl ChainAccumulator {
     fn add_session(&mut self, session: Uuid, rows: &[&FeedbackRow]) {
         for (outcome, markers) in episodes_of(rows) {
             self.stats.episodes += 1;
-            if outcome != Outcome::Open {
+            match outcome {
+                Outcome::Good => self.stats.good += 1,
+                Outcome::Bad => self.stats.bad += 1,
+                Outcome::Unknown => self.stats.unknown += 1,
+                Outcome::Open => {}
+            }
+            if outcome.judged() {
                 self.stats.judged += 1;
-                if outcome == Outcome::Bad {
-                    self.stats.bad += 1;
-                }
                 for (marker, _) in &markers {
                     let entry = self.harm.entry(marker.clone()).or_default();
                     entry.0 += 1;
@@ -962,7 +1009,7 @@ fn apply_harm(out: &mut Vec<Candidate>, chains: &ChainStats) {
             lift,
         };
         let note = format!(
-            " {:.0}% of the episodes with this failure ended in a correction, rewind or cancel ({lift:.1}x the baseline).",
+            " {:.0}% of the episodes with this failure and a clear outcome ended in a correction, redo, rewind or cancel ({lift:.1}x the baseline).",
             harm.bad_rate * 100.0
         );
         let worker = harm
@@ -1127,11 +1174,13 @@ pub(crate) fn render_text(report: &FeedbackReport) -> String {
 
     let chains = &report.chains;
     out.push_str(&format!(
-        "\nFailure chains: {} episodes, {} with an outcome, {} bad ({})\n",
+        "\nFailure chains: {} episodes, {} with an outcome ({} good, {} bad: {}), {} unknown\n",
         chains.episodes,
         chains.judged,
+        chains.good,
         chains.bad,
-        percent(chains.bad_rate)
+        percent(chains.bad_rate),
+        chains.unknown
     ));
     for cluster in &chains.clusters {
         out.push_str(&format!("  {:>5}  {}\n", cluster.count, cluster.signature));
@@ -1197,6 +1246,8 @@ mod tests {
             followup_hint: None,
             prev_status: None,
             decision: None,
+            gap_ms: None,
+            queued_behind: None,
         }
     }
 
@@ -1383,15 +1434,19 @@ mod tests {
         }
     }
 
+    /// 上一轮完成后几秒内说的一句话：算作对上一轮结果的反应。
     fn followup(session: Uuid, ts_ms: u64, hint: &str) -> FeedbackRow {
         FeedbackRow {
             followup_hint: Some(hint.to_owned()),
+            prev_status: Some("completed".to_owned()),
+            gap_ms: Some(5_000),
+            queued_behind: Some(false),
             ..row(session, ts_ms, "user_followup")
         }
     }
 
     /// 五个会话里，反复找不到编辑目标、跑满轮次的那一段都被用户纠正；
-    /// 读文件失败的段都顺利；另有一段被回退。
+    /// 读文件失败的段都被用户认可；另有一段被回退。
     fn chain_sample() -> Vec<FeedbackRow> {
         let mut rows = Vec::new();
         for index in 0..5_u64 {
@@ -1412,7 +1467,7 @@ mod tests {
             let at = MONDAY + index * HOUR;
             rows.push(tool(session, at, "read_file", "io"));
             for step in 1..=4 {
-                rows.push(followup(session, at + step * 10, "supplement"));
+                rows.push(followup(session, at + step * 10, "approval"));
             }
         }
         let rewound = Uuid::from_u128(400);
@@ -1436,7 +1491,8 @@ mod tests {
             "tool_failed:edit_file/edit_text_not_found×4+ → incomplete:max_turns ⇒ bad",
             5
         )));
-        assert!(signatures.contains(&("tool_failed:read_file/io×1 ⇒ ok", 5)));
+        assert!(signatures.contains(&("tool_failed:read_file/io×1 ⇒ good", 5)));
+        assert_eq!((chains.good, chains.unknown), (20, 0));
         assert!(signatures.contains(&("tool_failed:read_file/io×1 ⇒ open", 5)));
         let edit = chains
             .harm
@@ -1497,8 +1553,80 @@ mod tests {
         assert_eq!(incomplete.evidence.count, 5);
         assert!(report.candidates[2].evidence.harm.is_none());
         let text = render_text(&report);
-        assert!(text.contains("Failure chains: 31 episodes, 26 with an outcome, 6 bad"));
+        assert!(
+            text.contains("Failure chains: 31 episodes, 26 with an outcome (20 good, 6 bad: "),
+            "{text}"
+        );
         assert!(text.contains("4.3x baseline"));
+    }
+
+    /// 没识别到纠正不等于做对了：每一种说明不了好坏的后续输入都记 unknown，
+    /// 只有明确认可已完成的一轮、或目标过了完成门禁才算 good。
+    #[test]
+    fn only_clear_reactions_give_an_episode_an_outcome() {
+        let outcome_of = |rows: Vec<FeedbackRow>| {
+            let refs: Vec<&FeedbackRow> = rows.iter().collect();
+            episodes_of(&refs)[0].0.label()
+        };
+        let session = Uuid::from_u128(900);
+        let reply = |hint: &str| followup(session, MONDAY + 10, hint);
+        assert_eq!(outcome_of(vec![reply("approval")]), "good");
+        assert_eq!(outcome_of(vec![reply("correction")]), "bad");
+        assert_eq!(outcome_of(vec![reply("redo")]), "bad");
+        assert_eq!(outcome_of(vec![reply("supplement")]), "unknown");
+        assert_eq!(outcome_of(vec![reply("other")]), "unknown");
+
+        let late = FeedbackRow {
+            gap_ms: Some(REACTION_WINDOW_MS + 1),
+            ..reply("correction")
+        };
+        assert_eq!(outcome_of(vec![late]), "unknown", "hours later");
+        let queued = FeedbackRow {
+            queued_behind: Some(true),
+            ..reply("correction")
+        };
+        assert_eq!(
+            outcome_of(vec![queued]),
+            "unknown",
+            "typed before the turn ended"
+        );
+        let no_gap = FeedbackRow {
+            gap_ms: None,
+            ..reply("approval")
+        };
+        assert_eq!(outcome_of(vec![no_gap]), "unknown", "older ledger rows");
+        let partial = FeedbackRow {
+            prev_status: Some("partial".to_owned()),
+            ..reply("approval")
+        };
+        assert_eq!(
+            outcome_of(vec![partial]),
+            "unknown",
+            "\"continue\" after a stop"
+        );
+
+        let deny = FeedbackRow {
+            decision: Some("deny".to_owned()),
+            ..row(session, MONDAY, "approval_resolved")
+        };
+        assert_eq!(
+            outcome_of(vec![deny, reply("other")]),
+            "unknown",
+            "a human decision"
+        );
+        let rewound_later = FeedbackRow {
+            gap_ms: Some(REACTION_WINDOW_MS * 10),
+            ..reply("approval")
+        };
+        assert_eq!(
+            outcome_of(vec![row(session, MONDAY, "session_rewound"), rewound_later]),
+            "bad"
+        );
+        assert_eq!(
+            outcome_of(vec![row(session, MONDAY, "goal_completed"), reply("other")]),
+            "good",
+            "the completion gate is evidence of its own"
+        );
     }
 
     #[test]
