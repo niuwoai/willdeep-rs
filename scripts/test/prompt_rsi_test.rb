@@ -45,9 +45,14 @@ class PromptRsiGateTest < Minitest::Test
       candidate: (0...4).map { |index| row("h#{index}", 'holdout', index < cand_passed ? 'passed' : 'failed') } }
   end
 
+  # 任务清单：validation 10、regression 2、holdout 4，外加一道不参与对照的 train。
+  def tasks
+    (baseline_rows + holdout(0, 0)[:baseline]).to_h { |row| [row['task'], row['split']] }.merge('t0' => 'train')
+  end
+
   def evaluate(candidate, holdout: holdout(2, 2), provenance: PROVENANCE)
     PromptRsi::Gate.evaluate(provenance: provenance, baseline: baseline_rows, candidate: candidate,
-                             holdout: holdout)
+                             tasks: tasks, holdout: holdout)
   end
 
   def failed(result)
@@ -94,7 +99,7 @@ class PromptRsiGateTest < Minitest::Test
     errored = candidate_rows(passed: 8)
     errored[9] = row('v9', 'validation', 'error')
     assert_equal 'non_reproducible', evaluate(errored)['verdict']
-    empty = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows, candidate: [])
+    empty = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows, candidate: [], tasks: tasks)
     assert_equal 'non_reproducible', empty['verdict']
     assert_includes empty['problems'], 'candidate 这一轮没跑成（没有报告）'
     broken_holdout = holdout(2, 2)
@@ -103,8 +108,76 @@ class PromptRsiGateTest < Minitest::Test
   end
 
   def test_stage_one_without_holdout_is_never_a_pass
-    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows, candidate: candidate_rows)
+    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows, candidate: candidate_rows,
+                                      tasks: tasks)
     assert_equal 'rejected', result['verdict']
+  end
+
+  # 报告行必须与任务清单一一对应：截断、换题、重复、换组、未知状态都不能晋升。
+  def test_incomplete_or_mismatched_task_sets_are_not_reproducible
+    cases = {
+      'candidate 缺任务' => candidate_rows(passed: 10).reject { |item| %w[v8 v9 r1].include?(item['task']) },
+      'candidate 有任务清单之外的任务' => candidate_rows.map { |item| item.merge('task' => "x-#{item['task']}") },
+      'candidate 有重复的任务' => candidate_rows + [row('v0', 'validation', 'passed')],
+      'candidate 的任务分组与清单不符' => candidate_rows.map { |item| item['task'] == 'r1' ? item.merge('split' => 'validation') : item },
+      'candidate 有未知状态的任务' => candidate_rows(passed: 6).map { |item| item['status'] == 'failed' ? item.merge('status' => 'interrupted') : item }
+    }
+    cases.each do |problem, candidate|
+      result = evaluate(candidate)
+      assert_equal 'non_reproducible', result['verdict'], problem
+      assert(result['problems'].any? { |text| text.start_with?(problem) }, "#{problem}: #{result['problems'].inspect}")
+    end
+    truncated = holdout(2, 2)
+    truncated[:candidate] = truncated[:candidate].first(1)
+    result = evaluate(candidate_rows, holdout: truncated)
+    assert_equal 'non_reproducible', result['verdict']
+    assert_includes result['problems'], 'holdout candidate 缺任务：h1, h2, h3'
+  end
+
+  def test_holdout_that_never_ran_is_not_reproducible_rather_than_overfit
+    result = evaluate(candidate_rows, holdout: { baseline: [], candidate: [] })
+    assert_equal 'non_reproducible', result['verdict']
+    assert_includes result['problems'], 'holdout baseline 这一轮没跑成（没有报告）'
+    assert_includes result['problems'], 'holdout candidate 这一轮没跑成（没有报告）'
+  end
+
+  def test_holdout_keeps_the_same_floors_as_stage_one
+    cheating = holdout(2, 2)
+    cheating[:candidate][3] = row('h3', 'holdout', 'cheated', 'false_completion' => true)
+    result = evaluate(candidate_rows, holdout: cheating)
+    assert_equal 'rejected', result['verdict']
+    assert_equal %w[holdout_no_new_false_completions holdout_no_new_cheating], failed(result)
+    costly = holdout(2, 2)
+    costly[:candidate] = costly[:candidate].map { |item| item.merge('input_tokens' => 100_000, 'elapsed_seconds' => 10_000.0) }
+    assert_equal %w[holdout_token_growth holdout_time_growth], failed(evaluate(candidate_rows, holdout: costly))
+    # 底线破了又掉了通过率：先算不合格，不记成过拟合。
+    worse = holdout(3, 2)
+    worse[:candidate][3] = row('h3', 'holdout', 'cheated')
+    assert_equal 'rejected', evaluate(candidate_rows(passed: 8), holdout: worse)['verdict']
+  end
+
+  # 缺测的 token 不按 0 算：全缺、候选缺得比 baseline 多都不能过；两边缺同一题时
+  # 只比都测到的那些题。
+  def test_missing_token_measurements_never_count_as_a_pass
+    unmeasured = { 'input_tokens' => nil, 'output_tokens' => nil }
+    all_missing = candidate_rows(overrides: unmeasured)
+    assert_equal ['token_growth'], failed(evaluate(all_missing))
+    half_missing = candidate_rows.each_with_index.map do |item, index|
+      index.even? ? item.merge(unmeasured) : item.merge('input_tokens' => 1300)
+    end
+    result = evaluate(half_missing)
+    assert_equal ['token_growth'], failed(result)
+    assert_match(/baseline 0 题、候选 6 题/, result['checks'].find { |item| item['name'] == 'token_growth' }['detail'])
+    holdout_missing = holdout(2, 2)
+    holdout_missing[:candidate] = holdout_missing[:candidate].map { |item| item.merge(unmeasured) }
+    assert_equal ['holdout_token_growth'], failed(evaluate(candidate_rows, holdout: holdout_missing))
+    timeout = row('v9', 'validation', 'timeout', unmeasured)
+    base = baseline_rows.map { |item| item['task'] == 'v9' ? timeout : item }
+    cand = candidate_rows.map { |item| item['task'] == 'v9' ? timeout : item }
+    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: base, candidate: cand, tasks: tasks,
+                                      holdout: holdout(2, 2))
+    assert_equal 'candidate_passes', result['verdict'], result.inspect
+    assert_match(/可比 11 题/, result['checks'].find { |item| item['name'] == 'token_growth' }['detail'])
   end
 
   def suggestion_summary(overrides = {})
@@ -126,6 +199,24 @@ class PromptRsiGateTest < Minitest::Test
                  gate.call(suggestion_summary('judged' => 10, 'plausible_rate' => 90.0, 'wrong_voice' => 1))['verdict']
     assert_equal 'non_reproducible', gate.call(suggestion_summary('errors' => 2))['verdict']
   end
+
+  # baseline 缺的指标是「没测」，不是 0：不能拿来当下限，也不能让 plausible 过门。
+  def test_missing_suggestion_metrics_are_never_compared_as_zero
+    gate = lambda do |baseline, candidate = suggestion_summary('judged' => 10, 'plausible_rate' => 90.0)|
+      PromptRsi::Gate.suggestion(provenance: PROVENANCE, baseline: baseline, candidate: candidate)
+    end
+    %w[none_hit_rate suggest_given_rate reject_hit_rate leaks].each do |key|
+      result = gate.call(suggestion_summary('judged' => 10, 'plausible_rate' => 80.0, key => nil))
+      assert_equal 'non_reproducible', result['verdict'], key
+      assert_includes result['problems'], "baseline 摘要缺 #{key}，无从对照"
+    end
+    crashed = gate.call({ 'errors' => 1 })
+    assert_equal 'non_reproducible', crashed['verdict']
+    assert_includes crashed['problems'], 'baseline 摘要缺 reject_hit_rate、leaks、none_hit_rate、suggest_given_rate，无从对照'
+    unjudged_baseline = gate.call(suggestion_summary)
+    assert_equal 'needs_human_judging', unjudged_baseline['verdict']
+    refute(unjudged_baseline['checks'].any? { |item| item['name'] == 'plausible_not_worse' })
+  end
 end
 
 class PromptRsiReportTest < Minitest::Test
@@ -133,7 +224,7 @@ class PromptRsiReportTest < Minitest::Test
     gate_test = PromptRsiGateTest.new('report')
     candidate = gate_test.candidate_rows(passed: 7)
     result = PromptRsi::Gate.evaluate(provenance: PromptRsiGateTest::PROVENANCE, baseline: gate_test.baseline_rows,
-                                      candidate: candidate, holdout: gate_test.holdout(2, 2))
+                                      candidate: candidate, tasks: gate_test.tasks, holdout: gate_test.holdout(2, 2))
     report = PromptRsi::Report.build(suite: 'model-eval', provenance: PromptRsiGateTest::PROVENANCE, result: result,
                                      baseline_rows: gate_test.baseline_rows, candidate_rows: candidate,
                                      generated_at: Time.utc(2026, 9, 30, 12))

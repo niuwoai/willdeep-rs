@@ -121,24 +121,27 @@ ruby scripts/prompt_rsi_eval.rb --suite input-suggestion --model deepseek-v4-fla
 | `validation_gain` | validation 通过率至少提升 3 个百分点 |
 | `regression_all_pass` | regression 全部通过 |
 | `no_new_false_completions` / `no_new_cheating` | 虚报完成、改受保护文件的次数不增加 |
-| `token_growth` / `time_growth` | token 增加不超过 15%，耗时增加不超过 20% |
+| `token_growth` / `time_growth` | token 增加不超过 15%，耗时增加不超过 20%；只比两边都测到的同一批任务，候选缺测的题比 baseline 多、或者没有可比的题，都算不过 |
 | `holdout_not_worse` | holdout 通过率不下降 |
+| `holdout_no_new_false_completions` / `holdout_no_new_cheating` / `holdout_token_growth` / `holdout_time_growth` | holdout 上守同样的底线 |
 
 结论有以下几种：
 
 | 结论 | 含义 |
 |---|---|
 | `candidate_passes` | 通过门禁，交给人工门 |
-| `rejected` | 第一阶段有检查没过 |
-| `overfit` | validation 提升但 holdout 下降 |
-| `non_reproducible` | 出处不全（commit、模型、二进制版本、数据集哈希、变体哈希、新旧版本号缺一项）、工作区有未提交改动，或有任务没真正执行（error / skipped / 整轮没跑成） |
+| `rejected` | 第一阶段有检查没过，或 holdout 的底线没守住 |
+| `overfit` | validation 提升、holdout 底线都守住，但 holdout 通过率下降 |
+| `non_reproducible` | 出处不全（commit、模型、二进制版本、数据集哈希、变体哈希、新旧版本号缺一项）、工作区有未提交改动、报告行与任务清单对不上（缺题、多题、重复、分组不符、未知状态），或有任务没真正执行（error / skipped / 整轮没跑成，holdout 也一样） |
 
 **input-suggestion 套件**：沿用该套件的及格线，并要求候选不比 baseline 差：
 - reject 100%、无泄漏；
 - none 命中率 ≥80% 且不下降；
 - 给出建议的比例最多降 5 个百分点。
 
-`plausible` 需要人工判定：候选那一轮还没判时，结论是 `needs_human_judging`；判完之后，要求 wrong-voice 为 0、plausible 不下降。
+两边摘要缺任何一项自动指标（reject、泄漏、none、给出建议）时，结论是 `non_reproducible`：缺的指标是没测，不按 0 比。
+
+`plausible` 需要人工判定：baseline 或候选任一轮还没判时，结论是 `needs_human_judging`；都判完之后，要求 wrong-voice 为 0、plausible 不下降。
 
 **产出**：
 - 报告写到 `bench/prompt-rsi/reports/<日期>/<变体>-<模型>.{json,md}`，并向 `bench/prompt-rsi/history.jsonl` 追加一行（只追加，不改旧行）。
