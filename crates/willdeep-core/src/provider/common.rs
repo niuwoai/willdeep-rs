@@ -324,6 +324,86 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// 最小的 SOCKS5 中转：只认无认证、CONNECT 到 IPv4 或域名，然后双向转发。
+    /// 返回代理地址与它接到的连接数。
+    async fn socks5_relay() -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut greeting = [0_u8; 2];
+                    client.read_exact(&mut greeting).await.ok()?;
+                    let mut methods = vec![0_u8; usize::from(greeting[1])];
+                    client.read_exact(&mut methods).await.ok()?;
+                    client.write_all(&[5, 0]).await.ok()?;
+                    let mut head = [0_u8; 4];
+                    client.read_exact(&mut head).await.ok()?;
+                    let host = match head[3] {
+                        1 => {
+                            let mut ip = [0_u8; 4];
+                            client.read_exact(&mut ip).await.ok()?;
+                            std::net::Ipv4Addr::from(ip).to_string()
+                        }
+                        3 => {
+                            let mut length = [0_u8; 1];
+                            client.read_exact(&mut length).await.ok()?;
+                            let mut name = vec![0_u8; usize::from(length[0])];
+                            client.read_exact(&mut name).await.ok()?;
+                            String::from_utf8(name).ok()?
+                        }
+                        _ => return None,
+                    };
+                    let mut port = [0_u8; 2];
+                    client.read_exact(&mut port).await.ok()?;
+                    let target = format!("{host}:{}", u16::from_be_bytes(port));
+                    let mut upstream = tokio::net::TcpStream::connect(target).await.ok()?;
+                    client
+                        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                        .await
+                        .ok()?;
+                    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+                        .await
+                        .ok()
+                });
+            }
+        });
+        (format!("socks5h://{address}"), connections)
+    }
+
+    /// `ALL_PROXY=socks5://…` 是常见配置（launchd 只读到 ~/.bash_profile 时尤其如此）。
+    /// reqwest 少了 `socks` feature 时每个请求都报 `unsupported scheme socks5`。
+    #[tokio::test]
+    async fn requests_go_through_a_socks5_proxy() {
+        let (url, hits, _server) = scripted_server(vec![Some(200)]).await;
+        let (proxy, relayed) = socks5_relay().await;
+        let config = ProviderConfig::new(
+            ProviderKind::OpenAiCompatible,
+            ApiDialect::ChatCompletions,
+            url.clone(),
+            "test-key".to_owned(),
+            "model".to_owned(),
+        );
+        // 生产代码靠环境变量配代理；测试里改环境变量会串到别的测试，所以显式给。
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(config.request_timeout_secs))
+            .proxy(reqwest::Proxy::all(&proxy).unwrap())
+            .build()
+            .unwrap();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .expect("request through socks5");
+        assert_eq!(response.status(), 200);
+        assert_eq!(relayed.load(Ordering::SeqCst), 1, "went through the proxy");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
     /// 一个只够用来数「客户端敲了几次门」的 HTTP 服务端。
     ///
     /// `script` 按顺序决定每一次连接怎么收场：`None` 表示接了就把连接掐掉

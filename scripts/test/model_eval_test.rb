@@ -20,6 +20,7 @@ require_relative '../lib/model_eval/report'
 require_relative '../lib/model_eval/task'
 require_relative '../lib/model_eval/verifier'
 require_relative '../model_eval_trend'
+require_relative '../model_eval'
 
 module TaskFixture
   LIB = "module Adder\n  def self.add(a, b)\n    a - b\n  end\nend\n"
@@ -316,6 +317,17 @@ class ReportTest < Minitest::Test
       File.write(File.join(root, 'bench', 'model-eval', 'tasks', 'new-task', 'task.json'), '{}')
       assert ModelEval::Report.git_context(root)[:dirty], 'an untracked task changes the run'
     end
+  end
+
+  # 夜跑的 plist 设了 WILLDEEP_EVAL_MODELS，脚本又逐个传 `--model`：命令行优先，
+  # 不相加，也不重复——否则每个模型跑两遍，第二遍撞上第一遍的工作区。
+  def test_command_line_models_replace_the_environment_list_without_duplicates
+    env = 'glm-5, deepseek-v4-flash,deepseek-v4-pro'
+    assert_equal %w[glm-5 deepseek-v4-flash deepseek-v4-pro], ModelEval.model_list(env, [])
+    assert_equal %w[glm-5 deepseek-v4-flash deepseek-v4-pro],
+                 ModelEval.model_list(env, %w[glm-5 deepseek-v4-flash deepseek-v4-pro])
+    assert_equal %w[glm-5], ModelEval.model_list(env, %w[glm-5 glm-5])
+    assert_equal [], ModelEval.model_list(nil, [])
   end
 
   def test_three_leading_errors_abort_the_model_but_a_later_error_does_not

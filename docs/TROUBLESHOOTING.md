@@ -40,6 +40,12 @@ chmod 600 ~/.willdeep/config.toml
 - 登录需要 stdin 是 TTY，非交互环境（CI、管道）无法使用；
 - 轮询上限约 6 分钟，超时后重新执行 `willdeep --onboarding`。
 
+### 模型请求报 `tunnel error` 或 `error sending request`
+
+先看代理环境变量：`env | grep -i proxy`。willdeep 认 `HTTPS_PROXY` / `HTTP_PROXY`（http 代理），也认 `ALL_PROXY=socks5://…` / `socks5h://…`（0.89.0-rc2 起；更早的版本会报 `unsupported scheme socks5`）。几个变量同时存在时 `HTTPS_PROXY` 优先。
+
+launchd、cron 这类非交互环境拿不到交互 shell 里的变量：`bash -lc` 只读 `~/.bash_profile`，那里有什么就用什么。要让定时任务走代理，把变量写进 `~/.bash_profile` 或 plist 的 `EnvironmentVariables`。
+
 ### 配置校验
 
 ```bash

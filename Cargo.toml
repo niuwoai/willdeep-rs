@@ -21,7 +21,9 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 clap_mangen = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+# `socks`：认 `ALL_PROXY=socks5://…`。没有它，只配了 socks5 代理的环境（例如
+# launchd 只读到 ~/.bash_profile 的 ALL_PROXY）每个请求都报 unsupported scheme。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart", "socks"] }
 regex = "1.11"
 rust-embed = "8.7"
 serde = { version = "1.0", features = ["derive"] }
