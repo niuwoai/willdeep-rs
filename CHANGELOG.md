@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.89.0-rc2] - 2026-10-06
+
+### Fixed
+- 认得 `ALL_PROXY=socks5://…` / `socks5h://…`：此前 HTTP 客户端没编进 socks 支持，只配了 socks5 代理的环境里每个模型请求都报 `unsupported scheme socks5`。launchd 夜跑评测只从 `~/.bash_profile` 读到 socks5 的 `ALL_PROXY`，自 9 月下旬起每晚全部失败。
+- `scripts/model_eval.rb`：命令行给了 `--model` 就只用命令行的模型，不再与 `WILLDEEP_EVAL_MODELS` 相加，并去重。此前夜跑把每个模型跑两遍，第二遍落在第一遍留下的工作区里，报「工作区 git 初始化失败（nothing to commit）」。
+
 ## [0.89.0-rc1] - 2026-10-03
 
 ### Added
