@@ -512,7 +512,7 @@ export function App() {
       setActivity(t.thinking);
       setChat((current) => current.map((message) => message.id === runId ? { ...message, thinking: thinkingTail(`${message.thinking ?? ""}${event.text || ""}`) } : message));
     }
-    else if (["provider_retry_wait", "subagent_retry_wait", "provider_retry_started", "subagent_retry_started"].includes(event.type)) setActivity(event.label || t.thinking);
+    else if (["provider_retry_wait", "subagent_retry_wait", "provider_retry_started", "subagent_retry_started", "runtime_handoff_wait"].includes(event.type)) setActivity(event.label || t.thinking);
     else if (event.type === "thought") setActivity(event.text || t.thinking);
     else if (event.type === "turn_started") {
       setChat((current) => current.map((message) => message.id === runId ? { ...message, content: "", thinking: "" } : message));

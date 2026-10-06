@@ -1550,24 +1550,41 @@ async fn run_runtime_turn_inner(
             .save(&mut session)
             .map_err(|error| WebError::internal(error.to_string()))?;
     }
-    let remote_session = crate::daemon::ensure_runtime_session(
-        &state.home,
-        session.id,
-        &workspace,
-        session.profile.clone().or(profile),
-        None,
-    )
-    .await
-    .map_err(WebError::from_anyhow)?;
-    let turn = crate::daemon::submit_runtime_turn(
-        &state.home,
-        remote_session.id,
-        input.prompt.trim().to_owned(),
-        input.attachments,
-        crate::Surface::Web,
-    )
-    .await
-    .map_err(WebError::from_anyhow)?;
+    let language = Language::parse(input.language.as_deref()).unwrap_or(state_language(&state));
+    let session_profile = session.profile.clone().or(profile);
+    let prompt = input.prompt.trim().to_owned();
+    // 领养会话与提交都可能撞上旧 Runtime 的排空闸门；两步一起重来，
+    // 领养本身幂等，不会多建会话。
+    let (remote_session, turn) =
+        retry_through_runtime_handoff(tx, language, RUNTIME_HANDOFF_RETRY, || {
+            // 每次重试都拿自己的一份：借用捕获的 async 闭包过不了 tokio::spawn 的 Send 推导。
+            let home = state.home.clone();
+            let workspace = workspace.clone();
+            let session_id = session.id;
+            let session_profile = session_profile.clone();
+            let prompt = prompt.clone();
+            let attachments = input.attachments.clone();
+            async move {
+                let remote_session = crate::daemon::ensure_runtime_session(
+                    &home,
+                    session_id,
+                    &workspace,
+                    session_profile,
+                    None,
+                )
+                .await?;
+                let turn = crate::daemon::submit_runtime_turn(
+                    &home,
+                    remote_session.id,
+                    prompt,
+                    attachments,
+                    crate::Surface::Web,
+                )
+                .await?;
+                Ok((remote_session, turn))
+            }
+        })
+        .await?;
     send_event(
         tx,
         serde_json::json!({
@@ -1587,7 +1604,7 @@ async fn run_runtime_turn_inner(
             session_id: remote_session.id,
             turn_id: turn.id,
             task_id: None,
-            language: Language::parse(input.language.as_deref()).unwrap_or(state_language(&state)),
+            language,
         },
         tx,
     )
@@ -1712,7 +1729,9 @@ struct InputSuggestionRequest {
     turn_id: Option<uuid::Uuid>,
 }
 
+mod runtime_handoff;
 mod suggestion_feedback;
+use runtime_handoff::{RUNTIME_HANDOFF_RETRY, retry_through_runtime_handoff};
 #[cfg(test)]
 use suggestion_feedback::{SuggestionFeedbackRequest, apply_suggestion_feedback};
 use suggestion_feedback::{input_suggestion_feedback, issue_suggestion};
