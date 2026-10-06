@@ -285,9 +285,20 @@ module ModelEval
   end
 end
 
+module ModelEval
+  # 要评的模型：命令行给了 `--model` 就只用命令行的，否则用 WILLDEEP_EVAL_MODELS；
+  # 去重。两边相加曾让夜跑（plist 设了环境变量、脚本又逐个传 `--model`）把每个
+  # 模型跑两遍，第二遍落在第一遍留下的工作区里，git 初始化报 nothing to commit。
+  def self.model_list(env_value, cli_models)
+    models = cli_models.empty? ? env_value.to_s.split(',') : cli_models
+    models.map(&:strip).reject(&:empty?).uniq
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
+  cli_models = []
   options = {
-    models: ENV.fetch('WILLDEEP_EVAL_MODELS', '').split(',').map(&:strip).reject(&:empty?),
+    models: [],
     profile: nil,
     tasks: nil,
     kind: nil,
@@ -305,7 +316,7 @@ if $PROGRAM_NAME == __FILE__
   }
   OptionParser.new do |parser|
     parser.banner = 'Usage: ruby scripts/model_eval.rb [options]'
-    parser.on('--model NAME', '要评的模型，可重复；缺省读 WILLDEEP_EVAL_MODELS') { |v| options[:models] << v }
+    parser.on('--model NAME', '要评的模型，可重复；缺省读 WILLDEEP_EVAL_MODELS') { |v| cli_models << v }
     parser.on('--profile NAME', 'willdeep 的 provider profile') { |v| options[:profile] = v }
     parser.on('--tasks LIST', '只跑这些任务，逗号分隔') { |v| options[:tasks] = v.split(',').map(&:strip) }
     parser.on('--split LIST', "只跑这些分组，逗号分隔（#{ModelEval::SPLITS.join(' / ')}）") do |v|
@@ -328,6 +339,7 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--check-tasks', '不联网：自检每个任务 fixture 红、solution 绿') { options[:mode] = :check }
     parser.on('--list', '列出任务') { options[:mode] = :list }
   end.parse!
+  options[:models] = ModelEval.model_list(ENV.fetch('WILLDEEP_EVAL_MODELS', ''), cli_models)
   raise 'timeout 与 max-turns 必须为正' unless options[:timeout].positive? && options[:turns].positive?
   if options[:variant] && options[:archive]
     # `history.jsonl` 追的是「同一份提示词下模型的趋势」，候选提示词的成绩混进去
