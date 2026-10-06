@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.89.0-rc3] - 2026-10-06
+
+### Fixed
+- Web 端发消息时，如果旧 Runtime 正在为版本交接排空（例如 `willdeep daemon upgrade` 期间），不再直接报出英文原文 `Runtime is draining for version handoff`：
+  - 服务端识别出这是可重试的交接错误，每秒重试一次，最多等 120 秒，新 Runtime 起来后自动提交这条消息；
+  - 等待期间界面状态行显示「Runtime 正在升级，等待新版本就绪」（中 / 英 / 日）；
+  - 超时则提示「Runtime 正在升级，新版本还没就绪，请稍后重新发送」；
+  - 浏览器断开后立即停止等待。其它错误不重试。
+- Runtime 客户端返回的 API 错误保留错误码和 `retryable`，不再压成一句字符串。
+
 ## [0.89.0-rc2] - 2026-10-06
 
 ### Fixed

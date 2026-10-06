@@ -1089,12 +1089,42 @@ fn remote_agent(agent: willdeep_runtime_protocol::RuntimeAgent) -> RemoteAgent {
     }
 }
 
+/// Runtime 返回的业务错误。保留错误码和 `retryable`，调用方才能分辨
+/// 「换个 Runtime 再来」和「这个请求本身就不对」——压成一句字符串就分不出了。
+#[derive(Debug)]
+pub(crate) struct RuntimeApiError {
+    pub code: willdeep_runtime_protocol::ErrorCode,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl std::fmt::Display for RuntimeApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Runtime API error: {}", self.message)
+    }
+}
+
+impl std::error::Error for RuntimeApiError {}
+
+/// 旧 Runtime 正在为版本交接排空：请求在闸门上就被拒了，没有进幂等缓存，
+/// 等替换实例起来后用新的 request_id 重发是安全的。
+pub(crate) fn is_runtime_handoff(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RuntimeApiError>()
+        .is_some_and(|error| {
+            error.retryable && error.code == willdeep_runtime_protocol::ErrorCode::Unavailable
+        })
+}
+
 fn api_data<T>(response: willdeep_runtime_protocol::ApiResponse<T>) -> Result<T> {
     match response {
         willdeep_runtime_protocol::ApiResponse::Ok { data, .. } => Ok(data),
-        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => {
-            bail!("Runtime API error: {}", error.message)
+        willdeep_runtime_protocol::ApiResponse::Error { error, .. } => Err(RuntimeApiError {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
         }
+        .into()),
     }
 }
 
