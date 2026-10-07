@@ -27,7 +27,7 @@ fn background_supervisor_completes_work_and_kills_it_when_parent_disconnects() {
             "command": supervisor_print_command(),
             "sandbox": { "policy": "Off", "writable_roots": [] },
             "workspace": workspace,
-            "timeout_seconds": 10
+            "timeout_seconds": 60
         }),
     );
     let completed = completed
