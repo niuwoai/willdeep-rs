@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde_json::Value;
 use willdeep_core::mcp::HostRequestError;
-use willdeep_core::plugin::host_requests::{AI_COMPLETE, IMAGE_GENERATE};
+use willdeep_core::plugin::host_requests::{AI_COMPLETE, IMAGE_GENERATE, ROUNDTABLE_RUN};
 use willdeep_core::plugin::{PluginHostRequests, PluginPermission, PluginRequestContext};
 
 use crate::plugin_capabilities::{INVALID_REQUEST_CODES, ImageRequest, PluginAiHost};
@@ -81,7 +81,11 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, HostRequest
 #[async_trait]
 impl PluginHostRequests for HostRequests {
     fn methods(&self) -> Vec<String> {
-        vec![IMAGE_GENERATE.to_owned(), AI_COMPLETE.to_owned()]
+        vec![
+            IMAGE_GENERATE.to_owned(),
+            AI_COMPLETE.to_owned(),
+            ROUNDTABLE_RUN.to_owned(),
+        ]
     }
 
     async fn handle(
@@ -91,6 +95,30 @@ impl PluginHostRequests for HostRequests {
         params: Value,
     ) -> Result<Value, HostRequestError> {
         match method {
+            ROUNDTABLE_RUN => {
+                context.require(PluginPermission::AiChat)?;
+                let request: crate::plugin_roundtable::Request = parse(params)?;
+                request.validate()?;
+                // 插件身份来自已批准的清单，仍检查路径分量，不允许跨插件写报告。
+                if !context
+                    .plugin_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                    || matches!(context.plugin_id.as_str(), "" | "." | "..")
+                {
+                    return Err(HostRequestError::failed("Invalid plugin identity."));
+                }
+                let model = RoundtableModel {
+                    host: self,
+                    context,
+                };
+                let result = crate::plugin_roundtable::run(request, &model).await?;
+                crate::plugin_roundtable::save(
+                    &self.home.join("plugin-data").join(&context.plugin_id),
+                    &result,
+                )?;
+                Ok(result)
+            }
             IMAGE_GENERATE => {
                 context.require(PluginPermission::AiImage)?;
                 let request: ImageRequest = parse(params)?;
@@ -127,6 +155,41 @@ impl PluginHostRequests for HostRequests {
     }
 }
 
+struct RoundtableModel<'a> {
+    host: &'a HostRequests,
+    context: &'a PluginRequestContext,
+}
+
+#[async_trait]
+impl crate::plugin_roundtable::Completion for RoundtableModel<'_> {
+    async fn complete(
+        &self,
+        request: &crate::plugin_roundtable::Request,
+        system: &str,
+        user: &str,
+        tokens: u32,
+    ) -> Result<Value, HostRequestError> {
+        let request: AiCompleteRequest = parse(serde_json::json!({
+            "system": system, "messages": [{"role":"user", "content":user}],
+            "provider":request.provider, "model":request.model, "max_output_tokens":tokens,
+        }))?;
+        let permits = |permission| {
+            self.context
+                .require(permission)
+                .map_err(|error| PluginWebError::BadRequest(error.message))
+        };
+        crate::plugin_web::complete(
+            &self.host.ai_host(),
+            &self.context.plugin_id,
+            request,
+            &permits,
+            None,
+        )
+        .await
+        .map_err(rpc_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,7 +223,7 @@ mod tests {
     fn advertises_only_what_is_implemented() {
         let home = scratch();
         let methods = handler(&home).methods();
-        assert_eq!(methods, vec![IMAGE_GENERATE, AI_COMPLETE]);
+        assert_eq!(methods, vec![IMAGE_GENERATE, AI_COMPLETE, ROUNDTABLE_RUN]);
         assert!(
             !methods
                 .iter()
@@ -185,6 +248,11 @@ mod tests {
                 AI_COMPLETE,
                 json!({"messages": [{"role": "user", "content": "hi"}]}),
             )
+            .await
+            .expect_err("no ai.chat");
+        assert!(denied.message.contains("ai.chat"));
+        let denied = handler
+            .handle(&context(vec![]), ROUNDTABLE_RUN, json!({}))
             .await
             .expect_err("no ai.chat");
         assert!(denied.message.contains("ai.chat"));

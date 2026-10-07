@@ -281,16 +281,19 @@ MCP 客户端三条路共用同一套连接规则：`${pluginRoot}` / `${setting
 
 ### 反向请求（插件 → 宿主）
 
+`willdeep/roundtable/run` 请求字段为 `title`、`topic`、`experts`（2～8 项，每项含 `id/name/expertise/persona`），可选 `chairPersona`、`verdictInstruction`、`rounds`（1～3）、`provider`、`model`。专家按顺序看到前序发言，主持人逐轮判断收敛，终稿后按契约生成 `verdict`。响应含 `reportID/sessionID/title/document/verdict/transcript/rounds/model/providerID`；记录保存于 `<WILLDEEP_HOME>/plugin-data/<插件 ID>/roundtables/<reportID>.json`。沿用模型凭据与用量账本，不把凭据交给插件；没有实时 UI 流式事件。
+
 插件在处理请求期间（或空闲时）往 stdout 写一条带 `id` 的 JSON-RPC 请求，宿主处理完
 把响应写回 stdin。与 macOS 宿主 `AgentMCPHostRequests` 同一份约定：
 
 - `initialize` 的 `capabilities.extensions["io.willdeep/host-requests"].methods` 只列
   **真的实现了**的方法。本宿主宣告 `willdeep/images/generate`（需 `ai.image`，形状同
   `ai.generateImage`，图落在 `<WILLDEEP_HOME>/plugin-media/<id>/`）与
-  `willdeep/ai/complete`（需 `ai.chat`，形状同 `ai.complete`，不流式）。
+  `willdeep/ai/complete`（需 `ai.chat`，形状同 `ai.complete`，不流式）与
+  `willdeep/roundtable/run`（需 `ai.chat`，自定义专家圆桌，不流式）。
   `willdeep/audio/synthesize`（宿主代管 TTS）两个宿主都没实现，**不宣告**。
 - 错误码：-32601 方法不存在 / 没宣告、-32602 参数不对、-32000 处理失败（含缺权限、
-  没凭据）、-32001 处理超过 600 秒。
+  没凭据）、-32001 处理超时（圆桌 1800 秒，其他请求 600 秒）。
 - 权限读插件清单，不读请求；用户在 `config.toml` 手配的 MCP 服务不宣告扩展，
   反向请求一律回 -32601。
 - stdout 由常驻读任务独占：插件在宿主没有在途请求时发来的反向请求（短剧工坊的本机
@@ -363,7 +366,7 @@ claude mcp add --transport http video-studio \
 | 聊天里的插件工具 | 一等工具，参数是 `arguments_json` 字符串，直接进每回合工具表 | 进 `list_mcp_tools` / `call_mcp_tool` 两个元工具（与配置的 MCP 工具一致），schema 按需搜索，不随每回合进上下文 |
 | 插件 MCP 网关 | App 进程内，随 App 常驻 | `willdeep web` 进程内；没开 Web 就没有网关 |
 | 网关 stdio 中转的错误 | 一律包成 -32603 | 插件回的 JSON-RPC 错误对象原样带回；宿主侧失败才 -32603 |
-| 反向请求 | `willdeep/images/generate`、`willdeep/ai/complete` | 同（均不含 `willdeep/audio/synthesize`）；`ai/complete` 带 `videoPaths` 报 `videosUnsupported` |
+| 反向请求 | `willdeep/images/generate`、`willdeep/ai/complete`、`willdeep/roundtable/run` | 同（均不含 `willdeep/audio/synthesize`）；圆桌一次性返回并保存报告，`ai/complete` 带 `videoPaths` 报 `videosUnsupported` |
 | stdio 服务需要 `process.execute` | 缺了整个包拒载 | 包照载、页面命令照跑；网关与聊天工具不暴露这个服务 |
 | `minimumWillDeepVersion` | 校验 | 解析但**不校验**（`PluginPackage::check_minimum_version` 没有调用方）。有意为之：插件写的是 macOS 版号（短剧工坊 `1.343.0-rc1`），拿 rs 的 `0.8x` 去比会把所有插件拒掉；要校验得先有按宿主区分的字段 |
 | secret 存储 | Keychain | `plugin-registry.web.json`（0600）。**没有系统钥匙串加持**，敏感度高的凭据请仍然放 Keychain 并用引用 |

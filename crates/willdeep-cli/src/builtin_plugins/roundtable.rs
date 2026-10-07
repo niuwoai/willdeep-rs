@@ -679,13 +679,13 @@ fn transcript(messages: &[Message]) -> String {
 }
 
 /// 模型常把 JSON 包在围栏或前后文字里：取第一个 `{` 到最后一个 `}`。
-fn parse_json(text: &str) -> Option<Value> {
+pub(crate) fn parse_json(text: &str) -> Option<Value> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-fn normalize_stance(raw: Option<&str>) -> String {
+pub(crate) fn normalize_stance(raw: Option<&str>) -> String {
     match raw
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
@@ -699,7 +699,7 @@ fn normalize_stance(raw: Option<&str>) -> String {
 }
 
 /// 去掉包住全文的 ```markdown 围栏与重复的 H1（Xedit `AgentRoundtableDocumentNormalizer` 的主干）。
-fn normalize_document(text: &str) -> String {
+pub(crate) fn normalize_document(text: &str) -> String {
     let mut text = text.trim().to_owned();
     if text.starts_with("```") {
         let mut lines: Vec<&str> = text.lines().collect();

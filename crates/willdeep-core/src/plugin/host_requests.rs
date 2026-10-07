@@ -18,6 +18,8 @@ pub const IMAGE_GENERATE: &str = "willdeep/images/generate";
 /// 问一次模型（不流式）：形状同页面桥 `ai.complete`，结果
 /// `{text, model, providerID, toolCalls}`。需要 `ai.chat`。
 pub const AI_COMPLETE: &str = "willdeep/ai/complete";
+/// 插件自带专家席的无人值守圆桌。需要 `ai.chat`。
+pub const ROUNDTABLE_RUN: &str = "willdeep/roundtable/run";
 /// 宿主代管 TTS。macOS 宿主与本宿主目前都没有实现，不宣告——插件据此报
 /// 「宿主不支持」而不是干等。
 pub const AUDIO_SYNTHESIZE: &str = "willdeep/audio/synthesize";

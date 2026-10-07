@@ -30,6 +30,28 @@ use super::{HostRequestError, HostRequestHandler, McpError, McpServerConfig};
 /// 单次反向请求的处理上限，与 macOS 宿主同值。出一张图通常几十秒，带参考图要
 /// 先上传；十分钟之外只可能是上游挂住了，不能让等它的请求永远不超时。
 pub const HOST_REQUEST_MAX_SECONDS: u64 = 600;
+pub const HOST_ROUNDTABLE_MAX_SECONDS: u64 = 1_800;
+
+fn host_request_timeout(method: &str) -> u64 {
+    if method == crate::plugin::host_requests::ROUNDTABLE_RUN {
+        HOST_ROUNDTABLE_MAX_SECONDS
+    } else {
+        HOST_REQUEST_MAX_SECONDS
+    }
+}
+
+#[test]
+fn roundtable_has_its_own_timeout_budget() {
+    assert_eq!(
+        host_request_timeout(crate::plugin::host_requests::ROUNDTABLE_RUN),
+        1_800
+    );
+    assert_eq!(
+        host_request_timeout(crate::plugin::host_requests::AI_COMPLETE),
+        600
+    );
+    assert_eq!(host_request_timeout("unknown"), 600);
+}
 
 struct Shared {
     stdin: Mutex<ChildStdin>,
@@ -255,6 +277,7 @@ async fn answer_host_request(
     method: String,
     params: Value,
 ) {
+    let timeout_seconds = host_request_timeout(&method);
     let outcome = match &handler {
         // 用户手工配置的 MCP 服务没有经过插件清单的权限声明与安装批准，
         // 一律回 method not found。
@@ -265,7 +288,7 @@ async fn answer_host_request(
             HostRequestError::method_not_found(format!("Method not found: {method}")),
         ),
         Some(handler) => match tokio::time::timeout(
-            Duration::from_secs(HOST_REQUEST_MAX_SECONDS),
+            Duration::from_secs(timeout_seconds),
             handler.handle(&method, params),
         )
         .await
@@ -274,7 +297,7 @@ async fn answer_host_request(
             Err(_) => Err(HostRequestError {
                 code: HostRequestError::TIMED_OUT,
                 message: format!(
-                    "Host request {method} did not finish within {HOST_REQUEST_MAX_SECONDS} seconds."
+                    "Host request {method} did not finish within {timeout_seconds} seconds."
                 ),
             }),
         },

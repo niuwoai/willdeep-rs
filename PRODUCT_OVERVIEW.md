@@ -1,10 +1,12 @@
 # Product Overview
 
-> 最后更新：2026-10-06 | 当前版本：v0.89.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-07 | 当前版本：v0.90.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 产品概览最多 20,000 个 Unicode 字符；预算内作为参考资料直接注入 Agent 提示，超限后主文档只保留摘要与子文档索引，运行时只注入索引提示并按需读取详情。完整项目指令仍限于适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
 
 ## 项目简介
+
+插件可通过 `willdeep/roundtable/run` 开自定义专家圆桌，短剧工坊可提交六位创作专家的角色、讨论材料和审核结论契约。Rust 宿主顺序调用模型、保留发言与立场、主持人收敛并保存终稿；当前返回完整结果，不提供 macOS 圆桌页面的实时流式展示。
 
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
