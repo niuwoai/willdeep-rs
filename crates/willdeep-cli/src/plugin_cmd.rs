@@ -57,7 +57,7 @@ pub enum PluginAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Plugins that ship inside willdeep (scheduled tasks, expert roundtable).
+    /// Plugins that ship inside willdeep (favorites, scheduled tasks, expert roundtable).
     Builtin {
         #[command(subcommand)]
         action: BuiltinAction,
@@ -73,7 +73,7 @@ pub enum BuiltinAction {
     List,
     /// Install a built-in plugin as an ordinary plugin package.
     Install {
-        /// scheduler or roundtable.
+        /// favorites, scheduler or roundtable.
         name: String,
         /// Approve the declared permissions and enable it immediately.
         #[arg(long)]
@@ -298,7 +298,7 @@ async fn install(home: &Path, path: &Path, enable: bool) -> Result<()> {
 }
 
 /// 返回 (plugin_id, version)。
-fn install_one(home: &Path, path: &Path) -> Result<(String, String)> {
+pub(crate) fn install_one(home: &Path, path: &Path) -> Result<(String, String)> {
     let source = path
         .canonicalize()
         .with_context(|| format!("resolve {}", path.display()))?;

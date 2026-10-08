@@ -1,0 +1,14 @@
+{
+  "destination.favorites": "Favorites",
+  "command.add": "Favorite",
+  "command.list": "List favorites",
+  "command.update": "Update favorite",
+  "command.remove": "Remove favorite",
+  "command.restore": "Restore favorite",
+  "command.read_image": "Load memo image",
+  "command.read_content": "Load full favorite content",
+  "command.open_link": "Open link in browser",
+  "command.clear": "Clear favorites",
+  "command.refresh": "Refresh",
+  "command.open": "Open favorites"
+}

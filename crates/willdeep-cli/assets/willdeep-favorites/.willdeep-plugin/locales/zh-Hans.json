@@ -1,0 +1,14 @@
+{
+  "destination.favorites": "收藏夹",
+  "command.add": "收藏",
+  "command.list": "收藏列表",
+  "command.update": "修改收藏",
+  "command.remove": "删除收藏",
+  "command.restore": "恢复收藏",
+  "command.read_image": "读取备忘图片",
+  "command.read_content": "读取收藏完整正文",
+  "command.open_link": "在浏览器中打开链接",
+  "command.clear": "清空收藏",
+  "command.refresh": "刷新",
+  "command.open": "打开收藏夹"
+}

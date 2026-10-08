@@ -467,6 +467,10 @@ impl PluginHost {
             // 自己猜 `plugin-data/<id>` 的约定，也不会写到别的插件那边去。
             let data_dir = plugin_data_dir(&self.home, plugin_id);
             if std::fs::create_dir_all(&data_dir).is_ok() {
+                if plugin_id == "willdeep-favorites" {
+                    env.entry("WD_FAVORITES_FILE".to_owned())
+                        .or_insert_with(|| data_dir.join("favorites.json").display().to_string());
+                }
                 env.entry("WILLDEEP_PLUGIN_DATA".to_owned())
                     .or_insert_with(|| data_dir.display().to_string());
             }

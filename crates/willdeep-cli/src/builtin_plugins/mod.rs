@@ -5,6 +5,7 @@
 //! 批准。区别只在 MCP 服务端：`mcp.json` 写的是 `${willdeepExe} plugin
 //! serve-builtin <id>`，也就是 willdeep 自己，不需要 Python、Node 或别的运行时。
 //!
+//! 收藏夹另内嵌原版 Ruby 包，需要 `/usr/bin/ruby`。
 //! 与 Xedit 的对应关系见 `docs/BUILTIN_PLUGINS.md`。
 
 pub(crate) mod roundtable;
@@ -107,6 +108,11 @@ pub(crate) fn write_package(package: &BuiltinPackage, dir: &Path) -> Result<()> 
 
 /// `willdeep plugin builtin list`。
 pub(crate) fn list() {
+    println!(
+        "favorites    {} {}  permissions: process.execute, conversation.read\n             Rich text and image favorites; requires /usr/bin/ruby.",
+        crate::favorites_plugin::ID,
+        crate::favorites_plugin::VERSION
+    );
     for package in PACKAGES {
         println!(
             "{:<12} {} {}  permissions: {}\n             {}",
@@ -121,9 +127,12 @@ pub(crate) fn list() {
 
 /// `willdeep plugin builtin install <name>`：写出包，再走普通的安装流程。
 pub(crate) async fn install(home: &Path, name: &str, enable: bool) -> Result<()> {
+    if name == "favorites" || name == crate::favorites_plugin::ID {
+        return crate::favorites_plugin::install(home, enable).await;
+    }
     let Some(package) = package(name) else {
         bail!(
-            "unknown built-in plugin {name}; available: {}",
+            "unknown built-in plugin {name}; available: favorites, {}",
             PACKAGES
                 .iter()
                 .map(|package| package.short)

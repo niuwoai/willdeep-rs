@@ -341,6 +341,7 @@ struct ComposerSkill {
 }
 
 pub async fn serve(config: WebConfig) -> Result<()> {
+    crate::favorites_plugin::ensure_installed(&config.home).await?;
     if config.open_setup && config.listen.ip().is_loopback() {
         if let Some(parent) = config.config_path.parent() {
             std::fs::create_dir_all(parent).context("create setup configuration directory")?;

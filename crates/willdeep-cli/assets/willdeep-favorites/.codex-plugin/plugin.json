@@ -1,0 +1,10 @@
+{
+  "name": "willdeep-favorites",
+  "version": "2.3.0",
+  "description": "Save snippets and personal memos with pasted images from the chat transcript.",
+  "interface": {
+    "displayName": "Favorites",
+    "shortDescription": "收藏夹：在聊天正文里选中一段文字即可收藏，随时搜索、加标签、写备注、置顶或删除。",
+    "composerIcon": "sf:bookmark.fill"
+  }
+}

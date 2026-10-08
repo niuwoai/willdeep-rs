@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "minimumWillDeepVersion": "1.300.0-rc1",
+  "contributes": {
+    "destinations": [{
+      "id": "favorites",
+      "titleKey": "destination.favorites",
+      "icon": "sf:bookmark.fill",
+      "mainPage": "favorites.main",
+      "companionSidebar": "favorites.sidebar",
+      "toolbarCommandIDs": ["favorites.refresh"],
+      "defaultPinned": true
+    }],
+    "sidebars": [{
+      "id": "favorites.sidebar",
+      "mode": "none"
+    }],
+    "pages": [{
+      "id": "favorites.main",
+      "runtime": "localWeb",
+      "entryPath": "ui/index.html"
+    }],
+    "commands": [
+      {
+        "id": "favorites.open_link",
+        "titleKey": "command.open_link",
+        "icon": "sf:link",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.open_link"}
+      },
+      {
+        "id": "favorites.read_content",
+        "titleKey": "command.read_content",
+        "icon": "sf:doc.text",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.read_content"}
+      },
+      {
+        "id": "favorites.add",
+        "titleKey": "command.add",
+        "icon": "sf:bookmark",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.add"}
+      },
+      {
+        "id": "favorites.list",
+        "titleKey": "command.list",
+        "icon": "sf:list.bullet",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.list"}
+      },
+      {
+        "id": "favorites.update",
+        "titleKey": "command.update",
+        "icon": "sf:square.and.pencil",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.update"}
+      },
+      {
+        "id": "favorites.remove",
+        "titleKey": "command.remove",
+        "icon": "sf:trash",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.remove"}
+      },
+      {
+        "id": "favorites.restore",
+        "titleKey": "command.restore",
+        "icon": "sf:arrow.uturn.backward",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.restore"}
+      },
+      {
+        "id": "favorites.read_image",
+        "titleKey": "command.read_image",
+        "icon": "sf:photo",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.read_image"}
+      },
+      {
+        "id": "favorites.clear",
+        "titleKey": "command.clear",
+        "icon": "sf:trash.slash",
+        "handler": {"type": "mcpTool", "server": "favorites", "tool": "favorites.clear"}
+      },
+      {
+        "id": "favorites.refresh",
+        "titleKey": "command.refresh",
+        "icon": "sf:arrow.clockwise",
+        "handler": {"type": "host", "action": "plugin.refresh"}
+      },
+      {
+        "id": "favorites.open",
+        "titleKey": "command.open",
+        "icon": "sf:bookmark.fill",
+        "handler": {"type": "navigate", "destination": "favorites"}
+      }
+    ],
+    "menus": {
+      "chat.selection": ["favorites.add"],
+      "commandPalette": ["favorites.open", "favorites.refresh"],
+      "plugin.page.toolbar": ["favorites.refresh"]
+    },
+    "settings": []
+  },
+  "permissions": ["process.execute", "conversation.read"],
+  "dependencies": {"mcpServers": ["favorites"], "skills": []}
+}

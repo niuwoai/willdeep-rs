@@ -1,0 +1,1681 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>收藏夹</title>
+    <style>
+      /*
+       * 收藏夹页面：纯静态页 + window.willdeep.executeCommand 调插件命令，
+       * 没有构建步骤（改完直接生效），也不引任何外部资源——插件页跑在
+       * CSP 收紧的 WKWebView 里，connect-src 是 'none'。
+       *
+       * 宿主注入了 --willdeep-bg / --willdeep-fg / --willdeep-secondary /
+       * --willdeep-accent 与 color-scheme，这里在其之上再派生一套语义 token，
+       * 深浅色都靠 color-mix 从宿主色推出来，不写死第二套配色。
+       * 布局一律用 % 与 flex：插件页宽度由宿主分栏决定，vw 会算错。
+       */
+      :root {
+        --fg: var(--willdeep-fg, #1a1a1c);
+        --muted: var(--willdeep-secondary, #6c6c70);
+        --surface: color-mix(in srgb, var(--fg) 5%, transparent);
+        --surface-strong: color-mix(in srgb, var(--fg) 9%, transparent);
+        --border: color-mix(in srgb, var(--fg) 16%, transparent);
+        --border-strong: color-mix(in srgb, var(--fg) 34%, transparent);
+        --danger: #e5484d;
+        --pin: #e8a33d;
+        --radius: 10px;
+        --gap: 10px;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 18px 20px 96px;
+        color: var(--fg);
+        font: var(--willdeep-body-font-size, 15px)/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      button, input, textarea {
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: none;
+        padding: 0;
+      }
+      button { cursor: pointer; }
+      .hidden { display: none !important; }
+
+      /* ── 顶栏 ────────────────────────────────────────────── */
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: .2px; }
+      .count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+      .toolbar { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+      .search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 150px;
+        max-width: 260px;
+        flex: 1 1 180px;
+        padding: 4px 9px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--surface);
+      }
+      .search:focus-within { border-color: var(--border-strong); }
+      .search input { width: 100%; outline: none; }
+      .search input::placeholder { color: var(--muted); }
+      .search .glyph { color: var(--muted); font-size: 12px; }
+      .search .clear { color: var(--muted); font-size: 15px; line-height: 1; }
+      .search .clear:hover { color: var(--fg); }
+      .chip {
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 4px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .chip:hover { border-color: var(--border-strong); }
+      .chip[aria-pressed="true"] { background: var(--surface-strong); border-color: var(--border-strong); }
+      .chip.danger:hover { border-color: var(--danger); color: var(--danger); }
+      .chip.primary { background: color-mix(in srgb, var(--willdeep-accent, #6e7bf2) 18%, transparent); border-color: color-mix(in srgb, var(--willdeep-accent, #6e7bf2) 48%, var(--border)); }
+
+      /* ── 标签过滤条 ──────────────────────────────────────── */
+      .tagbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+      .tagbar .chip { font-size: 11.5px; padding: 3px 9px; }
+      .tagbar .chip .n { color: var(--muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
+
+      /* ── 卡片网格 ────────────────────────────────────────── */
+      /*
+       * 瀑布流而不是网格。
+       *
+       * 网格的行高由那一行最高的卡决定，而收藏的长度天差地别：一条
+       * 「Nginx 访问日志」旁边站一条二十行的备案公告，短卡下面就空出
+       * 一大片。多列布局按列独立堆叠，矮卡后面紧跟下一张。
+       *
+       * `columns: 400px` 让列数随容器宽度自己算：宽就多列，窄到放不下
+       * 两列时自然退回一列，不需要断点。卡片必须 `break-inside: avoid`，
+       * 否则一张卡会被从中间劈开、上半截留在这一列、下半截跑到下一列。
+       */
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        columns: 400px;
+        column-gap: var(--gap);
+      }
+      li.card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+        padding: 12px 14px 10px;
+        position: relative;
+        min-width: 0;
+        /* 多列里的间距靠 margin，column-gap 只管列与列之间。 */
+        margin-bottom: var(--gap);
+        break-inside: avoid;
+        -webkit-column-break-inside: avoid;
+      }
+      li.card[data-pinned="true"] { border-color: color-mix(in srgb, var(--pin) 45%, var(--border)); }
+      li.card[data-pinned="true"]::before {
+        content: "";
+        position: absolute;
+        left: -1px; top: 12px;
+        width: 3px; height: 20px;
+        border-radius: 0 3px 3px 0;
+        background: var(--pin);
+      }
+      .text {
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+      .text.clamped {
+        display: -webkit-box;
+        -webkit-line-clamp: 6;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .text mark { background: color-mix(in srgb, var(--pin) 45%, transparent); color: inherit; border-radius: 2px; }
+      .text:empty { display: none; }
+      .images { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
+      .memo-image { width: 100%; max-height: 260px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-strong); display: block; }
+      .image-placeholder { min-height: 76px; border-radius: 8px; background: var(--surface-strong); color: var(--muted); display: grid; place-items: center; font-size: 12px; }
+      .expand { color: var(--muted); font-size: 12px; margin-top: 4px; }
+      .expand:hover { color: var(--fg); }
+      .note {
+        margin-top: 8px;
+        padding: 6px 9px;
+        border-radius: 7px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        cursor: text;
+      }
+      .note.empty { background: none; padding: 4px 0 0; opacity: .75; }
+      .note:hover { color: var(--fg); }
+      .note-editor {
+        margin-top: 8px;
+        width: 100%;
+        min-height: 54px;
+        resize: vertical;
+        padding: 6px 9px;
+        border-radius: 7px;
+        border: 1px solid var(--border-strong);
+        background: var(--surface-strong);
+        outline: none;
+      }
+      .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .tag:hover { color: var(--fg); border-color: var(--border-strong); }
+      .tag .x { opacity: 0; font-size: 12px; line-height: 1; }
+      .tag:hover .x { opacity: .6; }
+      .tag .x:hover { opacity: 1; color: var(--danger); }
+      .tag-input {
+        border: 1px dashed var(--border-strong);
+        border-radius: 999px;
+        padding: 1px 9px;
+        font-size: 11.5px;
+        outline: none;
+        width: 90px;
+      }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 9px;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+      .meta .spacer { margin-left: auto; }
+      .meta .source {
+        border-radius: 4px;
+        padding: 0 5px;
+        background: var(--surface-strong);
+      }
+      .meta button.source:hover { color: var(--fg); }
+      .actions { display: flex; gap: 4px; opacity: 0; transition: opacity .12s ease; }
+      li.card:hover .actions, li.card:focus-within .actions { opacity: 1; }
+      .actions button {
+        color: var(--muted);
+        font-size: 11.5px;
+        border-radius: 6px;
+        padding: 2px 7px;
+      }
+      .actions button:hover { color: var(--fg); background: var(--surface-strong); }
+      .actions button.danger:hover { color: var(--danger); }
+      .actions button[aria-pressed="true"] { color: var(--pin); }
+
+      /* ── 状态位 ──────────────────────────────────────────── */
+      .state { padding: 44px 12px; text-align: center; color: var(--muted); }
+      .state .headline { color: var(--fg); font-size: 14px; margin-bottom: 6px; }
+      .state.error .headline { color: var(--danger); }
+      .state code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        background: var(--surface-strong);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+      .state .retry { margin-top: 12px; }
+      .skeleton {
+        columns: 400px;
+        column-gap: var(--gap);
+      }
+      .skeleton div {
+        height: 64px;
+        border-radius: var(--radius);
+        background: var(--surface);
+        margin-bottom: var(--gap);
+        break-inside: avoid;
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .skeleton div:nth-child(2) { animation-delay: .18s; }
+      .skeleton div:nth-child(3) { animation-delay: .36s; }
+      @keyframes pulse { 0%, 100% { opacity: .45; } 50% { opacity: .9; } }
+
+      /* ── 撤销条 ──────────────────────────────────────────── */
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 18px;
+        transform: translate(-50%, 12px);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 12px;
+        border-radius: 9px;
+        border: 1px solid var(--border-strong);
+        /* 页面底色就是 --willdeep-bg，撤销条必须比它再抬一档才看得见。 */
+        background: color-mix(in srgb, var(--willdeep-bg, #1c1c1e) 86%, var(--fg));
+        box-shadow: 0 6px 24px rgba(0, 0, 0, .32);
+        font-size: 12.5px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .15s ease, transform .15s ease;
+        max-width: 90%;
+      }
+      .toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+      .toast .undo { color: var(--fg); font-weight: 600; }
+      .toast .undo:hover { text-decoration: underline; }
+      .toast.error { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); }
+
+      /* ── 新备忘弹层 ─────────────────────────────────────── */
+      .memo-modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: color-mix(in srgb, var(--willdeep-bg, #1c1c1e) 70%, transparent); }
+      .memo-dialog { width: min(620px, 100%); max-height: min(760px, 92vh); overflow: auto; border: 1px solid var(--border-strong); border-radius: 14px; padding: 18px; background: var(--willdeep-bg, #1c1c1e); box-shadow: 0 18px 60px rgba(0, 0, 0, .35); }
+      .memo-dialog header { margin: 0 0 14px; }
+      .memo-dialog h2 { margin: 0; font-size: 16px; }
+      .modal-close { margin-left: auto; color: var(--muted); font-size: 20px; }
+      .memo-editor { display: block; width: 100%; max-width: 100%; min-height: 150px; resize: vertical; padding: 12px; border: 1px solid var(--border); border-radius: 9px; outline: none; background: var(--surface); }
+      .memo-editor:focus, .memo-drop:focus-within { border-color: var(--border-strong); }
+      /* label 默认行内显示，边框会在换行处断开；上传区必须是完整的块。 */
+      .memo-drop { display: block; width: 100%; min-width: 0; overflow-wrap: anywhere; margin-top: 12px; padding: 18px; border: 1px dashed var(--border-strong); border-radius: 10px; text-align: center; color: var(--muted); cursor: pointer; }
+      .memo-drop:hover { color: var(--fg); background: var(--surface); }
+      .memo-drop strong { display: block; color: var(--fg); font-size: 13px; margin-bottom: 4px; }
+      .memo-drop input { display: none; }
+      .memo-images { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; margin-top: 12px; }
+      .draft-image { position: relative; }
+      .draft-image img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+      .draft-image button { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 999px; color: white; background: rgba(0, 0, 0, .65); }
+      .memo-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+      .memo-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+      .memo-editor { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .memo-editor:empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; }
+      .rich-text { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+      .rich-text p { margin: 0 0 .65em; white-space: pre-wrap; }
+      .rich-text > :first-child { margin-top: 0; }
+      .rich-text > :last-child { margin-bottom: 0; }
+      .rich-text h1, .rich-text h2, .rich-text h3, .rich-text h4, .rich-text h5, .rich-text h6 { font-size: 1.1em; line-height: 1.4; margin: .8em 0 .4em; }
+      .rich-text h1 { font-size: 1.35em; }
+      .rich-text h2 { font-size: 1.2em; }
+      .rich-text ul, .rich-text ol { columns: auto; list-style: revert; padding-left: 1.6em; margin: .5em 0; }
+      .rich-text li { white-space: pre-wrap; }
+      .rich-text blockquote { margin: .6em 0; border-left: 3px solid var(--border-strong); padding-left: 12px; color: var(--muted); }
+      .rich-text pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; padding: 10px; background: var(--surface-strong); border-radius: 7px; }
+      .rich-text code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+      .rich-text a { color: var(--willdeep-accent, #5265c7); text-decoration: underline; }
+      .rich-text .table-scroll { max-width: 100%; overflow-x: auto; margin: .6em 0; }
+      .rich-text table { border-collapse: collapse; width: max-content; min-width: 100%; max-width: 2400px; }
+      .rich-text th, .rich-text td { border: 1px solid var(--border-strong); padding: 6px 9px; min-width: 60px; max-width: 320px; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .rich-text .inline-image { display: block; max-width: 100%; max-height: 260px; object-fit: contain; margin: 8px 0; border-radius: 8px; }
+      .rich-text.clamped { display: block; max-height: 220px; overflow: hidden; }
+      .text.expanded { max-height: 70vh; overflow: auto; }
+      .memo-status { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+      @media (prefers-reduced-motion: reduce) {
+        .skeleton div { animation: none; }
+        .toast { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 id="title">收藏夹</h1>
+      <span class="count" id="count"></span>
+      <div class="toolbar">
+        <label class="search">
+          <span class="glyph" aria-hidden="true">⌕</span>
+          <input id="search" type="search" autocomplete="off" spellcheck="false" />
+          <button class="clear hidden" id="search-clear" type="button" aria-label="clear">×</button>
+        </label>
+        <button class="chip" id="sort" type="button" aria-pressed="false"></button>
+        <button class="chip" id="refresh" type="button"></button>
+        <button class="chip primary" id="new-memo" type="button"></button>
+        <button class="chip danger" id="clear-all" type="button"></button>
+      </div>
+    </header>
+
+    <div class="tagbar hidden" id="tagbar"></div>
+
+    <div class="skeleton" id="skeleton"><div></div><div></div><div></div></div>
+    <div class="state hidden" id="state"></div>
+    <ul id="list"></ul>
+
+    <div class="memo-modal hidden" id="memo-modal" role="dialog" aria-modal="true" aria-labelledby="memo-title">
+      <div class="memo-dialog">
+        <header>
+          <h2 id="memo-title"></h2>
+          <button class="modal-close" id="memo-close" type="button" aria-label="close">×</button>
+        </header>
+        <div class="memo-options">
+          <button class="chip" id="memo-plain-paste" type="button" aria-pressed="false"></button>
+        </div>
+        <div class="memo-editor rich-text" id="memo-editor" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false"></div>
+        <div class="memo-status" id="memo-status" role="status" aria-live="polite"></div>
+        <label class="memo-drop" id="memo-drop" for="memo-file">
+          <strong id="memo-drop-title"></strong>
+          <span id="memo-drop-hint"></span>
+          <input id="memo-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple />
+        </label>
+        <div class="memo-images" id="memo-images"></div>
+        <div class="memo-actions">
+          <button class="chip" id="memo-cancel" type="button"></button>
+          <button class="chip primary" id="memo-save" type="button"></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast">
+      <span id="toast-text"></span>
+      <button class="undo hidden" id="toast-undo" type="button"></button>
+    </div>
+
+    <script>
+      (function () {
+        'use strict';
+
+        // ── i18n ──────────────────────────────────────────────
+        var STRINGS = {
+          zh: {
+            title: '收藏夹',
+            search: '搜索收藏…',
+            sortNewest: '最新在前',
+            sortOldest: '最早在前',
+            refresh: '刷新',
+            newMemo: '新备忘',
+            memoTitle: '新建备忘',
+            memoPlaceholder: '写下要记住的内容…',
+            plainPaste: '粘贴为纯文本',
+            contentLimit: '内容过大或结构过于复杂：正文最多 100KB、结构最多 2000 个节点、嵌套最多 16 层、表格最多 1000 格。请拆分后保存。',
+            invalidContent: '正文结构不受支持，未保存。请改为纯文本粘贴。',
+            imageLimit: '图片超限：最多 8 张，每张 8MB，总计 24MB。',
+            unsafeRemoved: '已移除网页样式、嵌入内容或远程图片，仅保留支持的内容格式。',
+            contentLoading: '正在读取完整内容…',
+            openLink: '在默认浏览器中打开链接',
+            linkFailed: '无法打开链接，请复制链接后在浏览器中打开。',
+            contentSize: function (n) { return '正文 ' + n + 'KB / 100KB；支持富文本粘贴'; },
+            pasteImage: '粘贴或拖入图片',
+            pasteImageHint: '支持截图、剪贴板图片，也可以点击选择文件',
+            cancel: '取消',
+            saveMemo: '保存备忘',
+            removeImage: '移除图片',
+            memoSaved: '备忘已保存',
+            imageLoading: '图片加载中…',
+            clearAll: '清空',
+            clearConfirm: '再点一次清空',
+            all: '全部',
+            count: function (n) { return '共 ' + n + ' 条'; },
+            filtered: function (n, total) { return n + ' / ' + total + ' 条'; },
+            emptyTitle: '还没有收藏',
+            emptyBody: '在聊天正文里选中一段文字，点气泡上的「收藏」就存进来了。',
+            noMatchTitle: '没有匹配的收藏',
+            noMatchBody: '换个关键词，或者清掉标签过滤。',
+            errorTitle: '读取收藏失败',
+            retry: '重试',
+            copy: '复制',
+            copied: '已复制',
+            copyFailed: '复制失败',
+            remove: '删除',
+            pin: '置顶',
+            unpin: '取消置顶',
+            note: '备注',
+            addNote: '＋ 备注',
+            notePlaceholder: '写点备注…（⌘↩ 保存，Esc 取消）',
+            expand: '展开',
+            collapse: '收起',
+            openSource: '查看原文',
+            addTag: '＋ 标签',
+            removed: '已删除 1 条收藏',
+            cleared: function (n) { return '已清空 ' + n + ' 条收藏'; },
+            undo: '撤销',
+            justNow: '刚刚',
+            minutesAgo: function (n) { return n + ' 分钟前'; },
+            hoursAgo: function (n) { return n + ' 小时前'; },
+            yesterday: '昨天',
+            bridgeMissing: '插件桥接不可用：这个页面需要在 WillDeep 里打开。'
+          },
+          en: {
+            title: 'Favorites',
+            search: 'Search favorites…',
+            sortNewest: 'Newest first',
+            sortOldest: 'Oldest first',
+            refresh: 'Refresh',
+            newMemo: 'New memo',
+            memoTitle: 'New memo',
+            memoPlaceholder: 'Write something to remember…',
+            plainPaste: 'Paste as plain text',
+            contentLimit: 'Content is too large or complex: 100KB text, 2000 nodes, 16 nesting levels and 1000 table cells maximum. Split it before saving.',
+            invalidContent: 'Unsupported document structure. Nothing saved; try pasting as plain text.',
+            imageLimit: 'Image limit: 8 images, 8MB each, 24MB total.',
+            unsafeRemoved: 'Web styles, embedded content or remote images were removed; supported formatting was kept.',
+            contentLoading: 'Loading full content…',
+            openLink: 'Open link in the default browser',
+            linkFailed: 'Could not open this link. Copy it and open it in your browser.',
+            contentSize: function (n) { return 'Text ' + n + 'KB / 100KB; rich text paste supported'; },
+            pasteImage: 'Paste or drop an image',
+            pasteImageHint: 'Screenshots and clipboard images are supported; click to choose a file',
+            cancel: 'Cancel',
+            saveMemo: 'Save memo',
+            removeImage: 'Remove image',
+            memoSaved: 'Memo saved',
+            imageLoading: 'Loading image…',
+            clearAll: 'Clear',
+            clearConfirm: 'Click again to clear',
+            all: 'All',
+            count: function (n) { return n + ' saved'; },
+            filtered: function (n, total) { return n + ' of ' + total; },
+            emptyTitle: 'Nothing saved yet',
+            emptyBody: 'Select text in the chat transcript and hit “Favorite” in the bubble.',
+            noMatchTitle: 'No matching favorites',
+            noMatchBody: 'Try another keyword, or drop the tag filter.',
+            errorTitle: 'Could not read favorites',
+            retry: 'Retry',
+            copy: 'Copy',
+            copied: 'Copied',
+            copyFailed: 'Copy failed',
+            remove: 'Delete',
+            pin: 'Pin',
+            unpin: 'Unpin',
+            note: 'Note',
+            addNote: '+ Note',
+            notePlaceholder: 'Add a note… (⌘↩ to save, Esc to cancel)',
+            expand: 'Expand',
+            collapse: 'Collapse',
+            openSource: 'View source',
+            addTag: '+ tag',
+            removed: 'Favorite deleted',
+            cleared: function (n) { return 'Cleared ' + n + ' favorites'; },
+            undo: 'Undo',
+            justNow: 'just now',
+            minutesAgo: function (n) { return n + 'm ago'; },
+            hoursAgo: function (n) { return n + 'h ago'; },
+            yesterday: 'Yesterday',
+            bridgeMissing: 'Plugin bridge unavailable: open this page inside WillDeep.'
+          }
+        };
+
+        function currentLocale() {
+          var context = (window.willdeep && window.willdeep.getContext) ? window.willdeep.getContext() : {};
+          return String((context && context.locale) || navigator.language || 'en');
+        }
+        function dict() {
+          return currentLocale().toLowerCase().indexOf('zh') === 0 ? STRINGS.zh : STRINGS.en;
+        }
+        function t(key) {
+          var value = dict()[key];
+          return typeof value === 'function' ? value.apply(null, [].slice.call(arguments, 1)) : value;
+        }
+
+        // 剪贴板 HTML 仅在 inert template 中解析，原始节点绝不进入可见 DOM。
+        // 文档树不包含 CSS、任意属性或 HTML；显示时逐个创建白名单元素。
+        var RICH_TYPES = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 's', 'u', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'a', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'br'];
+        var RICH_BLOCKS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre', 'tr'];
+        var BLOCKED_TAGS = ['script', 'style', 'iframe', 'frame', 'object', 'embed', 'svg', 'math', 'form', 'input', 'button', 'select', 'textarea', 'link', 'meta', 'base', 'template', 'audio', 'video', 'canvas', 'noscript'];
+        var CONTENT_LIMITS = { text: 102400, document: 262144, html: 1048576, nodes: 2000, depth: 16, cells: 1000 };
+        var IMAGE_LIMITS = { count: 8, each: 8388608, total: 25165824, concurrent: 4, cacheBytes: 45000000, cacheCount: 64 };
+        function byteSize(value) { return new TextEncoder().encode(value).length; }
+        function contentError(key) { return new Error(t(key || 'contentLimit')); }
+        function safeURL(raw) {
+          var value = String(raw || '').trim();
+          if (byteSize(value) > 2048 || /[\x00-\x20\x7f]/.test(value)) return null;
+          try {
+            var url = new URL(value);
+            if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password) return null;
+            return url.href;
+          } catch (error) { return null; }
+        }
+        function richText(nodes) {
+          return nodes.map(function (node) {
+            if (node.type === 'text') return node.text;
+            if (node.type === 'br') return '\n';
+            if (node.type === 'image') return '';
+            return richText(node.children || []) + (RICH_BLOCKS.indexOf(node.type) !== -1 ? '\n' : (node.type === 'td' || node.type === 'th' ? '\t' : ''));
+          }).join('');
+        }
+        function validateContent(content, images) {
+          if (!content || content.version !== 1 || !Array.isArray(content.nodes)) throw contentError('invalidContent');
+          if (byteSize(JSON.stringify(content)) > CONTENT_LIMITS.document) throw contentError();
+          var count = 0, cells = 0, textBytes = 0;
+          function visit(nodes, depth) {
+            if (!Array.isArray(nodes)) throw contentError('invalidContent');
+            if (depth > CONTENT_LIMITS.depth) throw contentError();
+            nodes.forEach(function (node) {
+              if (++count > CONTENT_LIMITS.nodes) throw contentError();
+              if (!node || typeof node !== 'object') throw contentError('invalidContent');
+              if (node.type === 'text') {
+                if (typeof node.text !== 'string') throw contentError('invalidContent');
+                textBytes += byteSize(node.text);
+                if (textBytes > CONTENT_LIMITS.text) throw contentError();
+              } else if (node.type === 'image') {
+                if (!images.some(function (image) { return image.id === node.imageId; })) throw contentError('invalidContent');
+              } else {
+                if (RICH_TYPES.indexOf(node.type) === -1) throw contentError('invalidContent');
+                if ((node.type === 'td' || node.type === 'th') && ++cells > CONTENT_LIMITS.cells) throw contentError();
+                if (node.type !== 'br') visit(node.children || [], depth + 1);
+              }
+            });
+          }
+          visit(content.nodes, 0);
+          if (byteSize(richText(content.nodes)) > CONTENT_LIMITS.text) throw contentError();
+          return content;
+        }
+        function imageID() {
+          var bytes = new Uint8Array(16);
+          window.crypto.getRandomValues(bytes);
+          return 'img-' + Array.prototype.map.call(bytes, function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+        }
+        function dataImage(source) {
+          var match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([a-z0-9+/=\r\n]+)$/i.exec(source);
+          if (!match) return null;
+          if (match[2].length > IMAGE_LIMITS.each * 4 / 3 + 128) throw contentError('imageLimit');
+          try {
+            var binary = atob(match[2]);
+            var bytes = new Uint8Array(binary.length);
+            for (var index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+            return new File([bytes], 'clipboard.' + match[1].split('/')[1], { type: match[1].toLowerCase() });
+          } catch (error) { throw contentError('invalidContent'); }
+        }
+        function importNodes(parent, context, depth) {
+          if (depth > CONTENT_LIMITS.depth) throw contentError();
+          var nodes = [];
+          Array.prototype.forEach.call(parent.childNodes, function (child) {
+            if (++context.count > CONTENT_LIMITS.nodes) throw contentError();
+            if (child.nodeType === 3) { nodes.push({ type: 'text', text: child.nodeValue }); return; }
+            if (child.nodeType !== 1) return;
+            var tag = child.tagName.toLowerCase();
+            if (BLOCKED_TAGS.indexOf(tag) !== -1) { context.removed = true; return; }
+            if (tag === 'img') {
+              var id = context.editor && child.dataset.imageId;
+              if (!id) {
+                var source = child.getAttribute('src') || '';
+                var file = dataImage(source);
+                if (!file && /^(?:cid:|blob:)/i.test(source)) file = context.files.shift();
+                if (!file) { context.removed = true; return; }
+                id = imageID();
+                context.pending.push({ file: file, id: id });
+              }
+              nodes.push({ type: 'image', imageId: id });
+              return;
+            }
+            if (!context.editor && Array.prototype.some.call(child.attributes, function (attribute) {
+              return !(tag === 'a' && attribute.name === 'href');
+            })) context.removed = true;
+            var children = importNodes(child, context, depth + 1);
+            if (context.editor && child.classList.contains('table-scroll')) { nodes = nodes.concat(children); return; }
+            if (tag === 'b') tag = 'strong';
+            if (tag === 'i') tag = 'em';
+            if (tag === 'strike' || tag === 'del') tag = 's';
+            if (tag === 'div' || tag === 'section' || tag === 'article') tag = 'p';
+            if (RICH_TYPES.indexOf(tag) === -1) { nodes = nodes.concat(children); return; }
+            var node = { type: tag };
+            if (tag !== 'br') node.children = children;
+            if (tag === 'a') {
+              var href = safeURL(child.getAttribute('href'));
+              if (href) node.href = href;
+              else context.removed = true;
+            }
+            nodes.push(node);
+          });
+          return nodes;
+        }
+        function editorContent() {
+          var context = { editor: true, count: 0, pending: [], files: [] };
+          return validateContent({ version: 1, nodes: importNodes(el.memoEditor, context, 0) }, state.memo.images);
+        }
+        function renderRich(content, item, editing) {
+          validateContent(content, item.images || []);
+          function make(node) {
+            if (node.type === 'text') return document.createTextNode(node.text);
+            if (node.type === 'image') {
+              var image = (item.images || []).find(function (entry) { return entry.id === node.imageId; });
+              var source = editing ? image.data : state.imageData[item.id + ':' + image.id];
+              var img = document.createElement(source ? 'img' : 'span');
+              img.className = source ? 'inline-image' : 'image-placeholder';
+              img.dataset.imageId = image.id;
+              if (source && /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(source)) {
+                img.src = source;
+                img.alt = image.name || image.filename || t('memoTitle');
+                img.dataset.imageId = image.id;
+                img.loading = 'lazy';
+                if (editing) img.contentEditable = 'false';
+              } else img.textContent = t('imageLoading');
+              return img;
+            }
+            var href = node.type === 'a' && safeURL(node.href);
+            var element = document.createElement(node.type === 'a' && !href ? 'span' : node.type);
+            if (href) {
+              element.href = href;
+              element.target = '_blank';
+              element.rel = 'noopener noreferrer';
+              element.referrerPolicy = 'no-referrer';
+              element.title = t('openLink');
+              element.addEventListener('click', function (event) {
+                event.preventDefault();
+                if (!editing) runCommand('favorites.open_link', { url: href }).catch(fail);
+              });
+            }
+            (node.children || []).forEach(function (child) { element.appendChild(make(child)); });
+            if (node.type !== 'table') return element;
+            var wrapper = document.createElement('div');
+            wrapper.className = 'table-scroll';
+            wrapper.appendChild(element);
+            return wrapper;
+          }
+          var fragment = document.createDocumentFragment();
+          content.nodes.forEach(function (node) { fragment.appendChild(make(node)); });
+          return fragment;
+        }
+
+        // ── 宿主桥接 ───────────────────────────────────────────
+        // executeCommand 回来的是 MCP 工具调用的完整 result 对象（JSON 文本），
+        // 真正的载荷在 content[0].text 里，所以这里统一剥一层。
+        function runCommand(commandID, args) {
+          if (!window.willdeep || typeof window.willdeep.executeCommand !== 'function') {
+            return Promise.reject(new Error(t('bridgeMissing')));
+          }
+          return window.willdeep.executeCommand(commandID, args || {}).then(unwrap);
+        }
+
+        function unwrap(raw) {
+          var payload = parseJSON(raw);
+          if (payload && Array.isArray(payload.content)) {
+            var text = null;
+            payload.content.forEach(function (entry) {
+              if (text === null && entry && typeof entry.text === 'string') text = entry.text;
+            });
+            payload = parseJSON(text);
+          }
+          if (payload && payload.ok === false) {
+            throw new Error(String(payload.error || 'unknown error'));
+          }
+          return payload;
+        }
+
+        function parseJSON(raw) {
+          if (raw === null || raw === undefined) return null;
+          if (typeof raw === 'object') return raw;
+          try {
+            return JSON.parse(String(raw));
+          } catch (error) {
+            return null;
+          }
+        }
+
+        // ── 状态 ──────────────────────────────────────────────
+        var state = {
+          items: [],
+          tags: [],
+          total: 0,
+          query: '',
+          tag: '',
+          oldestFirst: false,
+          expanded: {},
+          imageData: {},
+          editingNote: null,
+          loaded: false,
+          confirmingClear: false,
+          loadedQuery: '',
+          memo: { open: false, text: '', images: [], content: { version: 1, nodes: [] }, plainPaste: false }
+        };
+        var lastRemoved = null;
+        var toastTimer = null;
+        var confirmTimer = null;
+
+        var el = {
+          title: document.getElementById('title'),
+          count: document.getElementById('count'),
+          search: document.getElementById('search'),
+          searchClear: document.getElementById('search-clear'),
+          sort: document.getElementById('sort'),
+          refresh: document.getElementById('refresh'),
+          clearAll: document.getElementById('clear-all'),
+          newMemo: document.getElementById('new-memo'),
+          tagbar: document.getElementById('tagbar'),
+          skeleton: document.getElementById('skeleton'),
+          state: document.getElementById('state'),
+          list: document.getElementById('list'),
+          toast: document.getElementById('toast'),
+          toastText: document.getElementById('toast-text'),
+          toastUndo: document.getElementById('toast-undo'),
+          memoModal: document.getElementById('memo-modal'),
+          memoTitle: document.getElementById('memo-title'),
+          memoClose: document.getElementById('memo-close'),
+          memoEditor: document.getElementById('memo-editor'),
+          memoPlainPaste: document.getElementById('memo-plain-paste'),
+          memoStatus: document.getElementById('memo-status'),
+          memoDrop: document.getElementById('memo-drop'),
+          memoDropTitle: document.getElementById('memo-drop-title'),
+          memoDropHint: document.getElementById('memo-drop-hint'),
+          memoFile: document.getElementById('memo-file'),
+          memoImages: document.getElementById('memo-images'),
+          memoCancel: document.getElementById('memo-cancel'),
+          memoSave: document.getElementById('memo-save')
+        };
+
+        // ── 渲染 ──────────────────────────────────────────────
+        function renderChrome() {
+          document.documentElement.lang = dict() === STRINGS.zh ? 'zh-Hans' : 'en';
+          el.title.textContent = t('title');
+          el.search.placeholder = t('search');
+          el.sort.textContent = state.oldestFirst ? t('sortOldest') : t('sortNewest');
+          el.sort.setAttribute('aria-pressed', String(state.oldestFirst));
+          el.refresh.textContent = t('refresh');
+          el.newMemo.textContent = t('newMemo');
+          el.memoTitle.textContent = t('memoTitle');
+          el.memoEditor.dataset.placeholder = t('memoPlaceholder');
+          el.memoEditor.setAttribute('aria-label', t('memoPlaceholder'));
+          el.memoPlainPaste.textContent = t('plainPaste');
+          el.memoDropTitle.textContent = t('pasteImage');
+          el.memoDropHint.textContent = t('pasteImageHint');
+          el.memoCancel.textContent = t('cancel');
+          el.memoSave.textContent = t('saveMemo');
+          el.clearAll.textContent = state.confirmingClear ? t('clearConfirm') : t('clearAll');
+          el.clearAll.classList.toggle('hidden', state.total === 0);
+          el.searchClear.classList.toggle('hidden', state.query === '');
+        }
+
+        function visibleItems() {
+          var needle = state.query.trim().toLowerCase();
+          var list = state.items.filter(function (item) {
+            if (state.tag && !(item.tags || []).some(function (tag) {
+              return tag.toLowerCase() === state.tag.toLowerCase();
+            })) return false;
+            if (!needle || state.loadedQuery === needle) return true;
+            var haystack = [item.text, item.note, item.source, (item.tags || []).join(' '), (item.images || []).map(function (image) { return image.filename; }).join(' ')]
+              .join('\n').toLowerCase();
+            return haystack.indexOf(needle) !== -1;
+          });
+          if (state.oldestFirst) {
+            // 服务端给的是「置顶优先 + 最新在前」；反转时保持置顶仍在最前。
+            list = list.slice().sort(function (a, b) {
+              if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+              return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+            });
+          }
+          return list;
+        }
+
+        function renderCount(shown) {
+          if (!state.total) { el.count.textContent = ''; return; }
+          el.count.textContent = shown === state.total ? t('count', state.total) : t('filtered', shown, state.total);
+        }
+
+        function renderTagbar() {
+          el.tagbar.textContent = '';
+          if (!state.tags.length) { el.tagbar.classList.add('hidden'); return; }
+          el.tagbar.classList.remove('hidden');
+          el.tagbar.appendChild(tagChip('', t('all'), null, state.tag === ''));
+          state.tags.forEach(function (entry) {
+            el.tagbar.appendChild(
+              tagChip(entry.name, entry.name, entry.count, state.tag.toLowerCase() === entry.name.toLowerCase())
+            );
+          });
+        }
+
+        function tagChip(value, label, count, active) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'chip';
+          button.setAttribute('aria-pressed', String(!!active));
+          button.appendChild(document.createTextNode(label));
+          if (count !== null && count !== undefined) {
+            var badge = document.createElement('span');
+            badge.className = 'n';
+            badge.textContent = String(count);
+            button.appendChild(badge);
+          }
+          button.addEventListener('click', function () {
+            state.tag = state.tag.toLowerCase() === String(value).toLowerCase() ? '' : value;
+            render();
+          });
+          return button;
+        }
+
+        function showState(kind, headline, body, action) {
+          el.state.className = 'state' + (kind ? ' ' + kind : '');
+          el.state.textContent = '';
+          var head = document.createElement('div');
+          head.className = 'headline';
+          head.textContent = headline;
+          el.state.appendChild(head);
+          if (body) {
+            var detail = document.createElement('div');
+            detail.textContent = body;
+            el.state.appendChild(detail);
+          }
+          if (action) {
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'chip retry';
+            button.textContent = action.label;
+            button.addEventListener('click', action.run);
+            el.state.appendChild(button);
+          }
+          el.state.classList.remove('hidden');
+        }
+
+        function render() {
+          if (imageObserver) imageObserver.disconnect();
+          renderChrome();
+          var items = visibleItems();
+          renderCount(items.length);
+          renderTagbar();
+          el.list.textContent = '';
+
+          if (!state.loaded) return;
+          el.skeleton.classList.add('hidden');
+
+          if (!items.length) {
+            if (state.total === 0) {
+              showState('', t('emptyTitle'), t('emptyBody'), null);
+            } else {
+              showState('', t('noMatchTitle'), t('noMatchBody'), null);
+            }
+            return;
+          }
+          el.state.classList.add('hidden');
+          items.forEach(function (item) {
+            var element = card(item);
+            el.list.appendChild(element);
+            if (item.images && item.images.length) imageObserver.observe(element);
+          });
+          pruneExpandButtons();
+        }
+
+        // 折叠是按字数猜的，真正有没有被裁掉要等排版完才知道：
+        // 没裁掉的那些把折叠样式和「展开」一起撤掉，免得按钮点了没反应。
+        function pruneExpandButtons() {
+          var cards = el.list.querySelectorAll('li.card');
+          Array.prototype.forEach.call(cards, function (li) {
+            var text = li.querySelector('.text');
+            var expand = li.querySelector('.expand');
+            if (li.dataset.needsFull === 'true') return;
+            if (!text || !expand || !text.classList.contains('clamped')) return;
+            if (text.scrollHeight <= text.clientHeight + 1) {
+              text.classList.remove('clamped');
+              expand.classList.add('hidden');
+            }
+          });
+        }
+
+        // ── 单条卡片 ───────────────────────────────────────────
+        function card(item) {
+          var li = document.createElement('li');
+          li.className = 'card';
+          li.dataset.itemId = item.id;
+          li.dataset.pinned = String(!!item.pinned);
+
+          var text = document.createElement('div');
+          text.className = 'text';
+          var isRich = !!(item.richContent || item.content);
+          var isLong = isRich || item.hasMoreText || String(item.text || '').length > 320 || String(item.text || '').split('\n').length > 6;
+          li.dataset.needsFull = String(isRich || !!item.hasMoreText);
+          if (isLong && !state.expanded[item.id]) text.classList.add('clamped');
+          if (state.expanded[item.id]) text.classList.add('expanded');
+          if (isRich) {
+            text.classList.add('rich-text');
+            try {
+              text.appendChild(renderRich(item.content || item.contentPreview, item, false));
+              highlightRich(text, state.query.trim());
+            } catch (error) {
+              console.warn('favorites: unsupported rich content; showing plain text');
+              highlight(text, String(item.text || ''), state.query.trim());
+            }
+          } else highlight(text, String(item.text || ''), state.query.trim());
+          li.appendChild(text);
+
+          if (!isRich && item.images && item.images.length) li.appendChild(imagesView(item));
+
+          if (isLong) {
+            var expand = document.createElement('button');
+            expand.type = 'button';
+            expand.className = 'expand';
+            expand.textContent = state.expanded[item.id] ? t('collapse') : t('expand');
+            expand.addEventListener('click', function () {
+              if (state.expanded[item.id]) { state.expanded[item.id] = false; render(); return; }
+              expand.disabled = true;
+              expand.textContent = t('contentLoading');
+              fullItem(item).then(function () { state.expanded[item.id] = true; render(); }).catch(function (error) { fail(error); render(); });
+            });
+            li.appendChild(expand);
+          }
+
+          li.appendChild(noteView(item));
+          li.appendChild(tagsRow(item));
+          li.appendChild(metaRow(item));
+          return li;
+        }
+
+        function fullItem(item) {
+          if (item.fullLoaded || (!item.richContent && !item.hasMoreText)) return Promise.resolve(item);
+          return runCommand('favorites.read_content', { id: item.id }).then(function (payload) {
+            if (!payload || !payload.item) throw contentError('invalidContent');
+            Object.assign(item, payload.item, { fullLoaded: true });
+            return item;
+          });
+        }
+
+        function highlightRich(container, needle) {
+          if (!needle) return;
+          var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+          var nodes = [], node;
+          while ((node = walker.nextNode())) nodes.push(node);
+          nodes.forEach(function (text) {
+            var span = document.createElement('span');
+            highlight(span, text.nodeValue, needle);
+            text.replaceWith(span);
+          });
+        }
+
+        function imagesView(item) {
+          var row = document.createElement('div');
+          row.className = 'images';
+          (item.images || []).forEach(function (image) {
+            var key = item.id + ':' + image.id;
+            var source = state.imageData && state.imageData[key];
+            if (source) {
+              var imageElement = document.createElement('img');
+              imageElement.className = 'memo-image';
+              imageElement.src = source;
+              imageElement.alt = image.filename || t('memoTitle');
+              row.appendChild(imageElement);
+            } else {
+              var placeholder = document.createElement('div');
+              placeholder.className = 'image-placeholder';
+              placeholder.dataset.imageId = image.id;
+              placeholder.textContent = t('imageLoading');
+              row.appendChild(placeholder);
+            }
+          });
+          return row;
+        }
+
+        var imageQueue = [], imagePending = {}, imageActive = 0, imageCacheOrder = [];
+        var imageObserver = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            var item = state.items.find(function (candidate) { return candidate.id === entry.target.dataset.itemId; });
+            if (!item) return;
+            var ids = Array.prototype.map.call(entry.target.querySelectorAll('[data-image-id]'), function (node) { return node.dataset.imageId; });
+            (item.images || []).forEach(function (image) {
+              var key = item.id + ':' + image.id;
+              if (ids.indexOf(image.id) === -1 || state.imageData[key] || imagePending[key]) return;
+              imagePending[key] = true;
+              imageQueue.push({ key: key, item: item, image: image });
+            });
+          });
+          pumpImages();
+        }, { rootMargin: '100px' });
+        function pumpImages() {
+          while (imageActive < IMAGE_LIMITS.concurrent && imageQueue.length) fetchMemoImage(imageQueue.shift());
+        }
+        function fetchMemoImage(request) {
+          imageActive++;
+          runCommand('favorites.read_image', { item_id: request.item.id, image_id: request.image.id }).then(function (payload) {
+            if (!payload || !/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(payload.data || '')) throw contentError('invalidContent');
+            state.imageData[request.key] = payload.data;
+            imageCacheOrder.push(request.key);
+            var cachedBytes = imageCacheOrder.reduce(function (sum, key) { return sum + (state.imageData[key] || '').length; }, 0);
+            while (imageCacheOrder.length > 1 && (cachedBytes > IMAGE_LIMITS.cacheBytes || imageCacheOrder.length > IMAGE_LIMITS.cacheCount)) {
+              var evicted = imageCacheOrder.shift();
+              cachedBytes -= (state.imageData[evicted] || '').length;
+              delete state.imageData[evicted];
+            }
+            Array.prototype.forEach.call(el.list.querySelectorAll('li.card'), function (cardElement) {
+              if (cardElement.dataset.itemId !== request.item.id) return;
+              Array.prototype.forEach.call(cardElement.querySelectorAll('.image-placeholder'), function (placeholder) {
+                if (placeholder.dataset.imageId !== request.image.id) return;
+                var img = document.createElement('img');
+                img.className = request.item.richContent || request.item.content ? 'inline-image' : 'memo-image';
+                img.dataset.imageId = request.image.id;
+                img.src = payload.data;
+                img.alt = request.image.filename || t('memoTitle');
+                img.loading = 'lazy';
+                placeholder.replaceWith(img);
+              });
+            });
+          }).catch(function () { console.warn('favorites: memo image unavailable'); }).then(function () {
+            imageActive--;
+            delete imagePending[request.key];
+            pumpImages();
+          });
+        }
+
+        // 命中的关键词高亮：全部走 textContent，绝不用 innerHTML 拼用户内容。
+        function highlight(container, value, needle) {
+          if (!needle) { container.textContent = value; return; }
+          var haystack = value.toLowerCase();
+          var target = needle.toLowerCase();
+          var index = haystack.indexOf(target);
+          if (index === -1) { container.textContent = value; return; }
+          var cursor = 0;
+          while (index !== -1 && cursor < value.length) {
+            container.appendChild(document.createTextNode(value.slice(cursor, index)));
+            var mark = document.createElement('mark');
+            mark.textContent = value.slice(index, index + needle.length);
+            container.appendChild(mark);
+            cursor = index + needle.length;
+            index = haystack.indexOf(target, cursor);
+          }
+          container.appendChild(document.createTextNode(value.slice(cursor)));
+        }
+
+        function noteView(item) {
+          if (state.editingNote === item.id) {
+            var editor = document.createElement('textarea');
+            editor.className = 'note-editor';
+            editor.value = item.note || '';
+            editor.placeholder = t('notePlaceholder');
+            editor.addEventListener('keydown', function (event) {
+              if (event.key === 'Escape') {
+                event.stopPropagation();
+                state.editingNote = null;
+                render();
+              } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                commitNote(item, editor.value);
+              }
+            });
+            editor.addEventListener('blur', function () { commitNote(item, editor.value); });
+            window.setTimeout(function () { editor.focus(); }, 0);
+            return editor;
+          }
+          var note = document.createElement('div');
+          note.className = 'note' + (item.note ? '' : ' empty');
+          note.textContent = item.note || t('addNote');
+          note.title = t('note');
+          note.addEventListener('click', function () {
+            state.editingNote = item.id;
+            render();
+          });
+          return note;
+        }
+
+        function commitNote(item, value) {
+          var next = String(value == null ? '' : value).trim();
+          state.editingNote = null;
+          if (next === String(item.note || '')) { render(); return; }
+          item.note = next;
+          render();
+          runCommand('favorites.update', { id: item.id, note: next }).then(load).catch(fail);
+        }
+
+        function tagsRow(item) {
+          var row = document.createElement('div');
+          row.className = 'tags';
+          (item.tags || []).forEach(function (tag) {
+            var chip = document.createElement('span');
+            chip.className = 'tag';
+            var label = document.createElement('button');
+            label.type = 'button';
+            label.textContent = tag;
+            label.addEventListener('click', function () {
+              state.tag = state.tag.toLowerCase() === tag.toLowerCase() ? '' : tag;
+              render();
+            });
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'x';
+            remove.textContent = '×';
+            remove.addEventListener('click', function () {
+              var next = (item.tags || []).filter(function (value) { return value !== tag; });
+              runCommand('favorites.update', { id: item.id, tags: next }).then(load).catch(fail);
+            });
+            chip.appendChild(label);
+            chip.appendChild(remove);
+            row.appendChild(chip);
+          });
+
+          var adder = document.createElement('button');
+          adder.type = 'button';
+          adder.className = 'tag';
+          adder.textContent = t('addTag');
+          adder.addEventListener('click', function () {
+            var input = document.createElement('input');
+            input.className = 'tag-input';
+            input.maxLength = 24;
+            row.replaceChild(input, adder);
+            input.focus();
+            var done = false;
+            var commit = function (save) {
+              if (done) return;
+              done = true;
+              var value = input.value.trim();
+              if (save && value) {
+                var next = (item.tags || []).concat([value]);
+                runCommand('favorites.update', { id: item.id, tags: next }).then(load).catch(fail);
+              } else {
+                render();
+              }
+            };
+            input.addEventListener('keydown', function (event) {
+              if (event.key === 'Enter') { event.preventDefault(); commit(true); }
+              else if (event.key === 'Escape') { event.stopPropagation(); commit(false); }
+            });
+            input.addEventListener('blur', function () { commit(true); });
+          });
+          row.appendChild(adder);
+          return row;
+        }
+
+        function metaRow(item) {
+          var meta = document.createElement('div');
+          meta.className = 'meta';
+
+          var time = document.createElement('span');
+          time.textContent = relativeTime(item.createdAt);
+          time.title = absoluteTime(item.createdAt);
+          meta.appendChild(time);
+
+          if (item.sourceSessionID && item.sourceMessageID && window.willdeep
+              && typeof window.willdeep.openConversation === 'function') {
+            var source = document.createElement('button');
+            source.type = 'button';
+            source.className = 'source';
+            source.textContent = t('openSource');
+            source.addEventListener('click', function () {
+              window.willdeep.openConversation(item.sourceSessionID, item.sourceMessageID);
+            });
+            meta.appendChild(source);
+          } else if (item.source) {
+            var sourceLabel = document.createElement('span');
+            sourceLabel.className = 'source';
+            sourceLabel.textContent = item.source;
+            meta.appendChild(sourceLabel);
+          }
+
+          var spacer = document.createElement('span');
+          spacer.className = 'spacer';
+          meta.appendChild(spacer);
+
+          var actions = document.createElement('div');
+          actions.className = 'actions';
+
+          var pin = document.createElement('button');
+          pin.type = 'button';
+          pin.textContent = item.pinned ? t('unpin') : t('pin');
+          pin.setAttribute('aria-pressed', String(!!item.pinned));
+          pin.addEventListener('click', function () {
+            runCommand('favorites.update', { id: item.id, pinned: !item.pinned }).then(load).catch(fail);
+          });
+          actions.appendChild(pin);
+
+          var copy = document.createElement('button');
+          copy.type = 'button';
+          copy.textContent = t('copy');
+          copy.addEventListener('click', function () {
+            fullItem(item).then(function (full) { return copyText(String(full.text || '')); }).then(function (ok) {
+              copy.textContent = ok ? t('copied') : t('copyFailed');
+              window.setTimeout(function () { copy.textContent = t('copy'); }, 1200);
+            }).catch(fail);
+          });
+          actions.appendChild(copy);
+
+          var remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'danger';
+          remove.textContent = t('remove');
+          remove.addEventListener('click', function () {
+            remove.disabled = true;
+            runCommand('favorites.remove', { id: item.id })
+              .then(function (payload) {
+                lastRemoved = (payload && payload.item) || item;
+                toast(t('removed'), t('undo'), undoRemove);
+                return load();
+              })
+              .catch(function (error) { remove.disabled = false; fail(error); });
+          });
+          actions.appendChild(remove);
+
+          meta.appendChild(actions);
+          return meta;
+        }
+
+        function undoRemove() {
+          if (!lastRemoved) return;
+          var item = lastRemoved;
+          lastRemoved = null;
+          hideToast();
+          runCommand('favorites.restore', { item: item }).then(load).catch(fail);
+        }
+
+        // ── 新备忘与图片粘贴 ──────────────────────────────────
+        function openMemo() {
+          state.memo = { open: true, text: '', images: [], content: { version: 1, nodes: [] }, plainPaste: false, busy: 0 };
+          memoRange = null;
+          el.memoPlainPaste.setAttribute('aria-pressed', 'false');
+          renderMemo();
+          el.memoModal.classList.remove('hidden');
+          window.setTimeout(function () { el.memoEditor.focus(); }, 0);
+        }
+
+        function closeMemo() {
+          state.memo.open = false;
+          el.memoModal.classList.add('hidden');
+        }
+
+        function renderMemo() {
+          el.memoEditor.textContent = '';
+          el.memoEditor.appendChild(renderRich(state.memo.content, state.memo, true));
+          syncMemo();
+          renderMemoImages();
+        }
+
+        function renderMemoImages() {
+          el.memoImages.textContent = '';
+          state.memo.images.forEach(function (image, index) {
+            var wrapper = document.createElement('div');
+            wrapper.className = 'draft-image';
+            var preview = document.createElement('img');
+            preview.src = image.data;
+            preview.alt = image.name || t('memoTitle');
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.textContent = '×';
+            remove.title = t('removeImage');
+            remove.addEventListener('click', function () {
+              state.memo.images.splice(index, 1);
+              Array.prototype.forEach.call(el.memoEditor.querySelectorAll('[data-image-id]'), function (node) {
+                if (node.dataset.imageId === image.id) node.remove();
+              });
+              syncMemo();
+              renderMemoImages();
+            });
+            wrapper.appendChild(preview);
+            wrapper.appendChild(remove);
+            el.memoImages.appendChild(wrapper);
+          });
+        }
+
+        function fileToDataURL(file) {
+          return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve({ name: file.name, type: file.type, data: String(reader.result || '') }); };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+        }
+
+        var memoRange = null;
+        function rememberMemoRange() {
+          var selection = window.getSelection();
+          if (selection.rangeCount && el.memoEditor.contains(selection.getRangeAt(0).commonAncestorContainer)) memoRange = selection.getRangeAt(0).cloneRange();
+        }
+        function syncMemo() {
+          try {
+            state.memo.content = editorContent();
+            state.memo.text = richText(state.memo.content.nodes).trim();
+            el.memoStatus.textContent = t('contentSize', Math.ceil(byteSize(state.memo.text) / 1024));
+            el.memoSave.disabled = state.memo.busy > 0;
+            rememberMemoRange();
+            return true;
+          } catch (error) {
+            el.memoStatus.textContent = error.message;
+            el.memoSave.disabled = true;
+            return false;
+          }
+        }
+        function insertContent(content, range) {
+          var previous = state.memo.content;
+          var fragment = renderRich(content, state.memo, true);
+          var last = fragment.lastChild;
+          if (!last) return;
+          if (!range || !el.memoEditor.contains(range.commonAncestorContainer)) {
+            range = document.createRange();
+            range.selectNodeContents(el.memoEditor);
+            range.collapse(false);
+          }
+          range.deleteContents();
+          range.insertNode(fragment);
+          range.setStartAfter(last);
+          range.collapse(true);
+          var selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          el.memoEditor.focus();
+          if (!syncMemo()) {
+            el.memoEditor.textContent = '';
+            el.memoEditor.appendChild(renderRich(previous, state.memo, true));
+            syncMemo();
+            throw contentError();
+          }
+        }
+        function prepareImages(pending, memo) {
+          var total = memo.images.reduce(function (sum, image) { return sum + image.bytes; }, 0);
+          if (memo.images.length + pending.length > IMAGE_LIMITS.count) return Promise.reject(contentError('imageLimit'));
+          for (var index = 0; index < pending.length; index++) {
+            var file = pending[index].file;
+            total += file.size;
+            if (file.size > IMAGE_LIMITS.each || total > IMAGE_LIMITS.total) return Promise.reject(contentError('imageLimit'));
+          }
+          return Promise.all(pending.map(function (entry) {
+            return fileToDataURL(entry.file).then(function (image) { image.id = entry.id; image.bytes = entry.file.size; return image; });
+          }));
+        }
+        function insertPrepared(content, pending, range, removed) {
+          var memo = state.memo;
+          if (memo.busy || !syncMemo()) { fail(contentError('invalidContent')); return; }
+          memo.busy++;
+          el.memoSave.disabled = true;
+          prepareImages(pending, memo).then(function (images) {
+            if (state.memo !== memo || !memo.open) return;
+            var oldImages = memo.images;
+            memo.images = memo.images.concat(images);
+            try {
+              validateContent({ version: 1, nodes: memo.content.nodes.concat(content.nodes) }, memo.images);
+              insertContent(content, range);
+            } catch (error) { memo.images = oldImages; throw error; }
+            renderMemoImages();
+            if (removed) el.memoStatus.textContent = t('unsafeRemoved');
+          }).catch(function (error) {
+            if (state.memo === memo && memo.open) { fail(error); el.memoStatus.textContent = error.message; }
+          }).then(function () {
+            memo.busy--;
+            if (state.memo === memo) el.memoSave.disabled = false;
+          });
+        }
+
+        function addImageFiles(files) {
+          var candidates = Array.prototype.filter.call(files || [], function (file) {
+            return file && /^image\/(png|jpeg|webp|gif)$/i.test(file.type);
+          });
+          if (!candidates.length) return;
+          if (!state.memo.open) openMemo();
+          var pending = candidates.map(function (file) { return { file: file, id: imageID() }; });
+          var content = { version: 1, nodes: pending.map(function (entry) { return { type: 'image', imageId: entry.id }; }) };
+          insertPrepared(content, pending, memoRange, false);
+        }
+
+        function pasteContent(clipboard, plain) {
+          try {
+            var files = clipboardImageFiles(clipboard);
+            var html = !plain && clipboard.getData('text/html');
+            var text = clipboard.getData('text/plain') || '';
+            if (byteSize(html || '') > CONTENT_LIMITS.html || byteSize(text) > CONTENT_LIMITS.text) throw contentError();
+            var context = { count: 0, pending: [], files: files.slice(), removed: false };
+            var nodes;
+            if (html) {
+              var template = document.createElement('template');
+              template.innerHTML = html;
+              nodes = importNodes(template.content, context, 0);
+            } else nodes = text ? [{ type: 'p', children: [{ type: 'text', text: text }] }] : [];
+            // 实际剪贴板文件可保存；远程 URL 不下载。已用于 cid/blob 的文件不重复追加。
+            context.files.forEach(function (file) {
+              var id = imageID();
+              context.pending.push({ file: file, id: id });
+              nodes.push({ type: 'image', imageId: id });
+            });
+            insertPrepared({ version: 1, nodes: nodes }, context.pending, memoRange && memoRange.cloneRange(), context.removed);
+          } catch (error) { fail(error); el.memoStatus.textContent = error.message; }
+        }
+
+        function clipboardImageFiles(clipboard) {
+          var files = Array.prototype.filter.call((clipboard && clipboard.files) || [], function (file) {
+            return file && file.type && file.type.indexOf('image/') === 0;
+          });
+          if (files.length) return files;
+          return Array.prototype.map.call((clipboard && clipboard.items) || [], function (item) {
+            return item && item.kind === 'file' && item.type.indexOf('image/') === 0 ? item.getAsFile() : null;
+          }).filter(Boolean);
+        }
+
+        function saveMemo() {
+          if (state.memo.busy || !syncMemo()) return;
+          var text = state.memo.text;
+          if (!text && !state.memo.images.length) return;
+          el.memoSave.disabled = true;
+          runCommand('favorites.add', {
+            text: text,
+            content: state.memo.content,
+            images: state.memo.images.map(function (image) {
+              return { id: image.id, filename: image.name, mime_type: image.type, data: image.data };
+            })
+          }).then(function () {
+            closeMemo();
+            toast(t('memoSaved'), null, null);
+            return load();
+          }).catch(fail).then(function () { el.memoSave.disabled = false; });
+        }
+
+        // ── 时间 ──────────────────────────────────────────────
+        function parseDate(iso) {
+          if (!iso) return null;
+          var date = new Date(iso);
+          return isNaN(date.getTime()) ? null : date;
+        }
+        function absoluteTime(iso) {
+          var date = parseDate(iso);
+          return date ? date.toLocaleString() : '';
+        }
+        function relativeTime(iso) {
+          var date = parseDate(iso);
+          if (!date) return '';
+          var minutes = Math.floor((Date.now() - date.getTime()) / 60000);
+          if (minutes < 1) return t('justNow');
+          if (minutes < 60) return t('minutesAgo', minutes);
+          if (minutes < 60 * 24) return t('hoursAgo', Math.floor(minutes / 60));
+          var today = new Date();
+          var yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+          if (date >= yesterday && date < new Date(yesterday.getTime() + 86400000)) {
+            return t('yesterday') + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          }
+          return date.toLocaleDateString();
+        }
+
+        // ── 复制：插件页不是安全上下文，navigator.clipboard 可能缺席 ──
+        function copyText(value) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(value).then(function () { return true; }, legacyCopy);
+          }
+          return Promise.resolve(legacyCopy());
+
+          function legacyCopy() {
+            try {
+              var area = document.createElement('textarea');
+              area.value = value;
+              area.style.position = 'fixed';
+              area.style.opacity = '0';
+              document.body.appendChild(area);
+              area.select();
+              var ok = document.execCommand('copy');
+              document.body.removeChild(area);
+              return ok;
+            } catch (error) {
+              return false;
+            }
+          }
+        }
+
+        // ── 提示条 ────────────────────────────────────────────
+        function toast(message, actionLabel, action) {
+          el.toast.classList.remove('error');
+          el.toastText.textContent = message;
+          if (actionLabel && action) {
+            el.toastUndo.textContent = actionLabel;
+            el.toastUndo.classList.remove('hidden');
+            el.toastUndo.onclick = action;
+          } else {
+            el.toastUndo.classList.add('hidden');
+            el.toastUndo.onclick = null;
+          }
+          el.toast.classList.add('show');
+          window.clearTimeout(toastTimer);
+          toastTimer = window.setTimeout(hideToast, 6000);
+        }
+        function hideToast() {
+          el.toast.classList.remove('show');
+          window.clearTimeout(toastTimer);
+        }
+        function fail(error) {
+          var message = (error && error.message) ? error.message : String(error);
+          if (message === 'content limit exceeded') message = t('contentLimit');
+          if (message === 'invalid rich content') message = t('invalidContent');
+          if (message === 'invalid images') message = t('imageLimit');
+          if (/^(invalid link|link opening)/.test(message)) message = t('linkFailed');
+          if (!state.loaded) {
+            el.skeleton.classList.add('hidden');
+            showState('error', t('errorTitle'), message, { label: t('retry'), run: load });
+            return;
+          }
+          el.toast.classList.add('error');
+          el.toastText.textContent = message;
+          el.toastUndo.classList.add('hidden');
+          el.toast.classList.add('show');
+          window.clearTimeout(toastTimer);
+          toastTimer = window.setTimeout(hideToast, 6000);
+        }
+
+        // ── 载入 ──────────────────────────────────────────────
+        var inFlight = null;
+        function load() {
+          if (inFlight) return inFlight;
+          var requestedQuery = state.query.trim().toLowerCase();
+          inFlight = runCommand('favorites.list', { query: requestedQuery })
+            .then(function (payload) {
+              state.items = (payload && Array.isArray(payload.items)) ? payload.items : [];
+              state.tags = (payload && Array.isArray(payload.tags)) ? payload.tags : [];
+              state.total = (payload && typeof payload.total === 'number') ? payload.total : state.items.length;
+              state.loaded = true;
+              state.loadedQuery = requestedQuery;
+              el.state.classList.add('hidden');
+              render();
+            })
+            .catch(fail)
+            .then(function () {
+              inFlight = null;
+              if (state.query.trim().toLowerCase() !== requestedQuery) return load();
+            });
+          return inFlight;
+        }
+
+        // ── 事件接线 ───────────────────────────────────────────
+        var searchTimer = null;
+        el.search.addEventListener('input', function () {
+          window.clearTimeout(searchTimer);
+          searchTimer = window.setTimeout(function () {
+            state.query = el.search.value;
+            load();
+          }, 100);
+        });
+        el.searchClear.addEventListener('click', function () {
+          el.search.value = '';
+          state.query = '';
+          el.search.focus();
+          load();
+        });
+        el.sort.addEventListener('click', function () {
+          state.oldestFirst = !state.oldestFirst;
+          render();
+        });
+        el.refresh.addEventListener('click', function () { load(); });
+        el.newMemo.addEventListener('click', openMemo);
+        el.memoClose.addEventListener('click', closeMemo);
+        el.memoCancel.addEventListener('click', closeMemo);
+        el.memoSave.addEventListener('click', saveMemo);
+        el.memoEditor.addEventListener('input', syncMemo);
+        el.memoEditor.addEventListener('keyup', rememberMemoRange);
+        el.memoEditor.addEventListener('mouseup', rememberMemoRange);
+        el.memoEditor.addEventListener('blur', rememberMemoRange);
+        el.memoEditor.addEventListener('click', function (event) {
+          if (event.target.closest('a')) event.preventDefault();
+        });
+        el.memoPlainPaste.addEventListener('click', function () {
+          state.memo.plainPaste = !state.memo.plainPaste;
+          el.memoPlainPaste.setAttribute('aria-pressed', String(state.memo.plainPaste));
+        });
+        var nextPastePlain = false;
+        el.memoEditor.addEventListener('keydown', function (event) {
+          if (event.key.toLowerCase() === 'v' && event.shiftKey && (event.metaKey || event.ctrlKey)) {
+            nextPastePlain = true;
+            window.setTimeout(function () { nextPastePlain = false; }, 1000);
+          }
+        });
+        el.memoFile.addEventListener('change', function () { addImageFiles(el.memoFile.files); el.memoFile.value = ''; });
+        el.memoDrop.addEventListener('dragover', function (event) { event.preventDefault(); });
+        el.memoDrop.addEventListener('drop', function (event) {
+          event.preventDefault();
+          addImageFiles(event.dataTransfer && event.dataTransfer.files);
+        });
+        el.memoEditor.addEventListener('dragover', function (event) { event.preventDefault(); });
+        el.memoEditor.addEventListener('drop', function (event) {
+          event.preventDefault();
+          rememberMemoRange();
+          if (event.dataTransfer) pasteContent(event.dataTransfer, state.memo.plainPaste);
+        });
+        document.addEventListener('paste', function (event) {
+          if (state.memo.open && el.memoEditor.contains(event.target) && event.clipboardData) {
+            event.preventDefault();
+            rememberMemoRange();
+            pasteContent(event.clipboardData, state.memo.plainPaste || nextPastePlain);
+            nextPastePlain = false;
+            return;
+          }
+          var files = clipboardImageFiles(event.clipboardData);
+          if (!files.length) return;
+          event.preventDefault();
+          addImageFiles(files);
+        });
+        el.clearAll.addEventListener('click', function () {
+          if (!state.confirmingClear) {
+            state.confirmingClear = true;
+            renderChrome();
+            window.clearTimeout(confirmTimer);
+            confirmTimer = window.setTimeout(function () {
+              state.confirmingClear = false;
+              renderChrome();
+            }, 4000);
+            return;
+          }
+          state.confirmingClear = false;
+          window.clearTimeout(confirmTimer);
+          runCommand('favorites.clear', { confirm: true })
+            .then(function (payload) {
+              toast(t('cleared', (payload && payload.removed) || 0), null, null);
+              return load();
+            })
+            .catch(fail);
+        });
+
+        document.addEventListener('keydown', function (event) {
+          var typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName) || (document.activeElement && document.activeElement.isContentEditable);
+          if ((event.metaKey || event.ctrlKey) && event.key === 'f') {
+            event.preventDefault();
+            el.search.focus();
+            el.search.select();
+          } else if (event.key === '/' && !typing) {
+            event.preventDefault();
+            el.search.focus();
+          } else if (event.key === 'Escape' && state.memo.open) {
+            event.preventDefault();
+            closeMemo();
+          } else if (event.key === 'Escape' && !typing) {
+            if (state.query || state.tag) {
+              el.search.value = '';
+              state.query = '';
+              state.tag = '';
+              load();
+            } else {
+              hideToast();
+            }
+          }
+        });
+
+        // 宿主推上下文（切回这个页面、刷新命令、深浅色切换）时重新拉数据。
+        window.addEventListener('willdeep:context-changed', function () {
+          renderChrome();
+          load();
+        });
+
+        renderChrome();
+        load();
+      })();
+    </script>
+  </body>
+</html>

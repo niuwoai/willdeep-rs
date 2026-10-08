@@ -23,6 +23,7 @@ mod detached_delivery;
 mod doctor;
 mod editor;
 mod event_cmd;
+mod favorites_plugin;
 mod feedback_cmd;
 mod feedback_review_cmd;
 mod handoff_cmd;
@@ -657,6 +658,9 @@ async fn run() -> Result<()> {
             .or(loaded.file.agent.language.as_deref()),
     )?;
     let home = willdeep_home()?;
+    if !administrative {
+        favorites_plugin::ensure_installed(&home).await?;
+    }
     // 匿名产品遥测。配置默认开启，WILLDEEP_TELEMETRY_DISABLED=1 可整体关掉。
     // 只写本地队列，实际发送在进程退出前一次性做（见 main）。
     telemetry::install(telemetry::Telemetry::new(

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "favorites": {
+      "command": "/usr/bin/ruby",
+      "args": ["${pluginRoot}/server/favorites.rb"],
+      "startup_timeout_sec": 10
+    }
+  }
+}

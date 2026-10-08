@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.94.0-rc1] - 2026-10-08
+
+### Added
+- 随 CLI 内嵌最新版 willdeep-favorites 2.3.0，启动 CLI / WebApp 时安装，支持富文本与图片收藏；提供 `plugin builtin install favorites`，审批与启用由用户决定，保留已有插件版本和数据。
+
+### Fixed
+- 收藏夹 MCP 使用当前 WillDeep home 的私有数据文件，隔离配置和测试不会误写 macOS App 的历史收藏数据。
+
 ## [0.93.0-rc1] - 2026-10-08
 
 ### Added

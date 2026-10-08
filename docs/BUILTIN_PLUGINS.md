@@ -1,20 +1,25 @@
 # 内置插件
 
-两项能力从 macOS 版（Xedit）移植过来，以**插件**的形式随 willdeep 一起发：
+以下能力以**插件**的形式随 willdeep 一起发：
 
 | 插件 | 用途 | 对应 Xedit |
 |---|---|---|
+| `willdeep-favorites` 2.3.0 | 富文本备忘、图片收藏、搜索、标签与撤销；Web 插件页面与聊天选区收藏 | 同源第一方收藏夹插件 |
 | `willdeep-scheduler` | 定时任务：到点在全新会话里自动跑一个 prompt，可带自我完成的目标 | `schedule_task` / `complete_scheduled_task`、Automations（`AgentRoutine`） |
 | `willdeep-roundtable` | 专家圆桌：几位立场各异的领域专家多轮讨论一个开放问题，收敛成决策文档 | Expert Roundtable（`AgentRoundtable`） |
 
 它们是普通的插件包，走和第三方插件一样的安装、批准、启用流程，权限逐条声明。
-唯一的区别是 MCP 服务端：`mcp.json` 里写的是 `${willdeepExe} plugin serve-builtin <id>`，
-也就是 willdeep 自己，不需要 Python、Node 或别的运行时。
+定时任务与圆桌的 MCP 服务端使用 `${willdeepExe} plugin serve-builtin <id>`，无需额外运行时。
+收藏夹内嵌原版 Ruby 服务和页面，需要 `/usr/bin/ruby`；启动 CLI 或 WebApp 时自动安装，
+仍须批准并启用。重复启动保留相同版本、已有更高版本、审批及数据。
+收藏数据位于 `$WILLDEEP_HOME/plugin-data/willdeep-favorites/favorites.json`，图片在同名 `.media` 目录。
+macOS App 的历史收藏文件不会自动迁移或修改。
 
 ## 安装
 
 ```bash
 willdeep plugin builtin list
+willdeep plugin builtin install favorites --enable   # 明确批准并启用随包收藏夹
 willdeep plugin builtin install scheduler      # 装好后按提示 approve + enable
 willdeep plugin builtin install roundtable --enable   # 或者一步批准并启用
 ```
