@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "config": {
+      "command": "/usr/bin/ruby",
+      "args": ["${pluginRoot}/server/config_server.rb"],
+      "startup_timeout_sec": 10
+    }
+  }
+}

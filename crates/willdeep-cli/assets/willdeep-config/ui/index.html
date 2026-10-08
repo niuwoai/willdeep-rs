@@ -1,0 +1,1950 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WillDeep Config</title>
+<style>
+/*
+ * 颜色一律从宿主变量派生：WillDeep mac 在文档头部注入 --willdeep-*（随浅/深色切换），
+ * willdeep-rs 不注入，只在上下文里给 colorScheme。所以这里**不能**在 :root 上定义
+ * --willdeep-* 本身（会盖掉 mac 注入的值），只定义兜底色，按 data-scheme 切换。
+ */
+:root {
+  --fb-bg: #1c1c1e; --fb-fg: #f2f2f4; --fb-secondary: #a1a1a6; --fb-accent: #f2f2f4;
+  color-scheme: dark;
+}
+:root[data-scheme="light"] {
+  --fb-bg: #ffffff; --fb-fg: #1a1a1c; --fb-secondary: #6c6c70; --fb-accent: #111111;
+  color-scheme: light;
+}
+:root {
+  --bg: var(--willdeep-bg, var(--fb-bg));
+  --fg: var(--willdeep-fg, var(--fb-fg));
+  --secondary: var(--willdeep-secondary, var(--fb-secondary));
+  --accent: var(--willdeep-accent, var(--fb-accent));
+  --on-accent: var(--bg);
+  --surface: color-mix(in srgb, var(--bg) 96%, var(--fg));
+  --surface-2: color-mix(in srgb, var(--bg) 91%, var(--fg));
+  --line: color-mix(in srgb, var(--bg) 84%, var(--fg));
+  --line-strong: color-mix(in srgb, var(--bg) 70%, var(--fg));
+  /* 语义色：只用于错误/警告/成功三种状态，与宿主前景色混合，随主题变深变浅 */
+  --danger: color-mix(in srgb, #e5484d 78%, var(--fg));
+  --warn: color-mix(in srgb, #d99a1e 78%, var(--fg));
+  --ok: color-mix(in srgb, #3e9b5b 78%, var(--fg));
+  --danger-soft: color-mix(in srgb, #e5484d 14%, var(--bg));
+  --warn-soft: color-mix(in srgb, #d99a1e 14%, var(--bg));
+  --ok-soft: color-mix(in srgb, #3e9b5b 14%, var(--bg));
+  --radius: 8px;
+  --topbar-h: 52px;
+}
+* { box-sizing: border-box; }
+html { font-size: var(--willdeep-body-font-size, 13px); }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+[hidden] { display: none !important; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  min-height: var(--topbar-h);
+  padding: 10px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.meta { flex: 1 1 260px; min-width: 0; font-size: 0.85rem; color: var(--secondary); }
+.meta .path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search {
+  flex: 0 1 240px; min-width: 160px;
+  padding: 5px 10px; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: var(--bg);
+}
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  padding: 5px 11px; border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  cursor: pointer; font-size: 0.92rem; white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: color-mix(in srgb, var(--bg) 84%, var(--fg)); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, var(--bg)); }
+.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 85%, var(--bg)); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--secondary); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+.btn-sm { padding: 2px 8px; font-size: 0.85rem; }
+.icon-btn {
+  flex: none; width: 26px; height: 26px; padding: 0;
+  border: none; border-radius: 6px; background: transparent;
+  color: var(--secondary); cursor: pointer; font-size: 1rem; line-height: 26px;
+}
+.icon-btn:hover { background: var(--surface-2); color: var(--fg); }
+
+/* ---------- 横幅 ---------- */
+.banner {
+  margin: 12px 16px 0; padding: 10px 12px; border-radius: var(--radius);
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  font-size: 0.92rem;
+}
+.banner-error { background: var(--danger-soft); border: 1px solid var(--danger); }
+.banner-warn { background: var(--warn-soft); border: 1px solid var(--warn); }
+.banner .grow { flex: 1 1 240px; }
+
+/* ---------- 主体布局 ---------- */
+.layout { display: flex; gap: 20px; padding: 16px 16px 96px; align-items: flex-start; }
+.toc {
+  position: sticky; top: calc(var(--topbar-h) + 16px);
+  flex: 0 0 180px; max-height: calc(100vh - var(--topbar-h) - 40px); overflow: auto;
+  font-size: 0.9rem;
+}
+.toc button {
+  display: flex; justify-content: space-between; gap: 6px; width: 100%;
+  padding: 4px 8px; border: none; border-radius: 6px; background: transparent;
+  color: var(--secondary); text-align: left; cursor: pointer; font-size: inherit;
+}
+.toc button:hover, .toc button:focus-visible { background: var(--surface-2); color: var(--fg); }
+.toc button.sub { padding-left: 20px; font-size: 0.86rem; }
+.toc button.dim { opacity: 0.4; }
+.toc .dot { flex: none; min-width: 18px; text-align: center; border-radius: 999px;
+  background: var(--accent); color: var(--on-accent); font-size: 0.75rem; }
+main { flex: 1 1 auto; min-width: 0; }
+.empty { color: var(--secondary); padding: 40px 0; text-align: center; }
+
+/* ---------- 卡片 ---------- */
+.group-head { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 8px; }
+.group-head h2 { font-size: 1.05rem; margin: 0; }
+.group-head .desc { color: var(--secondary); font-size: 0.86rem; flex: 1; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px 6px;
+  margin-bottom: 12px;
+  scroll-margin-top: calc(var(--topbar-h) + 12px);
+}
+.card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.card-title { font-weight: 600; font-size: 1rem; }
+.card-desc { color: var(--secondary); font-size: 0.86rem; margin-bottom: 6px; }
+.card-head .spacer { flex: 1; }
+.card.removed .row { opacity: 0.45; }
+.card.removed .card-title { text-decoration: line-through; }
+.tag {
+  display: inline-block; padding: 0 6px; border-radius: 4px;
+  font-size: 0.75rem; line-height: 1.6;
+  background: var(--surface-2); color: var(--secondary); border: 1px solid var(--line);
+}
+.tag-strong { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.tag-danger { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
+.tag-warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.card-note { font-size: 0.86rem; color: var(--warn); margin: 4px 0 8px; }
+
+/* ---------- 字段行 ---------- */
+.row {
+  display: grid; grid-template-columns: 210px minmax(0, 1fr); column-gap: 14px;
+  padding: 7px 0 7px 10px; margin-left: -10px;
+  border-left: 3px solid transparent;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: calc(var(--topbar-h) + 24px);
+}
+.card-head + .row, .card-desc + .row, .card-note + .row { border-top: none; }
+.row.dirty { border-left-color: var(--accent); }
+.row.invalid { border-left-color: var(--danger); }
+.row.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 22%, transparent); } to { background: transparent; } }
+.row-label { padding-top: 4px; font-size: 0.93rem; overflow-wrap: anywhere; }
+.row-label code { display: block; color: var(--secondary); font-size: 0.78rem; }
+.row-control { display: flex; gap: 6px; align-items: flex-start; min-width: 0; }
+.row-control > .grow { flex: 1 1 auto; min-width: 0; }
+.row-help { grid-column: 2; font-size: 0.8rem; color: var(--secondary); margin-top: 3px; }
+.row-help.error { color: var(--danger); }
+.row-help.warn { color: var(--warn); }
+input[type="text"], input[type="password"], select, textarea {
+  width: 100%; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: var(--bg);
+  font-size: 0.93rem;
+}
+textarea { resize: vertical; min-height: 54px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86rem; }
+input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--secondary) 80%, var(--bg)); }
+.row.invalid input, .row.invalid textarea { border-color: var(--danger); }
+input:focus, select:focus, textarea:focus, .search:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 0;
+}
+:disabled { cursor: not-allowed; }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.55; }
+.secret-view { display: flex; align-items: center; gap: 6px; min-height: 30px; }
+.secret-view input { flex: 1 1 auto; width: auto; min-width: 0; }
+.secret-view .mono { color: var(--secondary); }
+
+/* ---------- 底部保存栏 ---------- */
+.savebar {
+  position: fixed; left: 16px; right: 16px; bottom: 14px; z-index: 30;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 10px 14px; border-radius: 12px;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 24px color-mix(in srgb, #000 28%, transparent);
+}
+.savebar .grow { flex: 1 1 200px; font-size: 0.93rem; }
+.savebar .error { color: var(--danger); }
+
+/* ---------- 提示 ---------- */
+.toasts {
+  position: fixed; top: calc(var(--topbar-h) + 10px); right: 16px; z-index: 60;
+  display: flex; flex-direction: column; gap: 8px; width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 10px 12px; border-radius: var(--radius);
+  font-size: 0.92rem; overflow-wrap: anywhere;
+  box-shadow: 0 6px 20px color-mix(in srgb, #000 22%, transparent);
+}
+.toast .grow { flex: 1; }
+.toast-ok { background: var(--ok-soft); border: 1px solid var(--ok); }
+.toast-warn { background: var(--warn-soft); border: 1px solid var(--warn); }
+.toast-error { background: var(--danger-soft); border: 1px solid var(--danger); }
+
+/* ---------- 对话框 ---------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: color-mix(in srgb, #000 55%, transparent);
+}
+.dialog {
+  width: min(560px, 100%); max-height: 86vh; display: flex; flex-direction: column;
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: 12px;
+}
+.dialog.wide { width: min(920px, 100%); }
+.dialog-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.dialog-head .title { font-weight: 600; flex: 1; }
+.dialog-body { padding: 14px 16px; overflow: auto; }
+.dialog-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.dialog-body p { margin: 0 0 10px; }
+.dialog-body h3 { font-size: 0.95rem; margin: 4px 0 6px; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.field .hint { font-size: 0.8rem; color: var(--secondary); }
+.field .error { font-size: 0.8rem; color: var(--danger); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-bottom: 12px; }
+th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+th { color: var(--secondary); font-weight: 500; }
+pre.code {
+  margin: 0; padding: 10px 0; border-radius: 6px; overflow: auto;
+  background: var(--surface); font-size: 0.82rem; line-height: 1.55;
+}
+pre.code .ln { display: block; padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.code .add { background: var(--ok-soft); }
+pre.code .del { background: var(--danger-soft); }
+pre.code .hunk { color: var(--secondary); }
+pre.code .hl { background: var(--warn-soft); outline: 1px solid var(--warn); }
+pre.code .num { display: inline-block; width: 3.2em; color: var(--secondary); user-select: none; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.list li .grow { flex: 1; min-width: 0; }
+.sub, .list .sub { font-size: 0.8rem; color: var(--secondary); }
+.issue { cursor: pointer; }
+.issue:hover .grow { text-decoration: underline; }
+
+@media (max-width: 760px) {
+  .toc { display: none; }
+  .row { grid-template-columns: minmax(0, 1fr); }
+  .row-help { grid-column: 1; }
+  .search { flex: 1 1 100%; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="meta" id="meta"></div>
+  <input type="search" class="search" id="search" autocomplete="off">
+  <div class="toolbar" id="toolbar"></div>
+</div>
+<div id="banner"></div>
+<div class="layout">
+  <nav class="toc" id="toc"></nav>
+  <main id="main"></main>
+</div>
+<div class="savebar" id="savebar" hidden></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div id="dialog-root"></div>
+
+<script>
+'use strict';
+
+// ======================================================================
+// 文案。界面文字全部走这里；字段名、节名的英文也在这里补，中文取服务端 schema。
+// ======================================================================
+
+const I18N = {
+  zh: {
+    'page.title': 'WillDeep 配置',
+    'meta.missing': '配置文件还不存在，保存时会新建',
+    'meta.modified': '修改于 {time}',
+    'meta.size': '{size}',
+    'search.placeholder': '搜索配置项…',
+    'btn.validate': '校验', 'btn.backups': '备份', 'btn.template': '模板', 'btn.raw': '原文',
+    'btn.reload': '重新读取', 'btn.cancel': '取消', 'btn.close': '关闭', 'btn.continue': '继续',
+    'btn.preview': '预览并保存', 'btn.discardAll': '全部撤销', 'btn.confirmWrite': '确认写入',
+    'btn.restore': '恢复', 'btn.confirmRestore': '确认恢复？', 'btn.copy': '复制',
+    'btn.showDiff': '与当前文件对比', 'btn.hideDiff': '收起对比',
+    'btn.reveal': '显示', 'btn.replace': '替换', 'btn.set': '设置', 'btn.collapse': '收起',
+    'btn.showSecret': '显示明文', 'btn.hideSecret': '隐藏明文',
+    'btn.revert': '撤销此项改动', 'btn.add': '新增', 'btn.remove': '删除', 'btn.undoRemove': '撤销删除',
+    'btn.confirmRemove': '确认删除？', 'btn.create': '创建', 'btn.gotoField': '定位',
+    'btn.viewRaw': '查看原文', 'btn.openBackups': '恢复备份',
+    'state.loading': '正在读取配置…', 'state.busy': '处理中…',
+    'value.unset': '未设置', 'value.defaultIs': '未设置 · 默认 {value}',
+    'value.true': '是', 'value.false': '否',
+    'value.unknownOption': '{value}（不在已知取值里）',
+    'value.missingRef': '{value}（没有这个提供商）',
+    'tag.default': '默认', 'tag.new': '新增', 'tag.removing': '将删除', 'tag.readonly': '只读',
+    'tag.unknown': '未收录',
+    'secret.none': '未设置', 'secret.note': '明文只在本页内存里，不会写进日志',
+    'array.placeholder': '每行一项',
+    'err.int': '请输入整数', 'err.float': '请输入数字', 'err.range': '数值超出范围',
+    'help.missingRef': '默认提供商指向的 [providers.{value}] 不存在，WillDeep 启动会找不到它',
+    'help.refRemoving': '这个提供商将被删除，默认提供商会指向一个不存在的配置',
+    'help.legacy': '这是旧写法，WillDeep 仍能识别；换成列表里的值更稳妥',
+    'save.count': '{n} 项未保存改动',
+    'save.invalid': '{n} 处输入有误，改好后才能保存',
+    'save.emptyNew': '{name} 还没填任何字段，保存时会跳过',
+    'toast.loadFailed': '读取配置失败：{msg}',
+    'toast.saved': '已写入。旧文件备份在 {path}',
+    'toast.savedNoBackup': '已写入（新建文件，无旧文件可备份）',
+    'toast.saveFailed': '写入失败：{msg}',
+    'toast.rolledBack': '写入失败，已自动回滚：{msg}',
+    'toast.planFailed': '无法生成预览：{msg}',
+    'toast.nothing': '没有需要保存的改动',
+    'toast.fixInvalid': '有输入不合法的字段，先改好再保存',
+    'toast.parseLocked': '配置文件有语法错误，先修复或恢复备份后才能保存',
+    'toast.validOk': '校验通过，没有发现问题',
+    'toast.validateFailed': '校验失败：{msg}',
+    'toast.restored': '已从 {name} 恢复。恢复前的文件也备份了',
+    'toast.restoreFailed': '恢复失败：{msg}',
+    'toast.backupsFailed': '读取备份列表失败：{msg}',
+    'toast.templateFailed': '生成模板失败：{msg}',
+    'toast.revealFailed': '读取密钥失败：{msg}',
+    'toast.copied': '已复制到剪贴板',
+    'toast.copyManual': '无法直接写剪贴板，已选中全文，按 ⌘C 复制',
+    'toast.fieldNotFound': '第 {line} 行不是本页能编辑的字段，已打开原文',
+    'banner.parse': '配置文件第 {line} 行有语法错误：{msg}。修好之前本页只读。',
+    'banner.parseNoLine': '配置文件有语法错误：{msg}。修好之前本页只读。',
+    'dlg.discard.title': '放弃未保存的改动？',
+    'dlg.discard.body': '还有 {n} 项改动没有保存，继续会全部丢掉。',
+    'dlg.preview.title': '确认写入配置',
+    'dlg.preview.none': '这些改动写回后与现有文件相同，不需要写入。',
+    'dlg.preview.backupNote': '写入前会自动备份当前文件，写入后会逐项校验，失败自动回滚。',
+    'dlg.preview.col.op': '操作', 'dlg.preview.col.item': '配置项', 'dlg.preview.col.from': '原值', 'dlg.preview.col.to': '新值',
+    'op.add': '新增', 'op.set': '修改', 'op.unset': '删除此项', 'op.removeSection': '删除整节',
+    'dlg.backups.title': '备份',
+    'dlg.backups.note': '恢复前会先把当前文件再备份一次，恢复错了也能找回来。',
+    'dlg.backups.empty': '还没有备份。每次在本页保存都会自动生成一份。',
+    'dlg.template.title': '配置模板',
+    'dlg.template.note': '按 WillDeep 当前支持的配置项生成的完整模板，只读，不会写入文件。',
+    'dlg.raw.title': '配置原文',
+    'dlg.raw.note': '密钥已打码。这里只读，要改请在表单里改。',
+    'dlg.validate.title': '校验结果',
+    'dlg.validate.errors': '错误', 'dlg.validate.warnings': '提醒',
+    'dlg.validate.line': '第 {line} 行',
+    'dlg.add.title': '新增{group}',
+    'dlg.add.name': '名称',
+    'dlg.add.suggest': '常用：',
+    'err.name.empty': '名称不能为空',
+    'err.name.chars': '不能包含空格、点号、方括号、引号或 #，最长 64 个字符',
+    'err.name.dup': '已经有同名的了',
+    'dlg.remove.title': '删除 {name}？',
+    'dlg.remove.body': '会从配置文件里删掉整个 [{section}] 段，包括其中的密钥。保存前都可以撤销。',
+    'unknown.title': '未收录的配置项',
+    'unknown.desc': '文件里有、但本页不认识的键。本页不会修改或删除它们。',
+    'unknown.root': '（顶层）',
+    'group.addHint': '还没有配置。',
+    'card.emptyNew': '新增的配置至少要填一项才会写入。',
+    'card.readonlyName': '名称里含有本页无法安全写回的字符，只能在文件里直接修改。'
+  },
+  en: {
+    'page.title': 'WillDeep Config',
+    'meta.missing': 'The config file does not exist yet; saving will create it',
+    'meta.modified': 'Modified {time}',
+    'meta.size': '{size}',
+    'search.placeholder': 'Search settings…',
+    'btn.validate': 'Validate', 'btn.backups': 'Backups', 'btn.template': 'Template', 'btn.raw': 'Source',
+    'btn.reload': 'Reload', 'btn.cancel': 'Cancel', 'btn.close': 'Close', 'btn.continue': 'Continue',
+    'btn.preview': 'Review & save', 'btn.discardAll': 'Discard all', 'btn.confirmWrite': 'Write changes',
+    'btn.restore': 'Restore', 'btn.confirmRestore': 'Confirm restore?', 'btn.copy': 'Copy',
+    'btn.showDiff': 'Compare with current file', 'btn.hideDiff': 'Hide comparison',
+    'btn.reveal': 'Reveal', 'btn.replace': 'Replace', 'btn.set': 'Set', 'btn.collapse': 'Collapse',
+    'btn.showSecret': 'Show', 'btn.hideSecret': 'Hide',
+    'btn.revert': 'Revert this change', 'btn.add': 'Add', 'btn.remove': 'Delete', 'btn.undoRemove': 'Undo delete',
+    'btn.confirmRemove': 'Confirm delete?', 'btn.create': 'Create', 'btn.gotoField': 'Go to',
+    'btn.viewRaw': 'View source', 'btn.openBackups': 'Restore a backup',
+    'state.loading': 'Loading configuration…', 'state.busy': 'Working…',
+    'value.unset': 'Not set', 'value.defaultIs': 'Not set · default {value}',
+    'value.true': 'Yes', 'value.false': 'No',
+    'value.unknownOption': '{value} (not a known value)',
+    'value.missingRef': '{value} (no such provider)',
+    'tag.default': 'Default', 'tag.new': 'New', 'tag.removing': 'Will delete', 'tag.readonly': 'Read-only',
+    'tag.unknown': 'Unrecognized',
+    'secret.none': 'Not set', 'secret.note': 'The plaintext stays in this page’s memory and is never logged',
+    'array.placeholder': 'One item per line',
+    'err.int': 'Enter a whole number', 'err.float': 'Enter a number', 'err.range': 'Number out of range',
+    'help.missingRef': '[providers.{value}] does not exist, so WillDeep will not find the default provider',
+    'help.refRemoving': 'This provider is being deleted; the default provider would point to nothing',
+    'help.legacy': 'This is a legacy spelling WillDeep still accepts; a listed value is safer',
+    'save.count': '{n} unsaved change(s)',
+    'save.invalid': '{n} invalid input(s) must be fixed before saving',
+    'save.emptyNew': '{name} has no fields filled in and will be skipped',
+    'toast.loadFailed': 'Could not read the config: {msg}',
+    'toast.saved': 'Saved. The previous file was backed up to {path}',
+    'toast.savedNoBackup': 'Saved (new file, nothing to back up)',
+    'toast.saveFailed': 'Write failed: {msg}',
+    'toast.rolledBack': 'Write failed and was rolled back: {msg}',
+    'toast.planFailed': 'Could not build the preview: {msg}',
+    'toast.nothing': 'Nothing to save',
+    'toast.fixInvalid': 'Fix the invalid fields before saving',
+    'toast.parseLocked': 'The config file has a syntax error; fix it or restore a backup before saving',
+    'toast.validOk': 'Validation passed',
+    'toast.validateFailed': 'Validation failed: {msg}',
+    'toast.restored': 'Restored from {name}. The file before restoring was backed up too',
+    'toast.restoreFailed': 'Restore failed: {msg}',
+    'toast.backupsFailed': 'Could not list backups: {msg}',
+    'toast.templateFailed': 'Could not build the template: {msg}',
+    'toast.revealFailed': 'Could not read the secret: {msg}',
+    'toast.copied': 'Copied to the clipboard',
+    'toast.copyManual': 'Clipboard is not available; the text is selected, press ⌘C to copy',
+    'toast.fieldNotFound': 'Line {line} is not an editable field; showing the source instead',
+    'banner.parse': 'Syntax error on line {line}: {msg}. This page is read-only until it is fixed.',
+    'banner.parseNoLine': 'Syntax error: {msg}. This page is read-only until it is fixed.',
+    'dlg.discard.title': 'Discard unsaved changes?',
+    'dlg.discard.body': '{n} change(s) have not been saved and will be lost.',
+    'dlg.preview.title': 'Write configuration',
+    'dlg.preview.none': 'These changes leave the file unchanged; nothing to write.',
+    'dlg.preview.backupNote': 'The current file is backed up first; every change is verified after writing and rolled back on failure.',
+    'dlg.preview.col.op': 'Action', 'dlg.preview.col.item': 'Setting', 'dlg.preview.col.from': 'Before', 'dlg.preview.col.to': 'After',
+    'op.add': 'Add', 'op.set': 'Change', 'op.unset': 'Remove', 'op.removeSection': 'Delete section',
+    'dlg.backups.title': 'Backups',
+    'dlg.backups.note': 'The current file is backed up again before restoring, so a wrong restore can be undone.',
+    'dlg.backups.empty': 'No backups yet. Every save from this page creates one.',
+    'dlg.template.title': 'Config template',
+    'dlg.template.note': 'A complete template of the settings WillDeep supports. Read-only; nothing is written.',
+    'dlg.raw.title': 'Config source',
+    'dlg.raw.note': 'Secrets are masked. Read-only; edit through the form.',
+    'dlg.validate.title': 'Validation',
+    'dlg.validate.errors': 'Errors', 'dlg.validate.warnings': 'Warnings',
+    'dlg.validate.line': 'Line {line}',
+    'dlg.add.title': 'Add {group}',
+    'dlg.add.name': 'Name',
+    'dlg.add.suggest': 'Common: ',
+    'err.name.empty': 'Name is required',
+    'err.name.chars': 'No spaces, dots, brackets, quotes or #; at most 64 characters',
+    'err.name.dup': 'That name is already used',
+    'dlg.remove.title': 'Delete {name}?',
+    'dlg.remove.body': 'The whole [{section}] section, including its secrets, will be removed. You can undo until you save.',
+    'unknown.title': 'Unrecognized settings',
+    'unknown.desc': 'Keys in the file that this page does not know. They are never changed or removed here.',
+    'unknown.root': '(top level)',
+    'group.addHint': 'Nothing configured yet.',
+    'card.emptyNew': 'Fill in at least one field for this to be written.',
+    'card.readonlyName': 'The name contains characters this page cannot write back safely; edit the file directly.'
+  }
+};
+
+// 服务端 schema 的文字是中文；英文界面按 groupID.key 在这里补译，缺的回退到中文。
+const I18N_SCHEMA_EN = {
+  'section.root': ['General', 'Global defaults'],
+  'section.agent': ['Agent', 'Turn limits, approval and dispatch'],
+  'section.local_model': ['Local model', 'How to reach a local inference server'],
+  'section.skills': ['Skills', 'Where skills are searched'],
+  'section.notifications': ['Notifications', 'Sounds and webhook notifications'],
+  'section.providers': ['Model providers', 'Each [providers.<id>] is one provider'],
+  'section.mcp_servers': ['MCP servers', 'Each [mcp_servers.<name>] is an external MCP server'],
+  'section.subagents': ['Subagents', 'Each [subagents.<profile>] overrides that role’s defaults'],
+  'root.version': ['Config version'],
+  'root.default_provider': ['Default provider', 'The id of a [providers.<id>] section'],
+  'agent.max_turns': ['Max turns'],
+  'agent.approval': ['Approval policy', 'Whether to ask before writing files, running commands or going online'],
+  'agent.small_model_routing': ['Small-model routing', 'Send light tasks to a small model'],
+  'agent.auto_dispatch_read_only': ['Auto-dispatch read-only work'],
+  'agent.max_deep_calls_per_harness': ['Max deep calls per session'],
+  'local_model.enabled': ['Enable local model'],
+  'local_model.base_url': ['Server URL'],
+  'local_model.summary_model': ['Summary model'],
+  'local_model.prefer_for_titles': ['Prefer for titles'],
+  'local_model.prefer_for_context_summaries': ['Prefer for context summaries'],
+  'local_model.prefer_for_worker_routing': ['Prefer for worker routing'],
+  'skills.roots': ['Skill roots'],
+  'notifications.sound': ['Sound'],
+  'notifications.custom_sound_file': ['Custom sound file'],
+  'notifications.custom_sound_display_name': ['Custom sound name'],
+  'notifications.webhook_enabled': ['Enable webhook'],
+  'notifications.webhook_url': ['Webhook URL'],
+  'notifications.webhook_on_task_completed': ['Notify when a task completes'],
+  'notifications.webhook_on_attention_required': ['Notify when attention is needed'],
+  'providers.provider': ['Provider type'],
+  'providers.api': ['API protocol'],
+  'providers.api_base': ['API base URL'],
+  'providers.api_key': ['API key'],
+  'providers.model': ['Default model'],
+  'providers.max_output_tokens': ['Max output tokens'],
+  'mcp_servers.command': ['Command'],
+  'mcp_servers.args': ['Arguments'],
+  'mcp_servers.startup_timeout_seconds': ['Startup timeout (s)'],
+  'mcp_servers.enabled': ['Enabled'],
+  'subagents.context_window': ['Context window'],
+  'option.approval.read-only': 'Read-only',
+  'option.approval.strict': 'Strict: always ask',
+  'option.approval.smart': 'Smart: ask for risky actions (recommended)',
+  'option.approval.workspace-write': 'Allow inside the workspace',
+  'option.approval.full-access': 'Full access',
+  'option.provider.auto': 'Auto-detect',
+  'option.provider.openai-compatible': 'OpenAI-compatible',
+  'option.api.auto': 'Auto'
+};
+
+// approval 的旧写法：WillDeep 仍接受，但不在推荐列表里（willdeep-rs ApprovalMode::parse）
+const LEGACY_VALUES = {
+  approval: ['ask', 'request-every-time', 'auto-review', 'readonly', 'workspace-access', 'workspace', 'full', 'silent']
+};
+
+// 与服务端 ConfigSchema.valid_instance? 同一条规则
+const INSTANCE_NAME_RE = /^[^\s.\[\]"'#]{1,64}$/;
+const TOAST_MS = 4500;
+const ARM_MS = 5000;
+const NUL = ' ';
+
+let lang = 'zh';
+
+function t(id, vars) {
+  const table = I18N[lang] || I18N.zh;
+  let s = table[id] != null ? table[id] : (I18N.zh[id] != null ? I18N.zh[id] : id);
+  if (vars) {
+    for (const k of Object.keys(vars)) s = s.split('{' + k + '}').join(String(vars[k]));
+  }
+  return s;
+}
+
+function schemaText(id, index, fallback) {
+  if (lang === 'zh') return fallback;
+  const entry = I18N_SCHEMA_EN[id];
+  if (entry == null) return fallback;
+  if (typeof entry === 'string') return index === 0 ? entry : fallback;
+  return entry[index] != null ? entry[index] : fallback;
+}
+
+function sectionTitle(sec) {
+  if (sec.kind === 'collection' || sec.kind === 'unknown') return sec.title || sec.name;
+  return schemaText('section.' + sec.groupID, 0, sec.title || sec.name);
+}
+function sectionDesc(sec) {
+  return schemaText('section.' + sec.groupID, 1, sec.description || '');
+}
+function fieldLabel(groupID, field) { return schemaText(groupID + '.' + field.key, 0, field.label || field.key); }
+function fieldDesc(groupID, field) { return schemaText(groupID + '.' + field.key, 1, field.description || ''); }
+function optionLabel(field, value) {
+  const en = I18N_SCHEMA_EN['option.' + field.key + '.' + value];
+  if (lang !== 'zh' && en) return en;
+  const labels = field.optionLabels || {};
+  if (lang !== 'zh' && labels[value] && /^[\x00-\x7F]*$/.test(labels[value])) return labels[value];
+  if (lang !== 'zh') return value;
+  return labels[value] || value;
+}
+
+// ======================================================================
+// 宿主桥
+// ======================================================================
+
+// 宿主回来的结果可能是对象、JSON 字符串，或 MCP 的 {content:[{type:'text',text}]}；最多剥 3 层
+function unwrapResult(data) {
+  let depth = 0;
+  while (depth < 3) {
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch (e) { return { ok: false, error: 'parse_error', message: String(data).slice(0, 200) }; }
+    } else if (data && Array.isArray(data.content) && data.content[0] && data.content[0].type === 'text') {
+      data = data.content[0].text;
+    } else {
+      break;
+    }
+    depth++;
+  }
+  return data;
+}
+
+async function callCommand(commandId, args) {
+  try {
+    if (!window.willdeep || typeof window.willdeep.executeCommand !== 'function') {
+      return { ok: false, error: 'internal', message: 'window.willdeep.executeCommand is not available' };
+    }
+    const raw = await window.willdeep.executeCommand(commandId, args || {});
+    const result = unwrapResult(raw);
+    return result && typeof result === 'object' ? result : { ok: false, error: 'internal', message: String(result) };
+  } catch (e) {
+    return { ok: false, error: 'internal', message: (e && e.message) || String(e) };
+  }
+}
+
+function hostCapable(name) {
+  const caps = (window.willdeep && window.willdeep.capabilities) || [];
+  return Array.isArray(caps) && caps.indexOf(name) >= 0;
+}
+
+// 兜底配色只在宿主没注入 --willdeep-* 时起作用（willdeep-rs）。rs 目前在上下文里把
+// colorScheme 固定写成 "dark"，而它自己的界面默认跟随系统，所以那里的 "dark" 不可信：
+// 只认明确的 "light"，其余跟随 prefers-color-scheme（sandbox iframe 与宿主页面同一套媒体查询）。
+function resolveScheme(c) {
+  const injected = typeof getComputedStyle === 'function' &&
+    getComputedStyle(document.documentElement).getPropertyValue('--willdeep-bg').trim() !== '';
+  const hinted = c.colorScheme || c.theme;
+  if (injected && hinted) return hinted;
+  if (hinted === 'light') return 'light';
+  const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)');
+  if (mq) return mq.matches ? 'light' : 'dark';
+  return hinted || 'dark';
+}
+
+function applyContext(ctx) {
+  const c = ctx || {};
+  S.context = c;
+  const scheme = resolveScheme(c);
+  document.documentElement.setAttribute('data-scheme', scheme === 'light' ? 'light' : 'dark');
+  const locale = String(c.locale || navigator.language || 'zh').toLowerCase();
+  const next = locale.indexOf('zh') === 0 ? 'zh' : 'en';
+  if (next !== lang) {
+    lang = next;
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    if (S.snapshot) renderAll(); else renderChrome();
+  }
+}
+
+// ======================================================================
+// 状态
+// ======================================================================
+
+const S = {
+  snapshot: null,
+  context: {},
+  loading: false,
+  busy: false,
+  fields: new Map(),        // ek -> { section, field, groupID }
+  sections: new Map(),      // section name -> section（快照里的 + 新增的）
+  added: new Map(),         // section name -> { groupID, instance }，尚未写入的新实例
+  removed: new Set(),       // 待整节删除的已有实例
+  armedRemove: null,        // 卡片上「确认删除？」待二次点击的节名
+  filter: '',
+  dialog: null,             // { onAction, onClose, ... }
+  restoreArmed: null,
+  restoreTimer: null
+};
+let edits = new Map();      // ek -> { op: 'set'|'unset', section, key, value }
+let drafts = new Map();     // ek -> { raw, error }：输入不合法、还没形成编辑的原文
+let plaintexts = new Map(); // ek -> 已显示的密钥明文，只在内存
+let secretOpen = new Set(); // ek：密钥输入框处于展开状态
+let secretVisible = new Set(); // ek：明文可见（否则是密码框）
+
+function ekOf(section, key) { return section + NUL + key; }
+
+function dirtyCount() {
+  let n = S.removed.size;
+  for (const e of edits.values()) if (!S.removed.has(e.section)) n++;
+  return n;
+}
+function hasUnsaved() { return dirtyCount() > 0 || drafts.size > 0 || S.added.size > 0; }
+function parseLocked() { return !!(S.snapshot && S.snapshot.parseError); }
+
+// ======================================================================
+// 值的解析与编辑记录（纯逻辑，测试直接调用）
+// ======================================================================
+
+function isBlankValue(v) {
+  return v == null || v === '' || (Array.isArray(v) && v.length === 0);
+}
+
+function sameValue(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  return a === b;
+}
+
+// 把输入框里的原文解析成 {clear:true} | {value} | {error}
+function parseInput(type, raw) {
+  const text = raw == null ? '' : String(raw);
+  if (type === 'bool') {
+    if (text === '' || text === 'unset') return { clear: true };
+    return { value: text === 'true' };
+  }
+  if (type === 'int') {
+    const s = text.trim();
+    if (s === '') return { clear: true };
+    if (!/^[+-]?\d+$/.test(s)) return { error: t('err.int') };
+    const n = Number(s);
+    if (!Number.isSafeInteger(n)) return { error: t('err.range') };
+    return { value: n };
+  }
+  if (type === 'float') {
+    const s = text.trim();
+    if (s === '') return { clear: true };
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return { error: t('err.float') };
+    const n = Number(s);
+    if (!Number.isFinite(n)) return { error: t('err.range') };
+    return { value: n };
+  }
+  if (type === 'stringArray') {
+    // 一行一项：路径、命令参数里本来就可能有逗号，不能按逗号拆
+    const items = text.split(/\r?\n/).map(s => s.trim()).filter(s => s !== '');
+    return items.length ? { value: items } : { clear: true };
+  }
+  // string / enum / secret
+  if (text === '') return { clear: true };
+  return { value: text };
+}
+
+// 把一次输入落成编辑。original = { present, value, secret, plaintext }
+// 规则：改回原值就不算改动；清空时，键原本存在才记 unset，否则只是取消编辑。
+function commitValue(section, key, type, raw, original) {
+  const ek = ekOf(section, key);
+  const parsed = parseInput(type, raw);
+  if (parsed.error) {
+    drafts.set(ek, { raw: raw, error: parsed.error });
+    edits.delete(ek);
+    return parsed;
+  }
+  drafts.delete(ek);
+  if (parsed.clear) {
+    // 密钥框清空只算「不改了」：点「替换」后又删光，不该悄悄把已保存的密钥删掉
+    if (original.present && !original.secret) edits.set(ek, { op: 'unset', section, key });
+    else edits.delete(ek);
+    return parsed;
+  }
+  let unchanged = false;
+  if (original.present) {
+    if (original.secret) unchanged = original.plaintext != null && original.plaintext === parsed.value;
+    else unchanged = sameValue(original.value, parsed.value);
+  }
+  if (unchanged) edits.delete(ek);
+  else edits.set(ek, { op: 'set', section, key, value: parsed.value });
+  return parsed;
+}
+
+function originalOf(ek) {
+  const info = S.fields.get(ek);
+  if (!info) return { present: false, value: null, secret: false, plaintext: null };
+  const f = info.field;
+  return {
+    present: !!f.hasValue,
+    value: f.hasValue ? f.value : null,
+    secret: f.type === 'secret',
+    plaintext: plaintexts.has(ek) ? plaintexts.get(ek) : null
+  };
+}
+
+// 兼容旧页面与测试的入口：hasValue 显式给出时以它为准
+function onFieldChange(section, key, type, rawValue, hasValue) {
+  const ek = ekOf(section, key);
+  const original = originalOf(ek);
+  if (hasValue !== undefined) original.present = !!hasValue;
+  return commitValue(section, key, type, rawValue, original);
+}
+
+// 发给 config.plan / config.apply 的编辑列表
+function buildEdits() {
+  const list = [];
+  for (const section of S.removed) list.push({ op: 'removeSection', section });
+  for (const e of edits.values()) {
+    if (S.removed.has(e.section)) continue;
+    list.push(e.op === 'unset' ? { op: 'unset', section: e.section, key: e.key }
+                               : { op: 'set', section: e.section, key: e.key, value: e.value });
+  }
+  return list;
+}
+
+function addedWithoutFields() {
+  const out = [];
+  for (const name of S.added.keys()) {
+    let any = false;
+    for (const e of edits.values()) if (e.section === name && e.op === 'set') { any = true; break; }
+    if (!any) out.push(name);
+  }
+  return out;
+}
+
+// ======================================================================
+// 快照索引
+// ======================================================================
+
+function collectionMeta(groupID) {
+  const list = (S.snapshot && S.snapshot.collections) || [];
+  return list.find(c => c.id === groupID) || null;
+}
+
+function indexSnapshot() {
+  S.fields.clear();
+  S.sections.clear();
+  if (!S.snapshot) return;
+  for (const sec of S.snapshot.sections || []) {
+    S.sections.set(sec.name, sec);
+    for (const f of sec.fields || []) {
+      S.fields.set(ekOf(sec.name, f.key), { section: sec, field: f, groupID: sec.groupID });
+    }
+  }
+  for (const [name, info] of S.added) {
+    const meta = collectionMeta(info.groupID);
+    const sec = {
+      name, title: info.instance, description: meta ? meta.description : '', groupID: info.groupID,
+      kind: 'collection', editable: true, instance: info.instance, isNew: true,
+      fields: ((meta && meta.fields) || []).map(f => Object.assign({}, f, {
+        value: f.type === 'secret' ? '' : f.default, hasValue: false, source: 'default'
+      }))
+    };
+    S.sections.set(name, sec);
+    for (const f of sec.fields) S.fields.set(ekOf(name, f.key), { section: sec, field: f, groupID: info.groupID });
+  }
+}
+
+function instanceNames(groupID) {
+  const names = [];
+  for (const sec of S.sections.values()) {
+    if (sec.kind === 'collection' && sec.groupID === groupID && sec.instance) names.push(sec.instance);
+  }
+  return names;
+}
+
+// ======================================================================
+// 渲染：工具
+// ======================================================================
+
+function esc(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function fmtValue(v) {
+  if (v == null) return '';
+  if (v === true) return t('value.true');
+  if (v === false) return t('value.false');
+  if (Array.isArray(v)) return v.join(', ');
+  return String(v);
+}
+
+function fmtBytes(n) {
+  if (n == null) return '-';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  try { return new Date(ts * 1000).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US'); } catch (e) { return String(ts); }
+}
+
+function domId(prefix, text) {
+  let h = 0;
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return prefix + '-' + (h >>> 0).toString(36);
+}
+
+// ======================================================================
+// 渲染：顶栏、横幅、目录
+// ======================================================================
+
+function renderChrome() {
+  document.title = t('page.title');
+  const search = document.getElementById('search');
+  search.placeholder = t('search.placeholder');
+  search.setAttribute('aria-label', t('search.placeholder'));
+  renderMeta();
+  renderToolbar();
+}
+
+function renderMeta() {
+  const el = document.getElementById('meta');
+  const snap = S.snapshot;
+  if (!snap) { el.textContent = S.loading ? t('state.loading') : ''; return; }
+  const bits = [];
+  if (snap.exists) {
+    bits.push(t('meta.modified', { time: fmtTime(snap.mtime) }));
+    bits.push(fmtBytes(snap.byteSize));
+  } else {
+    bits.push(t('meta.missing'));
+  }
+  el.innerHTML = '<span class="path mono" title="' + esc(snap.path) + '">' + esc(snap.path || '') + '</span>' +
+    '<span>' + esc(bits.join(' · ')) + '</span>';
+}
+
+function renderToolbar() {
+  const busy = S.busy || S.loading;
+  const dis = busy ? ' disabled' : '';
+  document.getElementById('toolbar').innerHTML =
+    '<button class="btn" data-act="validate"' + dis + '>' + esc(t('btn.validate')) + '</button>' +
+    '<button class="btn" data-act="backups"' + dis + '>' + esc(t('btn.backups')) + '</button>' +
+    '<button class="btn" data-act="template"' + dis + '>' + esc(t('btn.template')) + '</button>' +
+    '<button class="btn" data-act="raw"' + (S.snapshot && S.snapshot.exists ? dis : ' disabled') + '>' + esc(t('btn.raw')) + '</button>' +
+    '<button class="btn" data-act="reload"' + dis + '>' + esc(t('btn.reload')) + '</button>';
+}
+
+function renderBanner() {
+  const el = document.getElementById('banner');
+  const pe = S.snapshot && S.snapshot.parseError;
+  if (!pe) { el.innerHTML = ''; return; }
+  const msg = pe.line ? t('banner.parse', { line: pe.line, msg: pe.message }) : t('banner.parseNoLine', { msg: pe.message });
+  el.innerHTML = '<div class="banner banner-error"><span class="grow">' + esc(msg) + '</span>' +
+    '<button class="btn btn-sm" data-act="raw" data-line="' + esc(pe.line || '') + '">' + esc(t('btn.viewRaw')) + '</button>' +
+    '<button class="btn btn-sm" data-act="backups">' + esc(t('btn.openBackups')) + '</button></div>';
+}
+
+function sectionDirtyCount(name) {
+  let n = S.removed.has(name) ? 1 : 0;
+  for (const e of edits.values()) if (e.section === name && !S.removed.has(name)) n++;
+  for (const ek of drafts.keys()) if (ek.split(NUL)[0] === name) n++;
+  return n;
+}
+
+function renderToc() {
+  const el = document.getElementById('toc');
+  if (!S.snapshot) { el.innerHTML = ''; return; }
+  let html = '';
+  const link = (target, label, count, sub) =>
+    '<button type="button" class="' + (sub ? 'sub' : '') + '" data-act="jump" data-target="' + esc(target) + '"><span>' + esc(label) + '</span>' +
+    (count ? '<span class="dot">' + count + '</span>' : '') + '</button>';
+  for (const sec of S.snapshot.sections || []) {
+    if (sec.kind === 'static') html += link(domId('card', sec.name), sectionTitle(sec), sectionDirtyCount(sec.name));
+  }
+  for (const meta of S.snapshot.collections || []) {
+    const title = schemaText('section.' + meta.id, 0, meta.title);
+    html += link(domId('group', meta.id), title, 0);
+    for (const sec of orderedInstances(meta.id)) {
+      html += link(domId('card', sec.name), sec.instance, sectionDirtyCount(sec.name), true);
+    }
+  }
+  if (unknownSections().length || (S.snapshot.unknownKeys || []).length) {
+    html += link('card-unknown', t('unknown.title'), 0);
+  }
+  el.innerHTML = html;
+}
+
+// ======================================================================
+// 渲染：字段行
+// ======================================================================
+
+function defaultPlaceholder(field) {
+  if (field.type === 'secret') return '';
+  const d = field.value;
+  if (!field.hasValue && !isBlankValue(d)) return t('value.defaultIs', { value: fmtValue(d) });
+  return t('value.unset');
+}
+
+function currentRaw(ek, field) {
+  if (drafts.has(ek)) return drafts.get(ek).raw;
+  const e = edits.get(ek);
+  if (e) return e.op === 'unset' ? null : e.value;
+  if (field.type === 'secret') return plaintexts.has(ek) ? plaintexts.get(ek) : null;
+  return field.hasValue ? field.value : null;
+}
+
+function renderSelect(id, disabled, options, selected) {
+  let html = '<select id="' + id + '" data-input' + disabled + '>';
+  for (const o of options) {
+    html += '<option value="' + esc(o.value) + '"' + (o.value === selected ? ' selected' : '') + '>' + esc(o.label) + '</option>';
+  }
+  return html + '</select>';
+}
+
+function renderControl(sec, field, ek, id, disabled) {
+  const type = field.type;
+  const cur = currentRaw(ek, field);
+  const unsetLabel = defaultPlaceholder(field);
+
+  if (field.ref) {
+    const names = instanceNames(field.ref).filter(n => !S.removed.has(field.ref + '.' + n));
+    const opts = [{ value: '', label: t('value.unset') }].concat(names.map(n => ({ value: n, label: n })));
+    const val = cur == null ? '' : String(cur);
+    if (val && names.indexOf(val) < 0) {
+      const removing = S.removed.has(field.ref + '.' + val);
+      opts.push({ value: val, label: removing ? val : t('value.missingRef', { value: val }) });
+    }
+    return renderSelect(id, disabled, opts, val);
+  }
+  if (type === 'bool') {
+    const val = cur == null ? '' : (cur ? 'true' : 'false');
+    return renderSelect(id, disabled, [
+      { value: '', label: unsetLabel }, { value: 'true', label: t('value.true') }, { value: 'false', label: t('value.false') }
+    ], val);
+  }
+  if (type === 'enum' && Array.isArray(field.options)) {
+    const val = cur == null ? '' : String(cur);
+    const opts = [{ value: '', label: unsetLabel }].concat(field.options.map(o => ({ value: o, label: optionLabel(field, o) })));
+    if (val && field.options.indexOf(val) < 0) opts.push({ value: val, label: t('value.unknownOption', { value: val }) });
+    return renderSelect(id, disabled, opts, val);
+  }
+  if (type === 'stringArray') {
+    const text = cur == null ? '' : (Array.isArray(cur) ? cur.join('\n') : String(cur));
+    const rows = Math.min(8, Math.max(2, text.split('\n').length + 1));
+    const ph = !field.hasValue && !isBlankValue(field.value) ? unsetLabel : t('array.placeholder');
+    return '<textarea id="' + id + '" data-input rows="' + rows + '" spellcheck="false" placeholder="' + esc(ph) + '"' + disabled + '>' + esc(text) + '</textarea>';
+  }
+  if (type === 'secret') return renderSecret(field, ek, id, disabled);
+  const val = cur == null ? '' : String(cur);
+  const mode = (type === 'int') ? ' inputmode="numeric"' : (type === 'float' ? ' inputmode="decimal"' : '');
+  return '<input type="text" id="' + id + '" data-input' + mode + ' spellcheck="false" autocomplete="off" value="' + esc(val) +
+    '" placeholder="' + esc(unsetLabel) + '"' + disabled + '>';
+}
+
+function renderSecret(field, ek, id, disabled) {
+  const open = secretOpen.has(ek) || edits.has(ek) || drafts.has(ek);
+  if (!open) {
+    let html = '<div class="secret-view">';
+    if (field.hasValue) {
+      html += '<span class="mono">' + esc(field.preview || '••••') + '</span>' +
+        '<button class="btn btn-sm" data-act="reveal"' + disabled + '>' + esc(t('btn.reveal')) + '</button>' +
+        '<button class="btn btn-sm" data-act="replace"' + disabled + '>' + esc(t('btn.replace')) + '</button>';
+    } else {
+      html += '<span class="mono">' + esc(t('secret.none')) + '</span>' +
+        '<button class="btn btn-sm" data-act="replace"' + disabled + '>' + esc(t('btn.set')) + '</button>';
+    }
+    return html + '</div>';
+  }
+  const cur = currentRaw(ek, field);
+  const visible = secretVisible.has(ek);
+  return '<input type="' + (visible ? 'text' : 'password') + '" id="' + id + '" data-input data-secret class="grow" autocomplete="off" spellcheck="false" value="' +
+    esc(cur == null ? '' : cur) + '"' + disabled + '>' +
+    '<button class="btn btn-sm" data-act="toggle-secret" aria-pressed="' + (visible ? 'true' : 'false') + '">' +
+    esc(t(visible ? 'btn.hideSecret' : 'btn.showSecret')) + '</button>' +
+    (edits.has(ek) || drafts.has(ek) ? '' : '<button class="btn btn-sm btn-ghost" data-act="collapse-secret">' + esc(t('btn.collapse')) + '</button>');
+}
+
+function rowHelp(sec, field, ek) {
+  if (drafts.has(ek)) return { cls: 'error', text: drafts.get(ek).error };
+  const cur = currentRaw(ek, field);
+  if (field.ref && cur) {
+    const target = field.ref + '.' + cur;
+    if (S.removed.has(target)) return { cls: 'warn', text: t('help.refRemoving') };
+    if (!S.sections.has(target)) return { cls: 'warn', text: t('help.missingRef', { value: cur }) };
+  }
+  if (field.type === 'enum' && cur && Array.isArray(field.options) && field.options.indexOf(String(cur)) < 0 &&
+      (LEGACY_VALUES[field.key] || []).indexOf(String(cur).toLowerCase()) >= 0) {
+    return { cls: 'warn', text: t('help.legacy') };
+  }
+  if (field.type === 'secret' && (secretOpen.has(ek) || edits.has(ek))) return { cls: '', text: t('secret.note') };
+  const desc = fieldDesc(sec.groupID, field);
+  return desc ? { cls: '', text: desc } : null;
+}
+
+function rowSearchText(sec, field) {
+  return [fieldLabel(sec.groupID, field), field.label, field.key, sectionTitle(sec), sec.name].join(' ').toLowerCase();
+}
+
+function renderRow(sec, field) {
+  const ek = ekOf(sec.name, field.key);
+  const id = domId('f', ek);
+  const readonly = !sec.editable || sec.kind === 'unknown' || parseLocked() || S.removed.has(sec.name) || S.busy;
+  const disabled = readonly ? ' disabled' : '';
+  const dirty = edits.has(ek) && !S.removed.has(sec.name);
+  const invalid = drafts.has(ek);
+  const cls = 'row' + (dirty ? ' dirty' : '') + (invalid ? ' invalid' : '');
+  const showDefault = !field.hasValue && !dirty && !invalid && field.type !== 'secret' && sec.kind !== 'unknown' && !sec.isNew;
+  let html = '<div class="' + cls + '" id="' + domId('row', ek) + '" data-section="' + esc(sec.name) + '" data-key="' + esc(field.key) +
+    '" data-type="' + esc(field.type) + '" data-search="' + esc(rowSearchText(sec, field)) + '">';
+  html += '<label class="row-label" for="' + id + '">' + esc(fieldLabel(sec.groupID, field)) +
+    (showDefault ? ' <span class="tag">' + esc(t('tag.default')) + '</span>' : '') +
+    '<code>' + esc(field.key) + '</code></label>';
+  html += '<div class="row-control">';
+  if (sec.kind === 'unknown') {
+    html += '<input type="text" id="' + id + '" disabled value="' + esc(field.secret ? (field.preview || '••••') : fmtValue(field.value)) + '">';
+  } else {
+    const control = renderControl(sec, field, ek, id, disabled);
+    html += (field.type === 'secret' ? '<div class="grow secret-view">' + control + '</div>' : '<div class="grow">' + control + '</div>');
+  }
+  if ((dirty || invalid) && !readonly) {
+    html += '<button class="icon-btn" data-act="revert" title="' + esc(t('btn.revert')) + '" aria-label="' + esc(t('btn.revert')) + '">↺</button>';
+  }
+  html += '</div>';
+  const help = rowHelp(sec, field, ek);
+  if (help) html += '<div class="row-help ' + help.cls + '">' + esc(help.text) + '</div>';
+  return html + '</div>';
+}
+
+function rerenderRow(section, key) {
+  const sec = S.sections.get(section);
+  if (!sec) return;
+  const field = (sec.fields || []).find(f => f.key === key);
+  const el = document.getElementById(domId('row', ekOf(section, key)));
+  if (!field || !el) return;
+  el.outerHTML = renderRow(sec, field);
+}
+
+// 依赖别的行状态的行（默认提供商依赖提供商列表）
+function rerenderDependents() {
+  for (const [ek, info] of S.fields) {
+    if (info.field.ref) rerenderRow(info.section.name, info.field.key);
+  }
+}
+
+// ======================================================================
+// 渲染：卡片与整页
+// ======================================================================
+
+function orderedInstances(groupID) {
+  const list = [];
+  for (const sec of S.sections.values()) {
+    if (sec.kind === 'collection' && sec.groupID === groupID) list.push(sec);
+  }
+  return list;
+}
+
+function unknownSections() {
+  return ((S.snapshot && S.snapshot.sections) || []).filter(s => s.kind === 'unknown');
+}
+
+function renderCard(sec) {
+  const removing = S.removed.has(sec.name);
+  const cls = 'card' + (removing ? ' removed' : '');
+  let head = '<span class="card-title">' + esc(sectionTitle(sec)) + '</span>';
+  if (sec.isNew) head += '<span class="tag tag-strong">' + esc(t('tag.new')) + '</span>';
+  if (removing) head += '<span class="tag tag-danger">' + esc(t('tag.removing')) + '</span>';
+  if (!sec.editable && sec.kind !== 'unknown') head += '<span class="tag">' + esc(t('tag.readonly')) + '</span>';
+  if (sec.kind === 'unknown') head += '<span class="tag">' + esc(t('tag.unknown')) + '</span>';
+  head += '<span class="spacer"></span>';
+  if (sec.kind === 'collection' && sec.editable && !parseLocked()) {
+    const dis = S.busy ? ' disabled' : '';
+    if (removing) {
+      head += '<button class="btn btn-sm" data-act="undo-remove"' + dis + '>' + esc(t('btn.undoRemove')) + '</button>';
+    } else if (S.armedRemove === sec.name) {
+      head += '<button class="btn btn-sm btn-danger" data-act="remove"' + dis + '>' + esc(t('btn.confirmRemove')) + '</button>';
+    } else {
+      head += '<button class="btn btn-sm btn-ghost" data-act="remove"' + dis + '>' + esc(t('btn.remove')) + '</button>';
+    }
+  }
+  let html = '<section class="' + cls + '" id="' + domId('card', sec.name) + '" data-card="' + esc(sec.name) + '">' +
+    '<div class="card-head">' + head + '</div>';
+  // 集合实例与未收录节的说明已经写在分组标题上，卡片里不再重复
+  const desc = sec.kind === 'static' ? sectionDesc(sec) : '';
+  if (desc) html += '<div class="card-desc">' + esc(desc) + '</div>';
+  if (sec.isNew && addedWithoutFields().indexOf(sec.name) >= 0) html += '<div class="card-note">' + esc(t('card.emptyNew')) + '</div>';
+  if (sec.kind === 'collection' && !sec.editable) html += '<div class="card-note">' + esc(t('card.readonlyName')) + '</div>';
+  for (const f of sec.fields || []) html += renderRow(sec, f);
+  return html + '</section>';
+}
+
+function renderCardByName(name) {
+  const el = document.getElementById(domId('card', name));
+  const sec = S.sections.get(name);
+  if (el && sec) el.outerHTML = renderCard(sec);
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+  if (!S.snapshot) {
+    main.innerHTML = '<div class="empty">' + esc(S.loading ? t('state.loading') : '') + '</div>';
+    return;
+  }
+  let html = '';
+  for (const sec of S.snapshot.sections || []) {
+    if (sec.kind === 'static') html += renderCard(sec);
+  }
+  for (const meta of S.snapshot.collections || []) {
+    const title = schemaText('section.' + meta.id, 0, meta.title);
+    const desc = schemaText('section.' + meta.id, 1, meta.description);
+    const addDis = (parseLocked() || S.busy) ? ' disabled' : '';
+    html += '<div class="group-head" id="' + domId('group', meta.id) + '" data-group="' + esc(meta.id) + '" style="scroll-margin-top: calc(var(--topbar-h) + 12px)">' +
+      '<h2>' + esc(title) + '</h2><span class="desc">' + esc(desc) + '</span>' +
+      '<button class="btn btn-sm" data-act="add-instance" data-group="' + esc(meta.id) + '"' + addDis + '>＋ ' + esc(t('btn.add')) + '</button></div>';
+    const list = orderedInstances(meta.id);
+    if (!list.length) html += '<div class="card-desc" data-group-empty="' + esc(meta.id) + '">' + esc(t('group.addHint')) + '</div>';
+    for (const sec of list) html += renderCard(sec);
+  }
+  const unknown = unknownSections();
+  const keys = S.snapshot.unknownKeys || [];
+  const unknownInKnown = keys.filter(k => !unknown.some(s => s.name === k.section));
+  if (unknown.length || unknownInKnown.length) {
+    html += '<div class="group-head" id="card-unknown" data-unknown-head><h2>' + esc(t('unknown.title')) + '</h2><span class="desc">' + esc(t('unknown.desc')) + '</span></div>';
+    for (const sec of unknown) html += renderCard(sec);
+    if (unknownInKnown.length) {
+      html += '<section class="card" data-unknown-list><ul class="list">';
+      for (const k of unknownInKnown) {
+        html += '<li><span class="grow mono">' + esc((k.section ? '[' + k.section + '] ' : t('unknown.root') + ' ') + k.key) + '</span></li>';
+      }
+      html += '</ul></section>';
+    }
+  }
+  main.innerHTML = html;
+  applyFilter();
+}
+
+function renderSavebar() {
+  const bar = document.getElementById('savebar');
+  const n = dirtyCount();
+  const bad = drafts.size;
+  const empties = addedWithoutFields();
+  if (!n && !bad && !empties.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+  const parts = [];
+  if (n) parts.push('<span>' + esc(t('save.count', { n })) + '</span>');
+  if (bad) parts.push('<span class="error">' + esc(t('save.invalid', { n: bad })) + '</span>');
+  if (empties.length) parts.push('<span class="sub">' + esc(t('save.emptyNew', { name: empties.join(', ') })) + '</span>');
+  const busy = S.busy ? ' disabled' : '';
+  bar.innerHTML = '<div class="grow">' + parts.join(' · ') + '</div>' +
+    '<button class="btn" data-act="discard-all"' + busy + '>' + esc(t('btn.discardAll')) + '</button>' +
+    '<button class="btn btn-primary" data-act="preview" aria-keyshortcuts="Meta+S Control+S"' +
+    ((S.busy || bad || !n || parseLocked()) ? ' disabled' : '') + '>' + esc(S.busy ? t('state.busy') : t('btn.preview')) + '</button>';
+  bar.hidden = false;
+}
+
+function renderAll() {
+  indexSnapshot();
+  renderChrome();
+  renderBanner();
+  renderToc();
+  renderMain();
+  renderSavebar();
+}
+
+// 行级改动之后的局部刷新：不重画整页，焦点不会丢
+function afterRowChange(section, key) {
+  rerenderRow(section, key);
+  rerenderDependents();
+  const sec = S.sections.get(section);
+  if (sec && sec.isNew) {
+    const card = document.getElementById(domId('card', section));
+    const note = card && card.querySelector('.card-note');
+    const empty = addedWithoutFields().indexOf(section) >= 0;
+    if (!!note !== empty) renderCardByName(section);
+  }
+  renderToc();
+  renderSavebar();
+  if (S.filter) applyFilter();
+}
+
+function applyFilter() {
+  const q = S.filter.trim().toLowerCase();
+  const main = document.getElementById('main');
+  for (const row of main.querySelectorAll('.row')) {
+    row.hidden = q !== '' && (row.getAttribute('data-search') || '').indexOf(q) < 0;
+  }
+  for (const card of main.querySelectorAll('section.card')) {
+    const rows = card.querySelectorAll('.row');
+    if (!rows.length) { card.hidden = q !== ''; continue; }
+    let any = false;
+    for (const r of rows) if (!r.hidden) { any = true; break; }
+    card.hidden = !any;
+  }
+  for (const head of main.querySelectorAll('.group-head[data-group]')) {
+    const id = head.getAttribute('data-group');
+    const cards = orderedInstances(id).map(s => document.getElementById(domId('card', s.name))).filter(Boolean);
+    head.hidden = q !== '' && !cards.some(c => !c.hidden);
+  }
+  for (const empty of main.querySelectorAll('[data-group-empty]')) empty.hidden = q !== '';
+  const unknownHead = main.querySelector('[data-unknown-head]');
+  if (unknownHead) {
+    let any = false;
+    for (let el = unknownHead.nextElementSibling; el; el = el.nextElementSibling) if (!el.hidden) { any = true; break; }
+    unknownHead.hidden = q !== '' && !any;
+  }
+  for (const a of document.querySelectorAll('#toc button')) {
+    const target = document.getElementById(a.getAttribute('data-target'));
+    a.classList.toggle('dim', !!(q && target && target.hidden));
+  }
+}
+
+// ======================================================================
+// 提示与对话框
+// ======================================================================
+
+function toast(kind, text) {
+  const box = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + kind;
+  el.innerHTML = '<span class="grow">' + esc(text) + '</span><button class="icon-btn" aria-label="' + esc(t('btn.close')) + '">×</button>';
+  el.querySelector('button').addEventListener('click', () => el.remove());
+  box.appendChild(el);
+  if (kind === 'ok') setTimeout(() => el.remove(), TOAST_MS);
+  while (box.children.length > 4) box.removeChild(box.firstChild);
+}
+
+// 宿主的 iframe 不给 allow-modals，原生 confirm / alert 弹窗用不了，一律画在页面里
+function openDialog(opts) {
+  S.dialog = opts;
+  const actions = (opts.actions || []).map(a =>
+    '<button class="btn ' + (a.kind === 'primary' ? 'btn-primary' : a.kind === 'danger' ? 'btn-danger' : '') + '" data-dlg="' + esc(a.id) + '"' +
+    (a.disabled ? ' disabled' : '') + '>' + esc(a.label) + '</button>').join('');
+  document.getElementById('dialog-root').innerHTML =
+    '<div class="overlay" data-dlg-overlay><div class="dialog' + (opts.wide ? ' wide' : '') + '" role="dialog" aria-modal="true" aria-label="' + esc(opts.title) + '">' +
+    '<div class="dialog-head"><span class="title">' + esc(opts.title) + '</span>' +
+    '<button class="icon-btn" data-dlg="__close" aria-label="' + esc(t('btn.close')) + '">×</button></div>' +
+    '<div class="dialog-body" id="dialog-body">' + (opts.body || '') + '</div>' +
+    (actions ? '<div class="dialog-foot">' + actions + '</div>' : '') + '</div></div>';
+  const focus = document.querySelector('#dialog-root [data-autofocus]') ||
+                document.querySelector('#dialog-root .dialog-foot .btn-primary, #dialog-root .dialog-foot .btn');
+  if (focus) setTimeout(() => focus.focus(), 0);
+  if (opts.onOpen) opts.onOpen();
+}
+
+function closeDialog() {
+  const d = S.dialog;
+  S.dialog = null;
+  if (S.restoreTimer) { clearTimeout(S.restoreTimer); S.restoreTimer = null; }
+  S.restoreArmed = null;
+  document.getElementById('dialog-root').innerHTML = '';
+  if (d && d.onClose) d.onClose();
+}
+
+function setDialogBody(html) {
+  const body = document.getElementById('dialog-body');
+  if (body) body.innerHTML = html;
+}
+
+// 有未保存改动时先问一句；没有就直接做
+function guardDiscard(action) {
+  if (!hasUnsaved()) { action(); return; }
+  openDialog({
+    title: t('dlg.discard.title'),
+    body: '<p>' + esc(t('dlg.discard.body', { n: dirtyCount() + drafts.size })) + '</p>',
+    actions: [{ id: 'cancel', label: t('btn.cancel') }, { id: 'go', label: t('btn.continue'), kind: 'danger' }],
+    onAction: id => { closeDialog(); if (id === 'go') action(); }
+  });
+}
+
+// ======================================================================
+// 流程：读取
+// ======================================================================
+
+function resetEdits() {
+  edits.clear();
+  drafts.clear();
+  plaintexts.clear();
+  secretOpen.clear();
+  secretVisible.clear();
+  S.added.clear();
+  S.removed.clear();
+  S.armedRemove = null;
+}
+
+async function loadSnapshot() {
+  S.loading = true;
+  renderChrome();
+  const result = await callCommand('config.snapshot', {});
+  S.loading = false;
+  if (!result || !result.ok) {
+    toast('error', t('toast.loadFailed', { msg: (result && result.message) || '?' }));
+    renderChrome();
+    renderMain();
+    return;
+  }
+  S.snapshot = result;
+  resetEdits();
+  renderAll();
+}
+
+// ======================================================================
+// 流程：字段交互
+// ======================================================================
+
+function readRaw(el) {
+  return el.value;
+}
+
+function handleFieldCommit(el) {
+  const row = el.closest('.row');
+  if (!row) return;
+  const section = row.getAttribute('data-section');
+  const key = row.getAttribute('data-key');
+  const info = S.fields.get(ekOf(section, key));
+  if (!info) return;
+  commitValue(section, key, info.field.type, readRaw(el), originalOf(ekOf(section, key)));
+  afterRowChange(section, key);
+}
+
+function revertField(section, key) {
+  const ek = ekOf(section, key);
+  edits.delete(ek);
+  drafts.delete(ek);
+  secretVisible.delete(ek);
+  if (!plaintexts.has(ek)) secretOpen.delete(ek);
+  afterRowChange(section, key);
+}
+
+async function revealSecret(section, key) {
+  const ek = ekOf(section, key);
+  const result = await callCommand('config.reveal', { section, key, confirm: true });
+  if (!result || !result.ok) {
+    toast('error', t('toast.revealFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  // 只进内存缓存：用户真的改了这个框才会形成编辑
+  plaintexts.set(ek, result.value == null ? '' : String(result.value));
+  secretOpen.add(ek);
+  secretVisible.add(ek);
+  afterRowChange(section, key);
+  focusField(section, key, true);
+}
+
+function replaceSecret(section, key) {
+  const ek = ekOf(section, key);
+  plaintexts.delete(ek);
+  secretOpen.add(ek);
+  afterRowChange(section, key);
+  focusField(section, key, true);
+}
+
+function collapseSecret(section, key) {
+  const ek = ekOf(section, key);
+  plaintexts.delete(ek);
+  secretOpen.delete(ek);
+  secretVisible.delete(ek);
+  afterRowChange(section, key);
+}
+
+function toggleSecret(section, key) {
+  const ek = ekOf(section, key);
+  const input = document.getElementById(domId('f', ek));
+  // 先把框里正在输入的内容落下来，免得切换时丢字
+  if (input) commitValue(section, key, 'secret', input.value, originalOf(ek));
+  if (secretVisible.has(ek)) secretVisible.delete(ek); else secretVisible.add(ek);
+  afterRowChange(section, key);
+  focusField(section, key, false);
+}
+
+function focusField(section, key, select) {
+  setTimeout(() => {
+    const el = document.getElementById(domId('f', ekOf(section, key)));
+    if (!el) return;
+    el.focus();
+    if (select && el.select) el.select();
+  }, 0);
+}
+
+function flashRow(section, key) {
+  const row = document.getElementById(domId('row', ekOf(section, key)));
+  if (!row) return false;
+  if (S.filter) { S.filter = ''; document.getElementById('search').value = ''; applyFilter(); }
+  row.scrollIntoView({ block: 'center' });
+  row.classList.remove('flash');
+  void row.offsetWidth;
+  row.classList.add('flash');
+  focusField(section, key, false);
+  return true;
+}
+
+function discardAll() {
+  const keepPlain = new Map(plaintexts);
+  resetEdits();
+  // 已显示的明文没有改动，撤销时不必再收起
+  for (const [k, v] of keepPlain) { plaintexts.set(k, v); secretOpen.add(k); }
+  renderAll();
+}
+
+// ======================================================================
+// 流程：集合实例
+// ======================================================================
+
+function openAddInstance(groupID) {
+  const meta = collectionMeta(groupID);
+  if (!meta) return;
+  const title = schemaText('section.' + meta.id, 0, meta.title);
+  const taken = instanceNames(groupID);
+  const suggestions = (meta.suggestions || []).filter(s => taken.indexOf(s) < 0);
+  const body = '<div class="field"><label for="new-instance">' + esc(t('dlg.add.name')) + '</label>' +
+    '<input type="text" id="new-instance" data-autofocus autocomplete="off" spellcheck="false">' +
+    '<span class="hint mono">' + esc('[' + meta.prefix + '.<' + (meta.instanceHint || '') + '>]') + '</span>' +
+    '<span class="error" id="new-instance-error"></span></div>' +
+    (suggestions.length ? '<div class="chips"><span class="hint">' + esc(t('dlg.add.suggest')) + '</span>' +
+      suggestions.map(s => '<button class="btn btn-sm" data-suggest="' + esc(s) + '">' + esc(s) + '</button>').join('') + '</div>' : '');
+  openDialog({
+    title: t('dlg.add.title', { group: title }),
+    body,
+    actions: [{ id: 'cancel', label: t('btn.cancel') }, { id: 'create', label: t('btn.create'), kind: 'primary' }],
+    onAction: id => {
+      if (id !== 'create') { closeDialog(); return; }
+      const input = document.getElementById('new-instance');
+      const name = (input.value || '').trim();
+      const err = instanceNameError(groupID, name);
+      if (err) { document.getElementById('new-instance-error').textContent = err; input.focus(); return; }
+      closeDialog();
+      addInstance(groupID, name);
+    },
+    onSuggest: value => {
+      const input = document.getElementById('new-instance');
+      input.value = value;
+      input.focus();
+    },
+    submitOnEnter: 'create'
+  });
+}
+
+function instanceNameError(groupID, name) {
+  if (!name) return t('err.name.empty');
+  if (!INSTANCE_NAME_RE.test(name)) return t('err.name.chars');
+  const meta = collectionMeta(groupID);
+  const section = meta.prefix + '.' + name;
+  if (S.sections.has(section) && !S.removed.has(section)) return t('err.name.dup');
+  if (S.removed.has(section)) return t('err.name.dup');
+  return null;
+}
+
+function addInstance(groupID, name) {
+  const meta = collectionMeta(groupID);
+  const section = meta.prefix + '.' + name;
+  S.added.set(section, { groupID, instance: name });
+  renderAll();
+  const sec = S.sections.get(section);
+  const first = sec && (sec.fields || [])[0];
+  const card = document.getElementById(domId('card', section));
+  if (card) card.scrollIntoView({ block: 'start' });
+  if (first) focusField(section, first.key, false);
+}
+
+function removeInstance(section) {
+  const sec = S.sections.get(section);
+  if (!sec) return;
+  if (sec.isNew) {
+    // 还没写进文件的新实例，删掉就是丢弃，不必再确认
+    S.added.delete(section);
+    for (const ek of Array.from(edits.keys())) if (ek.split(NUL)[0] === section) edits.delete(ek);
+    for (const ek of Array.from(drafts.keys())) if (ek.split(NUL)[0] === section) drafts.delete(ek);
+    renderAll();
+    return;
+  }
+  if (S.armedRemove !== section) {
+    const prev = S.armedRemove;
+    S.armedRemove = section;
+    if (prev) renderCardByName(prev);
+    renderCardByName(section);
+    setTimeout(() => {
+      if (S.armedRemove === section) { S.armedRemove = null; renderCardByName(section); applyFilter(); }
+    }, ARM_MS);
+    applyFilter();
+    return;
+  }
+  S.armedRemove = null;
+  S.removed.add(section);
+  for (const ek of Array.from(drafts.keys())) if (ek.split(NUL)[0] === section) drafts.delete(ek);
+  renderCardByName(section);
+  rerenderDependents();
+  renderToc();
+  renderSavebar();
+  applyFilter();
+}
+
+function undoRemove(section) {
+  S.removed.delete(section);
+  renderCardByName(section);
+  rerenderDependents();
+  renderToc();
+  renderSavebar();
+  applyFilter();
+}
+
+// ======================================================================
+// 流程：预览与写入
+// ======================================================================
+
+function changeOpLabel(c) {
+  if (c.op === 'removeSection') return t('op.removeSection');
+  if (c.op === 'unset') return t('op.unset');
+  return c.from == null ? t('op.add') : t('op.set');
+}
+
+function fmtChangeValue(v, masked) {
+  if (v == null) return '—';
+  if (masked) return '••••';
+  if (Array.isArray(v)) return v.length ? v.join('\n') : '[]';
+  return fmtValue(v);
+}
+
+function renderDiff(diff) {
+  if (!diff) return '';
+  const lines = String(diff).replace(/\n$/, '').split('\n');
+  return '<pre class="code">' + lines.map(line => {
+    let cls = '';
+    if (line.indexOf('+++') === 0 || line.indexOf('---') === 0 || line.indexOf('@@') === 0) cls = 'hunk';
+    else if (line[0] === '+') cls = 'add';
+    else if (line[0] === '-') cls = 'del';
+    return '<span class="ln ' + cls + '">' + esc(line || ' ') + '</span>';
+  }).join('') + '</pre>';
+}
+
+async function previewChanges() {
+  if (S.busy) return;
+  if (parseLocked()) { toast('error', t('toast.parseLocked')); return; }
+  if (drafts.size) {
+    toast('error', t('toast.fixInvalid'));
+    const first = drafts.keys().next().value.split(NUL);
+    flashRow(first[0], first[1]);
+    return;
+  }
+  const list = buildEdits();
+  if (!list.length) { toast('warn', t('toast.nothing')); return; }
+  setBusy(true);
+  const result = await callCommand('config.plan', { edits: list });
+  setBusy(false);
+  if (!result || !result.ok) {
+    const details = result && result.details && Array.isArray(result.details.edits)
+      ? '：' + result.details.edits.map(e => e.reason).join('；') : '';
+    toast('error', t('toast.planFailed', { msg: ((result && result.message) || '?') + details }));
+    return;
+  }
+  const changes = result.changes || [];
+  let body = '';
+  const empties = addedWithoutFields();
+  if (empties.length) body += '<p class="sub">' + esc(t('save.emptyNew', { name: empties.join(', ') })) + '</p>';
+  if (!result.diff) {
+    body += '<p>' + esc(t('dlg.preview.none')) + '</p>';
+  } else {
+    body += '<table><tr><th>' + esc(t('dlg.preview.col.op')) + '</th><th>' + esc(t('dlg.preview.col.item')) + '</th><th>' +
+      esc(t('dlg.preview.col.from')) + '</th><th>' + esc(t('dlg.preview.col.to')) + '</th></tr>';
+    for (const c of changes) {
+      const item = c.op === 'removeSection' ? '[' + c.section + ']' : (c.section ? c.section + '.' : '') + c.key;
+      body += '<tr><td>' + esc(changeOpLabel(c)) + '</td><td class="mono">' + esc(item) + '</td><td class="mono">' +
+        esc(c.op === 'removeSection' ? '' : fmtChangeValue(c.from, c.masked)) + '</td><td class="mono">' +
+        esc(c.op === 'removeSection' ? '' : fmtChangeValue(c.to, c.masked)) + '</td></tr>';
+    }
+    body += '</table>' + renderDiff(result.diff) + '<p class="sub" style="margin-top:10px">' + esc(t('dlg.preview.backupNote')) + '</p>';
+  }
+  openDialog({
+    title: t('dlg.preview.title'),
+    wide: true,
+    body,
+    actions: [{ id: 'cancel', label: t('btn.cancel') },
+              { id: 'apply', label: t('btn.confirmWrite'), kind: 'primary', disabled: !result.diff }],
+    onAction: id => {
+      if (id === 'apply') applyChanges(list); else closeDialog();
+    }
+  });
+}
+
+async function applyChanges(list) {
+  if (S.busy) return;
+  setBusy(true);
+  for (const b of document.querySelectorAll('#dialog-root .dialog-foot .btn')) b.disabled = true;
+  const result = await callCommand('config.apply', { edits: list, confirm: true });
+  setBusy(false);
+  closeDialog();
+  if (!result || !result.ok) {
+    const rolled = result && result.details && result.details.rolledBack;
+    toast('error', t(rolled ? 'toast.rolledBack' : 'toast.saveFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  toast('ok', result.backupPath ? t('toast.saved', { path: result.backupPath }) : t('toast.savedNoBackup'));
+  await loadSnapshot();
+}
+
+function setBusy(flag) {
+  S.busy = flag;
+  renderToolbar();
+  renderSavebar();
+}
+
+// ======================================================================
+// 流程：校验、原文
+// ======================================================================
+
+// 按原文把行号对到「节 + 键」，好把校验结果定位到表单
+function locateLine(line) {
+  const raw = (S.snapshot && S.snapshot.raw) || '';
+  const lines = raw.split(/\r?\n/);
+  if (!line || line > lines.length) return null;
+  let section = '';
+  for (let i = 0; i < line; i++) {
+    const m = lines[i].match(/^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$/);
+    if (m) section = m[1].replace(/\s*\.\s*/g, '.').replace(/"/g, '');
+  }
+  const km = lines[line - 1].match(/^\s*("?)([A-Za-z0-9_-]+)\1\s*=/);
+  return km ? { section, key: km[2] } : { section, key: null };
+}
+
+function gotoLine(line) {
+  const loc = locateLine(line);
+  if (loc && loc.key && S.fields.has(ekOf(loc.section, loc.key))) {
+    closeDialog();
+    if (flashRow(loc.section, loc.key)) return;
+  }
+  toast('warn', t('toast.fieldNotFound', { line }));
+  showRaw(line);
+}
+
+async function doValidate() {
+  setBusy(true);
+  const result = await callCommand('config.validate', {});
+  setBusy(false);
+  if (!result || result.ok === false) {
+    toast('error', t('toast.validateFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  const errors = result.errors || [];
+  const warnings = result.warnings || [];
+  if (!errors.length && !warnings.length) { toast('ok', t('toast.validOk')); return; }
+  const list = (items, kind) => '<ul class="list">' + items.map(it =>
+    '<li class="issue" data-line="' + esc(it.line || '') + '"><span class="tag ' + (kind === 'error' ? 'tag-danger' : 'tag-warn') + '">' +
+    esc(t('dlg.validate.line', { line: it.line || '?' })) + '</span><span class="grow">' + esc(it.message) + '</span>' +
+    (it.line ? '<button class="btn btn-sm" data-goto="' + esc(it.line) + '">' + esc(t('btn.gotoField')) + '</button>' : '') + '</li>').join('') + '</ul>';
+  let body = '';
+  if (errors.length) body += '<h3>' + esc(t('dlg.validate.errors')) + '</h3>' + list(errors, 'error');
+  if (warnings.length) body += '<h3>' + esc(t('dlg.validate.warnings')) + '</h3>' + list(warnings, 'warn');
+  openDialog({ title: t('dlg.validate.title'), body, wide: true,
+               actions: [{ id: 'close', label: t('btn.close') }], onAction: () => closeDialog() });
+}
+
+function showRaw(highlight) {
+  const raw = (S.snapshot && S.snapshot.raw) || '';
+  const lines = raw.replace(/\n$/, '').split('\n');
+  const hl = Number(highlight) || 0;
+  const body = '<p class="sub">' + esc(t('dlg.raw.note')) + '</p><pre class="code">' + lines.map((l, i) =>
+    '<span class="ln' + (i + 1 === hl ? ' hl' : '') + '" id="raw-line-' + (i + 1) + '"><span class="num">' + (i + 1) + '</span>' +
+    esc(l || ' ') + '</span>').join('') + '</pre>';
+  openDialog({
+    title: t('dlg.raw.title'), wide: true, body,
+    actions: [{ id: 'close', label: t('btn.close') }], onAction: () => closeDialog(),
+    onOpen: () => {
+      const el = hl && document.getElementById('raw-line-' + hl);
+      if (el) setTimeout(() => el.scrollIntoView({ block: 'center' }), 0);
+    }
+  });
+}
+
+// ======================================================================
+// 流程：备份
+// ======================================================================
+
+async function showBackups() {
+  setBusy(true);
+  const result = await callCommand('config.backups', {});
+  setBusy(false);
+  if (!result || !result.ok) {
+    toast('error', t('toast.backupsFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  const items = result.items || [];
+  openDialog({
+    title: t('dlg.backups.title'), wide: true,
+    body: '',
+    items,
+    actions: [{ id: 'close', label: t('btn.close') }],
+    onAction: () => closeDialog(),
+    onOpen: () => renderBackupList(items)
+  });
+}
+
+function renderBackupList(items) {
+  if (!items.length) { setDialogBody('<p>' + esc(t('dlg.backups.empty')) + '</p>'); return; }
+  let html = '<p class="sub">' + esc(t('dlg.backups.note')) + '</p><ul class="list">';
+  for (const it of items) {
+    const armed = S.restoreArmed === it.name;
+    html += '<li><div class="grow"><div class="mono">' + esc(it.name) + '</div><div class="sub">' +
+      esc(fmtTime(it.mtime) + ' · ' + fmtBytes(it.byteSize)) + '</div></div>' +
+      '<button class="btn btn-sm' + (armed ? ' btn-danger' : '') + '" data-restore="' + esc(it.name) + '"' + (S.busy ? ' disabled' : '') + '>' +
+      esc(armed ? t('btn.confirmRestore') : t('btn.restore')) + '</button></li>';
+  }
+  setDialogBody(html + '</ul>');
+}
+
+function onRestoreClick(name) {
+  const items = (S.dialog && S.dialog.items) || [];
+  if (S.restoreArmed !== name) {
+    // 换一条就换一个待确认对象，旧的那条自动复原
+    S.restoreArmed = name;
+    if (S.restoreTimer) clearTimeout(S.restoreTimer);
+    S.restoreTimer = setTimeout(() => { S.restoreArmed = null; if (S.dialog && S.dialog.items) renderBackupList(S.dialog.items); }, ARM_MS);
+    renderBackupList(items);
+    return;
+  }
+  const run = () => doRestore(name);
+  if (hasUnsaved()) { closeDialog(); guardDiscard(run); } else { run(); }
+}
+
+async function doRestore(name) {
+  setBusy(true);
+  if (S.dialog && S.dialog.items) renderBackupList(S.dialog.items);
+  const result = await callCommand('config.restore', { name, confirm: true });
+  setBusy(false);
+  closeDialog();
+  if (!result || !result.ok) {
+    toast('error', t('toast.restoreFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  toast('ok', t('toast.restored', { name: result.restoredFrom || name }));
+  await loadSnapshot();
+}
+
+// ======================================================================
+// 流程：模板
+// ======================================================================
+
+async function showTemplate() {
+  setBusy(true);
+  const result = await callCommand('config.render', {});
+  setBusy(false);
+  if (!result || !result.ok) {
+    toast('error', t('toast.templateFailed', { msg: (result && result.message) || '?' }));
+    return;
+  }
+  const text = result.text || '';
+  let showDiff = false;
+  const draw = () => {
+    setDialogBody('<p class="sub">' + esc(t('dlg.template.note')) + '</p>' +
+      '<pre class="code" id="template-text">' + text.replace(/\n$/, '').split('\n').map(l => '<span class="ln">' + esc(l || ' ') + '</span>').join('') + '</pre>' +
+      (showDiff && result.diff ? '<div style="margin-top:12px">' + renderDiff(result.diff) + '</div>' : ''));
+    const btn = document.querySelector('#dialog-root [data-dlg="diff"]');
+    if (btn) btn.textContent = t(showDiff ? 'btn.hideDiff' : 'btn.showDiff');
+  };
+  openDialog({
+    title: t('dlg.template.title'), wide: true, body: '',
+    actions: [
+      { id: 'diff', label: t('btn.showDiff'), disabled: !result.diff },
+      { id: 'close', label: t('btn.close') },
+      { id: 'copy', label: t('btn.copy'), kind: 'primary' }
+    ],
+    onOpen: draw,
+    onAction: id => {
+      if (id === 'close') closeDialog();
+      else if (id === 'diff') { showDiff = !showDiff; draw(); }
+      else if (id === 'copy') copyText(text, document.getElementById('template-text'));
+    }
+  });
+}
+
+async function copyText(text, selectEl) {
+  if (hostCapable('clipboard.write') && window.willdeep.clipboard && typeof window.willdeep.clipboard.write === 'function') {
+    try { await window.willdeep.clipboard.write(text); toast('ok', t('toast.copied')); return; } catch (e) { /* 落到下面的兜底 */ }
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      toast('ok', t('toast.copied'));
+      return;
+    }
+  } catch (e) { /* 沙箱里常见：没有剪贴板权限 */ }
+  if (selectEl && window.getSelection) {
+    const range = document.createRange();
+    range.selectNodeContents(selectEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  toast('warn', t('toast.copyManual'));
+}
+
+// ======================================================================
+// 事件
+// ======================================================================
+
+function onClick(event) {
+  const dlgBtn = event.target.closest('[data-dlg]');
+  if (dlgBtn && S.dialog) {
+    const id = dlgBtn.getAttribute('data-dlg');
+    if (id === '__close') closeDialog(); else if (S.dialog.onAction) S.dialog.onAction(id);
+    return;
+  }
+  if (event.target.hasAttribute && event.target.hasAttribute('data-dlg-overlay') && S.dialog) {
+    closeDialog();
+    return;
+  }
+  const suggest = event.target.closest('[data-suggest]');
+  if (suggest && S.dialog && S.dialog.onSuggest) { S.dialog.onSuggest(suggest.getAttribute('data-suggest')); return; }
+  const restore = event.target.closest('[data-restore]');
+  if (restore) { onRestoreClick(restore.getAttribute('data-restore')); return; }
+  const gotoBtn = event.target.closest('[data-goto]');
+  if (gotoBtn) { gotoLine(Number(gotoBtn.getAttribute('data-goto'))); return; }
+  const issue = event.target.closest('.issue[data-line]');
+  if (issue && issue.getAttribute('data-line')) { gotoLine(Number(issue.getAttribute('data-line'))); return; }
+
+  const el = event.target.closest('[data-act]');
+  if (!el || el.disabled) return;
+  const act = el.getAttribute('data-act');
+  const row = el.closest('.row');
+  const section = row && row.getAttribute('data-section');
+  const key = row && row.getAttribute('data-key');
+  const card = el.closest('[data-card]');
+  switch (act) {
+    case 'validate': doValidate(); break;
+    case 'backups': showBackups(); break;
+    case 'template': showTemplate(); break;
+    case 'raw': showRaw(el.getAttribute('data-line')); break;
+    case 'reload': guardDiscard(loadSnapshot); break;
+    case 'preview': previewChanges(); break;
+    case 'discard-all': discardAll(); break;
+    case 'revert': revertField(section, key); break;
+    case 'reveal': revealSecret(section, key); break;
+    case 'replace': replaceSecret(section, key); break;
+    case 'collapse-secret': collapseSecret(section, key); break;
+    case 'toggle-secret': toggleSecret(section, key); break;
+    case 'add-instance': openAddInstance(el.getAttribute('data-group')); break;
+    case 'remove': if (card) removeInstance(card.getAttribute('data-card')); break;
+    case 'undo-remove': if (card) undoRemove(card.getAttribute('data-card')); break;
+    case 'jump': {
+      const target = document.getElementById(el.getAttribute('data-target'));
+      if (target) target.scrollIntoView({ block: 'start' });
+      break;
+    }
+    default: break;
+  }
+}
+
+function onChange(event) {
+  const el = event.target;
+  if (!el.hasAttribute || !el.hasAttribute('data-input')) return;
+  handleFieldCommit(el);
+}
+
+// 数字框边输边校验，不等失焦
+function onInput(event) {
+  const el = event.target;
+  if (el.id === 'search') { S.filter = el.value; applyFilter(); return; }
+  if (!el.hasAttribute || !el.hasAttribute('data-input')) return;
+  const row = el.closest('.row');
+  if (!row) return;
+  const type = row.getAttribute('data-type');
+  if (type !== 'int' && type !== 'float') return;
+  const parsed = parseInput(type, el.value);
+  row.classList.toggle('invalid', !!parsed.error);
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && S.dialog) { event.preventDefault(); closeDialog(); return; }
+  if (event.key === 'Enter' && S.dialog && S.dialog.submitOnEnter && event.target.tagName === 'INPUT') {
+    event.preventDefault();
+    S.dialog.onAction(S.dialog.submitOnEnter);
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && (event.key === 's' || event.key === 'S')) {
+    event.preventDefault();
+    if (S.dialog) return;
+    // 先让正在编辑的框提交，再预览
+    const active = document.activeElement;
+    if (active && active.hasAttribute && active.hasAttribute('data-input')) handleFieldCommit(active);
+    previewChanges();
+  }
+}
+
+function init() {
+  document.addEventListener('click', onClick);
+  document.addEventListener('change', onChange);
+  document.addEventListener('input', onInput);
+  document.addEventListener('keydown', onKeydown);
+  window.addEventListener('willdeep:context-changed', e => applyContext(e.detail));
+  const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)');
+  if (mq && mq.addEventListener) mq.addEventListener('change', () => applyContext(S.context));
+  lang = '';
+  applyContext(window.willdeep && typeof window.willdeep.getContext === 'function' ? window.willdeep.getContext() : {});
+  loadSnapshot();
+}
+
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else if (typeof document !== 'undefined' && document.body) {
+  init();
+}
+</script>
+</body>
+</html>

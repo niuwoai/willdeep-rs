@@ -8,6 +8,7 @@ import { SidebarSettings } from "./SidebarSettings";
 import { QuickSettings } from "./QuickSettings";
 import { applyThemeMode, storedThemeMode, useResolvedColorScheme, type ThemeMode } from "./theme";
 import { PluginCenter } from "./PluginCenter";
+import { ProviderSetup, type SetupStatus } from "./ProviderSetup";
 import { PluginPage } from "./PluginPage";
 import { PluginRail, type RailSelection } from "./PluginRail";
 import { PluginSidebar } from "./PluginSidebar";
@@ -302,6 +303,23 @@ export function App() {
   const [rail, setRail] = useState<RailSelection>(railFromHash);
   const [pluginSelectedItem, setPluginSelectedItem] = useState<string | null>(null);
   const [pluginReloadToken, setPluginReloadToken] = useState(0);
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
+  const [setupLoadFailed, setSetupLoadFailed] = useState(false);
+  const [showSetup, setShowSetup] = useState(new URLSearchParams(window.location.search).get("setup") === "1");
+  const checkSetup = useCallback(async () => {
+    const value = await json<SetupStatus>("/api/setup");
+    setSetupStatus(value);
+    setSetupLoadFailed(false);
+    return value;
+  }, []);
+  useEffect(() => { checkSetup().catch(() => setSetupLoadFailed(true)); }, [checkSetup]);
+  const finishSetup = () => {
+    setShowSetup(false);
+    setRail({ kind: "conversation" });
+    const url = new URL(window.location.href);
+    url.searchParams.delete("setup");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  };
 
   const refreshPlugins = useCallback(() => {
     fetchPlugins(language)
@@ -319,8 +337,8 @@ export function App() {
   // 选中的插件被停用或卸载时回到对话，而不是停在一个已经不存在的目的地上。
   // 插件清单还没加载完时先别动——否则从一个 #plugin/... 链接进来会被立刻踢走。
   useEffect(() => {
-    if (rail.kind === "plugin" && plugins.length > 0 && !activePlugin) setRail({ kind: "conversation" });
-  }, [rail, activePlugin, plugins.length]);
+    if (rail.kind === "plugin" && plugins.length > 0 && !activePlugin) setRail({ kind: showSetup ? "center" : "conversation" });
+  }, [rail, activePlugin, plugins.length, showSetup]);
 
   useEffect(() => {
     const target = hashForRail(rail);
@@ -965,18 +983,19 @@ export function App() {
   // （它的配套侧栏 + 页面），要么是插件中心。入口、侧栏与中央页永远来自
   // 同一个 descriptor，不会出现入口属于 A、侧栏属于 B 的半切换状态。
   const railNav = <PluginRail entries={pluginEntries} selection={rail} messages={t} onSelect={(next) => { setPluginSelectedItem(null); setRail(next); }} />;
+  const setupGuide = showSetup ? <ProviderSetup status={setupStatus} loadFailed={setupLoadFailed} plugin={plugins.find((plugin) => plugin.id === "willdeep-config")} messages={t} onCheck={checkSetup} onDone={finishSetup} onOpen={(destination) => { if (destination) navigateToDestination(destination); else setRail({ kind: "center" }); }} /> : null;
 
   if (rail.kind === "center") {
-    return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
+    return <Box>{setupGuide}<Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
       {railNav}
       <PluginCenter plugins={plugins} failures={pluginFailures} messages={t} onChanged={() => setPluginReloadToken((current) => current + 1)} />
       {pluginOverlays}
-    </Flex>;
+    </Flex></Box>;
   }
 
   if (rail.kind === "plugin" && activePlugin) {
     const { plugin, destination } = activePlugin;
-    return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
+    return <Box>{setupGuide}<Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
       {railNav}
       {destination.sidebar?.mode === "declarative" && <PluginSidebar plugin={plugin} destination={destination} locale={language} messages={t} reloadToken={pluginReloadToken} onNavigate={navigateToDestination} onSelectItem={setPluginSelectedItem} selectedItemId={pluginSelectedItem} onRowContextMenu={(event, componentId, commands) => {
         const entries = menuEntries(plugins, "plugin.sidebar.row.context").filter((entry) => entry.pluginId === plugin.id && (!commands.length || commands.includes(entry.commandId)));
@@ -989,10 +1008,10 @@ export function App() {
         if (sendNow) void send(text); else setPrompt(text);
       }} onOpenSession={(id) => { setRail({ kind: "conversation" }); void loadSessionRef.current(id); }} />
       {pluginOverlays}
-    </Flex>;
+    </Flex></Box>;
   }
 
-  return <Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
+  return <Box>{setupGuide}<Flex minH="100vh" bg="var(--bg-page)" color="var(--text)">
     {railNav}
     {/* 侧栏本身不滚动：只有会话列表滚。这样列表能吃掉全部剩余高度，
         而不是被上面几块设置挤到下半屏。 */}
@@ -1140,5 +1159,5 @@ export function App() {
       <QuickSettings messages={t} language={language} onLanguageChange={setLanguage} theme={theme} onThemeChange={setTheme} />
     </Container>
     {pluginOverlays}
-  </Flex>;
+  </Flex></Box>;
 }

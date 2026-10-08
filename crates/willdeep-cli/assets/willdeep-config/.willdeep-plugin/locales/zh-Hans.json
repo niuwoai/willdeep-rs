@@ -1,0 +1,13 @@
+{
+  "destination.config": "配置管理",
+  "command.config.open": "打开配置",
+  "command.config.refreshPage": "刷新页面",
+  "command.config.snapshot": "获取配置快照",
+  "command.config.plan": "规划配置变更",
+  "command.config.apply": "应用配置变更",
+  "command.config.validate": "校验配置",
+  "command.config.backups": "列出备份",
+  "command.config.restore": "恢复备份",
+  "command.config.render": "生成配置模板",
+  "command.config.reveal": "显示密钥"
+}

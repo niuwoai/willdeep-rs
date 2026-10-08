@@ -1,0 +1,10 @@
+{
+  "name": "willdeep-config",
+  "version": "0.2.0",
+  "description": "WillDeep configuration manager with TOML editing, backup, and validation tools",
+  "interface": {
+    "displayName": "Config",
+    "shortDescription": "管理 WillDeep 配置文件",
+    "composerIcon": "sf:gearshape"
+  }
+}

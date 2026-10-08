@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +21,8 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use willdeep_core::{MessageAttachment, Role, Session, SessionStore, SkillCatalog};
 
+mod setup;
+
 const MAX_PROMPT_CHARS: usize = 100_000;
 const MAX_AGENT_LABEL_CHARS: usize = 128;
 
@@ -38,6 +41,8 @@ pub struct WebConfig {
     pub workspaces: Vec<PathBuf>,
     pub home: PathBuf,
     pub language: Language,
+    pub open_setup: bool,
+    pub setup_started: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 }
 
 struct WebState {
@@ -336,6 +341,12 @@ struct ComposerSkill {
 }
 
 pub async fn serve(config: WebConfig) -> Result<()> {
+    if config.open_setup && config.listen.ip().is_loopback() {
+        if let Some(parent) = config.config_path.parent() {
+            std::fs::create_dir_all(parent).context("create setup configuration directory")?;
+        }
+        crate::config_plugin::ensure_installed(&config.home).await?;
+    }
     for workspace in &config.workspaces {
         crate::daemon::ensure_remote_workspace(&config.home, workspace).await?;
     }
@@ -351,6 +362,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     });
     let app = Router::new()
         .route("/health", get(health))
+        .route("/api/setup", get(setup::setup_status))
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/sessions", get(sessions))
         .route(
@@ -414,6 +426,7 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     let app = match willdeep_core::plugin::PluginHost::discover(&state.home) {
         Ok(host) => {
             let host = Arc::new(host);
+            host.set_config_path(state.config_path.clone());
             // 插件 MCP 进程可以反向请求出图、问模型；凭据留在宿主。
             host.set_host_requests(Arc::new(crate::plugin_host_requests::HostRequests::new(
                 state.home.clone(),
@@ -462,7 +475,18 @@ pub async fn serve(config: WebConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind Web server at {}", config.listen))?;
-    println!("WillDeep Web: http://{}", config.listen);
+    let address = listener.local_addr()?;
+    println!("WillDeep Web: http://{address}");
+    if config.open_setup && address.ip().is_loopback() {
+        let url = format!("http://{address}/?setup=1#plugins");
+        println!("Provider setup: {url}");
+        if config.setup_started.is_none()
+            && std::io::stdin().is_terminal()
+            && !crate::onboarding::open_browser(&url)
+        {
+            eprintln!("Could not open the browser; open the Provider setup URL above manually.");
+        }
+    }
     for workspace in &config.workspaces {
         println!("Workspace: {}", workspace.display());
     }
@@ -471,8 +495,15 @@ pub async fn serve(config: WebConfig) -> Result<()> {
             "warning: Web mode has no application authentication; place it behind nginx/VPN and HTTPS"
         );
     }
+    if let Some(started) = config.setup_started {
+        let _ = started.send(address);
+    }
     axum::serve(listener, app).await.context("run Web server")?;
     Ok(())
+}
+
+pub(crate) fn setup_ready(path: &std::path::Path, profile: Option<&str>) -> bool {
+    setup::setup_ready(path, profile)
 }
 
 async fn composer(

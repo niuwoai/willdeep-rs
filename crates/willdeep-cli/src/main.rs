@@ -17,6 +17,7 @@ mod agent_metrics;
 mod audit_cmd;
 mod builtin_plugins;
 mod config;
+mod config_plugin;
 mod daemon;
 mod detached_delivery;
 mod doctor;
@@ -633,16 +634,23 @@ async fn run() -> Result<()> {
     let administrative =
         cli.list_projects || cli.list_sessions || cli.list_approvals || cli.clear_approvals;
     // 没有配置文件不等于要先设置：环境里有认得出的钥匙（或命令行给全了）就直接跑。
-    if cli.onboarding
-        || (!cli.web
-            && !administrative
-            && cli.config.is_none()
-            && !config::default_config_path()?.exists()
-            && !zero_config_ready(&cli))
-    {
-        onboarding::run(cli.config.as_deref()).await?;
-    }
-    let loaded = LoadedConfig::load(cli.config.as_deref())?;
+    let browser_setup = if cli.onboarding {
+        onboarding::run(cli.config.as_deref()).await?
+    } else {
+        !cli.web && !administrative && onboarding::needs_web_setup(&cli)
+    };
+    let _setup_server = if browser_setup && !cli.web {
+        Some(onboarding::configure_in_browser(&cli).await?)
+    } else {
+        None
+    };
+    let loaded = if cli.web && onboarding::needs_web_setup(&cli) {
+        LoadedConfig {
+            file: config::ConfigFile::default(),
+        }
+    } else {
+        LoadedConfig::load(cli.config.as_deref())?
+    };
     let language = i18n::Language::parse(
         cli.language
             .as_deref()
@@ -683,11 +691,15 @@ async fn run() -> Result<()> {
         }
         return web::serve(web::WebConfig {
             listen: cli.listen,
-            config_path: cli.config.clone().unwrap_or(config::default_config_path()?),
+            config_path: std::path::absolute(
+                cli.config.clone().unwrap_or(config::default_config_path()?),
+            )?,
             profile: cli.profile.clone(),
             workspaces,
             home,
             language,
+            open_setup: cli.onboarding || onboarding::needs_web_setup(&cli),
+            setup_started: None,
         })
         .await;
     }

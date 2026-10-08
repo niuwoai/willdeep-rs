@@ -2,6 +2,7 @@ export const languages = ["zh-CN", "en", "ja"] as const;
 export type Language = (typeof languages)[number];
 
 const zhCN = {
+  setupTitle: "首次设置：配置模型 Provider", setupEnable: "先在插件中心查看 willdeep-config 的权限，批准并启用。", setupConfigure: "打开 willdeep-config，添加你使用的模型服务。", setupSteps: "添加 Provider → 填写 API Base、API Key 和模型 → 选择默认 Provider → 预览并应用 → 校验配置。", setupFile: "配置文件", setupRubyMissing: "配置插件需要 /usr/bin/ruby；此环境未检测到。可在另一个终端运行 willdeep --onboarding，选择终端手动配置。", setupOpenConfig: "打开配置插件", setupOpenPlugins: "打开插件中心", setupDone: "配置好了，开始使用", setupChecking: "正在检查…", setupIncomplete: "默认 Provider 尚未就绪，请检查默认选择、地址、密钥和模型，应用后再试。", setupCheckFailed: "无法检查配置，请重试。", setupLater: "稍后配置",
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "工作区", session: "历史会话", newSession: "新会话", language: "语言",
   quickSettings: "语言与主题", planTitle: "执行计划", planPending: "待开始", planSkipped: "已跳过", planProgress: "{finished}/{total} 项已结束", hostActivity: "系统自动推进", conversationOriginal: "查看原始记录",
@@ -58,6 +59,7 @@ const zhCN = {
 export type Messages = typeof zhCN;
 
 const en: Messages = {
+  setupTitle: "First-use setup: model providers", setupEnable: "Review willdeep-config permissions in the plugin center, then approve and enable it.", setupConfigure: "Open willdeep-config and add your model service.", setupSteps: "Add a provider → enter API Base, API Key and model → choose the default provider → preview and apply → validate.", setupFile: "Configuration file", setupRubyMissing: "This plugin requires /usr/bin/ruby, which was not found. Run willdeep --onboarding in another terminal and choose manual terminal setup.", setupOpenConfig: "Open configuration plugin", setupOpenPlugins: "Open plugin center", setupDone: "Configuration saved, start using", setupChecking: "Checking…", setupIncomplete: "The default provider is not ready. Check the default selection, endpoint, credentials and model, apply changes and try again.", setupCheckFailed: "Could not check configuration. Try again.", setupLater: "Set up later",
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "Workspace", session: "Sessions", newSession: "New session", language: "Language",
   quickSettings: "Language and theme", planTitle: "Execution plan", planPending: "Pending", planSkipped: "Skipped", planProgress: "{finished}/{total} steps ended", hostActivity: "Automatic system activity", conversationOriginal: "View original records",
@@ -112,6 +114,7 @@ const en: Messages = {
 };
 
 const ja: Messages = {
+  setupTitle: "初回設定：モデル Provider", setupEnable: "プラグインセンターで willdeep-config の権限を確認し、承認して有効にしてください。", setupConfigure: "willdeep-config を開き、モデルサービスを追加してください。", setupSteps: "Provider を追加 → API Base・API Key・モデルを入力 → デフォルトを選択 → プレビューして適用 → 検証。", setupFile: "設定ファイル", setupRubyMissing: "このプラグインは /usr/bin/ruby が必要です。別のターミナルで willdeep --onboarding を実行し、手動設定を選んでください。", setupOpenConfig: "設定プラグインを開く", setupOpenPlugins: "プラグインセンターを開く", setupDone: "設定完了、利用を開始", setupChecking: "確認中…", setupIncomplete: "デフォルト Provider の選択・接続先・認証情報・モデルを確認し、変更を適用して再試行してください。", setupCheckFailed: "設定を確認できませんでした。再試行してください。", setupLater: "後で設定",
   documentTitle: "WillDeep Web", appName: "WillDeep", webHarness: "Web Harness",
   workspace: "ワークスペース", session: "履歴", newSession: "新しいセッション", language: "言語",
   quickSettings: "言語とテーマ", planTitle: "実行計画", planPending: "未着手", planSkipped: "スキップ", planProgress: "{finished}/{total} ステップ終了", hostActivity: "システムの自動進行", conversationOriginal: "元の記録を表示",

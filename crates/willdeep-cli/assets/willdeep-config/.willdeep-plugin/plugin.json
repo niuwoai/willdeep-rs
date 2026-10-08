@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "minimumWillDeepVersion": "1.300.0-rc1",
+  "contributes": {
+    "destinations": [{
+      "id": "config",
+      "titleKey": "destination.config",
+      "icon": "sf:gearshape",
+      "mainPage": "config.main",
+      "toolbarCommandIDs": ["config.refreshPage"],
+      "defaultPinned": false
+    }],
+    "pages": [{
+      "id": "config.main",
+      "runtime": "localWeb",
+      "entryPath": "ui/index.html"
+    }],
+    "commands": [
+      {
+        "id": "config.open",
+        "titleKey": "command.config.open",
+        "icon": "sf:gearshape",
+        "handler": {"type": "navigate", "destination": "config"}
+      },
+      {
+        "id": "config.refreshPage",
+        "titleKey": "command.config.refreshPage",
+        "icon": "sf:arrow.clockwise",
+        "handler": {"type": "host", "action": "plugin.refresh"}
+      },
+      {
+        "id": "config.snapshot",
+        "titleKey": "command.config.snapshot",
+        "icon": "sf:doc.text",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.snapshot"}
+      },
+      {
+        "id": "config.plan",
+        "titleKey": "command.config.plan",
+        "icon": "sf:list.bullet.rectangle",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.plan"}
+      },
+      {
+        "id": "config.apply",
+        "titleKey": "command.config.apply",
+        "icon": "sf:checkmark.circle",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.apply"}
+      },
+      {
+        "id": "config.validate",
+        "titleKey": "command.config.validate",
+        "icon": "sf:checkmark.shield",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.validate"}
+      },
+      {
+        "id": "config.backups",
+        "titleKey": "command.config.backups",
+        "icon": "sf:externaldrive",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.backups"}
+      },
+      {
+        "id": "config.restore",
+        "titleKey": "command.config.restore",
+        "icon": "sf:arrow.uturn.backward",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.restore"}
+      },
+      {
+        "id": "config.render",
+        "titleKey": "command.config.render",
+        "icon": "sf:doc.richtext",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.render"}
+      },
+      {
+        "id": "config.reveal",
+        "titleKey": "command.config.reveal",
+        "icon": "sf:eye",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.reveal_secret"}
+      }
+    ],
+    "menus": {
+      "commandPalette": ["config.open", "config.refreshPage"],
+      "plugin.page.toolbar": ["config.refreshPage"]
+    },
+    "settings": []
+  },
+  "permissions": ["process.execute", "clipboard.write"],
+  "dependencies": {"mcpServers": ["config"], "skills": []}
+}

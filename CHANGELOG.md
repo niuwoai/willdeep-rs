@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.93.0-rc1] - 2026-10-08
+
+### Added
+- 未配置 Provider 时，首次命令行启动自动提供后台 WebApp 与 willdeep-config 配置页地址，等待用户保存后继续进入 TUI；随 CLI 内嵌配置插件，保留 some.im 登录和终端手动配置，已有环境变量配置直接启动。
+
+### Fixed
+- Web 配置插件使用宿主实际的 `--config` / `WILLDEEP_HOME` 配置文件及备份目录，避免编辑到另一份默认配置。
+
 ## [0.92.0-rc1] - 2026-10-08
 
 ### Added

@@ -1,0 +1,13 @@
+{
+  "destination.config": "Config",
+  "command.config.open": "Open Config",
+  "command.config.refreshPage": "Refresh Page",
+  "command.config.snapshot": "Get Config Snapshot",
+  "command.config.plan": "Plan Config Changes",
+  "command.config.apply": "Apply Config Changes",
+  "command.config.validate": "Validate Config",
+  "command.config.backups": "List Backups",
+  "command.config.restore": "Restore Backup",
+  "command.config.render": "Render Config Template",
+  "command.config.reveal": "Reveal Secret"
+}

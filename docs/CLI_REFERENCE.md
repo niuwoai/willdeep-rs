@@ -70,7 +70,7 @@ willdeep --profile some-im --workspace .
 | `--web` | 启动内嵌浏览器 UI 与 JSON API，见 [Web 端指南](WEB_GUIDE.md) |
 | `--listen <ADDR>` | Web 监听地址，默认 `127.0.0.1:9847` |
 | `--web-workspace <PATH>` | Web 模式额外允许的工作区，可重复 |
-| `--onboarding` | 重新运行交互式首次设置 |
+| `--onboarding` | 重新运行首次设置：默认打开 WebApp / willdeep-config，也可选择 some.im 登录或终端手动配置；见 [首次配置指南](FIRST_USE_SETUP.md) |
 | `--json` | 在 stdout 输出 NDJSON 事件 |
 | `-r`, `--resume [ID\|latest]` | 恢复已保存的会话；省略值时直接加载最近更新的会话 |
 

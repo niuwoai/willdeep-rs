@@ -43,7 +43,7 @@ willdeep --version
 
 ```bash
 export SOMEIM_API_KEY=...        # 或 ANTHROPIC_API_KEY；OpenAI 兼容端点的写法见配置指南
-willdeep --onboarding            # 或者走一遍交互式设置，把 Provider 写进 ~/.willdeep/config.toml
+willdeep --onboarding            # 打开 WebApp 配置引导，也可选择终端手动配置
 ```
 
 **3. 开干。** 同一个二进制，三种用法：

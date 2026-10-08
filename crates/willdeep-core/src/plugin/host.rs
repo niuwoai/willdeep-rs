@@ -107,6 +107,7 @@ pub struct PluginHost {
     connecting: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     /// 插件 MCP 进程反向请求宿主时交给谁处理。没设就不宣告任何方法。
     host_requests: std::sync::RwLock<Option<Arc<dyn PluginHostRequests>>>,
+    config_path: std::sync::RwLock<Option<PathBuf>>,
     catalog: PluginToolCatalog,
 }
 
@@ -167,12 +168,22 @@ impl PluginHost {
             connections: Mutex::new(BTreeMap::new()),
             connecting: Mutex::new(BTreeMap::new()),
             host_requests: std::sync::RwLock::new(None),
+            config_path: std::sync::RwLock::new(None),
             catalog: PluginToolCatalog::new(home),
         })
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Configuration editor uses the Web host's actual config, including --config.
+    /// Set before the first MCP connection; existing connections keep their environment.
+    pub fn set_config_path(&self, path: PathBuf) {
+        *self
+            .config_path
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(path);
     }
 
     /// 装上反向请求处理器。只影响之后新建的连接，所以在第一次用插件之前调用。
@@ -436,6 +447,22 @@ impl PluginHost {
             // 免得宿主把图写在一处、插件去另一处找。插件自己声明了就不覆盖。
             env.entry("WILLDEEP_HOME".to_owned())
                 .or_insert_with(|| self.home.display().to_string());
+            if plugin_id == "willdeep-config"
+                && let Some(path) = self
+                    .config_path
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+            {
+                env.insert("WD_CONFIG_FILE".to_owned(), path.display().to_string());
+                env.insert(
+                    "WD_CONFIG_BACKUP_DIR".to_owned(),
+                    self.home
+                        .join("plugin-data/willdeep-config/backups")
+                        .display()
+                        .to_string(),
+                );
+            }
             // 每个插件一个私有数据目录，宿主负责建好并告诉它在哪：插件不必
             // 自己猜 `plugin-data/<id>` 的约定，也不会写到别的插件那边去。
             let data_dir = plugin_data_dir(&self.home, plugin_id);

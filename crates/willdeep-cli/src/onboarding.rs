@@ -11,27 +11,123 @@ use crate::config;
 const SOME_IM_ORIGIN: &str = "https://some.im";
 const CLIENT_ID: &str = "willdeep";
 
-pub async fn run(explicit_path: Option<&Path>) -> Result<()> {
+/// Returns true when the user chose the browser configuration flow.
+pub async fn run(explicit_path: Option<&Path>) -> Result<bool> {
     if !io::stdin().is_terminal() {
         bail!("first-use setup needs an interactive terminal; pass --config or provider flags");
     }
     println!("WillDeep 首次设置");
-    println!("1) some.im 浏览器登录（推荐）\n2) 手动填写 API Base / API Key");
+    println!(
+        "1) 打开 WebApp，在 willdeep-config 中配置 Provider（推荐）\n2) some.im 浏览器登录\n3) 在终端填写 API Base / API Key"
+    );
     let choice = prompt("选择 [1]: ")?;
-    let (provider, base, key, model) = if choice.trim().is_empty() || choice.trim() == "1" {
+    if choice.trim().is_empty() || choice.trim() == "1" {
+        println!("将在本机启动 WebApp，终端会给出配置地址；保存配置后自动继续启动命令行。");
+        return Ok(true);
+    }
+    let (provider, base, key, model) = if choice.trim() == "2" {
         some_im_login().await?
-    } else {
+    } else if choice.trim() == "3" {
         let base = required("API Base: ")?;
         let key = required("API Key（输入会显示，请留意终端历史）: ")?;
         let model = required("模型名: ")?;
         ("openai-compatible".to_owned(), base, key, model)
+    } else {
+        bail!("请选择 1、2 或 3");
     };
     let path = explicit_path
         .map(Path::to_path_buf)
         .unwrap_or(config::default_config_path()?);
     write_config(&path, &provider, &base, &key, &model)?;
     println!("配置已保存到 {}（权限仅当前用户可读写）", path.display());
-    Ok(())
+    Ok(false)
+}
+
+pub(crate) fn needs_web_setup(cli: &crate::Cli) -> bool {
+    let path = cli
+        .config
+        .clone()
+        .or_else(|| config::default_config_path().ok());
+    !crate::zero_config_ready(cli)
+        && path.is_some_and(|path| !crate::web::setup_ready(&path, cli.profile.as_deref()))
+}
+
+/// Keep the local configuration WebApp alive only for this CLI process.
+pub(crate) struct SetupServer(tokio::task::JoinHandle<Result<()>>);
+
+impl Drop for SetupServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(crate) async fn configure_in_browser(cli: &crate::Cli) -> Result<SetupServer> {
+    if !io::stdin().is_terminal() {
+        bail!("first-use setup needs an interactive terminal; pass --config or provider flags");
+    }
+    if !cli.listen.ip().is_loopback() {
+        bail!("Provider setup requires a loopback listen address");
+    }
+    let config_path =
+        std::path::absolute(cli.config.clone().unwrap_or(config::default_config_path()?))?;
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or(std::env::current_dir()?)
+        .canonicalize()?;
+    // A dedicated ephemeral port avoids taking over an existing user's WebApp.
+    let mut listen = cli.listen;
+    listen.set_port(0);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let server = SetupServer(tokio::spawn(crate::web::serve(crate::web::WebConfig {
+        listen,
+        config_path: config_path.clone(),
+        profile: cli.profile.clone(),
+        workspaces: vec![workspace],
+        home: crate::willdeep_home()?,
+        language: crate::i18n::Language::parse(cli.language.as_deref())?,
+        open_setup: true,
+        setup_started: Some(started),
+    })));
+    let address = tokio::time::timeout(Duration::from_secs(30), ready)
+        .await
+        .context("等待配置 WebApp 启动超时")?
+        .context("配置 WebApp 启动失败，请使用 --web 查看错误")?;
+    println!(
+        "尚未配置 Provider。willdeep-config 已随 CLI 内置。\n请打开 WebApp 配置地址：http://{address}/?setup=1#plugins\n配置插件地址：http://{address}/?setup=1#plugin/willdeep-config%3Aconfig\n首次使用请先在插件中心批准并启用 willdeep-config，然后添加 Provider、模型并设置默认 Provider。\n配置文件：{}\n终端正在等待保存配置，完成后自动继续；按 Ctrl+C 取消。",
+        config_path.display()
+    );
+    println!(
+        "插件需要 /usr/bin/ruby；缺少 Ruby 或无法使用浏览器时，可取消后运行 willdeep --onboarding，选择 3 在终端配置。"
+    );
+    loop {
+        if crate::web::setup_ready(&config_path, cli.profile.as_deref()) {
+            println!("Provider 配置已就绪，继续启动命令行。");
+            return Ok(server);
+        }
+        if server.0.is_finished() {
+            bail!("配置 WebApp 已停止，请重新运行 willdeep");
+        }
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                bail!("已取消首次配置");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+    }
+}
+
+pub(crate) fn open_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).status();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
+        .status();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(url).status();
+    result.is_ok_and(|status| status.success())
 }
 
 async fn some_im_login() -> Result<(String, String, String, String)> {
@@ -194,6 +290,31 @@ fn prompt(label: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_existing_configuration_still_requires_setup() {
+        use clap::Parser;
+        let root = std::env::temp_dir().join(format!("onboarding-detection-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let mut cli = crate::Cli::parse_from(["willdeep"]);
+        cli.config = Some(path.clone());
+        if !crate::zero_config_ready(&cli) {
+            assert!(needs_web_setup(&cli));
+            std::fs::write(&path, "version = 1\n").unwrap();
+            assert!(needs_web_setup(&cli));
+            write_config(
+                &path,
+                "openai-compatible",
+                "https://example.invalid/v1",
+                "placeholder",
+                "model",
+            )
+            .unwrap();
+            assert!(!needs_web_setup(&cli));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn extracts_credentials_from_supported_wrappers() {

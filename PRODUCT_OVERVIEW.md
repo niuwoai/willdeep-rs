@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-10-08 | 当前版本：v0.92.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-08 | 当前版本：v0.93.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 - 跨端运行参数 v1：与 Mac 共用完整 JSON、严格校验及 SHA-256 生效指纹；检查点与 RSI 对照门禁核对配置一致性。反馈支持有界待审队列、按需模型异常分流和独立人工结论。契约与执行差异见 [RSI 运行参数 v1](docs/RSI_RUNTIME_PARAMETERS_V1.md)。
 
@@ -16,6 +16,7 @@
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
 ## 核心功能
+- 首次命令行启动时，未配置 Provider 的用户直接收到后台 WebApp 与 willdeep-config 配置地址，保存后自动继续进入 TUI；随包提供配置插件，沿用插件中心的权限审批与启用流程。无 `/usr/bin/ruby` 的环境可用 `--onboarding` 选择终端配置，环境变量已配置的用户不重复引导。
 
 - 手机中继由 Runtime Daemon 托管：`/mobile` 或 `willdeep daemon mobile enable` 打开后持久在线，关掉终端、升级 Runtime 都不断；手机上能看到整个 Runtime 的会话、历史消息与所有待处理的审批和提问，能做的写操作只有四件——发提示词（含图片）、在已登记工作区新建会话、停止当前轮次、批准 / 拒绝审批（只给「这一次」，不给「总是允许」）与回答提问。命令走字面量白名单映射到已有 Runtime 操作，删改会话、登记工作区、改档位与模型一概不开放；手机先答掉的审批，TUI 里的对话框自动撤回。详见 docs/MOBILE.md 与 docs/decisions/2026-09-23-daemon-mobile-relay.md。
 
