@@ -718,6 +718,48 @@ async fn stops_before_returning_when_token_budget_is_exhausted() {
 }
 
 #[tokio::test]
+async fn unknown_usage_blocks_proposed_tools_before_any_side_effect() {
+    struct Unbilled;
+    #[async_trait]
+    impl Provider for Unbilled {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<Completion, ProviderError> {
+            Ok(Completion {
+                tool_calls: vec![ToolCall {
+                    id: "write".into(),
+                    name: "write_file".into(),
+                    arguments: r#"{"path":"unexpected.txt","content":"side effect"}"#.into(),
+                }],
+                finish_reason: Some("tool_calls".into()),
+                ..Completion::default()
+            })
+        }
+    }
+    let root =
+        std::env::temp_dir().join(format!("willdeep-unknown-usage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let agent = Agent::new(
+        Arc::new(Unbilled),
+        ToolRegistry::new(&root, ApprovalMode::FullAccess).unwrap(),
+        AgentConfig {
+            max_turns: 2,
+            system_prompt: "system".into(),
+            context_window: 128_000,
+            token_budget: Some(1000),
+        },
+    );
+    assert!(matches!(
+        agent.run("work").await,
+        Err(AgentError::TokenBudgetUsageUnknown)
+    ));
+    assert!(!root.join("unexpected.txt").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn parent_instruction_prevents_early_finish_and_continues_next_turn() {
     let inbox = Arc::new(AgentInstructionInbox::default());
     let provider = Arc::new(InstructionProvider {

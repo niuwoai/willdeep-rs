@@ -33,6 +33,7 @@ require_relative 'lib/prompt_rsi/gate'
 require_relative 'lib/prompt_rsi/report'
 require_relative 'lib/prompt_rsi/preflight'
 require_relative 'lib/suggestion_report'
+require_relative 'lib/runtime_parameters'
 
 module PromptRsiEval
   ROOT = File.expand_path('..', __dir__)
@@ -74,6 +75,7 @@ module PromptRsiEval
                '--binary', options[:binary], '--timeout', options[:timeout].to_s,
                '--max-turns', options[:turns].to_s]
     command += ['--jobs', options.fetch(:jobs, 1).to_s]
+    command += ['--runtime-parameters', options[:runtime_parameters]] if options[:runtime_parameters]
     if options[:checkpoint_dir]
       checkpoint = File.join(options[:checkpoint_dir], "#{label}.json")
       command += ['--checkpoint', checkpoint]
@@ -199,6 +201,10 @@ module PromptRsiEval
                                           binary_commit: variant['binary_commit'])
     provenance = variant.merge('model' => options[:model], 'commit' => context[:commit], 'dirty' => context[:dirty],
                                'binary_version' => binary_version(options[:binary]), 'parallel_jobs' => options.fetch(:jobs, 1))
+    if options[:suite] == 'model-eval'
+      runtime = RuntimeParameters.query(options[:binary], config: options[:config], turns: options[:turns])
+      provenance['runtime_parameters_sha256'] = RuntimeParameters.fingerprint(runtime)
+    end
     missing = ModelEval::Task.load_all(File.dirname(TASKS)).flat_map(&:missing_requirements).uniq if options[:suite] == 'model-eval'
     abort("RSI preflight：缺评测依赖 #{missing.join(', ')}") if missing&.any?
     if options[:preflight]
@@ -206,6 +212,10 @@ module PromptRsiEval
       return 0
     end
     options[:work] = Dir.mktmpdir('prompt-rsi-')
+    if runtime
+      options[:runtime_parameters] = File.join(options[:work], 'runtime-parameters.json')
+      File.write(options[:runtime_parameters], RuntimeParameters.canonical(runtime), mode: 'w', perm: 0o600)
+    end
     if options[:suite] == 'input-suggestion'
       report, raws = run_suggestion(options, provenance)
       if raws.values.all?

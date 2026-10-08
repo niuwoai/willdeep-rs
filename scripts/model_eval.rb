@@ -29,6 +29,7 @@ require 'tmpdir'
 
 require_relative 'lib/agent_eval_observation'
 require_relative 'lib/agent_eval_process'
+require_relative 'lib/runtime_parameters'
 require_relative 'lib/model_eval/config'
 require_relative 'lib/model_eval/report'
 require_relative 'lib/model_eval/task'
@@ -88,6 +89,12 @@ module ModelEval
       @run_root = Dir.mktmpdir('model-eval-run-')
       FileUtils.chmod(0o700, @run_root)
       @config = derive_config(@options[:config], @run_root)
+      @runtime_parameters = if @options[:runtime_parameters]
+                              RuntimeParameters.parse(File.read(@options[:runtime_parameters]))
+                            else
+                              RuntimeParameters.query(@binary, config: @config, turns: @options[:turns])
+                            end
+      @runtime_parameters_sha256 = RuntimeParameters.fingerprint(@runtime_parameters)
       context = Report.git_context(ROOT)
       warn "工作区不干净：这轮成绩挂在一个没提交的状态上，回放不了。" if context[:dirty]
       prepare_checkpoint(context)
@@ -146,6 +153,7 @@ module ModelEval
         'commit' => context[:commit], 'source' => Report.source_digest(ROOT),
         'binary_sha256' => Digest::SHA256.file(binary).hexdigest,
         'config_sha256' => Digest::SHA256.file(@config).hexdigest,
+        'runtime_parameters_sha256' => @runtime_parameters_sha256,
         'environment_sha256' => Digest::SHA256.hexdigest(JSON.generate(ENV.to_h.reject { |key, _| %w[PWD OLDPWD SHLVL _].include?(key) }.sort)),
         'models' => @options[:models], 'profile' => @options[:profile],
         'timeout' => @options[:timeout], 'turns' => @options[:turns], 'jobs' => @options.fetch(:jobs, 1),
@@ -187,6 +195,7 @@ module ModelEval
       home = File.join(slot, 'home')
       logs = File.join(slot, 'logs')
       [workspace, home, logs].each { |dir| FileUtils.mkdir_p(dir, mode: 0o700) }
+      File.write(File.join(home, 'runtime-parameters.json'), RuntimeParameters.canonical(@runtime_parameters), mode: 'w', perm: 0o600)
       begin
         Verifier.seed(task, workspace)
       rescue Verifier::SeedError => e
@@ -234,6 +243,8 @@ module ModelEval
         content_violations: verdict[:content_violations],
         mutants_caught: verdict[:mutants_caught], mutants_total: verdict[:mutants_total],
         elapsed_seconds: elapsed.round(1), input_tokens: tokens['input_tokens'], output_tokens: tokens['output_tokens'],
+        runtime_parameters: tokens['runtime_parameters'],
+        runtime_parameters_sha256: tokens['runtime_parameters_sha256'],
         # 实际生效的提示词变体：willdeep 在 JSON 结果里报告（null 即没有变体）；
         # 没拿到结果（超时、崩溃）时 reported 为 false。
         prompt_variant_reported: result.key?('prompt_variant'),
@@ -357,6 +368,7 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--kind KIND', "只跑这一类任务（#{ModelEval::KINDS.join(' / ')}）") { |v| options[:kind] = v }
     parser.on('--binary PATH', 'willdeep 二进制，缺省 PATH 里的 willdeep') { |v| options[:binary] = v }
     parser.on('--config PATH', '用户配置文件，缺省 ~/.willdeep/config.toml') { |v| options[:config] = File.expand_path(v) }
+    parser.on('--runtime-parameters PATH', '冻结的跨端运行参数 JSON') { |v| options[:runtime_parameters] = File.expand_path(v) }
     parser.on('--timeout SECONDS', Integer, "每个任务的墙钟上限，缺省 #{ModelEval::DEFAULT_TIMEOUT}") { |v| options[:timeout] = v }
     parser.on('--max-turns N', Integer, "每个任务的模型调用上限，缺省 #{ModelEval::DEFAULT_MAX_TURNS}") { |v| options[:turns] = v }
     parser.on('--jobs N', Integer, '任务并发数 1..4，默认 1；耗时对照请用 1') { |v| options[:jobs] = v }

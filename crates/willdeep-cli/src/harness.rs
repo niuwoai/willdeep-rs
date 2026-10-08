@@ -722,6 +722,32 @@ pub(crate) async fn build(
     resumed: Option<&willdeep_core::Session>,
     frontend: HarnessFrontend,
 ) -> Result<BuiltHarness> {
+    // Resolve before gateway/provider requests. Invalid explicit profiles never
+    // silently run with legacy defaults.
+    let mut effective = LoadedConfig {
+        file: loaded.file.clone(),
+    };
+    if let Some(parameters) = willdeep_core::runtime_parameters::RuntimeParameters::load(home)
+        .map_err(anyhow::Error::msg)?
+    {
+        let settings = &mut effective.file.agent;
+        settings.max_turns = Some(parameters.max_turns);
+        settings.token_budget = parameters.token_budget;
+        settings.goal_token_budget = parameters.goal_token_budget;
+        settings.goal_wall_clock_minutes = Some(parameters.goal_wall_clock_minutes);
+        settings.goal_max_continuations = Some(parameters.goal_max_continuations);
+        settings.input_suggestions = Some(parameters.input_suggestions);
+        settings.small_model_routing = Some(parameters.small_model_routing);
+        settings.auto_dispatch_read_only = Some(parameters.auto_dispatch_read_only);
+        settings.max_deep_calls_per_harness = Some(parameters.max_deep_calls_per_harness);
+    }
+    let loaded = &effective;
+    let max_turns = cli
+        .max_turns
+        .or(loaded.file.agent.max_turns)
+        .unwrap_or(crate::config::DEFAULT_MAX_TURNS);
+    let parameters = loaded.file.agent.runtime_parameters(max_turns);
+    parameters.validate().map_err(anyhow::Error::msg)?;
     let session_id = resumed
         .map(|session| session.id)
         .unwrap_or_else(uuid::Uuid::new_v4);
@@ -743,16 +769,6 @@ pub(crate) async fn build(
     let kind = provider_config.kind;
     let model = provider_config.model.clone();
     // 缺省值与上限见 config.rs：命令行、配置、缺省三级取值，同一把尺子校验。
-    let max_turns = cli
-        .max_turns
-        .or(loaded.file.agent.max_turns)
-        .unwrap_or(crate::config::DEFAULT_MAX_TURNS);
-    if !(1..=crate::config::MAX_TURNS_CEILING).contains(&max_turns) {
-        bail!(
-            "--max-turns must be between 1 and {}",
-            crate::config::MAX_TURNS_CEILING
-        );
-    }
     let workspace = resolve_workspace(cli, resumed)?;
     // 本机用量账本（docs/USAGE_LEDGER.md）。主回合、子 Agent、压缩由 Agent 在
     // 主循环里记；这里只把辅助用途的 Provider 包上按调用记账——被主循环用的
@@ -761,7 +777,8 @@ pub(crate) async fn build(
         willdeep_core::usage_ledger::shared_sink(&willdeep_core::usage_ledger::ledger_dir(home)),
         usage_ledger_context(&frontend, session_id, &workspace),
     );
-    let feedback = feedback_recorder(home, &loaded.file.feedback, usage_ledger.context());
+    let feedback = feedback_recorder(home, &loaded.file.feedback, usage_ledger.context())
+        .with_runtime_parameters(parameters);
     let web_tools = (kind == ProviderKind::SomeIm).then(|| WebToolConfig {
         some_im_base_url: provider_config.base_url.clone(),
         api_key: provider_config.api_key.clone(),
@@ -1106,7 +1123,7 @@ pub(crate) async fn build(
         agent = agent.with_instruction_inbox(inbox);
     }
     let routing_policy = RoutingPolicy {
-        auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(true),
+        auto_dispatch_read_only: loaded.file.agent.auto_dispatch_read_only.unwrap_or(false),
         max_deep_calls: loaded.file.agent.max_deep_calls_per_harness.unwrap_or(1),
     };
     if loaded.file.agent.small_model_routing.unwrap_or(true) {

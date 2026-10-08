@@ -42,7 +42,17 @@ pub(super) fn recover(
     if !settings.goal_auto_resume.unwrap_or(true) {
         return Ok(0);
     }
-    let budget = settings.goal_budget();
+    let mut budget = settings.goal_budget();
+    if let Some(parameters) =
+        willdeep_core::runtime_parameters::RuntimeParameters::load(&state.home)
+            .map_err(anyhow::Error::msg)?
+    {
+        budget.wall_clock = Some(std::time::Duration::from_secs(
+            parameters.goal_wall_clock_minutes * 60,
+        ));
+        budget.max_continuations = parameters.goal_max_continuations;
+        budget.max_tokens = parameters.goal_token_budget;
+    }
     let mut resumed = 0;
     for candidate in state.sessions.goal_resume_candidates(ORIGIN_PREFIX)? {
         let Ok(Some(goal)) = state.sessions.core_goal_state(candidate.session_id) else {

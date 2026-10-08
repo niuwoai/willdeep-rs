@@ -23,6 +23,7 @@ mod doctor;
 mod editor;
 mod event_cmd;
 mod feedback_cmd;
+mod feedback_review_cmd;
 mod handoff_cmd;
 mod harness;
 mod i18n;
@@ -601,7 +602,7 @@ async fn run() -> Result<()> {
                 audit_cmd::run(action, &willdeep_home()?, language)
             }
             CliCommand::Usage { action } => usage_cmd::run(action, &willdeep_home()?),
-            CliCommand::Feedback { action } => feedback_cmd::run(action, &willdeep_home()?),
+            CliCommand::Feedback { action } => feedback_review_cmd::run(action, &cli).await,
             CliCommand::Prompt { action } => prompt_cmd::run(action, &cli).await,
             CliCommand::Mcp { action } => {
                 let language = administrative_language(&cli)?;

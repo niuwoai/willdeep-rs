@@ -18,6 +18,10 @@ pub enum CheckpointStatus {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CheckpointMetadata {
     #[serde(default)]
+    pub runtime_parameters: Option<crate::runtime_parameters::RuntimeParameters>,
+    #[serde(default)]
+    pub runtime_parameters_sha256: Option<String>,
+    #[serde(default)]
     pub required_verifications: Vec<String>,
     #[serde(default)]
     pub verification_evidence: Vec<VerificationEvidence>,
@@ -76,6 +80,7 @@ pub(crate) struct CheckpointRecorder<'a> {
     pending_stream_bytes: usize,
     evidence_source: Option<&'a crate::tools::ToolRegistry>,
     goal_source: Option<&'a crate::goal::GoalContinuation>,
+    runtime_parameters: Option<crate::runtime_parameters::RuntimeParameters>,
 }
 
 pub(crate) const STREAM_CHECKPOINT_INTERVAL: std::time::Duration =
@@ -94,12 +99,20 @@ impl<'a> CheckpointRecorder<'a> {
             pending_stream_bytes: 0,
             evidence_source: None,
             goal_source: None,
+            runtime_parameters: None,
         }
     }
 
     /// 每次落检查点时顺带写目标快照。
     pub fn watch_goal(&mut self, goal: Option<&'a crate::goal::GoalContinuation>) {
         self.goal_source = goal;
+    }
+
+    pub fn watch_runtime_parameters(
+        &mut self,
+        parameters: Option<crate::runtime_parameters::RuntimeParameters>,
+    ) {
+        self.runtime_parameters = parameters;
     }
 
     fn goal_snapshot(&self) -> Option<crate::goal::GoalState> {
@@ -181,6 +194,11 @@ impl<'a> CheckpointRecorder<'a> {
             .collect();
         let checkpoint = RunCheckpoint {
             metadata: CheckpointMetadata {
+                runtime_parameters: self.runtime_parameters.clone(),
+                runtime_parameters_sha256: self
+                    .runtime_parameters
+                    .as_ref()
+                    .map(|value| value.fingerprint()),
                 required_verifications: self
                     .evidence_source
                     .map(|tools| tools.required_verifications())
@@ -284,7 +302,9 @@ impl<'a> CheckpointRecorder<'a> {
                     CheckpointStatus::Completed
                 }
                 Ok(_) => CheckpointStatus::Partial,
-                Err(AgentError::TokenBudgetExceeded { .. }) => CheckpointStatus::Partial,
+                Err(
+                    AgentError::TokenBudgetExceeded { .. } | AgentError::TokenBudgetUsageUnknown,
+                ) => CheckpointStatus::Partial,
                 Err(_) => CheckpointStatus::Failed,
             };
             sink.save(checkpoint).map_err(AgentError::Checkpoint)?;

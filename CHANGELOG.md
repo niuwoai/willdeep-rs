@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.92.0-rc1] - 2026-10-08
+
+### Added
+
+- 与 Mac 共用运行参数 JSON 契约、校验范围、默认值和配置指纹，执行反馈记录生效配置。
+- `feedback review-queue` 提供有界优先审阅队列；`feedback review --run ID --assist` 按需模型辅助，`--decision` 单独记录人工结论。
+- 检查点保存生效参数；RSI baseline、candidate 和 holdout 冻结同一配置，门禁拒绝缺失或不一致的参数证据。
+
+### Changed
+
+- 默认串行只读预派发关闭，与 Mac 一致；模型评审只消费运行事实，不替代人工评估、独立验证或候选晋升门禁。
+
 ## [Unreleased]
 
 ## [0.91.0-rc2] - 2026-10-08

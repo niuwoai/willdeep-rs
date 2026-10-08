@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require_relative '../runtime_parameters'
 
 module PromptRsi
   # 候选提示词的晋升门禁（`docs/PROMPT_RSI_DESIGN.md` §8.4、§11）。
@@ -234,6 +235,7 @@ module PromptRsi
       problems.concat(integrity('candidate', candidate_rows, tasks, STAGE_ONE_SPLITS))
       problems.concat(variant_problems('baseline', baseline_rows, nil))
       problems.concat(variant_problems('candidate', candidate_rows, provenance['candidate_bundle']))
+      problems.concat(runtime_problems(provenance, baseline_rows + candidate_rows))
       errors = (baseline_rows + candidate_rows).count { |row| %w[error skipped].include?(row['status']) }
       problems << "#{errors} 个任务没真正执行（error / skipped），对照不成立" if errors.positive?
       problems
@@ -248,9 +250,21 @@ module PromptRsi
       problems.concat(integrity('holdout candidate', holdout[:candidate], tasks, HOLDOUT_SPLITS))
       problems.concat(variant_problems('holdout baseline', holdout[:baseline], nil))
       problems.concat(variant_problems('holdout candidate', holdout[:candidate], provenance['candidate_bundle']))
+      problems.concat(runtime_problems(provenance, holdout[:baseline] + holdout[:candidate]))
       errors = (holdout[:baseline] + holdout[:candidate]).count { |row| %w[error skipped].include?(row['status']) }
       problems << "holdout 有 #{errors} 个任务没真正执行" if errors.positive?
       problems
+    end
+
+    def runtime_problems(provenance, rows)
+      expected = provenance['runtime_parameters_sha256']
+      return ['缺少运行参数指纹，无法复现'] unless expected.is_a?(String) && expected.match?(/\A[0-9a-f]{64}\z/)
+      invalid = rows.reject do |row|
+        row['runtime_parameters_sha256'] == expected && RuntimeParameters.fingerprint(row['runtime_parameters']) == expected
+      rescue RuntimeError
+        false
+      end
+      invalid.empty? ? [] : ["运行参数缺失、被改动或与对照不一致：#{named(invalid.map { |row| row['task'] })}"]
     end
 
     # 完整判定。`tasks` 是任务清单（任务 id → 分组）；`holdout` 为 nil 表示

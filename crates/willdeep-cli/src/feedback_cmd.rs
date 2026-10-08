@@ -47,6 +47,22 @@ const UNSTAMPED: &str = "unstamped";
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum FeedbackAction {
+    /// List a bounded, prioritized queue for human review (counts and identifiers only).
+    ReviewQueue {
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+    },
+    /// Review one recorded run. Model assistance never substitutes for a human decision.
+    Review {
+        #[arg(long)]
+        run: Uuid,
+        /// Ask the configured model to triage runtime evidence; no conversation text is sent.
+        #[arg(long, conflicts_with = "decision")]
+        assist: bool,
+        /// Explicit human disposition: accepted, needs_changes or unknown.
+        #[arg(long, value_parser = ["accepted", "needs_changes", "unknown"])]
+        decision: Option<String>,
+    },
     /// Print the prompt bundle id of every role in this build (main agent, input suggestions, each worker profile).
     ///
     /// Feedback rows carry the bundle id of the prompt that produced them; a
@@ -71,6 +87,9 @@ pub(crate) enum FeedbackAction {
 
 pub(crate) fn run(action: FeedbackAction, home: &Path) -> Result<()> {
     match action {
+        FeedbackAction::ReviewQueue { .. } | FeedbackAction::Review { .. } => {
+            anyhow::bail!("review commands require the feedback review dispatcher")
+        }
         FeedbackAction::Bundles => {
             for bundle in willdeep_core::prompt_bundle::current_bundles() {
                 println!("{bundle}");

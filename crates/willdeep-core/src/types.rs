@@ -267,13 +267,13 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// 这次调用计入预算的 token：Provider 报了总数就用总数，否则输入 + 输出。
+    /// Budget accounting never undercounts a contradictory provider total.
     pub fn billable_tokens(&self) -> u64 {
-        self.total_tokens.unwrap_or_else(|| {
+        self.total_tokens.unwrap_or(0).max(
             self.input_tokens
                 .unwrap_or(0)
-                .saturating_add(self.output_tokens.unwrap_or(0))
-        })
+                .saturating_add(self.output_tokens.unwrap_or(0)),
+        )
     }
 }
 

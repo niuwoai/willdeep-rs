@@ -282,6 +282,7 @@ pub fn error_code(error: &willdeep_core::AgentError) -> &'static str {
         AgentError::EmptyResponse => "empty_stream",
         AgentError::MaxTurns(_) => "max_turns",
         AgentError::TokenBudgetExceeded { .. } => "token_budget_exceeded",
+        AgentError::TokenBudgetUsageUnknown => "token_budget_usage_unknown",
         AgentError::Subagent(_) => "subagent_failed",
         AgentError::SubagentPartial { .. } => "subagent_partial",
         AgentError::Checkpoint(_) => "checkpoint_failed",

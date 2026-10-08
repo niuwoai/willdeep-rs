@@ -1,0 +1,12 @@
+{
+  "schema": "willdeep.runtime-parameters.v1",
+  "max_turns": 200,
+  "token_budget": null,
+  "goal_token_budget": null,
+  "goal_wall_clock_minutes": 240,
+  "goal_max_continuations": 64,
+  "input_suggestions": true,
+  "small_model_routing": true,
+  "auto_dispatch_read_only": false,
+  "max_deep_calls_per_harness": 1
+}

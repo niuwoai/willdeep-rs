@@ -124,6 +124,14 @@ pub struct RoutingGuard {
 }
 
 impl RoutingGuard {
+    /// Shared runtime contract scopes scarce-model admissions to one root run.
+    /// Inspection history survives, but previous runs cannot consume this run's quota.
+    pub fn begin_run(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.deep_calls = 0;
+        }
+    }
+
     pub fn new(policy: RoutingPolicy) -> Self {
         Self {
             policy,

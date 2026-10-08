@@ -23,6 +23,8 @@ mod local_partial;
 mod monitor_events;
 #[path = "headless_runtime/prompt_variant.rs"]
 mod prompt_variant;
+#[path = "headless_runtime/runtime_parameters.rs"]
+mod runtime_parameters;
 
 const MOCK_REPLY: &str = "headless runtime reply";
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());

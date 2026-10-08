@@ -1764,8 +1764,12 @@ async fn input_suggestion(
 
 async fn predict_session_input(state: &WebState, id: uuid::Uuid) -> Option<String> {
     let loaded = crate::config::LoadedConfig::load(Some(&state.config_path)).ok()?;
+    let profile = willdeep_core::runtime_parameters::RuntimeParameters::load(&state.home).ok()?;
     // 开关先看：关着就连会话文件和 Runtime 都不碰。
-    if !loaded.file.agent.input_suggestions.unwrap_or(true) {
+    if !profile
+        .map(|value| value.input_suggestions)
+        .unwrap_or_else(|| loaded.file.agent.input_suggestions.unwrap_or(true))
+    {
         return None;
     }
     let session = SessionStore::new(&state.home).load(id).ok()?;

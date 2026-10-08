@@ -31,9 +31,10 @@ module AgentEvalObservation
     return {} unless id.is_a?(String) && id.match?(/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i)
     session = object(File.join(home, 'sessions', "#{id}.json"))
     return {} unless session['id'] == id && session['execution_checkpoint'].is_a?(Hash)
-    session['execution_checkpoint'].slice('input_tokens', 'output_tokens').transform_values do |value|
+    checkpoint = session['execution_checkpoint']
+    checkpoint.slice('input_tokens', 'output_tokens').transform_values do |value|
       value.is_a?(Integer) && value >= 0 ? value : nil
-    end
+    end.merge(checkpoint.slice('runtime_parameters', 'runtime_parameters_sha256'))
   end
 
   def self.cli_output(path, ndjson: false)

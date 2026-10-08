@@ -18,12 +18,14 @@ require_relative '../lib/prompt_rsi/report'
 require_relative '../prompt_rsi_eval'
 
 class PromptRsiGateTest < Minitest::Test
+  RUNTIME = JSON.parse(File.read(File.expand_path('../../docs/runtime-parameters.example.json', __dir__))).freeze
   PROVENANCE = {
     'variant_id' => 'tone-conclusion-first', 'role' => 'main', 'section' => 'tone',
     'commit' => 'abc1234', 'dirty' => false, 'model' => 'glm-5', 'binary_version' => '0.87.0',
     'binary_commit' => "abc1234#{'0' * 33}",
     'dataset_sha256' => 'd' * 64, 'variant_sha256' => 'v' * 64,
-    'parent_bundle' => 'main@111111111111', 'candidate_bundle' => 'main@222222222222'
+    'parent_bundle' => 'main@111111111111', 'candidate_bundle' => 'main@222222222222',
+    'runtime_parameters_sha256' => RuntimeParameters.fingerprint(RUNTIME)
   }.freeze
 
   # baseline 一行：willdeep 报告了没有套变体。
@@ -31,6 +33,7 @@ class PromptRsiGateTest < Minitest::Test
     { 'task' => task, 'split' => split, 'status' => status, 'false_completion' => false,
       'input_tokens' => 1000, 'output_tokens' => 200, 'elapsed_seconds' => 10.0,
       'prompt_variant_reported' => true, 'prompt_variant_bundle' => nil,
+      'runtime_parameters' => RUNTIME, 'runtime_parameters_sha256' => PROVENANCE['runtime_parameters_sha256'],
       'task_sha256' => "sha-#{task}" }.merge(overrides)
   end
 
@@ -77,6 +80,22 @@ class PromptRsiGateTest < Minitest::Test
     assert_empty failed(result)
     assert_equal 60.0, result['stats']['baseline']['validation']['pass_rate']
     assert_equal 70.0, result['stats']['candidate']['validation']['pass_rate']
+  end
+
+  def test_runtime_parameters_must_be_reported_and_match_the_frozen_snapshot
+    changed = RUNTIME.merge('max_turns' => 17)
+    tampered = candidate_rows.map { |row| row.merge('runtime_parameters' => changed) }
+    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows,
+      candidate: tampered, tasks: tasks, holdout: holdout(2, 3))
+    assert_equal 'non_reproducible', result['verdict']
+    missing = candidate_rows.map { |row| row.reject { |key, _| key == 'runtime_parameters_sha256' } }
+    result = PromptRsi::Gate.evaluate(provenance: PROVENANCE, baseline: baseline_rows,
+      candidate: missing, tasks: tasks, holdout: holdout(2, 3))
+    assert_equal 'non_reproducible', result['verdict']
+    assert_equal 'cbbe63a9094a7d8546d52f38775bf9e8e0f5e010cfabc767a9d4ffb42ee00e1b', RuntimeParameters.fingerprint(RUNTIME)
+    duplicate = RuntimeParameters.canonical(RUNTIME).sub('"max_turns":200', '"max_turns":200,"max_turns":201')
+    assert_raises(RuntimeError) { RuntimeParameters.parse(duplicate) }
+    assert_raises(RuntimeError) { RuntimeParameters.canonical(RUNTIME.merge('max_turns' => 200.0)) }
   end
 
   def test_each_stage_one_rule_rejects_on_its_own

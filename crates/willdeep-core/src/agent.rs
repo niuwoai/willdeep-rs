@@ -350,6 +350,10 @@ pub enum AgentError {
     MaxTurns(usize),
     #[error("agent exhausted its token budget of {budget} tokens (used {used})")]
     TokenBudgetExceeded { budget: u64, used: u64 },
+    #[error(
+        "provider usage is unknown under a bounded token budget; no proposed tools were executed"
+    )]
+    TokenBudgetUsageUnknown,
     #[error("subagent failed: {0}")]
     Subagent(String),
     #[error("subagent stopped with {reason:?} after {turns} rounds; partial result:\n{report}")]
@@ -403,6 +407,12 @@ pub struct Agent {
 }
 
 impl Agent {
+    fn has_bounded_usage(&self) -> bool {
+        self.config.token_budget.is_some()
+            || self.goal_continuation.as_ref().is_some_and(|goal| {
+                goal.default_budget().max_tokens.is_some() && goal.statement().is_some()
+            })
+    }
     pub fn new(provider: Arc<dyn Provider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self {
             provider: crate::provider::MainModelHandle::new(provider),
@@ -788,6 +798,9 @@ impl Agent {
             .transpose()
             .map_err(AgentError::Checkpoint)?;
         let mut recorder = crate::checkpoint::CheckpointRecorder::new(sink);
+        if let Some(routing) = &self.routing {
+            routing.begin_run();
+        }
         recorder.initialize_evidence(&self.tools)?;
         recorder.initialize_verification(
             self.tools
@@ -801,16 +814,24 @@ impl Agent {
         }
         let verifications_before = self.tools.verification_count();
         let feedback = self.feedback.as_ref().map(|feedback| {
-            feedback.for_run(
-                self.provider
-                    .current()
-                    .ok()
-                    .and_then(|provider| provider.ledger_identity()),
-            )
+            feedback
+                .for_run(
+                    self.provider
+                        .current()
+                        .ok()
+                        .and_then(|provider| provider.ledger_identity()),
+                )
+                .with_execution_limits(self.config.max_turns, self.config.token_budget)
         });
         if let Some(feedback) = &feedback {
             feedback.record_run_started();
         }
+        recorder.watch_runtime_parameters(
+            feedback
+                .as_ref()
+                .and_then(|feedback| feedback.runtime_parameters())
+                .cloned(),
+        );
         let result = self
             .run_inner(messages, user_message, &mut recorder, feedback.as_ref())
             .await;
@@ -832,6 +853,12 @@ impl Agent {
                 .tools
                 .run_verification(recorder.verification_baseline(), verifications_before);
             feedback.record_run_verification(verification, ran);
+        }
+        if let Some(feedback) = &feedback {
+            feedback.record_run_finished(match &result {
+                Ok(outcome) => outcome.stop_reason.as_str(),
+                Err(_) => "error",
+            });
         }
         recorder.finish(&result)?;
         result
@@ -941,14 +968,18 @@ impl Agent {
                 .request_messages_accounted(&messages, &mut compressed, &mut |usage| {
                     input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                     output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
-                    used_tokens =
-                        used_tokens.saturating_add(usage.total_tokens.unwrap_or_else(|| {
-                            usage
-                                .input_tokens
-                                .unwrap_or(0)
-                                .saturating_add(usage.output_tokens.unwrap_or(0))
-                        }));
+                    let call_tokens = usage.billable_tokens();
+                    used_tokens = used_tokens.saturating_add(call_tokens);
+                    if let Some(goal) = &self.goal_continuation {
+                        goal.record_tokens(call_tokens);
+                    }
                     checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
+                    if self.has_bounded_usage()
+                        && usage.total_tokens.is_none()
+                        && (usage.input_tokens.is_none() || usage.output_tokens.is_none())
+                    {
+                        return Err(AgentError::TokenBudgetUsageUnknown);
+                    }
                     if let Some(budget) = self.config.token_budget
                         && used_tokens >= budget
                     {
@@ -1069,6 +1100,10 @@ impl Agent {
             // 思考型模型要求把这一轮的思维链随 assistant 消息回传，否则下一轮
             // 带着工具调用的历史会被上游整条拒掉。
             let reasoning = completion.reasoning.clone();
+            let usage_known = completion.usage.as_ref().is_some_and(|usage| {
+                usage.total_tokens.is_some()
+                    || (usage.input_tokens.is_some() && usage.output_tokens.is_some())
+            });
             if let Some(usage) = completion.usage {
                 input_tokens = input_tokens.saturating_add(usage.input_tokens.unwrap_or(0));
                 output_tokens = output_tokens.saturating_add(usage.output_tokens.unwrap_or(0));
@@ -1103,6 +1138,9 @@ impl Agent {
                 // 协议没报 usage：照样记一次调用，Token 留空，不估算。
                 self.settle_model_call(call, None, crate::usage_ledger::Outcome::Ok)
                     .await;
+            }
+            if self.has_bounded_usage() && !usage_known {
+                return Err(AgentError::TokenBudgetUsageUnknown);
             }
             let content = completion.content.trim().to_owned();
             if !content.is_empty() {

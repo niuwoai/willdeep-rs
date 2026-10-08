@@ -10,6 +10,13 @@ pub const CONFIG_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum ConfigAction {
+    /// Show the shared credential-free runtime profile, or create its initial file.
+    Runtime {
+        #[arg(long)]
+        init: bool,
+        #[arg(long)]
+        max_turns: Option<usize>,
+    },
     /// Create a private starter config without overwriting an existing file.
     Init,
     /// Parse and validate the effective config.
@@ -24,6 +31,9 @@ pub fn handle(action: ConfigAction, explicit_path: Option<&Path>) -> Result<()> 
         .map(Ok)
         .unwrap_or_else(default_config_path)?;
     match action {
+        ConfigAction::Runtime { init, max_turns } => {
+            runtime_profile(init, max_turns, explicit_path)
+        }
         ConfigAction::Init => init(&path),
         ConfigAction::Check => {
             let loaded = load_required(&path)?;
@@ -35,6 +45,42 @@ pub fn handle(action: ConfigAction, explicit_path: Option<&Path>) -> Result<()> 
         }
         ConfigAction::Show => show(&path),
     }
+}
+
+fn runtime_profile(init: bool, max_turns: Option<usize>, config_path: Option<&Path>) -> Result<()> {
+    use willdeep_core::runtime_parameters::{FILE_NAME, RuntimeParameters};
+    let home = willdeep_home()?;
+    if init {
+        std::fs::create_dir_all(&home)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        options
+            .open(home.join(FILE_NAME))
+            .context("create shared runtime profile without overwriting")?
+            .write_all(RuntimeParameters::default().canonical().as_bytes())?;
+    }
+    let mut parameters = match RuntimeParameters::load(&home).map_err(anyhow::Error::msg)? {
+        Some(parameters) => parameters,
+        None => {
+            let loaded = LoadedConfig::load(config_path)?;
+            loaded
+                .file
+                .agent
+                .runtime_parameters(loaded.file.agent.max_turns.unwrap_or(DEFAULT_MAX_TURNS))
+        }
+    };
+    if let Some(max_turns) = max_turns {
+        parameters.max_turns = max_turns;
+    }
+    parameters.validate().map_err(anyhow::Error::msg)?;
+    println!("{}", parameters.canonical());
+    Ok(())
 }
 
 fn init(path: &Path) -> Result<()> {
@@ -767,6 +813,23 @@ fn enforce_secret_file_permissions(_file: &ConfigFile, _path: &Path) -> Result<(
 }
 
 impl AgentSettings {
+    pub(crate) fn runtime_parameters(
+        &self,
+        max_turns: usize,
+    ) -> willdeep_core::runtime_parameters::RuntimeParameters {
+        willdeep_core::runtime_parameters::RuntimeParameters {
+            max_turns,
+            token_budget: self.token_budget,
+            goal_token_budget: self.goal_token_budget,
+            goal_wall_clock_minutes: self.goal_wall_clock_minutes.unwrap_or(240),
+            goal_max_continuations: self.goal_max_continuations.unwrap_or(64),
+            input_suggestions: self.input_suggestions.unwrap_or(true),
+            small_model_routing: self.small_model_routing.unwrap_or(true),
+            auto_dispatch_read_only: self.auto_dispatch_read_only.unwrap_or(false),
+            max_deep_calls_per_harness: self.max_deep_calls_per_harness.unwrap_or(1),
+            ..Default::default()
+        }
+    }
     /// `[agent] goal_*` 配置对应的目标预算。
     pub(crate) fn goal_budget(&self) -> willdeep_core::GoalBudget {
         let defaults = willdeep_core::GoalBudget::default();

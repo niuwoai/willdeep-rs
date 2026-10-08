@@ -365,6 +365,9 @@ impl Agent {
             // Emits `AgentEvent::Usage` when there is a bill, and writes one
             // usage-ledger line for this request either way.
             self.settle_model_call(call, usage, outcome).await;
+            if self.has_bounded_usage() && usage.is_none() {
+                return Err(AgentError::TokenBudgetUsageUnknown);
+            }
             if let Some(recorded) = recorded {
                 recorded?;
             }

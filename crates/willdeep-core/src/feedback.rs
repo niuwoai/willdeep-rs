@@ -55,6 +55,9 @@ pub fn feedback_dir(home: &Path) -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Signal {
+    ModelAssessment,
+    HumanDisposition,
+    RunFinished,
     /// 建议以灰字出现在空输入框里。分母。
     SuggestionShown,
     /// Tab 采用（只填入，没发送）。
@@ -140,6 +143,24 @@ pub struct FeedbackRecord {
     pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub runtime_parameters: Option<crate::runtime_parameters::RuntimeParameters>,
+    #[serde(default)]
+    pub runtime_parameters_sha256: Option<String>,
+    #[serde(default)]
+    pub judgment: Option<String>,
+    #[serde(default)]
+    pub judgment_source: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<u8>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub assessment_provider: Option<String>,
+    #[serde(default)]
+    pub assessment_model: Option<String>,
+    #[serde(default)]
+    pub assessment_prompt_sha256: Option<String>,
     pub signal: Signal,
     /// 把同一条建议的多个信号串起来。
     pub suggestion_id: Option<Uuid>,
@@ -210,6 +231,15 @@ impl FeedbackRecord {
             run_id: None,
             provider: None,
             model: None,
+            runtime_parameters: None,
+            runtime_parameters_sha256: None,
+            judgment: None,
+            judgment_source: None,
+            confidence: None,
+            reason_code: None,
+            assessment_provider: None,
+            assessment_model: None,
+            assessment_prompt_sha256: None,
             signal,
             suggestion_id: None,
             text_hash: None,
@@ -279,6 +309,7 @@ pub struct FeedbackRecorder {
     run_id: Option<Uuid>,
     provider: Option<String>,
     model: Option<String>,
+    runtime_parameters: Option<crate::runtime_parameters::RuntimeParameters>,
 }
 
 impl std::fmt::Debug for FeedbackRecorder {
@@ -307,6 +338,7 @@ impl FeedbackRecorder {
             run_id: None,
             provider: None,
             model: None,
+            runtime_parameters: None,
         }
     }
 
@@ -366,6 +398,10 @@ impl FeedbackRecorder {
         self.sink.is_some()
     }
 
+    pub fn runtime_parameters(&self) -> Option<&crate::runtime_parameters::RuntimeParameters> {
+        self.runtime_parameters.as_ref()
+    }
+
     /// 新运行有独立身份，不把旧模型或父 Worker 的模型误挂到新运行上。
     pub fn for_run(&self, identity: Option<crate::provider::ProviderIdentity>) -> Self {
         let mut recorder = self.clone();
@@ -376,7 +412,75 @@ impl FeedbackRecorder {
     }
 
     pub fn record_run_started(&self) {
-        self.record(Signal::RunStarted, |_| {});
+        self.record(Signal::RunStarted, |record| {
+            record.runtime_parameters = self.runtime_parameters.clone();
+            record.runtime_parameters_sha256 = self
+                .runtime_parameters
+                .as_ref()
+                .map(|value| value.fingerprint());
+        });
+    }
+
+    pub fn record_run_finished(&self, reason: &str) {
+        self.record(Signal::RunFinished, |record| {
+            record.stop_reason = Some(reason.into());
+        });
+    }
+
+    pub fn with_runtime_parameters(
+        mut self,
+        parameters: crate::runtime_parameters::RuntimeParameters,
+    ) -> Self {
+        self.runtime_parameters = Some(parameters);
+        self
+    }
+
+    pub fn with_execution_limits(mut self, max_turns: usize, token_budget: Option<u64>) -> Self {
+        if let Some(parameters) = &mut self.runtime_parameters {
+            parameters.max_turns = max_turns;
+            parameters.token_budget = token_budget;
+        }
+        self
+    }
+
+    pub fn record_review(
+        &self,
+        run_id: Uuid,
+        assessment: Option<&crate::feedback_assessment::Assessment>,
+        human: Option<&str>,
+        identity: Option<crate::provider::ProviderIdentity>,
+        parameter_hash: Option<String>,
+    ) {
+        if assessment.is_some() == human.is_some() {
+            return;
+        }
+        if human.is_some_and(|value| !["accepted", "needs_changes", "unknown"].contains(&value)) {
+            return;
+        }
+        let signal = if human.is_some() {
+            Signal::HumanDisposition
+        } else {
+            Signal::ModelAssessment
+        };
+        self.record(signal, |record| {
+            record.run_id = Some(run_id);
+            record.judgment_source = Some(if human.is_some() { "human" } else { "model" }.into());
+            record.judgment = human
+                .map(str::to_owned)
+                .or_else(|| assessment.map(|value| value.judgment.clone()));
+            record.confidence = assessment.map(|value| value.confidence);
+            record.reason_code = assessment.map(|value| value.reason_code.clone());
+            record.runtime_parameters_sha256 = parameter_hash;
+            if assessment.is_some() {
+                use sha2::{Digest, Sha256};
+                record.assessment_provider = identity.as_ref().map(|value| value.provider.clone());
+                record.assessment_model = identity.map(|value| value.model);
+                record.assessment_prompt_sha256 = Some(format!(
+                    "{:x}",
+                    Sha256::digest(crate::feedback_assessment::PROMPT.as_bytes())
+                ));
+            }
+        });
     }
 
     pub fn record_tool_success(&self, tool: &str) {
