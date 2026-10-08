@@ -1,6 +1,9 @@
 # Product Overview
 
-> 最后更新：2026-10-07 | 当前版本：v0.90.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-08 | 当前版本：v0.91.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+
+- RSI 评测支持受控并发、逐题断点及付费前出处检查；反馈健康报告明确显示缺少的观测和待调查问题。实施状态与后续验收见 [RSI 实施清单](docs/RSI_IMPLEMENTATION_2026_10_08.md)。
+- TUI / Web 输入预测在打字时隐藏、删空后恢复，Tab 填入而不发送。
 
 产品概览最多 20,000 个 Unicode 字符；预算内作为参考资料直接注入 Agent 提示，超限后主文档只保留摘要与子文档索引，运行时只注入索引提示并按需读取详情。完整项目指令仍限于适用范围内的 `AGENTS.md` 与 `CLAUDE.md`。
 

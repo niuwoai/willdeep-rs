@@ -4,6 +4,7 @@ require 'English'
 require 'fileutils'
 require 'json'
 require 'time'
+require 'digest'
 
 require_relative 'task'
 
@@ -78,6 +79,18 @@ module ModelEval
     # 未跟踪文件也会改变结果的路径：源码（`cargo test` 现编现跑）、评测脚本、任务集。
     # 别处的未跟踪文件（草稿文档之类）不算工作区不干净。
     SOURCE_PATHS = %w[crates scripts bench web/src Cargo.toml Cargo.lock].freeze
+
+    # 脏工作树也能断点续跑，但必须逐字相同；包含未跟踪实现，不包含生成报告。
+    def source_digest(root)
+      paths = git_output(root, 'ls-files', '-z', '--', 'crates', 'scripts', 'web/src', 'Cargo.toml', 'Cargo.lock').to_s.split("\0")
+      paths += untracked_sources(root).reject { |path| path.start_with?('bench/') }
+      digest = Digest::SHA256.new
+      paths.uniq.sort.each do |relative|
+        path = File.join(root, relative)
+        digest << relative << "\0" << (File.file?(path) ? File.binread(path) : '<deleted>') << "\0"
+      end
+      digest.hexdigest
+    end
 
     def git_context(root)
       commit = git_output(root, 'rev-parse', '--short', 'HEAD')

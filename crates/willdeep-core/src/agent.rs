@@ -800,11 +800,24 @@ impl Agent {
             goal.resume();
         }
         let verifications_before = self.tools.verification_count();
-        let result = self.run_inner(messages, user_message, &mut recorder).await;
+        let feedback = self.feedback.as_ref().map(|feedback| {
+            feedback.for_run(
+                self.provider
+                    .current()
+                    .ok()
+                    .and_then(|provider| provider.ledger_identity()),
+            )
+        });
+        if let Some(feedback) = &feedback {
+            feedback.record_run_started();
+        }
+        let result = self
+            .run_inner(messages, user_message, &mut recorder, feedback.as_ref())
+            .await;
         if let Some(goal) = &self.goal_continuation {
             goal.pause();
         }
-        if let (Some(feedback), Ok(outcome)) = (&self.feedback, &result)
+        if let (Some(feedback), Ok(outcome)) = (&feedback, &result)
             && !outcome.stop_reason.is_complete()
         {
             feedback.record_incomplete(
@@ -814,7 +827,7 @@ impl Agent {
             );
         }
         // 这次运行的验证结论进账本：失败链据此判结局，不只看用户怎么说。
-        if let (Some(feedback), Ok(_)) = (&self.feedback, &result) {
+        if let (Some(feedback), Ok(_)) = (&feedback, &result) {
             let (verification, ran) = self
                 .tools
                 .run_verification(recorder.verification_baseline(), verifications_before);
@@ -829,6 +842,7 @@ impl Agent {
         mut messages: Vec<Message>,
         mut user_message: Message,
         checkpoint: &mut crate::checkpoint::CheckpointRecorder<'_>,
+        feedback: Option<&crate::feedback::FeedbackRecorder>,
     ) -> Result<AgentOutcome, AgentError> {
         // Persisted history can come from older desktop bridges that retained
         // `role=tool` while losing the protocol IDs. Never let one malformed
@@ -1264,9 +1278,14 @@ impl Agent {
                     }
                 };
                 let (output, is_error) = match result {
-                    Ok(output) => (output, false),
+                    Ok(output) => {
+                        if let Some(feedback) = feedback {
+                            feedback.record_tool_success(&call.name);
+                        }
+                        (output, false)
+                    }
                     Err(error) => {
-                        if let Some(feedback) = &self.feedback {
+                        if let Some(feedback) = feedback {
                             feedback.record_tool_failure(&call.name, error.class());
                         }
                         (format!("tool error: {error}"), true)

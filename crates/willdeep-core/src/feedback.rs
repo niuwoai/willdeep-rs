@@ -74,6 +74,10 @@ pub enum Signal {
     /// 一次工具调用失败。`tool` 与 `error_class` 说明是哪个工具、哪一类错；
     /// 主 Agent 与 Worker 都记，Worker 的行带 `agent_id` / `worker_profile`。
     ToolFailed,
+    /// 已成功返回的工具调用；与 tool_failed 配对构成有结局调用的分母。
+    ToolSucceeded,
+    /// 运行真正进入 Agent 循环；取消或 Provider 出错也保留分母。
+    RunStarted,
     /// 一次 Agent 运行没有收敛就停了（轮次耗尽、输出被截断、改动未验证……），
     /// `stop_reason` 说明是哪一种，`report_len` 为 0 表示连部分结果都没有。
     AgentIncomplete,
@@ -130,6 +134,12 @@ pub struct FeedbackRecord {
     /// `worker:<工种>@…`、`input_suggestion@…`；未知为 `null`。
     #[serde(default)]
     pub prompt_bundle: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<Uuid>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub signal: Signal,
     /// 把同一条建议的多个信号串起来。
     pub suggestion_id: Option<Uuid>,
@@ -197,6 +207,9 @@ impl FeedbackRecord {
             agent_id: None,
             worker_profile: None,
             prompt_bundle: None,
+            run_id: None,
+            provider: None,
+            model: None,
             signal,
             suggestion_id: None,
             text_hash: None,
@@ -263,6 +276,9 @@ pub struct FeedbackRecorder {
     agent_id: Option<Uuid>,
     worker_profile: Option<String>,
     prompt_bundle: Option<String>,
+    run_id: Option<Uuid>,
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 impl std::fmt::Debug for FeedbackRecorder {
@@ -288,6 +304,9 @@ impl FeedbackRecorder {
             agent_id: None,
             worker_profile: None,
             prompt_bundle: None,
+            run_id: None,
+            provider: None,
+            model: None,
         }
     }
 
@@ -347,6 +366,25 @@ impl FeedbackRecorder {
         self.sink.is_some()
     }
 
+    /// 新运行有独立身份，不把旧模型或父 Worker 的模型误挂到新运行上。
+    pub fn for_run(&self, identity: Option<crate::provider::ProviderIdentity>) -> Self {
+        let mut recorder = self.clone();
+        recorder.run_id = Some(Uuid::new_v4());
+        recorder.provider = identity.as_ref().map(|identity| identity.provider.clone());
+        recorder.model = identity.map(|identity| identity.model);
+        recorder
+    }
+
+    pub fn record_run_started(&self) {
+        self.record(Signal::RunStarted, |_| {});
+    }
+
+    pub fn record_tool_success(&self, tool: &str) {
+        self.record(Signal::ToolSucceeded, |record| {
+            record.tool = Some(tool.to_owned());
+        });
+    }
+
     pub fn is_worker(&self) -> bool {
         self.agent_id.is_some()
     }
@@ -361,6 +399,9 @@ impl FeedbackRecorder {
         record.agent_id = self.agent_id;
         record.worker_profile = self.worker_profile.clone();
         record.prompt_bundle = self.prompt_bundle.clone();
+        record.run_id = self.run_id;
+        record.provider = self.provider.clone();
+        record.model = self.model.clone();
         fill(&mut record);
         sink.submit(record);
     }
@@ -939,6 +980,35 @@ mod tests {
             dwell: Some(Duration::from_millis(1_500)),
             sent,
         }
+    }
+
+    #[test]
+    fn run_scopes_keep_successes_attributed_and_do_not_inherit_an_unknown_model() {
+        let dir = temp_dir("run-scope");
+        let sink = FeedbackSink::spawn(&dir);
+        let parent = FeedbackRecorder::new(sink.clone(), "tui", false).for_run(Some(
+            crate::provider::ProviderIdentity {
+                provider: "local-test".into(),
+                model: "fixture-model".into(),
+                local: true,
+            },
+        ));
+        parent.record_run_started();
+        parent.record_tool_success("read_file");
+        let child = parent.for_run(None);
+        child.record_run_started();
+        assert!(sink.flush(Duration::from_secs(2)));
+        let rows = read_rows(&dir);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["run_id"], rows[1]["run_id"]);
+        assert_ne!(rows[0]["run_id"], rows[2]["run_id"]);
+        assert_eq!(rows[1]["signal"], "tool_succeeded");
+        assert_eq!(rows[1]["tool"], "read_file");
+        assert_eq!(rows[1]["provider"], "local-test");
+        assert_eq!(rows[1]["model"], "fixture-model");
+        assert!(rows[2]["provider"].is_null());
+        assert!(rows[2]["model"].is_null());
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
     #[test]

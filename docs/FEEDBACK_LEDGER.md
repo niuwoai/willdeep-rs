@@ -31,10 +31,12 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 | `suggestion_sent_verbatim` | 采用后原样发送 | `sent_hash`, `edit_distance = 0` | 最强正向 |
 | `suggestion_sent_edited` | 采用后小改、或保留原文再补充后发送 | `edit_distance`, `sent_len` | 正向：方向对但不完整 |
 | `suggestion_sent_rewritten` | 采用后基本重写（编辑距离超过建议长度一半）再发送 | `edit_distance` | 弱负向 |
-| `suggestion_ignored_typed` | 没动建议，直接打了别的字 | `dwell_ms` | 负向 |
+| `suggestion_ignored_typed` | 未采用建议，最终发送了其他内容；只打字、再删空不会结算 | `dwell_ms` | 负向 |
 | `suggestion_dismissed` | Esc 放弃 | `dwell_ms` | 明确负向 |
 | `suggestion_superseded` | 没有结局就被新一轮或新建议顶掉；已采用但始终没发送也记这个 | | 中性 |
 | `tool_failed` | 一次工具调用返回错误（主 Agent 与 Worker） | `tool`, `error_class` | 客观失败 |
+| `tool_succeeded` | 一次工具调用成功返回（主 Agent 与 Worker） | `tool`, `run_id` | 已结算工具调用分母；不代表任务完成 |
+| `run_started` | Agent 开始一次运行（主 Agent 与 Worker） | `run_id`, `provider`, `model` | 运行分母；provider / model 为运行起始归属，未知时 null |
 | `agent_incomplete` | 一次运行未收敛就停了：`max_turns`、`incomplete`、`unverified`、`budget_limited` | `stop_reason`, `turns`, `report_len` | 客观失败；`report_len = 0` 表示没有结果 |
 | `worker_started` | 一次 Worker 派工开始（重试不另记） | | 分母：按工种算「没有结果」比例 |
 | `worker_timed_out` | Worker 超时被中止 | `report_len = 0` | 客观失败 |
@@ -49,6 +51,10 @@ retain_months = 12  # daemon 启动时删掉更早的月份分片；0 = 不清�
 | `goal_completed` / `goal_completion_rejected` / `goal_budget_limited` | 目标收尾（见 [长程自治](LONG_HORIZON_AUTONOMY.md)） | `count`（未完成的验收项）、`continuations`, `elapsed_ms` | 「完成被拒」是虚报完成的强信号 |
 
 同一条建议的各行共享 `suggestion_id`。Web 端的 `suggestion_id` 由服务端签发，服务端记住建议原文与发出时间，浏览器只回传 id 与信号，所以账本里的原文与停留时长不采信浏览器给的值。Worker 的行带 `agent_id` 与 `worker_profile`，主 Agent 的行这两个字段是 `null`。Runtime 轮次的行带 `turn_id`。
+
+从 0.91.0-rc1 起，一次 Agent 运行的开始、工具结果和收尾共享 `run_id`，并带运行起始 provider / model。运行错误或中断可能只有开始而没有 `run_verified`，不能算作已验证成功。工具成功 / 失败仅覆盖已返回的调用，尚未返回或取消的调用不在这个分母内。旧账本缺少这些字段，不能用新分母计算旧事件失败率。
+
+`ruby scripts/feedback_health.rb --out target/rsi-health/latest` 生成无正文的 JSON / Markdown 健康报告，检查坏行、关联覆盖、建议终结和分母缺口，并列出仅供复现的工具失败调查队列。它不晋升提示词，也不降低候选阈值。
 
 每一行都带 `prompt_bundle`：产生它的提示词版本，形如 `角色@<sha256 前 12 位>`。
 - 角色有 `main`（主 Agent）、`worker:<工种>`（托管工种为 `worker:<工种>@hosted`）和 `input_suggestion`。

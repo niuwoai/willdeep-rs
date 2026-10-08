@@ -60,6 +60,9 @@ jobs:
       - name: Prompt RSI gate self-check
         if: runner.os == 'Linux'
         run: ruby scripts/test/prompt_rsi_test.rb
+      - name: Eval concurrency, resume and feedback health
+        if: runner.os == 'Linux'
+        run: ruby scripts/test/eval_execution_test.rb && ruby scripts/test/feedback_health_test.rb
       - name: CI samples parse
         if: runner.os == 'Linux'
         # 块标量：命令里的 `aliases: true` 放进普通标量会被 YAML 当成映射，整份工作流解析失败、一个 job 都不起。

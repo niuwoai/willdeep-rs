@@ -28,6 +28,7 @@ require_relative 'lib/willdeep_credentials'
 REPO_ROOT = File.expand_path('..', __dir__)
 
 options = {
+  jobs: 1,
   model: ENV['WILLDEEP_RANGE_MODEL'] || 'glm-5',
   config: File.join(ENV['WILLDEEP_HOME'] || File.join(Dir.home, '.willdeep'), 'config.toml'),
   out: File.join(REPO_ROOT, 'target', 'input-suggestion'),
@@ -37,6 +38,7 @@ options = {
 OptionParser.new do |parser|
   parser.banner = 'Usage: ruby scripts/input_suggestion_eval.rb [options]'
   parser.on('--model MODEL', '预测用的模型，默认 glm-5') { |value| options[:model] = value }
+  parser.on('--jobs N', Integer, '独立样本并发数 1..4，默认 1') { |value| options[:jobs] = value }
   parser.on('--config PATH', 'willdeep 配置文件路径') { |value| options[:config] = value }
   parser.on('--out DIR', '报告输出目录') { |value| options[:out] = value }
   parser.on('--no-history', '只跑不归档（调试用）') { options[:history] = nil }
@@ -45,6 +47,7 @@ OptionParser.new do |parser|
   end
   parser.on('--rescore PATH', '重算一份已归档的 run（人工填完 judged 后用）') { |value| options[:rescore] = value }
 end.parse!
+abort('jobs 必须为 1..4') unless (1..4).cover?(options[:jobs])
 # history 追的是同一份提示词下模型的趋势；候选提示词的对照结论归 bench/prompt-rsi。
 options[:history] = nil if options[:variant]
 
@@ -97,6 +100,7 @@ env = {
   'WILLDEEP_RANGE_API_BASE' => api_base,
   'WILLDEEP_RANGE_API_KEY' => api_key,
   'WILLDEEP_RANGE_MODEL' => options[:model],
+  'WILLDEEP_SUGGEST_JOBS' => options[:jobs].to_s,
   'WILLDEEP_SUGGEST_OUT' => json_path
 }
 # 没有变体时传 nil，把调用者 shell 里可能 export 过的候选清掉。
@@ -122,6 +126,7 @@ if options[:history]
   run_path = File.join(options[:history], 'runs', "#{stamp}-#{options[:model].gsub(/[^\w.-]/, '_')}.json")
   FileUtils.mkdir_p(File.dirname(run_path))
   run = { 'summary' => summary, 'model' => report['model'], 'prompt_variant' => report['prompt_variant'],
+          'parallel_jobs' => report['parallel_jobs'],
           'cases' => report['cases'] }
   File.write(run_path, "#{JSON.pretty_generate(run)}\n")
   append_history(options[:history], summary)

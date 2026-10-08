@@ -81,14 +81,22 @@ const HINTS = { 'zh-CN': 'Tab 采用', en: 'Tab to accept', ja: 'Tab で採用' 
       await page.waitForTimeout(300);
       assert.equal(await ghost.count(), 0, '采用后清空也不回来');
 
-      await finishTurn(view, '第二轮');
+      const second = await finishTurn(view, '第二轮');
+      const secondId = second.requests.filter(isSuggestion).at(-1).suggestion_id;
       await ghost.getByText(SUGGESTION, { exact: true }).waitFor();
       await input.pressSequentially('x');
       await ghost.waitFor({ state: 'hidden' });
       await input.fill('');
       await page.waitForTimeout(300);
-      assert.equal(await ghost.count(), 0, '打字放弃后删回空也不回来');
-      checks.push('打字即清掉灰字，删回空也不复现');
+      await ghost.getByText(SUGGESTION, { exact: true }).waitFor();
+      const feedback = (await state(page)).requests.filter(item => item.suggestion_id === secondId && item.path.endsWith('/feedback'));
+      assert.deepEqual(feedback.map(item => item.signal), ['shown'], '编辑后删空不算忽略，也不重复展示');
+      await input.focus();
+      await page.keyboard.press('Tab');
+      assert.equal(await input.inputValue(), SUGGESTION, '打字再删空仍可 Tab 采用');
+      await page.waitForTimeout(200);
+      assert.deepEqual((await state(page)).requests.filter(item => item.suggestion_id === secondId && item.path.endsWith('/feedback')).map(item => item.signal), ['shown', 'accepted']);
+      checks.push('打字隐藏灰字，删回空重新出现，Tab 仍可采用');
 
       await finishTurn(view, '第三轮');
       await ghost.getByText(SUGGESTION, { exact: true }).waitFor();

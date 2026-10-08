@@ -33,6 +33,7 @@ require_relative 'lib/model_eval/config'
 require_relative 'lib/model_eval/report'
 require_relative 'lib/model_eval/task'
 require_relative 'lib/model_eval/verifier'
+require_relative 'lib/model_eval/execution'
 
 module ModelEval
   ROOT = File.expand_path('..', __dir__)
@@ -89,18 +90,12 @@ module ModelEval
       @config = derive_config(@options[:config], @run_root)
       context = Report.git_context(ROOT)
       warn "工作区不干净：这轮成绩挂在一个没提交的状态上，回放不了。" if context[:dirty]
+      prepare_checkpoint(context)
       FileUtils.mkdir_p(@options[:out])
       exit_code = 0
       @options[:models].each do |model|
         @hints = []
-        rows = []
-        @tasks.each do |task|
-          rows << run_task(task, model)
-          next unless Report.abort_early?(rows)
-
-          warn "[#{model}] 开头 #{rows.size} 个任务全是 error，不再往下跑：多半是环境问题，不是模型问题。"
-          break
-        end
+        rows = run_tasks(model)
         if (reason = Report.unusable_reason(rows, @hints))
           # 一个都没执行的一轮不是成绩：不写报告、不进 history.jsonl，退出码 1。
           warn "[#{model}] 这一轮没跑成，不归档：#{reason}"
@@ -115,6 +110,7 @@ module ModelEval
                                    version: workspace_version, binary_version: @binary_version)
         report = { 'schema_version' => 1, 'model' => model, 'binary_version' => @binary_version,
                    'max_turns' => @options[:turns], 'timeout_seconds' => @options[:timeout],
+                   'parallel_jobs' => @options.fetch(:jobs, 1), 'resumed' => @options[:resume] == true,
                    'created_at' => summary['ran_at'], 'variant' => variant,
                    'rows' => rows.map { |row| row.transform_keys(&:to_s) } }
         safe_model = model.gsub(/[^A-Za-z0-9._-]/, '_')
@@ -129,6 +125,7 @@ module ModelEval
       end
       exit_code
     ensure
+      @checkpoint&.close
       if @run_root
         if @options[:keep]
           warn "保留运行目录（含会话与日志，别提交）：#{@run_root}"
@@ -139,6 +136,35 @@ module ModelEval
     end
 
     private
+
+    def prepare_checkpoint(context)
+      return unless @options[:checkpoint]
+
+      binary = @binary.include?(File::SEPARATOR) ? @binary : ENV.fetch('PATH', '').split(File::PATH_SEPARATOR)
+        .map { |dir| File.join(dir, @binary) }.find { |path| File.executable?(path) }
+      manifest = {
+        'commit' => context[:commit], 'source' => Report.source_digest(ROOT),
+        'binary_sha256' => Digest::SHA256.file(binary).hexdigest,
+        'config_sha256' => Digest::SHA256.file(@config).hexdigest,
+        'environment_sha256' => Digest::SHA256.hexdigest(JSON.generate(ENV.to_h.reject { |key, _| %w[PWD OLDPWD SHLVL _].include?(key) }.sort)),
+        'models' => @options[:models], 'profile' => @options[:profile],
+        'timeout' => @options[:timeout], 'turns' => @options[:turns], 'jobs' => @options.fetch(:jobs, 1),
+        'variant_sha256' => @options[:variant] && Digest::SHA256.file(@options[:variant]).hexdigest,
+        'tasks' => @tasks.to_h { |task| [task.id, task.content_sha256] }
+      }
+      @checkpoint = Checkpoint.new(@options[:checkpoint], manifest, resume: @options[:resume])
+    end
+
+    def run_tasks(model)
+      run = lambda do |task|
+        @checkpoint&.fetch(model, task) || run_task(task, model).tap { |row| @checkpoint&.store(model, row) }
+      end
+      # 先用三题确认 Provider 能开工，再并发余下的题，避免把鉴权失败放大。
+      leading = @tasks.first(Report::LEADING_ERRORS_TO_ABORT).map(&run)
+      return leading if Report.abort_early?(leading)
+
+      leading + Execution.run(@tasks.drop(leading.size), jobs: @options.fetch(:jobs, 1), &run)
+    end
 
     def select_tasks(tasks)
       wanted = @options[:tasks]
@@ -312,6 +338,7 @@ if $PROGRAM_NAME == __FILE__
     bench: ModelEval::BENCH,
     archive: ModelEval::BENCH,
     keep: false,
+    jobs: 1,
     mode: :run
   }
   OptionParser.new do |parser|
@@ -332,6 +359,9 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--config PATH', '用户配置文件，缺省 ~/.willdeep/config.toml') { |v| options[:config] = File.expand_path(v) }
     parser.on('--timeout SECONDS', Integer, "每个任务的墙钟上限，缺省 #{ModelEval::DEFAULT_TIMEOUT}") { |v| options[:timeout] = v }
     parser.on('--max-turns N', Integer, "每个任务的模型调用上限，缺省 #{ModelEval::DEFAULT_MAX_TURNS}") { |v| options[:turns] = v }
+    parser.on('--jobs N', Integer, '任务并发数 1..4，默认 1；耗时对照请用 1') { |v| options[:jobs] = v }
+    parser.on('--checkpoint PATH', '逐题原子保存结果，配置只保存哈希') { |v| options[:checkpoint] = File.expand_path(v) }
+    parser.on('--resume', '复用同出处 checkpoint，error/skipped 重跑') { options[:resume] = true }
     parser.on('--out DIR', '最新报告输出目录，缺省 target/model-eval') { |v| options[:out] = File.expand_path(v) }
     parser.on('--archive DIR', '归档目录，缺省 bench/model-eval') { |v| options[:archive] = File.expand_path(v) }
     parser.on('--no-archive', '只跑不归档（调试用）') { options[:archive] = nil }
@@ -341,6 +371,8 @@ if $PROGRAM_NAME == __FILE__
   end.parse!
   options[:models] = ModelEval.model_list(ENV.fetch('WILLDEEP_EVAL_MODELS', ''), cli_models)
   raise 'timeout 与 max-turns 必须为正' unless options[:timeout].positive? && options[:turns].positive?
+  raise 'jobs 必须为 1..4' unless (1..ModelEval::Execution::MAX_JOBS).cover?(options[:jobs])
+  raise '--resume 需要 --checkpoint' if options[:resume] && !options[:checkpoint]
   if options[:variant] && options[:archive]
     # `history.jsonl` 追的是「同一份提示词下模型的趋势」，候选提示词的成绩混进去
     # 会让趋势线莫名其妙地跳。对照结论归 `bench/prompt-rsi/`。

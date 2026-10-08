@@ -13,6 +13,7 @@ let chat = null;
 let chatCounter = 0;
 // 下一句预测的假回包；null 表示服务端判定不给。
 let suggestion = '提交并合回 develop';
+let suggestionCounter = 0;
 const submitChat = () => {
   if (!chat || chat.submitted || chat.closed) return;
   chat.submitted = true;
@@ -96,7 +97,16 @@ const server = await createServer({
         for await (const chunk of request) body += chunk;
         const { turn_id } = JSON.parse(body);
         requests[requests.length - 1].turn_id = turn_id;
-        return reply({ suggestion, turn_id });
+        const suggestion_id = suggestion ? `qa-suggestion-${++suggestionCounter}` : null;
+        requests[requests.length - 1].suggestion_id = suggestion_id;
+        return reply({ suggestion, turn_id, suggestion_id });
+      }
+      if (/^\/api\/sessions\/[^/]+\/input-suggestion\/feedback$/.test(url.pathname) && request.method === 'POST') {
+        let body = '';
+        for await (const chunk of request) body += chunk;
+        Object.assign(requests[requests.length - 1], JSON.parse(body));
+        response.writeHead(204);
+        return response.end();
       }
       const detailPath = url.pathname.match(/^\/api\/sessions\/(qa-session-\d+)$/);
       if (detailPath && request.method === 'GET') {

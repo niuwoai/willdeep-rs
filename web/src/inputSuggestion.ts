@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 
 // 轮次收尾后预测用户的下一句（与 TUI 同一契约）：空输入框里灰字显示，Tab 填入
-// 不发送，打字 / Esc / 新一轮 / 换会话即清。只活在内存里：刷新页面就没了。
+// 不发送，打字只隐藏，删空重新显示；Esc / 新一轮 / 换会话即清。
 //
 // 世代号是唯一的时序真相：每次清空或重新发起都换代，晚到的回包对不上代就丢，
 // 于是「放弃了不回来」不需要额外状态。
@@ -45,8 +45,8 @@ export function useInputSuggestion() {
     if (accepted) report(accepted, "superseded");
   }, []);
 
-  // 打字清掉的是「无视另打」，Esc 是「放弃」，其余（新一轮、换会话）是「被顶掉」。
-  // 只有被顶掉才连带作废已采用的那条：打字可能正是在改采用进来的话。
+  // 发送其他内容才结算「无视另打」；Esc 是「放弃」，新一轮、换会话是「被顶掉」。
+  // 只有被顶掉才连带作废已采用的那条：用户可能正在改采用进来的话。
   const clear = useCallback((outcome: SuggestionOutcome = "superseded") => {
     epochRef.current += 1;
     settleShown(outcome);
@@ -71,7 +71,8 @@ export function useInputSuggestion() {
     const accepted = acceptedRef.current;
     acceptedRef.current = null;
     if (accepted) report(accepted, "sent", sent);
-  }, []);
+    else if (sent) settleShown("ignored_typed");
+  }, [settleShown]);
 
   // `canShow` 在回包时再判一次：用户可能已经开始打字、贴了附件或开了新一轮。
   const request = useCallback(async (sessionId: string, turnId: string | null, canShow: () => boolean) => {

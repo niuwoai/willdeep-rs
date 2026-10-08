@@ -169,6 +169,8 @@ impl App {
         if let Some(accepted) = self.accepted_suggestion.take() {
             let signal = willdeep_core::feedback::classify_sent(&accepted.text, &submitted);
             self.record_suggestion(&accepted, signal, Some(&submitted));
+        } else if !submitted.is_empty() {
+            self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionIgnoredTyped);
         }
         submitted
     }
@@ -756,11 +758,7 @@ impl App {
     }
     pub(super) fn edit_input(&mut self, edit: impl FnOnce(&mut PromptEditor)) {
         edit(&mut self.input);
-        // 开始打字就放弃预测：灰字只在空输入框里有意义，删光了也不回来。
-        if !self.input.is_empty() && self.input_suggestion.is_some() {
-            self.finish_suggestion(willdeep_core::feedback::Signal::SuggestionIgnoredTyped);
-            self.clear_input_suggestion();
-        }
+        // 打字只隐藏灰字；删回空输入框仍能 Tab。真正发送别的话才算忽略。
         self.skill_selected = 0;
         self.skill_menu_dismissed = false;
         self.command_selected = 0;
@@ -1116,6 +1114,8 @@ impl App {
             );
             self.accepted_suggestion = Some(track);
         }
+        self.input_suggestion = None;
+        self.input_suggestion_epoch = self.input_suggestion_epoch.wrapping_add(1);
         self.edit_input(|input| input.insert(&suggestion));
         true
     }

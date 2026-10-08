@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::{StreamExt, stream};
+
 use sha2::{Digest, Sha256};
 
 use crate::input_suggestion::{payload, request_messages, sanitize};
@@ -189,44 +191,57 @@ async fn input_suggestion_live_fire() {
     config.max_output_tokens = 1_024;
     let provider: Arc<dyn Provider> = build_provider(config).expect("build provider");
 
-    let mut results = Vec::new();
-    for sample in load_samples(&samples_dir()) {
-        let body = payload(&conversation(&sample)).expect("well-formed sample");
-        let started = Instant::now();
-        let outcome = provider.complete(&request_messages(&body), &[]).await;
-        let elapsed_ms = started.elapsed().as_millis();
-        let result = match outcome {
-            Ok(completion) => SampleResult {
-                cleaned: sanitize(&completion.content),
-                raw: Some(completion.content),
-                error: None,
-                elapsed_ms,
-                input_tokens: completion
-                    .usage
-                    .as_ref()
-                    .and_then(|usage| usage.input_tokens),
-                output_tokens: completion
-                    .usage
-                    .as_ref()
-                    .and_then(|usage| usage.output_tokens),
-                id: sample.id,
-                sample_sha256: sample.sha256,
-                language: sample.language,
-                expect: sample.expect,
-            },
-            Err(error) => SampleResult {
-                raw: None,
-                cleaned: None,
-                error: Some(error.to_string()),
-                elapsed_ms,
-                input_tokens: None,
-                output_tokens: None,
-                id: sample.id,
-                sample_sha256: sample.sha256,
-                language: sample.language,
-                expect: sample.expect,
-            },
-        };
+    let jobs = env_value("WILLDEEP_SUGGEST_JOBS")
+        .map(|value| value.parse::<usize>().expect("jobs must be an integer"))
+        .unwrap_or(1);
+    assert!((1..=4).contains(&jobs), "jobs must be 1..4");
+    let mut results = stream::iter(load_samples(&samples_dir()))
+        .map(|sample| {
+            let provider = provider.clone();
+            async move {
+                let body = payload(&conversation(&sample)).expect("well-formed sample");
+                let started = Instant::now();
+                let outcome = provider.complete(&request_messages(&body), &[]).await;
+                let elapsed_ms = started.elapsed().as_millis();
+                match outcome {
+                    Ok(completion) => SampleResult {
+                        cleaned: sanitize(&completion.content),
+                        raw: Some(completion.content),
+                        error: None,
+                        elapsed_ms,
+                        input_tokens: completion
+                            .usage
+                            .as_ref()
+                            .and_then(|usage| usage.input_tokens),
+                        output_tokens: completion
+                            .usage
+                            .as_ref()
+                            .and_then(|usage| usage.output_tokens),
+                        id: sample.id,
+                        sample_sha256: sample.sha256,
+                        language: sample.language,
+                        expect: sample.expect,
+                    },
+                    Err(error) => SampleResult {
+                        raw: None,
+                        cleaned: None,
+                        error: Some(error.to_string()),
+                        elapsed_ms,
+                        input_tokens: None,
+                        output_tokens: None,
+                        id: sample.id,
+                        sample_sha256: sample.sha256,
+                        language: sample.language,
+                        expect: sample.expect,
+                    },
+                }
+            }
+        })
+        .buffer_unordered(jobs)
+        .collect::<Vec<_>>()
+        .await;
+    results.sort_by(|left, right| left.id.cmp(&right.id));
+    for result in &results {
         println!(
             "{} | {} | raw={:?} | cleaned={:?} | {}ms | in={:?} out={:?}{}",
             result.id,
@@ -242,11 +257,11 @@ async fn input_suggestion_live_fire() {
                 .map(|error| format!(" | error={error}"))
                 .unwrap_or_default()
         );
-        results.push(result);
     }
 
     let report = serde_json::json!({
         "model": model,
+        "parallel_jobs": jobs,
         "prompt_variant": crate::prompt_sections::active_variant_report(),
         "cases": results,
     });

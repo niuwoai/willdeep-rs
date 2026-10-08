@@ -640,6 +640,18 @@ async fn tool_failures_and_exhausted_turns_reach_the_feedback_ledger() {
     assert_eq!(verified[0]["verification"], "unverified");
     assert_eq!(verified[0]["count"], 0);
     assert_eq!(verified[0]["agent_id"], worker_id.to_string());
+    let starts: Vec<_> = rows
+        .iter()
+        .filter(|row| row["signal"] == "run_started")
+        .collect();
+    assert_eq!(starts.len(), 1);
+    assert!(!starts[0]["run_id"].is_null());
+    assert_eq!(starts[0]["run_id"], verified[0]["run_id"]);
+    assert!(
+        failures
+            .iter()
+            .all(|row| row["run_id"] == starts[0]["run_id"])
+    );
     let raw = serde_json::to_string(&rows).expect("json");
     assert!(
         !raw.contains("missing.txt"),

@@ -1378,7 +1378,7 @@ fn input_suggestion_is_accepted_with_tab_and_only_filled_in() {
     );
 }
 
-/// 打字或 Esc 都放弃预测，删光了也不回来。
+/// 打字只隐藏预测，删光可再次 Tab；Esc 才永久放弃。
 #[test]
 fn typing_or_escape_dismisses_the_input_suggestion() {
     let mut app = App::new(Vec::new(), Language::En);
@@ -1387,17 +1387,18 @@ fn typing_or_escape_dismisses_the_input_suggestion() {
 
     app.edit_input(|input| input.insert("n"));
     assert!(app.visible_input_suggestion().is_none());
-    assert!(app.input_suggestion.is_none());
+    assert!(app.input_suggestion.is_some());
     app.edit_input(|input| input.backspace());
     assert!(app.input.is_empty());
-    assert!(
-        app.visible_input_suggestion().is_none(),
-        "a dismissed suggestion does not come back"
-    );
+    assert_eq!(app.visible_input_suggestion(), Some("commit it"));
+    assert!(app.accept_input_suggestion());
+    assert_eq!(app.take_submitted_input(), "commit it");
 
     let epoch = app.input_suggestion_epoch;
     assert!(app.adopt_input_suggestion(Some("commit it".to_owned()), epoch));
     assert!(app.dismiss_input_suggestion());
+    app.edit_input(|input| input.insert("x"));
+    app.edit_input(|input| input.backspace());
     assert!(app.visible_input_suggestion().is_none());
     assert!(
         !app.dismiss_input_suggestion(),
@@ -1460,9 +1461,11 @@ fn input_suggestion_lifecycle_is_recorded_in_the_feedback_ledger() {
     let session = uuid::Uuid::new_v4();
     app.feedback_session = Some(session);
 
-    // 1. Tab 采用后原样发送。
+    // 1. 打字再删空后 Tab 采用，不能提前记 ignored，也不重复展示。
     let epoch = app.input_suggestion_epoch;
     assert!(app.adopt_input_suggestion(Some("run the tests".to_owned()), epoch));
+    app.edit_input(|input| input.insert("x"));
+    app.edit_input(|input| input.backspace());
     assert!(app.accept_input_suggestion());
     assert_eq!(app.take_submitted_input(), "run the tests");
     app.begin_turn(false, "working".to_owned());

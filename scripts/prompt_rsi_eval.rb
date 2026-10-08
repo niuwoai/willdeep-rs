@@ -31,6 +31,7 @@ require_relative 'lib/model_eval/report'
 require_relative 'lib/model_eval/task'
 require_relative 'lib/prompt_rsi/gate'
 require_relative 'lib/prompt_rsi/report'
+require_relative 'lib/prompt_rsi/preflight'
 require_relative 'lib/suggestion_report'
 
 module PromptRsiEval
@@ -72,6 +73,12 @@ module PromptRsiEval
                '--split', splits.join(','), '--no-archive', '--out', out,
                '--binary', options[:binary], '--timeout', options[:timeout].to_s,
                '--max-turns', options[:turns].to_s]
+    command += ['--jobs', options.fetch(:jobs, 1).to_s]
+    if options[:checkpoint_dir]
+      checkpoint = File.join(options[:checkpoint_dir], "#{label}.json")
+      command += ['--checkpoint', checkpoint]
+      command << '--resume' if options[:resume] && File.file?(checkpoint)
+    end
     command += ['--config', options[:config]] if options[:config]
     command += ['--profile', options[:profile]] if options[:profile]
     command += ['--variant', variant] if variant
@@ -113,7 +120,7 @@ module PromptRsiEval
   def suggestion_run(options, label, variant)
     out = File.join(options[:work], label)
     command = [RbConfig.ruby, File.join(__dir__, 'input_suggestion_eval.rb'), '--model', options[:model],
-               '--no-history', '--out', out]
+               '--no-history', '--out', out, '--jobs', options.fetch(:jobs, 1).to_s]
     command += ['--config', options[:config]] if options[:config]
     command += ['--variant', variant] if variant
     warn "== #{label}"
@@ -188,10 +195,16 @@ module PromptRsiEval
     return rescore(options) if options[:rescore]
 
     variant = check_variant(options[:binary], options[:variant])
-    context = ModelEval::Report.git_context(ROOT)
+    context = PromptRsi::Preflight.check!(root: ROOT, binary_version: binary_version(options[:binary]),
+                                          binary_commit: variant['binary_commit'])
     provenance = variant.merge('model' => options[:model], 'commit' => context[:commit], 'dirty' => context[:dirty],
-                               'binary_version' => binary_version(options[:binary]))
-    warn '工作区不干净：结论会是 non_reproducible。' if context[:dirty]
+                               'binary_version' => binary_version(options[:binary]), 'parallel_jobs' => options.fetch(:jobs, 1))
+    missing = ModelEval::Task.load_all(File.dirname(TASKS)).flat_map(&:missing_requirements).uniq if options[:suite] == 'model-eval'
+    abort("RSI preflight：缺评测依赖 #{missing.join(', ')}") if missing&.any?
+    if options[:preflight]
+      puts JSON.pretty_generate(provenance.merge('preflight' => 'passed', 'paid_requests' => 0))
+      return 0
+    end
     options[:work] = Dir.mktmpdir('prompt-rsi-')
     if options[:suite] == 'input-suggestion'
       report, raws = run_suggestion(options, provenance)
@@ -216,7 +229,7 @@ end
 if $PROGRAM_NAME == __FILE__
   options = {
     suite: 'model-eval', model: nil, variant: nil, profile: nil, config: nil,
-    binary: ENV.fetch('WILLDEEP_BIN', 'willdeep'), timeout: 300, turns: 24,
+    binary: ENV.fetch('WILLDEEP_BIN', 'willdeep'), timeout: 300, turns: 24, jobs: 1,
     archive: PromptRsiEval::ARCHIVE, history: true, keep: false
   }
   OptionParser.new do |parser|
@@ -228,6 +241,10 @@ if $PROGRAM_NAME == __FILE__
     parser.on('--config PATH', '用户配置文件') { |v| options[:config] = File.expand_path(v) }
     parser.on('--profile NAME', 'willdeep 的 provider profile') { |v| options[:profile] = v }
     parser.on('--timeout SECONDS', Integer, '每个任务的墙钟上限') { |v| options[:timeout] = v }
+    parser.on('--jobs N', Integer, '模型评测并发数 1..4；默认 1') { |v| options[:jobs] = v }
+    parser.on('--checkpoint-dir DIR', '保存 baseline/candidate 各阶段的逐题断点') { |v| options[:checkpoint_dir] = File.expand_path(v) }
+    parser.on('--resume', '从相同出处的逐题断点继续') { options[:resume] = true }
+    parser.on('--preflight', '只检查源码、二进制、任务和变体，不请求 Provider') { options[:preflight] = true }
     parser.on('--max-turns N', Integer, '每个任务的模型调用上限') { |v| options[:turns] = v }
     parser.on('--archive DIR', '归档目录，缺省 bench/prompt-rsi') { |v| options[:archive] = File.expand_path(v) }
     parser.on('--no-history', '不向 history.jsonl 追加') { options[:history] = false }
@@ -237,6 +254,9 @@ if $PROGRAM_NAME == __FILE__
     end
   end.parse!
   abort('需要 --model 与 --variant（或 --rescore）') unless options[:rescore] || (options[:model] && options[:variant])
+  abort('jobs 必须为 1..4') unless (1..4).cover?(options[:jobs])
+  abort('--resume 需要 --checkpoint-dir') if options[:resume] && !options[:checkpoint_dir]
+  abort('输入建议套件暂不支持断点；请用模型评测套件') if options[:suite] == 'input-suggestion' && options[:checkpoint_dir]
   abort('--suite 只能是 model-eval 或 input-suggestion') unless %w[model-eval input-suggestion].include?(options[:suite])
 
   exit(PromptRsiEval.main(options))
