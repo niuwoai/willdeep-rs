@@ -138,6 +138,11 @@ impl StdioConnection {
         timeout: Duration,
     ) -> Result<Value, McpError> {
         let _turn = self.turn.lock().await;
+        // A reaped process is dead even if stdout EOF has not reached the
+        // reader task yet. Do not write into its closed stdin in that gap.
+        if !self.is_alive() {
+            return Err(McpError::Exited(server.to_owned()));
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, mut receiver) = oneshot::channel();
         self.pending().insert(id, sender);

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.91.0-rc2] - 2026-10-08
+
+### Fixed
+- MCP 子进程已经退出、stdout 读任务尚未收尾时，请求入口直接返回 Exited，避免向已关闭 stdin 写入并偶发 BrokenPipe；既有退出状态回归在 macOS CI 复现后修复。
+
 ## [0.91.0-rc1] - 2026-10-08
 
 ### Added

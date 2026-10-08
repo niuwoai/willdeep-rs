@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-10-08 | 当前版本：v0.91.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-08 | 当前版本：v0.91.0-rc2（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 - RSI 评测支持受控并发、逐题断点及付费前出处检查；反馈健康报告明确显示缺少的观测和待调查问题。实施状态与后续验收见 [RSI 实施清单](docs/RSI_IMPLEMENTATION_2026_10_08.md)。
 - TUI / Web 输入预测在打字时隐藏、删空后恢复，Tab 填入而不发送。
