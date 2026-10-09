@@ -1,0 +1,18 @@
+{
+  "rust_core": {
+    "command": "cargo test --offline -p willdeep-core --lib -- --quiet",
+    "passed": 675,
+    "failed": 0,
+    "ignored": 5
+  },
+  "analysis_tests": {
+    "passed": 5,
+    "assertions": 12
+  },
+  "format_check": "passed",
+  "diff_check": "passed",
+  "old_report_sha256": {
+    "files_checked": 58,
+    "changed": 0
+  }
+}

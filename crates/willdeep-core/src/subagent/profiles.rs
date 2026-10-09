@@ -208,7 +208,7 @@ pub fn builtin_profiles(worker: Arc<dyn Provider>) -> Vec<SubagentProfile> {
                     "edit_file",
                     "run_command",
                 ],
-                prompt: "Your trade is BOUNDED IMPLEMENTATION. Complete the requested multi-file change inside the declared file set. Inspect neighboring code, preserve public behaviour outside the task, and use the verifier when one is supplied. You may create or edit only paths declared in task.write_files (legacy packets use task.relevant_files). Report changed files, verification and remaining uncertainty.",
+                prompt: "Your trade is BOUNDED IMPLEMENTATION. Complete the requested multi-file change inside the declared file set. Inspect neighboring code with bounded reads, then implement once the cause is understood. Preserve public behaviour outside the task. Check the original failing example against its required result and use the verifier when one is supplied, relative to your active workspace. Do not change existing tests when forbidden or redefine expectations to fit the patch. Before reporting completion, inspect the implementation diff; diagnostic files alone are not an implementation fix. You may create or edit only paths declared in task.write_files (legacy packets use task.relevant_files). Report changed files, verification and remaining uncertainty.",
                 max_turns: 18,
                 context_window: STANDARD_WINDOW,
                 tool_output_limit: Some(PAYLOAD_LIMIT_IMPLEMENTER),

@@ -1,0 +1,851 @@
+{
+  "schema": "willdeep.swebench.failure-analysis.v1",
+  "scope": "Published sanitized CLI 0.92.0-rc1 traces; observations are not inferred root causes.",
+  "runs": [
+    {
+      "id": "deepseek-flash-20261008",
+      "model": "deepseek-v4-flash",
+      "resolved": 11,
+      "planned": 30,
+      "statuses": {
+        "resolved": 11,
+        "unresolved": 8,
+        "budget_exhausted_empty_patch": 9,
+        "empty_patch": 2
+      }
+    },
+    {
+      "id": "glm5-20261009",
+      "model": "glm-5",
+      "resolved": 19,
+      "planned": 30,
+      "statuses": {
+        "unresolved": 7,
+        "resolved": 19,
+        "budget_exhausted_empty_patch": 3,
+        "empty_patch": 1
+      }
+    }
+  ],
+  "failed_attempts": 30,
+  "distinct_failed_tasks": 22,
+  "empty_patches": 15,
+  "trace_missing": 1,
+  "failures": [
+    {
+      "trace_missing": true,
+      "patch_files": [
+        "core"
+      ],
+      "diagnostic_or_core_only": true,
+      "tool_calls": {},
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-11555",
+      "status": "unresolved",
+      "reported_tokens": 0,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_order_by_ptr_field_with_default_ordering_by_expression (ordering.tests.OrderingTests)"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-11555/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 2,
+        "search_files": 1,
+        "read_file": 15,
+        "git_log": 1,
+        "grep_files": 6,
+        "run_command": 4,
+        "get_job_output": 2,
+        "spawn_agent": 1,
+        "await_agents": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "await_agents"
+      ],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-11885",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1034172,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-11885/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "search_files": 1,
+        "git_log": 1,
+        "read_file": 1,
+        "grep_files": 3,
+        "git_blame": 1,
+        "run_command": 2,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-12050",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1015318,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-12050/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "tests/generic_views/test_zzz_repro.py"
+      ],
+      "diagnostic_or_core_only": true,
+      "tool_calls": {
+        "run_command": 15,
+        "grep_files": 6,
+        "read_file": 17,
+        "create_file": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-13297",
+      "status": "unresolved",
+      "reported_tokens": 1045994,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_template_params_filtering (generic_views.test_base.DeprecationTests)"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-13297/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "tests/expressions_window/zz_tmp_check.py"
+      ],
+      "diagnostic_or_core_only": true,
+      "tool_calls": {
+        "grep_files": 24,
+        "read_file": 21,
+        "run_command": 3,
+        "list_directory": 1,
+        "create_file": 2,
+        "edit_file": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-13449",
+      "status": "unresolved",
+      "reported_tokens": 1035222,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_lag_decimalfield (expressions_window.tests.WindowFunctionTests)"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-13449/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 4,
+        "search_files": 1,
+        "run_command": 2,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-13837",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1050754,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-13837/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "run_command": 7,
+        "grep_files": 14,
+        "read_file": 20,
+        "search_files": 2,
+        "spawn_agent": 1,
+        "await_agents": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "await_agents"
+      ],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-15930",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1038077,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-15930/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "tests/annotations/tests.py"
+      ],
+      "diagnostic_or_core_only": true,
+      "tool_calls": {
+        "run_command": 10,
+        "grep_files": 11,
+        "read_file": 25,
+        "git_log": 2,
+        "edit_file": 3
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-16032",
+      "status": "unresolved",
+      "reported_tokens": 1004153,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_annotation_and_alias_filter_in_subquery (annotations.tests.NonAggregateAnnotationTestCase)",
+        "test_annotation_and_alias_filter_related_in_subquery (annotations.tests.NonAggregateAnnotationTestCase)"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-16032/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "django/core/management/commands/runserver.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "search_files": 1,
+        "grep_files": 8,
+        "read_file": 10,
+        "git_log": 2,
+        "run_command": 6,
+        "spawn_agent": 1,
+        "git_diff": 1,
+        "git_status": 1,
+        "get_job_output": 3
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "django__django-16145",
+      "status": "unresolved",
+      "reported_tokens": 1011290,
+      "official_report_present": true,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 1,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/django__django-16145/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 2,
+        "grep_files": 3,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "matplotlib__matplotlib-25122",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1066638,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/matplotlib__matplotlib-25122/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 17,
+        "git_status": 1,
+        "git_log": 1,
+        "grep_files": 9,
+        "run_command": 7,
+        "list_directory": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "mwaskom__seaborn-3187",
+      "status": "empty_patch",
+      "reported_tokens": 1037138,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/mwaskom__seaborn-3187/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "classes.dot"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 4,
+        "search_files": 1,
+        "read_file": 10,
+        "git_status": 1,
+        "git_log": 2,
+        "run_command": 15,
+        "grep_files": 4
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "pylint-dev__pylint-4551",
+      "status": "unresolved",
+      "reported_tokens": 762244,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "tests/unittest_pyreverse_writer.py::test_dot_files[packages_No_Name.dot]",
+        "tests/unittest_pyreverse_writer.py::test_dot_files[classes_No_Name.dot]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names0-special]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names1-private]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names2-public]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names3-protected]",
+        "tests/unittest_pyreverse_writer.py::test_get_annotation_annassign[a:",
+        "tests/unittest_pyreverse_writer.py::test_get_annotation_assignattr[def",
+        "tests/unittest_pyreverse_writer.py::test_infer_node_1",
+        "tests/unittest_pyreverse_writer.py::test_infer_node_2"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/pylint-dev__pylint-4551/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 7,
+        "grep_files": 6,
+        "run_command": 9,
+        "spawn_agent": 1,
+        "await_agents": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "await_agents"
+      ],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "pytest-dev__pytest-10081",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1029958,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/pytest-dev__pytest-10081/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "run_command": 1,
+        "search_files": 1,
+        "read_file": 6,
+        "grep_files": 5,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "scikit-learn__scikit-learn-13496",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1046794,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/scikit-learn__scikit-learn-13496/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "tests/test_ext_autodoc_private_members_verify.py"
+      ],
+      "diagnostic_or_core_only": true,
+      "tool_calls": {
+        "run_command": 1,
+        "search_files": 4,
+        "read_file": 21,
+        "grep_files": 4,
+        "create_file": 1,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "sphinx-doc__sphinx-8035",
+      "status": "unresolved",
+      "reported_tokens": 1062771,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "tests/test_ext_autodoc_private_members.py::test_private_members"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/sphinx-doc__sphinx-8035/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 13,
+        "read_file": 18,
+        "list_directory": 1,
+        "run_command": 1,
+        "spawn_agent": 2
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "sphinx-doc__sphinx-8551",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1021920,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/sphinx-doc__sphinx-8551/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "sympy/geometry/point.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 6,
+        "read_file": 8,
+        "git_log": 1,
+        "run_command": 13,
+        "spawn_agent": 1,
+        "git_status": 1,
+        "edit_file": 1,
+        "git_diff": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 1,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "sympy__sympy-11618",
+      "status": "unresolved",
+      "reported_tokens": 1006212,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_issue_11617"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/sympy__sympy-11618/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "run_command": 6,
+        "grep_files": 11,
+        "read_file": 27
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "sympy__sympy-20438",
+      "status": "empty_patch",
+      "reported_tokens": 1020134,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/sympy__sympy-20438/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 7,
+        "run_command": 12,
+        "grep_files": 4,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "deepseek-flash-20261008",
+      "instance_id": "sympy__sympy-22714",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1002842,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/deepseek-flash-20261008/tasks/sympy__sympy-22714/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "astropy/units/quantity.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 1,
+        "read_file": 9,
+        "grep_files": 5,
+        "run_command": 18,
+        "edit_file": 1,
+        "git_status": 1,
+        "git_diff": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "astropy__astropy-13977",
+      "status": "unresolved",
+      "reported_tokens": 1005450,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity0-quantity0-add]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity0-quantity0-multiply]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity0-quantity1-add]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity0-quantity1-multiply]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity1-quantity0-add]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity1-quantity0-multiply]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity1-quantity1-add]",
+        "astropy/units/tests/test_quantity_ufuncs.py::TestUfuncReturnsNotImplemented::TestBinaryUfuncs::test_full[empty-duck_quantity1-quantity1-multiply]"
+      ],
+      "pass_to_pass_failure_count": 4,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/astropy__astropy-13977/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "django/db/models/deletion.py",
+        "tests/delete/tests.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 4,
+        "search_files": 2,
+        "read_file": 15,
+        "grep_files": 7,
+        "edit_file": 4,
+        "run_command": 2
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "django__django-11885",
+      "status": "unresolved",
+      "reported_tokens": 1009098,
+      "official_report_present": true,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 2,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/django__django-11885/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 1,
+        "git_log": 1,
+        "grep_files": 11,
+        "read_file": 15,
+        "search_files": 2,
+        "run_command": 6
+      },
+      "last_proposed_tools_without_saved_result": [
+        "run_command"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "django__django-13297",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1001922,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/django__django-13297/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 25,
+        "read_file": 24,
+        "list_directory": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "django__django-13449",
+      "status": "empty_patch",
+      "reported_tokens": 1001865,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/django__django-13449/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "django/db/models/sql/query.py",
+        "tests/annotations/tests.py",
+        "tests/test_bug.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 2,
+        "grep_files": 12,
+        "read_file": 20,
+        "run_command": 17,
+        "edit_file": 2
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "django__django-16032",
+      "status": "unresolved",
+      "reported_tokens": 1001463,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_annotation_and_alias_filter_in_subquery (annotations.tests.NonAggregateAnnotationTestCase)",
+        "test_annotation_and_alias_filter_related_in_subquery (annotations.tests.NonAggregateAnnotationTestCase)"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/django__django-16032/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 7,
+        "read_file": 5,
+        "search_files": 1,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "django__django-16145",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1021246,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/django__django-16145/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "lib/matplotlib/ticker.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 8,
+        "read_file": 14,
+        "git_log": 2,
+        "run_command": 8,
+        "edit_file": 2
+      },
+      "last_proposed_tools_without_saved_result": [
+        "run_command"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "matplotlib__matplotlib-14623",
+      "status": "unresolved",
+      "reported_tokens": 1007742,
+      "official_report_present": true,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/matplotlib__matplotlib-14623/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "seaborn/_core/scales.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "read_file": 9,
+        "list_directory": 3,
+        "grep_files": 6,
+        "run_command": 32,
+        "edit_file": 1
+      },
+      "last_proposed_tools_without_saved_result": [],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "mwaskom__seaborn-3187",
+      "status": "unresolved",
+      "reported_tokens": 1057439,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "tests/test_relational.py::TestRelationalPlotter::test_legend_has_no_offset"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/mwaskom__seaborn-3187/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "pylint/pyreverse/inspector.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "list_directory": 5,
+        "read_file": 8,
+        "grep_files": 4,
+        "run_command": 26,
+        "edit_file": 2
+      },
+      "last_proposed_tools_without_saved_result": [
+        "run_command"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "pylint-dev__pylint-4551",
+      "status": "unresolved",
+      "reported_tokens": 1030400,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "tests/unittest_pyreverse_writer.py::test_dot_files[packages_No_Name.dot]",
+        "tests/unittest_pyreverse_writer.py::test_dot_files[classes_No_Name.dot]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names0-special]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names1-private]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names2-public]",
+        "tests/unittest_pyreverse_writer.py::test_get_visibility[names3-protected]",
+        "tests/unittest_pyreverse_writer.py::test_get_annotation_annassign[a:",
+        "tests/unittest_pyreverse_writer.py::test_get_annotation_assignattr[def",
+        "tests/unittest_pyreverse_writer.py::test_infer_node_1",
+        "tests/unittest_pyreverse_writer.py::test_infer_node_2"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/pylint-dev__pylint-4551/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 3,
+        "read_file": 7,
+        "run_command": 1,
+        "spawn_agent": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "spawn_agent"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "sympy__sympy-12096",
+      "status": "budget_exhausted_empty_patch",
+      "reported_tokens": 1008810,
+      "official_report_present": false,
+      "fail_to_pass_failures": [],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/sympy__sympy-12096/evidence.json"
+    },
+    {
+      "trace_missing": false,
+      "patch_files": [
+        "sympy/sets/sets.py"
+      ],
+      "diagnostic_or_core_only": false,
+      "tool_calls": {
+        "grep_files": 14,
+        "read_file": 15,
+        "run_command": 18,
+        "edit_file": 1
+      },
+      "last_proposed_tools_without_saved_result": [
+        "run_command"
+      ],
+      "spawn_calls_with_saved_result": 0,
+      "run": "glm5-20261009",
+      "instance_id": "sympy__sympy-20438",
+      "status": "unresolved",
+      "reported_tokens": 1029376,
+      "official_report_present": true,
+      "fail_to_pass_failures": [
+        "test_Eq",
+        "test_issue_19378"
+      ],
+      "pass_to_pass_failure_count": 0,
+      "evidence_url": "https://willdeep.com/benchmarks/runs/glm5-20261009/tasks/sympy__sympy-20438/evidence.json"
+    }
+  ],
+  "input_sha256": {
+    "index.json": "65d1eaff7af610f5b21552cc8a6d4892614465831dc58fbb95daa5e54261bc96",
+    "runs/deepseek-flash-20261008/tasks/django__django-11555/evidence.json": "9db6eca4f43855ea0400e3adb28795d4337ec36194407f30b494123f22280af2",
+    "runs/deepseek-flash-20261008/tasks/django__django-11885/evidence.json": "33d7a3d1be4f4febca2dfb15788141811048741fb199f710bdc640e2c378db68",
+    "runs/deepseek-flash-20261008/tasks/django__django-12050/evidence.json": "cace46542a7f7fd541a5024f801491da36507d503ed39605c8c8780e2b5ea7f3",
+    "runs/deepseek-flash-20261008/tasks/django__django-13297/evidence.json": "6e6ee992398d178b8d67d832f2d970391aa5d00760de13bbe8bfa38509dcba97",
+    "runs/deepseek-flash-20261008/tasks/django__django-13449/evidence.json": "4cc2e969bebaaf31747ec5677bb2d583fb43d4a82d63dea263a0d423ce182a38",
+    "runs/deepseek-flash-20261008/tasks/django__django-13837/evidence.json": "20b20a4e981d07dd7d01706e1867a521888f390cc882728311c8c31e47da33c9",
+    "runs/deepseek-flash-20261008/tasks/django__django-15930/evidence.json": "278045d3b556f23d1bc9c956117c06c7de9b497bacf11ce1f4345b0a6007620e",
+    "runs/deepseek-flash-20261008/tasks/django__django-16032/evidence.json": "f28118f24a1243fdac09b3f9d72ad403acf86f6e9d251f207a6bbd425b62b838",
+    "runs/deepseek-flash-20261008/tasks/django__django-16145/evidence.json": "c8d73b3cfbf52c4f1f27556b3b8f26bad20b5712093907838cc4995670595d33",
+    "runs/deepseek-flash-20261008/tasks/matplotlib__matplotlib-25122/evidence.json": "90c8257f8bea0a94447dfe58401de01bd7efebad977a9e9f9ddb646e41eda046",
+    "runs/deepseek-flash-20261008/tasks/mwaskom__seaborn-3187/evidence.json": "eb5f9f34f847137a7822b4d4b8d4b65f49c4200c99acc30cc781b96370114bf8",
+    "runs/deepseek-flash-20261008/tasks/pylint-dev__pylint-4551/evidence.json": "7c52ddbf87291f255bdecd4a0e12ea4c6cbc9425eb2e321c74f201dd5e7ed09e",
+    "runs/deepseek-flash-20261008/tasks/pytest-dev__pytest-10081/evidence.json": "e87a0413e705ae9eb8f961579c607c354544d46b48bfadf2167a837d99f3efa2",
+    "runs/deepseek-flash-20261008/tasks/scikit-learn__scikit-learn-13496/evidence.json": "a958f80b05ee7981f52e90873f226c83950f1cd3ba5d4c4054941ab58bd03acd",
+    "runs/deepseek-flash-20261008/tasks/sphinx-doc__sphinx-8035/evidence.json": "dd9fb15f78e7e378168f0f329290fb69ebb9db4e829da3bd695206cfbaaf4bc4",
+    "runs/deepseek-flash-20261008/tasks/sphinx-doc__sphinx-8551/evidence.json": "3479246c3872168cdce6ba3371c41058922f85222a0b8ac5e59eab5d3d406658",
+    "runs/deepseek-flash-20261008/tasks/sympy__sympy-11618/evidence.json": "ff8de8f9420774cf5b0c06787af8e9700eb41e5c246bf846a9bda859b604c527",
+    "runs/deepseek-flash-20261008/tasks/sympy__sympy-20438/evidence.json": "15e491e66ce20234f842465d5d172692a672e4f03b82fcfb5dc3829650986cc2",
+    "runs/deepseek-flash-20261008/tasks/sympy__sympy-22714/evidence.json": "810596617f39d6efda4064539ca57e44a201c5dbe27f305b46c9a2c33deb515c",
+    "runs/glm5-20261009/tasks/astropy__astropy-13977/evidence.json": "0c20e83706c28feb0d1a2e47bbb4bf1994421b3cad07e35fed2afc45b6414f48",
+    "runs/glm5-20261009/tasks/django__django-11885/evidence.json": "4af4edfd255f256eede648866c1744d947ac53a98b00989b8f7fd66e740db8ae",
+    "runs/glm5-20261009/tasks/django__django-13297/evidence.json": "2e1aeb6fe10a7a60b6466d6144cfb1826bd5810a02f67ee5f84f7b66177069cf",
+    "runs/glm5-20261009/tasks/django__django-13449/evidence.json": "d4412104ecb0c17da8bd38500222f874a46bafaaac508debce374e9f9fa25ebc",
+    "runs/glm5-20261009/tasks/django__django-16032/evidence.json": "53c51f6eea8b3f3475b8d16ee2682776d2b17fe00be3a7aa7100ce8513e50eda",
+    "runs/glm5-20261009/tasks/django__django-16145/evidence.json": "6ee64afb4ec651eee484b54d5b50aa753e8e7a023ec9d45f132f785cfc355e2c",
+    "runs/glm5-20261009/tasks/matplotlib__matplotlib-14623/evidence.json": "30a7ae65539e466c88887b29472ec5b8d991913cd926168562ac1146bda1a775",
+    "runs/glm5-20261009/tasks/mwaskom__seaborn-3187/evidence.json": "bf9bba2a179ff07d15ff48bfe432132180b2c27f2022f8e78a0d5f8e2ca3e020",
+    "runs/glm5-20261009/tasks/pylint-dev__pylint-4551/evidence.json": "e55ee9dc3fbc29dd12d3cede8f705d4eb9c1b5fa62f434db6c2872759b378e2a",
+    "runs/glm5-20261009/tasks/sympy__sympy-12096/evidence.json": "fd9cb6d0cdd5d847613c42ec468ac47f2dba47b28717bf49b948bf240098e1c8",
+    "runs/glm5-20261009/tasks/sympy__sympy-20438/evidence.json": "a6b043136bd0a8a752c9969ea9df8af0a0a71e1020a19f5d2b6df34c2a3068ab"
+  }
+}

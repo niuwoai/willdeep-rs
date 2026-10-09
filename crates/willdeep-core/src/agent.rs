@@ -14,6 +14,7 @@ use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{Message, ToolCall, Usage, sanitize_tool_history};
 
 mod context;
+mod guidance;
 mod messaging;
 mod parallel;
 mod progress;
@@ -927,6 +928,7 @@ impl Agent {
         // 自上次续推判定以来成功发起的工具调用数——续推判定的「进展证据」。
         let mut tools_since_check = 0_usize;
         let mut progress = progress::ProgressTracker::default();
+        let mut exploration = guidance::ExplorationGuidance::default();
         let mut incomplete_responses = 0_usize;
         let verification_baseline = checkpoint.verification_baseline().map(str::to_owned);
         let mut unverified_stops = 0_usize;
@@ -951,6 +953,13 @@ impl Agent {
                 messages[0].content.push_str("\n\n");
                 messages[0].content.push_str(&pin);
             }
+            messages[0].content.push_str("\n\n");
+            messages[0].content.push_str(&guidance::budget_context(
+                used_tokens,
+                self.config.token_budget,
+                turn,
+                self.config.max_turns,
+            ));
             self.append_pending_instructions(&mut messages);
             checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
             // 事件在这里进对话，而不是在工具与工具之间：一次 assistant 的
@@ -1283,6 +1292,11 @@ impl Agent {
                     .with_reasoning(reasoning),
             );
             checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
+            let all_reads = completion
+                .tool_calls
+                .iter()
+                .all(guidance::is_exploration_read);
+            let mut novel_read = false;
             let mut rules_changed = false;
             let mut parallel_results = self
                 .parallel_reads(&completion.tool_calls, &mut rules)
@@ -1331,6 +1345,7 @@ impl Agent {
                 };
                 if progress.observe(&call, &output, is_error) {
                     tools_since_check = tools_since_check.saturating_add(1);
+                    novel_read |= guidance::is_exploration_read(&call);
                 }
                 self.sink
                     .emit(AgentEvent::ToolCompleted {
@@ -1340,6 +1355,10 @@ impl Agent {
                     })
                     .await;
                 messages.push(Message::tool(&call, output));
+                checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
+            }
+            if let Some(steering) = exploration.finish_round(all_reads, novel_read) {
+                messages.push(Message::host_instruction(steering));
                 checkpoint.record(&messages, turn, input_tokens, output_tokens)?;
             }
         }

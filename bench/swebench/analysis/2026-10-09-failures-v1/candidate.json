@@ -1,0 +1,32 @@
+{
+  "baseline_commit": "1aff2ed8047fe811ddfce45f34ea963a64991d5a",
+  "baseline_version": "0.94.0-rc1",
+  "candidate_version": "0.94.0-rc2",
+  "historical_evaluation_version": "0.92.0-rc1",
+  "baseline_main_source_sha256": "4a55a31b6139f7cd7449396e2b6bb1685c810c5f7ee91d799c048d6c259ebe30",
+  "candidate_main_source_sha256": "77f86ca6da03439af0ec94c4c9ed6a4af46062ea09159952d39854134714516c",
+  "model_evaluation": "not_run",
+  "release": "not_published",
+  "reproduce": "ruby scripts/swebench_failure_analysis.rb /path/to/public/benchmarks /tmp/failure-analysis",
+  "baseline_worker_source_sha256": "11dacf8f2ea1982618492aeba8038368a51ab0375320f09e123ccf2f35cadf0d",
+  "candidate_worker_source_sha256": "5f1748ee276bf804389a1070880df86924475b552f5f6e0b14d9bd47eed0ab45",
+  "validation": {
+    "analysis_tests": {
+      "tests": 5,
+      "assertions": 12,
+      "failures": 0
+    },
+    "rust_core_tests": {
+      "command": "cargo test --offline -p willdeep-core --lib",
+      "passed": 671,
+      "failed": 0,
+      "ignored": 5
+    },
+    "format_check": "passed",
+    "diff_check": "passed"
+  },
+  "historical_report_hash_check": {
+    "files": 58,
+    "changed": 0
+  }
+}

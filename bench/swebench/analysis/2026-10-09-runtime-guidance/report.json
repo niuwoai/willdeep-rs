@@ -1,0 +1,35 @@
+{
+  "candidate_version": "0.94.0-rc3",
+  "exploration": {
+    "consecutive_stagnant_read_rounds": 3,
+    "consecutive_read_checkpoint_rounds": 6
+  },
+  "budget_warning_fraction": 0.75,
+  "token_scope": "Current Agent provider/compression usage only; no child/auxiliary or external evaluator budget integration.",
+  "hard_limits_changed": false,
+  "extra_provider_requests": false,
+  "model_evaluation": "not_run",
+  "published": false,
+  "source_sha256": {
+    "crates/willdeep-core/src/agent.rs": "00ab18b71348884614cede42f11952ec0608b98b9b93bd12b97d748abc35ff09",
+    "crates/willdeep-core/src/agent/guidance.rs": "186b8d8600d016c0cd5ef60051d05f470bb397cd50950f2833621d0212fb513a"
+  },
+  "validation": {
+    "rust_core": {
+      "command": "cargo test --offline -p willdeep-core --lib -- --quiet",
+      "passed": 675,
+      "failed": 0,
+      "ignored": 5
+    },
+    "analysis_tests": {
+      "passed": 5,
+      "assertions": 12
+    },
+    "format_check": "passed",
+    "diff_check": "passed",
+    "old_report_sha256": {
+      "files_checked": 58,
+      "changed": 0
+    }
+  }
+}

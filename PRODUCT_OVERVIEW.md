@@ -1,6 +1,6 @@
 # Product Overview
 
-> 最后更新：2026-10-08 | 当前版本：v0.94.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-09 | 当前版本：v0.94.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
 
 - 跨端运行参数 v1：与 Mac 共用完整 JSON、严格校验及 SHA-256 生效指纹；检查点与 RSI 对照门禁核对配置一致性。反馈支持有界待审队列、按需模型异常分流和独立人工结论。契约与执行差异见 [RSI 运行参数 v1](docs/RSI_RUNTIME_PARAMETERS_V1.md)。
 
@@ -16,6 +16,10 @@
 WillDeep CLI 是跨平台 AI Coding Agent 客户端。当前阶段通过用户提供的 API Base、API Key 和模型 ID，在受限工作区内完成模型推理、工具执行和结果验证。
 
 ## 核心功能
+
+- 普通工具循环有只读探索检查点和逐轮预算提醒；重复读取无新证据时提醒收敛，持续新证据时允许继续定向调查。运行器不强制修改，不增加预算或调用；子 Agent / 辅助调用不计入此处的本 Agent token 提醒。实现与验证边界见 [运行时改进报告](bench/swebench/analysis/2026-10-09-runtime-guidance/report.md)。
+
+- 编码修复提示明确原始行为验收、及时执行/委派及工作树内验证；本轮为未发布候选，本地契约测试不能证明模型解决率提升。失败证据与后续 A/B 边界见 [第一轮失败分析](bench/swebench/analysis/2026-10-09-failures-v1/report.md)。
 
 - 内嵌 willdeep-favorites 2.3.0：CLI/Web 启动安装，Web 插件页面支持富文本备忘、图片收藏、搜索与标签；`plugin builtin install favorites --enable` 可明确批准启用，需要 `/usr/bin/ruby`。数据保存在当前 home 的插件私有目录。
 - 首次命令行启动时，未配置 Provider 的用户直接收到后台 WebApp 与 willdeep-config 配置地址，保存后自动继续进入 TUI；随包提供配置插件，沿用插件中心的权限审批与启用流程。无 `/usr/bin/ruby` 的环境可用 `--onboarding` 选择终端配置，环境变量已配置的用户不重复引导。
