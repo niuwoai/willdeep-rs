@@ -122,6 +122,10 @@ fn failure_reason(error: &str) -> &'static str {
         "auth"
     } else if has(&["insufficient", "quota", "balance", "payment", "402"]) {
         "quota"
+    } else if has(&["timeout", "timed out", "deadline"])
+        && has(&["stream interrupted", "response body"])
+    {
+        "stream_timeout"
     } else if has(&["timeout", "timed out", "deadline"]) {
         "timeout"
     } else if has(&[
@@ -526,6 +530,18 @@ mod tests {
         for leaked in ["1305317", "/Users/someone", "Bad Request"] {
             assert!(!event.message.contains(leaked), "leaked {leaked}");
         }
+    }
+
+    #[test]
+    fn stream_timeout_reason_is_specific_and_redacted() {
+        let event = public_event(RuntimeEvent {
+            sequence: 1,
+            timestamp: 2,
+            kind: "task.failed".to_owned(),
+            message: "task_id=abc error=provider stream interrupted: error decoding response body: operation timed out token=secret".to_owned(),
+        });
+        assert_eq!(event.message, "task_id=abc reason=stream_timeout");
+        assert_eq!(failure_reason("request deadline exceeded"), "timeout");
     }
 
     #[test]

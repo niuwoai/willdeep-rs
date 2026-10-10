@@ -156,6 +156,7 @@ pub async fn send_open_retrying(
     deadline: tokio::time::Instant,
 ) -> Result<reqwest::Response, ProviderError> {
     for attempt in 1..MAX_ATTEMPTS {
+        ensure_request_deadline(deadline)?;
         // 拿不到副本说明 body 不可重放（流式请求），那就没有重发一说，
         // 直接跳出去把原件发掉。
         let Some(candidate) = request.try_clone() else {
@@ -191,9 +192,18 @@ pub async fn send_open_retrying(
         }
     }
     // 最后一遍：用掉原始 request，错误照原样往上抛，不再包一层重试的说辞。
+    ensure_request_deadline(deadline)?;
     tokio::time::timeout_at(deadline, send_once(request, config))
         .await
         .map_err(|_| ProviderError::DeadlineExceeded)?
+}
+
+// timeout_at 会先 poll 内层 future；暂停或休眠后必须在发送前拒绝过期请求。
+fn ensure_request_deadline(deadline: tokio::time::Instant) -> Result<(), ProviderError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(ProviderError::DeadlineExceeded);
+    }
+    Ok(())
 }
 
 fn retry_delay(error: &ProviderError, attempt: u32) -> Duration {
@@ -523,6 +533,24 @@ mod tests {
                 super::super::ProviderEvent::RetryStarted { attempt: 1 }
             ]
         ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn expired_request_deadline_never_sends_a_request() {
+        let (url, hits, server) = scripted_server(vec![Some(200)]).await;
+        let config = probe_config(&url);
+        let error = send_open_retrying(
+            client(&config).unwrap().get(&url),
+            &config,
+            &super::super::NoopProviderEvents,
+            tokio::time::Instant::now() - Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ProviderError::DeadlineExceeded));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
         server.abort();
     }
 
