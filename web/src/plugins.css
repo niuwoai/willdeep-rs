@@ -430,7 +430,18 @@
 }
 
 .plugin-settings { margin-top: 14px; border-top: 1px solid var(--bg-panel); padding-top: 12px; }
-.plugin-setting-row { padding: 6px 0; }
+.plugin-settings-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.plugin-setting-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.plugin-setting-label { flex: 1; min-width: 0; }
+.plugin-settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 16px; }
+.plugin-settings-save { padding: 7px 16px; border-radius: 7px; cursor: pointer; }
+.plugin-settings-save:disabled { opacity: 0.5; cursor: default; }
+@media (max-width: 600px) {
+  .plugin-setting-row { flex-wrap: wrap; }
+  .plugin-setting-label { flex-basis: 100%; }
+  .plugin-settings .plugin-setting-input { width: 100%; }
+  .plugin-settings-actions { flex-wrap: wrap; }
+}
 .plugin-setting-title { font-size: 13px; color: var(--text); }
 .plugin-setting-about { font-size: 11px; color: var(--text-faint); }
 

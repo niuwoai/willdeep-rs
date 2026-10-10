@@ -11,11 +11,11 @@ import type { Messages } from "./i18n";
 import {
   approvePlugin,
   setPluginEnabled,
-  setPluginSetting,
   uninstallPlugin,
   type PluginFailureView,
   type PluginView,
 } from "./plugins";
+import { PluginSettings } from "./PluginSettings";
 
 type Props = {
   plugins: PluginView[];
@@ -193,47 +193,7 @@ export function PluginCenter({ plugins, failures, messages, onChanged }: Props) 
             </Flex>
 
             {plugin.settings.length > 0 && (
-              <Box className="plugin-settings">
-                {plugin.settings.map((setting) => (
-                  <Flex key={setting.id} className="plugin-setting-row" gap="2" align="center">
-                    <Box flex="1" minW="0">
-                      <Text className="plugin-setting-title">{setting.title}</Text>
-                      {setting.description && <Text className="plugin-setting-about">{setting.description}</Text>}
-                    </Box>
-                    {setting.type === "boolean" ? (
-                      <input
-                        type="checkbox"
-                        aria-label={setting.title}
-                        checked={(setting.value ?? setting.default_value) === "true"}
-                        onChange={(event) =>
-                          void act(plugin.id, () =>
-                            setPluginSetting(plugin.id, setting.id, String(event.target.checked))
-                          )
-                        }
-                      />
-                    ) : (
-                      <input
-                        className="plugin-setting-input"
-                        aria-label={setting.title}
-                        // secret 只显示"设过没有"，不回显值：一个能读回来的
-                        // 密钥等于没存过。
-                        type={setting.type === "secret" ? "password" : "text"}
-                        placeholder={
-                          setting.type === "secret" && setting.configured
-                            ? messages.pluginSecretStored
-                            : setting.default_value ?? ""
-                        }
-                        defaultValue={setting.type === "secret" ? "" : setting.value ?? ""}
-                        onBlur={(event) => {
-                          const value = event.target.value;
-                          if (setting.type === "secret" && value === "") return;
-                          void act(plugin.id, () => setPluginSetting(plugin.id, setting.id, value || null));
-                        }}
-                      />
-                    )}
-                  </Flex>
-                ))}
-              </Box>
+              <PluginSettings plugin={plugin} messages={messages} onChanged={onChanged} />
             )}
           </Box>
         );
