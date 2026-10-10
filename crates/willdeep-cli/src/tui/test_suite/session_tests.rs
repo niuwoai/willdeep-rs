@@ -983,7 +983,12 @@ fn runtime_terminal_failure_stops_the_busy_indicator() {
     let event = crate::daemon::RemoteRuntimeEvent {
         sequence: 1,
         kind: "task.failed".to_owned(),
-        message: format!("task_id={} error=provider", uuid::Uuid::new_v4()),
+        message: format!(
+            "task_id={} session_id={} turn_id={} exit_code=none failure_domain=provider reason=stream_timeout",
+            uuid::Uuid::new_v4(),
+            session.id,
+            uuid::Uuid::new_v4()
+        ),
         visible: true,
         session_id: Some(session.id),
     };
@@ -997,6 +1002,17 @@ fn runtime_terminal_failure_stops_the_busy_indicator() {
             .iter()
             .any(|line| line.contains("Runtime task failed"))
     );
+    assert!(app.transcript.iter().any(|line| {
+        line.contains("response stream timed out")
+            && line.contains("not replayed")
+            && line.contains("remaining validation")
+    }));
+    assert!(app.transcript.iter().all(|line| {
+        !line.contains("session_id=")
+            && !line.contains("turn_id=")
+            && !line.contains("exit_code=none")
+            && !line.contains("failure_domain=")
+    }));
     std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]

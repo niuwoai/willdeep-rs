@@ -109,9 +109,9 @@ pub(super) async fn reconcile_stale_runtime_turn(
             app.append_transcript(format!(
                 "System: {}",
                 app.language.text(
-                    "Runtime 已无在途轮次，界面上残留的「工作中」已复位；排队的提示词继续发送",
-                    "Runtime has no active turn; the stale busy state was reset and queued prompts continue",
-                    "Runtime に進行中のターンはありません。残っていた実行中表示を戻し、キューのプロンプトを続行します",
+                    "Runtime 已无活动轮次，已清除残留的「工作中」显示；这不代表任务成功。已有改动不会回滚；仅继续发送待发提示词，失败轮次不会自动重跑",
+                    "Runtime has no active turn; the stale busy display was cleared. This does not mean success. Existing changes are not rolled back; only queued prompts continue, failed turns are not replayed",
+                    "Runtime に進行中のターンはありません。実行中表示を解除しましたが、成功を意味しません。既存の変更は戻さず、送信待ちのみ続行し、失敗したターンは再実行しません",
                 )
             ));
         }
@@ -356,9 +356,14 @@ fn failure_reason_text(message: &str, language: Language) -> Option<&'static str
             "provider のクォータ・残高不足",
         ),
         "timeout" => language.text(
-            "请求超时",
-            "The request timed out",
-            "リクエストがタイムアウト",
+            "模型请求超时（可能与休眠或网络中断有关）；已有改动不会回滚。网络恢复后发送「继续刚才的任务，先检查已有改动并补完校验」；侧栏 Inbox 可查看详情",
+            "Model request timed out (sleep or a network interruption may contribute). Existing changes are not rolled back. Once online, ask to continue after checking existing changes and remaining validation; see Inbox for details",
+            "モデルリクエストがタイムアウト（スリープや通信断の可能性）。既存の変更は戻しません。復旧後、変更と残りの検証を確認して続行するよう依頼してください。詳細は Inbox",
+        ),
+        "stream_timeout" => language.text(
+            "模型响应流读取超时（可能与休眠或网络中断有关）；为避免重复生成，未自动重放请求。已有改动不会回滚。网络恢复后发送「继续刚才的任务，先检查已有改动并补完校验」；侧栏 Inbox 可查看详情",
+            "Model response stream timed out (sleep or a network interruption may contribute); the request was not replayed to avoid duplicate generation. Existing changes are not rolled back. Once online, ask to continue after checking existing changes and remaining validation; see Inbox for details",
+            "モデル応答ストリームがタイムアウト（スリープや通信断の可能性）。重複生成を避けるため再送していません。既存の変更は戻しません。復旧後、変更と残りの検証を確認して続行するよう依頼してください。詳細は Inbox",
         ),
         "network" => language.text(
             "网络或 TLS 中断",
@@ -381,8 +386,8 @@ fn failure_reason_text(message: &str, language: Language) -> Option<&'static str
 fn event_details(message: &str) -> String {
     let details = message
         .split_whitespace()
-        .filter(|part| !part.starts_with("task_id="))
-        .filter(|part| !part.starts_with("reason="))
+        // 聊天区只显示有意义的命令退出码；轮次标识和故障域留在 Inbox。
+        .filter(|part| part.starts_with("exit_code=") && *part != "exit_code=none")
         .collect::<Vec<_>>()
         .join(" ");
     if details.is_empty() {
