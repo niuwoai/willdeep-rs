@@ -1,6 +1,8 @@
 # Product Overview
 
-> 最后更新：2026-10-09 | 当前版本：v0.94.0-rc3（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-10 | 当前版本：v0.94.0-rc4（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+
+- 模型响应流超时后不自动重放请求；TUI 区分流读取超时与普通超时，提示检查已有改动并续做校验。界面状态复位不代表任务成功。模型重试在发送前拒绝已经过期的请求期限。
 
 - 跨端运行参数 v1：与 Mac 共用完整 JSON、严格校验及 SHA-256 生效指纹；检查点与 RSI 对照门禁核对配置一致性。反馈支持有界待审队列、按需模型异常分流和独立人工结论。契约与执行差异见 [RSI 运行参数 v1](docs/RSI_RUNTIME_PARAMETERS_V1.md)。
 
