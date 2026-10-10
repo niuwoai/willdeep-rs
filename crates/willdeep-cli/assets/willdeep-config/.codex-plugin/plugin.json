@@ -1,6 +1,6 @@
 {
   "name": "willdeep-config",
-  "version": "0.2.0",
+  "version": "0.4.0-rc1",
   "description": "WillDeep configuration manager with TOML editing, backup, and validation tools",
   "interface": {
     "displayName": "Config",

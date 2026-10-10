@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:willdeep:creative:v1",
+  "$defs": {
+    "character": { "type": "object", "minProperties": 1, "properties": { "name": { "type": "string", "maxLength": 120 }, "description": { "type": "string", "maxLength": 2000 }, "visualPrompt": { "type": "string", "maxLength": 8000 } } },
+    "episode": { "type": "object", "minProperties": 1, "properties": { "order": { "type": "integer", "minimum": 1 }, "title": { "type": "string", "maxLength": 160 }, "summary": { "type": "string", "maxLength": 2000 }, "script": { "type": "string", "maxLength": 20000 } } },
+    "shot": { "type": "object", "minProperties": 1, "properties": {
+      "order": { "type": "integer", "minimum": 1 }, "title": { "type": "string", "maxLength": 160 }, "summary": { "type": "string", "maxLength": 2000 },
+      "actionStart": { "type": "string", "maxLength": 2000 }, "actionEnd": { "type": "string", "maxLength": 2000 }, "cameraIntent": { "type": "string", "maxLength": 1000 },
+      "startPrompt": { "type": "string", "maxLength": 8000 }, "endPrompt": { "type": "string", "maxLength": 8000 }, "duration": { "type": "number", "exclusiveMinimum": 0, "maximum": 600 },
+      "soundscape": { "type": "string", "maxLength": 1000 }, "music": { "type": "string", "maxLength": 500 },
+      "dialogue": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["speaker", "text"], "properties": { "speaker": { "type": "string", "maxLength": 120 }, "text": { "type": "string", "maxLength": 2000 } } } }
+    } },
+    "frames": { "type": "object", "minProperties": 1, "additionalProperties": false, "properties": { "startPrompt": { "type": "string", "maxLength": 8000 }, "endPrompt": { "type": "string", "maxLength": 8000 } } },
+    "asset": { "type": "object", "minProperties": 1, "properties": { "name": { "type": "string", "maxLength": 120 }, "prompt": { "type": "string", "maxLength": 8000 }, "notes": { "type": "string", "maxLength": 4000 } } },
+    "review": { "type": "object", "required": ["status", "issues"], "properties": {
+      "status": { "type": "string", "enum": ["pass", "warn", "block"] },
+      "summary": { "type": "string", "maxLength": 600 },
+      "issues": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["severity", "category", "reason"], "properties": {
+        "severity": { "type": "string", "enum": ["warn", "block"] },
+        "level": { "type": "string", "maxLength": 20, "description": "must (likely fails platform review unless fixed) or advice (style, taste or optional). Not an enum on purpose: an unknown value falls back by severity (block→must, warn→advice) instead of discarding the whole verdict." },
+        "category": { "type": "string", "enum": ["politics", "ethnicity_religion", "crime", "sexual", "violence", "minors", "superstition", "values", "infringement", "advertising", "injury", "blood", "text_overlay", "identity", "scene_jump", "continuity", "framing", "hook", "pacing", "arc", "character", "dialogue", "shootability", "cost", "other"] },
+        "location": { "type": "string", "maxLength": 200 },
+        "excerpt": { "type": "string", "maxLength": 600 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "suggestion": { "type": "string", "maxLength": 1000 },
+        "raisedBy": { "type": "string", "maxLength": 80, "description": "Expert panel (aspect panel): the expert(s) who raised this issue, as named in the panel skill." }
+      } } }
+    } },
+    "passage": { "type": "object", "required": ["replacement"], "properties": { "replacement": { "type": "string", "maxLength": 20000 } } },
+    "plan": { "type": "object", "required": ["title"], "properties": {
+      "title": { "type": "string", "minLength": 1, "maxLength": 160 }, "genre": { "type": "string", "maxLength": 80 }, "format": { "type": "string", "maxLength": 80 },
+      "logline": { "type": "string", "maxLength": 1200 }, "coreConflict": { "type": "string", "maxLength": 1200 }, "audience": { "type": "string", "maxLength": 300 },
+      "tone": { "type": "string", "maxLength": 300, "description": "Writing tone for the writers: how people talk, pacing, how episodes land, what not to write. Never sent to image or video models." },
+      "visualStyle": { "type": "string", "maxLength": 300, "description": "One visual-only sentence sent verbatim to every video prompt: light, colour, texture, lens, era. No story, dialogue, rules or instructions." },
+      "arc": { "type": "string", "maxLength": 4000 },
+      "episodeCount": { "type": "integer", "minimum": 1, "maximum": 100 }, "episodeDurationSeconds": { "type": "integer", "minimum": 15, "maximum": 600 },
+      "characters": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "name": { "type": "string", "maxLength": 120 }, "role": { "type": "string", "maxLength": 2000 } } } },
+      "episodes": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "title": { "type": "string", "maxLength": 160 }, "summary": { "type": "string", "maxLength": 2000 }, "script": { "type": "string", "maxLength": 20000 } } } }
+    } }
+  }
+}

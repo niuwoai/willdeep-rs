@@ -103,11 +103,11 @@ module ConfigSchema
       fields: [
         { key: "provider", label: "提供商类型", type: "enum", default: nil,
           options: PROVIDER_KINDS.map { |m| m[:id] }, optionLabels: labels_of(PROVIDER_KINDS) },
-        { key: "api", label: "接口协议", type: "enum", default: nil,
-          options: API_DIALECTS.map { |m| m[:id] }, optionLabels: labels_of(API_DIALECTS) },
         { key: "api_base", label: "接口地址", type: "string", default: nil },
         { key: "api_key", label: "API 密钥", type: "secret", default: nil, secret: true },
         { key: "model", label: "默认模型", type: "string", default: nil },
+        { key: "api", label: "接口协议", type: "enum", default: nil,
+          options: API_DIALECTS.map { |m| m[:id] }, optionLabels: labels_of(API_DIALECTS) },
         { key: "max_output_tokens", label: "最大输出 Token", type: "int", default: nil }
       ]
     },

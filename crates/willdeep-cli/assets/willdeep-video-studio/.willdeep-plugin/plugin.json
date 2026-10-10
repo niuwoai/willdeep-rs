@@ -1,0 +1,262 @@
+{
+  "$schema": "../../../docs/plugin-schema/willdeep-plugin.schema.json",
+  "schemaVersion": 1,
+  "minimumWillDeepVersion": "1.343.0-rc1",
+  "contributes": {
+    "destinations": [{
+      "id": "studio",
+      "titleKey": "destination.studio",
+      "icon": "sf:film.stack",
+      "mainPage": "studio.main",
+      "companionSidebar": "studio.sidebar",
+      "toolbarCommandIDs": ["video.refreshPage"]
+    }],
+    "sidebars": [{
+      "id": "studio.sidebar",
+      "mode": "none"
+    }],
+    "pages": [{
+      "id": "studio.main",
+      "runtime": "localWeb",
+      "entryPath": "ui/dist/index.html"
+    }],
+    "commands": [
+      {"id":"drama.list","titleKey":"command.drama.list","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.list"}},
+      {"id":"drama.get","titleKey":"command.drama.get","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.get"}},
+      {"id":"drama.confirmPlan","titleKey":"command.drama.confirmPlan","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.confirm_plan"}},
+      {"id":"drama.saveCharacter","titleKey":"command.drama.saveCharacter","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_character"}},
+      {"id":"drama.saveEpisode","titleKey":"command.drama.saveEpisode","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_episode"}},
+      {"id":"drama.saveShot","titleKey":"command.drama.saveShot","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_shot"}},
+      {"id":"drama.saveDraft","titleKey":"command.drama.saveDraft","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_draft"}},
+      {"id":"drama.write_with_panel","titleKey":"command.drama.write_with_panel","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.write_with_panel"}},
+      {"id":"drama.listShots","titleKey":"command.drama.listShots","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.list_shots"}},
+      {"id":"drama.saveShotDrafts","titleKey":"command.drama.saveShotDrafts","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_shot_drafts"}},
+      {"id":"drama.saveEpisodeDrafts","titleKey":"command.drama.saveEpisodeDrafts","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_episode_drafts"}},
+      {"id":"drama.commitEpisodeDrafts","titleKey":"command.drama.commitEpisodeDrafts","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.commit_episode_drafts"}},
+      {"id":"drama.commitDraft","titleKey":"command.drama.commitDraft","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.commit_draft"}},
+      {"id":"drama.discardDraft","titleKey":"command.drama.discardDraft","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.discard_draft"}},
+      {"id":"video.recordReview","titleKey":"command.video.recordReview","handler":{"type":"mcpTool","server":"video-studio","tool":"video.record_review"}},
+      {"id":"drama.recordReview","titleKey":"command.drama.recordReview","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.record_review"}},
+      {"id":"drama.acknowledgeReview","titleKey":"command.drama.acknowledgeReview","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.acknowledge_review"}},
+      {"id":"video.acknowledgeReview","titleKey":"command.video.acknowledgeReview","handler":{"type":"mcpTool","server":"video-studio","tool":"video.acknowledge_review"}},
+      {"id":"drama.saveCanon","titleKey":"command.drama.saveCanon","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_canon"}},
+      {"id":"drama.checkConsistency","titleKey":"command.drama.checkConsistency","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.check_consistency"}},
+      {"id":"drama.listHistory","titleKey":"command.drama.listHistory","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.list_history"}},
+      {"id":"drama.readVersion","titleKey":"command.drama.readVersion","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.read_version"}},
+      {"id":"drama.restoreVersion","titleKey":"command.drama.restoreVersion","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.restore_version"}},
+      {"id":"skill.list","titleKey":"command.skill.list","handler":{"type":"mcpTool","server":"video-studio","tool":"skill.list"}},
+      {"id":"skill.get","titleKey":"command.skill.get","handler":{"type":"mcpTool","server":"video-studio","tool":"skill.get"}},
+      {"id":"skill.save","titleKey":"command.skill.save","handler":{"type":"mcpTool","server":"video-studio","tool":"skill.save"}},
+      {"id":"skill.reset","titleKey":"command.skill.reset","handler":{"type":"mcpTool","server":"video-studio","tool":"skill.reset"}},
+      {"id":"skill.compose","titleKey":"command.skill.compose","handler":{"type":"mcpTool","server":"video-studio","tool":"skill.compose"}},
+      {"id":"chat.append","titleKey":"command.chat.append","handler":{"type":"mcpTool","server":"video-studio","tool":"chat.append"}},
+      {"id":"chat.list","titleKey":"command.chat.list","handler":{"type":"mcpTool","server":"video-studio","tool":"chat.list"}},
+      {"id":"chat.clear","titleKey":"command.chat.clear","handler":{"type":"mcpTool","server":"video-studio","tool":"chat.clear"}},
+      {"id":"drama.recordImage","titleKey":"command.drama.recordImage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.record_image"}},
+      {"id":"drama.selectImage","titleKey":"command.drama.selectImage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.select_image"}},
+      {"id":"drama.selectVideo","titleKey":"command.drama.selectVideo","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.select_video"}},
+      {"id":"drama.setClipTrim","titleKey":"command.drama.setClipTrim","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.set_clip_trim"}},
+      {"id":"drama.saveMetadata","titleKey":"command.drama.saveMetadata","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_metadata"}},
+      {"id":"video.restore","titleKey":"command.video.restore","handler":{"type":"mcpTool","server":"video-studio","tool":"video.restore"}},
+      {"id":"episode.composePlan","titleKey":"command.episode.composePlan","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.compose_plan"}},
+      {"id":"episode.saveComposeSettings","titleKey":"command.episode.saveComposeSettings","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.save_compose_settings"}},
+      {"id":"episode.compose","titleKey":"command.episode.compose","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.compose"}},
+      {"id":"episode.composeStatus","titleKey":"command.episode.composeStatus","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.compose_status"}},
+      {"id":"episode.composeCancel","titleKey":"command.episode.composeCancel","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.compose_cancel"}},
+      {"id":"jobs.status","titleKey":"command.jobs.status","handler":{"type":"mcpTool","server":"video-studio","tool":"jobs.status"}},
+      {"id":"jobs.cancel","titleKey":"command.jobs.cancel","handler":{"type":"mcpTool","server":"video-studio","tool":"jobs.cancel"}},
+      {"id":"qa.lessons","titleKey":"command.qa.lessons","handler":{"type":"mcpTool","server":"video-studio","tool":"qa.lessons"}},
+      {"id":"qa.saveLesson","titleKey":"command.qa.saveLesson","handler":{"type":"mcpTool","server":"video-studio","tool":"qa.save_lesson"}},
+      {"id":"episode.generateMusic","titleKey":"command.episode.generateMusic","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.generate_music"}},
+      {"id":"episode.importMusic","titleKey":"command.episode.importMusic","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.import_music"}},
+      {"id":"episode.revealOutput","titleKey":"command.episode.revealOutput","handler":{"type":"mcpTool","server":"video-studio","tool":"episode.reveal_output"}},
+      {"id":"drama.recordCharacterImage","titleKey":"command.drama.recordCharacterImage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.record_character_image"}},
+      {"id":"drama.selectCharacterImage","titleKey":"command.drama.selectCharacterImage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.select_character_image"}},
+      {"id":"drama.getProgress","titleKey":"command.drama.getProgress","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.get_progress"}},
+      {"id":"drama.getStageContext","titleKey":"command.drama.getStageContext","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.get_stage_context"}},
+      {"id":"review.run","titleKey":"command.review.run","handler":{"type":"mcpTool","server":"video-studio","tool":"review.run"}},
+      {"id":"review.getMaterial","titleKey":"command.review.getMaterial","handler":{"type":"mcpTool","server":"video-studio","tool":"review.get_material"}},
+      {"id":"image.generate","titleKey":"command.image.generate","handler":{"type":"mcpTool","server":"video-studio","tool":"image.generate"}},
+      {"id":"drama.listAssets","titleKey":"command.drama.listAssets","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.list_assets"}},
+      {"id":"drama.getAsset","titleKey":"command.drama.getAsset","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.get_asset"}},
+      {"id":"drama.saveAsset","titleKey":"command.drama.saveAsset","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.save_asset"}},
+      {"id":"drama.archiveAsset","titleKey":"command.drama.archiveAsset","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.archive_asset"}},
+      {"id":"drama.selectAssetMedia","titleKey":"command.drama.selectAssetMedia","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.select_asset_media"}},
+      {"id":"drama.setReferencePackage","titleKey":"command.drama.setReferencePackage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.set_reference_package"}},
+      {"id":"drama.previewReferencePackage","titleKey":"command.drama.previewReferencePackage","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.preview_reference_package"}},
+      {"id":"drama.selectDialogueAudio","titleKey":"command.drama.selectDialogueAudio","handler":{"type":"mcpTool","server":"video-studio","tool":"drama.select_dialogue_audio"}},
+      {"id":"voice.generate","titleKey":"command.voice.generate","handler":{"type":"mcpTool","server":"video-studio","tool":"voice.generate"}},
+      {"id":"video.capabilities","titleKey":"command.video.capabilities","handler":{"type":"mcpTool","server":"video-studio","tool":"video.capabilities"}},
+      {
+        "id": "video.open",
+        "titleKey": "command.open",
+        "icon": "sf:film.stack",
+        "handler": {"type": "navigate", "destination": "studio"}
+      },
+      {
+        "id": "video.refreshPage",
+        "titleKey": "command.refreshPage",
+        "icon": "sf:arrow.clockwise",
+        "handler": {"type": "host", "action": "plugin.refresh"}
+      },
+      {
+        "id": "video.createDraft",
+        "titleKey": "command.createDraft",
+        "icon": "sf:text.badge.plus",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.create_draft"}
+      },
+      {
+        "id": "video.list",
+        "titleKey": "command.list",
+        "icon": "sf:list.bullet.rectangle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.list"}
+      },
+      {
+        "id": "video.status",
+        "titleKey": "command.status",
+        "icon": "sf:info.circle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.status"}
+      },
+      {
+        "id": "video.generate",
+        "titleKey": "command.generate",
+        "icon": "sf:play.rectangle.on.rectangle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.generate"}
+      },
+      {
+        "id": "video.refresh",
+        "titleKey": "command.refresh",
+        "icon": "sf:arrow.triangle.2.circlepath",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.refresh"}
+      },
+      {
+        "id": "video.refreshActive",
+        "titleKey": "command.refreshActive",
+        "icon": "sf:clock.arrow.trianglehead.counterclockwise.rotate.90",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.refresh_active"}
+      },
+      {
+        "id": "video.retry",
+        "titleKey": "command.retry",
+        "icon": "sf:arrow.clockwise.circle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.retry"}
+      },
+      {
+        "id": "video.download",
+        "titleKey": "command.download",
+        "icon": "sf:arrow.down.circle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.download"}
+      },
+      {
+        "id": "video.remove",
+        "titleKey": "command.remove",
+        "icon": "sf:trash",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.remove"}
+      },
+      {
+        "id": "video.settings",
+        "titleKey": "command.settings",
+        "icon": "sf:gearshape",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.settings"}
+      },
+      {
+        "id": "video.pickReference",
+        "titleKey": "command.pickReference",
+        "icon": "sf:photo",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.pick_reference"}
+      },
+      {
+        "id": "video.preparePlayback",
+        "titleKey": "command.preparePlayback",
+        "icon": "sf:play.rectangle",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.prepare_playback"}
+      },
+      {
+        "id": "video.revealOutput",
+        "titleKey": "command.revealOutput",
+        "icon": "sf:folder",
+        "handler": {"type": "mcpTool", "server": "video-studio", "tool": "video.reveal_output"}
+      }
+    ],
+    "menus": {
+      "commandPalette": ["video.open", "video.refreshPage"],
+      "composer.more": ["video.open"],
+      "plugin.page.toolbar": ["video.refreshPage"]
+    },
+    "settings": [
+      {
+        "id": "videoProvider",
+        "type": "enum",
+        "titleKey": "setting.videoProvider",
+        "descriptionKey": "setting.videoProvider.description",
+        "options": ["tsingfly", "openai", "custom"],
+        "defaultValue": "tsingfly"
+      },
+      {
+        "id": "videoApiBase",
+        "type": "string",
+        "titleKey": "setting.videoApiBase",
+        "descriptionKey": "setting.videoApiBase.description",
+        "defaultValue": "https://hub.tsingfly.com"
+      },
+      {
+        "id": "videoApiKey",
+        "type": "secret",
+        "titleKey": "setting.videoApiKey",
+        "descriptionKey": "setting.videoApiKey.description"
+      },
+      {
+        "id": "outputDirectory",
+        "type": "string",
+        "titleKey": "setting.outputDirectory",
+        "descriptionKey": "setting.outputDirectory.description",
+        "defaultValue": "~/Movies/WillDeep Video Studio"
+      },
+      {
+        "id": "ttsProvider",
+        "type": "enum",
+        "titleKey": "setting.ttsProvider",
+        "descriptionKey": "setting.ttsProvider.description",
+        "options": ["dashscope", "openai"],
+        "defaultValue": "dashscope"
+      },
+      {
+        "id": "ttsApiBase",
+        "type": "string",
+        "titleKey": "setting.ttsApiBase",
+        "descriptionKey": "setting.ttsApiBase.description",
+        "defaultValue": "https://dashscope.aliyuncs.com"
+      },
+      {
+        "id": "ttsApiKey",
+        "type": "secret",
+        "titleKey": "setting.ttsApiKey",
+        "descriptionKey": "setting.ttsApiKey.description"
+      },
+      {
+        "id": "ttsModel",
+        "type": "string",
+        "titleKey": "setting.ttsModel",
+        "descriptionKey": "setting.ttsModel.description",
+        "defaultValue": "qwen3-tts-flash"
+      },
+      {
+        "id": "musicProvider",
+        "type": "enum",
+        "titleKey": "setting.musicProvider",
+        "descriptionKey": "setting.musicProvider.description",
+        "options": ["none", "acestep"],
+        "defaultValue": "none"
+      },
+      {
+        "id": "musicApiBase",
+        "type": "string",
+        "titleKey": "setting.musicApiBase",
+        "descriptionKey": "setting.musicApiBase.description",
+        "defaultValue": "http://127.0.0.1:8001"
+      }
+    ]
+  },
+  "permissions": ["process.execute", "network.access", "credentials.use", "ai.chat", "ai.image", "providers.read", "skills.read"],
+  "dependencies": {"mcpServers": ["video-studio"], "skills": ["video-studio", "production-repair"]}
+}

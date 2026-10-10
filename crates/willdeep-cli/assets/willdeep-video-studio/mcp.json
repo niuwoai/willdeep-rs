@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "video-studio": {
+      "command": "/usr/bin/ruby",
+      "args": ["${pluginRoot}/server/video_studio.rb"],
+      "env": {
+        "VIDEO_STUDIO_PROVIDER": "${setting:videoProvider}",
+        "VIDEO_STUDIO_API_BASE": "${setting:videoApiBase}",
+        "VIDEO_STUDIO_API_KEY": "${setting:videoApiKey}",
+        "VIDEO_STUDIO_OUTPUT_DIRECTORY": "${setting:outputDirectory}",
+        "VIDEO_STUDIO_MCP_HTTP_ENABLED": "1",
+        "VIDEO_STUDIO_TTS_PROVIDER": "${setting:ttsProvider}",
+        "VIDEO_STUDIO_TTS_API_BASE": "${setting:ttsApiBase}",
+        "VIDEO_STUDIO_TTS_API_KEY": "${setting:ttsApiKey}",
+        "VIDEO_STUDIO_TTS_MODEL": "${setting:ttsModel}",
+        "VIDEO_STUDIO_MUSIC_PROVIDER": "${setting:musicProvider}",
+        "VIDEO_STUDIO_MUSIC_API_BASE": "${setting:musicApiBase}"
+      },
+      "startup_timeout_sec": 180
+    }
+  }
+}

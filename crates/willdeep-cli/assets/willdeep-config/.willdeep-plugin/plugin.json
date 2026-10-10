@@ -17,6 +17,12 @@
     }],
     "commands": [
       {
+        "id": "config.models",
+        "titleKey": "command.config.models",
+        "icon": "sf:list.bullet",
+        "handler": {"type": "mcpTool", "server": "config", "tool": "config.models"}
+      },
+      {
         "id": "config.open",
         "titleKey": "command.config.open",
         "icon": "sf:gearshape",

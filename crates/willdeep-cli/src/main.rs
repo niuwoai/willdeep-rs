@@ -50,6 +50,7 @@ mod telemetry;
 mod titling;
 mod tui;
 mod usage_cmd;
+mod video_studio_plugin;
 mod web;
 
 use config::{LoadedConfig, ProviderProfile, willdeep_home};
@@ -660,6 +661,7 @@ async fn run() -> Result<()> {
     let home = willdeep_home()?;
     if !administrative {
         favorites_plugin::ensure_installed(&home).await?;
+        video_studio_plugin::ensure_installed(&home).await?;
     }
     // 匿名产品遥测。配置默认开启，WILLDEEP_TELEMETRY_DISABLED=1 可整体关掉。
     // 只写本地队列，实际发送在进程退出前一次性做（见 main）。

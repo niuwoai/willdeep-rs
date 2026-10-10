@@ -9,5 +9,6 @@
   "command.config.backups": "List Backups",
   "command.config.restore": "Restore Backup",
   "command.config.render": "Render Config Template",
-  "command.config.reveal": "Reveal Secret"
+  "command.config.reveal": "Reveal Secret",
+  "command.config.models": "List provider models"
 }

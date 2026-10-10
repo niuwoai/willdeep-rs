@@ -10,6 +10,7 @@ WillDeep 配置管理插件，提供 TOML 配置文件的读取、编辑、校�
 - 配置校验（`config.validate`）
 - 备份列表与恢复（`config.backups`、`config.restore`）
 - 配置模板生成（`config.render`）
+- 提供商默认模型选择框（`config.models`）：通过 `/v1/models` 加载列表，支持刷新和失败重试，保留当前配置模型；请求使用已保存或未保存的地址与密钥。
 - 集合实例（提供商、MCP 服务、子代理）的新增与整节删除（`removeSection`）
 
 页面同时运行在 WillDeep mac（WKWebView）与 willdeep-rs（沙箱 iframe）里，两边的差异与页面约定见

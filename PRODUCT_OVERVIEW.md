@@ -1,6 +1,8 @@
 # Product Overview
 
-> 最后更新：2026-10-10 | 当前版本：v0.95.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+> 最后更新：2026-10-11 | 当前版本：v0.96.0-rc1（验收记录见 docs/AGENT_RELIABILITY_WORK.md）
+
+发行包内嵌短剧工坊 0.46.0-rc1、willdeep-config 0.4.0-rc1 与 Favorites 2.3.0。CLI / Web 首次启动静默安装短剧运行包，保留已有同版本和用户数据；插件权限仍由用户在插件中心批准。
 
 Web 插件中心设置先编辑，再点击每个插件的“保存设置”按钮提交；页面显示未保存、保存中、已保存和失败状态。部分保存失败时保留剩余修改供重试，已保存的密钥不回显。
 

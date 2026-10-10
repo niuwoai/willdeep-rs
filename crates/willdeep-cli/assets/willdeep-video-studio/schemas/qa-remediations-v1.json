@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "description": "Frame-QA category -> how a clip is fixed. One table for the prompt compiler (prevention directives), video.remediate / episode.remediate_videos (automatic retakes) and qa.lessons. Every sentence is a positive description of the wanted picture: video models draw whatever a prompt mentions, so words such as cut, wound, blood, text or any negation never appear here (scripts/qa_remediation_test.rb checks it).",
+  "prevention": {
+    "minAttempts": 3,
+    "minResolvedRate": 0.6,
+    "builtin": [
+      {
+        "id": "continuous-take",
+        "category": "scene_jump",
+        "text": "One continuous take from a single camera position; the whole clip stays in the same location with the same framing from the first frame to the last."
+      }
+    ]
+  },
+  "categories": {
+    "scene_jump": {
+      "regenerate": true,
+      "maxRetries": 2,
+      "remediations": [
+        {
+          "id": "single-steady-shot",
+          "text": "Single steady shot: the camera stays on the same place and the same people for the entire clip, matching the first frame from start to end."
+        }
+      ]
+    },
+    "identity": {
+      "regenerate": true,
+      "maxRetries": 2,
+      "remediations": [
+        {
+          "id": "match-reference-people",
+          "text": "The people match their reference pictures exactly: same face, gender, age and outfit."
+        }
+      ]
+    },
+    "text_overlay": {
+      "regenerate": true,
+      "maxRetries": 2,
+      "remediations": [
+        {
+          "id": "voice-only-dialogue",
+          "text": "Dialogue is heard as voice alone; the picture shows only the people and the setting, clean and plain like a film frame."
+        }
+      ]
+    },
+    "injury": {
+      "regenerate": true,
+      "maxRetries": 2,
+      "remediations": [
+        {
+          "id": "intact-skin-calm-action",
+          "text": "Hands, wrists, arms, face and neck show smooth, clean, healthy skin throughout; every movement is calm and gentle."
+        }
+      ]
+    },
+    "blood": {
+      "regenerate": true,
+      "maxRetries": 2,
+      "remediations": [
+        {
+          "id": "clean-surfaces-calm-action",
+          "text": "Skin, clothing, bedding and floors keep their natural clean colours throughout; every movement is calm and gentle."
+        }
+      ]
+    },
+    "continuity": {
+      "regenerate": false,
+      "maxRetries": 0,
+      "remediations": [
+        {
+          "id": "steady-look",
+          "text": "Hair, clothing and accessories stay exactly as in the first frame for the whole clip, and the described action is carried out in full."
+        }
+      ]
+    },
+    "framing": {
+      "regenerate": false,
+      "maxRetries": 0,
+      "remediations": [
+        {
+          "id": "described-framing",
+          "text": "The camera holds the shot size and angle described for this shot for the whole clip."
+        }
+      ]
+    }
+  }
+}

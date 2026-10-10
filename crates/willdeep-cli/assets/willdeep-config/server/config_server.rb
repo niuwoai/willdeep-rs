@@ -23,11 +23,12 @@ require "config_doc"
 require "config_file"
 require "config_render"
 require "config_schema"
+require "provider_models"
 
 module WilldeepConfig
   PROTOCOL_VERSION = "2025-06-18"
   SERVER_NAME = "config"
-  SERVER_VERSION = "0.2.0"
+  SERVER_VERSION = "0.4.0-rc1"
   MASK = "••••"
   ABSENT = :__absent__
   OCTAL_FILE_MODE = 0o600
@@ -79,6 +80,7 @@ module WilldeepConfig
       when "config.restore" then tool_restore(args)
       when "config.render" then tool_render(args)
       when "config.reveal_secret" then tool_reveal_secret(args)
+      when "config.models" then tool_models(args)
       else Json.error("invalid_edits", "未知工具：#{name}")
       end
     rescue BadArgument => e
@@ -114,6 +116,27 @@ module WilldeepConfig
     end
 
     # ==== 工具 ====
+
+    def tool_models(args)
+      section = args["section"]
+      unless section.is_a?(String) && section.start_with?("providers.") &&
+             ConfigSchema.valid_instance?(section.delete_prefix("providers."))
+        return Json.error("invalid_edits", "section 必须是模型提供商节名")
+      end
+      values = {}
+      text, = read_config_text(resolve_path(args))
+      TomlLite.parse_document(text)[:entries].each do |entry|
+        values[entry.key] = entry.value if entry.section == section
+      end
+      base = args.key?("api_base") ? args["api_base"] : values["api_base"]
+      key = args.key?("api_key") ? args["api_key"] : values["api_key"]
+      unless base.is_a?(String) && (key.nil? || key.is_a?(String))
+        return Json.error("models_config", "请先填写接口地址；API 密钥必须是字符串")
+      end
+      ProviderModels.fetch(base, key.to_s)
+    rescue TomlLite::ParseError
+      Json.error("parse_error", "配置文件语法错误，无法读取提供商")
+    end
 
     def tool_schema(_args)
       sections = ConfigSchema.static_groups.map do |g|
@@ -874,6 +897,12 @@ module WilldeepConfig
     class << self
       def all
         [
+          tool("config.models", "请求提供商的 /v1/models 列表。使用已保存配置或页面未保存的地址和密钥，不返回凭据。",
+               PATH_PROPERTY.merge(
+                 "section" => { "type" => "string" },
+                 "api_base" => { "type" => "string" },
+                 "api_key" => { "type" => "string" }
+               )),
           tool("config.snapshot", "读取配置文件快照：按内置 schema 列出节与字段值、未知键、打码后的原文。密钥只给 preview。",
                PATH_PROPERTY),
           tool("config.schema", "返回内置 schema：可编辑的节、字段类型与默认值、提供商候选、文件与备份路径。", {}),

@@ -288,6 +288,14 @@ pre.code .num { display: inline-block; width: 3.2em; color: var(--secondary); us
 
 const I18N = {
   zh: {
+    'protocol.chooseModel': '请先选择模型，再指定接口协议。',
+    'protocol.unknown': '服务端未提供该模型的协议能力，请手动选择服务端支持的协议。自动按提供商类型选择，不保证模型兼容。',
+    'protocol.known': '可选协议来自服务端返回的该模型能力。',
+    'protocol.incompatible': '当前协议与所选模型不兼容，请调整后保存。',
+    'protocol.adjusted': '已根据所选模型的能力调整接口协议，请在保存前确认。',
+    'models.refresh': '刷新模型列表', 'models.loading': '正在加载模型…',
+    'models.empty': '接口未返回可用模型', 'models.idle': '填写接口地址后刷新模型列表',
+    'models.failed': '加载失败：{msg}', 'models.current': '{value}（当前配置）',
     'page.title': 'WillDeep 配置',
     'meta.missing': '配置文件还不存在，保存时会新建',
     'meta.modified': '修改于 {time}',
@@ -373,6 +381,14 @@ const I18N = {
     'card.readonlyName': '名称里含有本页无法安全写回的字符，只能在文件里直接修改。'
   },
   en: {
+    'protocol.chooseModel': 'Choose a model before selecting its API protocol.',
+    'protocol.unknown': 'The server did not report protocols for this model. Select a supported protocol manually. Auto follows the provider type and does not guarantee model compatibility.',
+    'protocol.known': 'Available protocols come from the server metadata for this model.',
+    'protocol.incompatible': 'The selected protocol is incompatible with this model. Adjust it before saving.',
+    'protocol.adjusted': 'The API protocol was adjusted for this model. Review it before saving.',
+    'models.refresh': 'Refresh models', 'models.loading': 'Loading models…',
+    'models.empty': 'The API returned no models', 'models.idle': 'Enter the API base, then refresh models',
+    'models.failed': 'Could not load models: {msg}', 'models.current': '{value} (current configuration)',
     'page.title': 'WillDeep Config',
     'meta.missing': 'The config file does not exist yet; saving will create it',
     'meta.modified': 'Modified {time}',
@@ -630,6 +646,7 @@ function applyContext(ctx) {
 // ======================================================================
 
 const S = {
+  models: new Map(),        // section -> request state; replacing it fences stale responses
   snapshot: null,
   context: {},
   loading: false,
@@ -963,10 +980,66 @@ function renderSelect(id, disabled, options, selected) {
   return html + '</select>';
 }
 
+function providerValue(sec, key) {
+  const field = sec.fields.find(f => f.key === key);
+  return field ? currentRaw(ekOf(sec.name, key), field) : null;
+}
+
+function modelProtocolInfo(sec) {
+  const model = providerValue(sec, 'model');
+  const state = S.models.get(sec.name);
+  const supported = state && state.protocols && state.protocols[model];
+  const known = Array.isArray(supported) && supported.length > 0;
+  const api = providerValue(sec, 'api');
+  const provider = providerValue(sec, 'provider');
+  const base = providerValue(sec, 'api_base') || '';
+  let nativeAnthropic = provider === 'anthropic';
+  if (!provider || provider === 'auto') {
+    try { nativeAnthropic = new URL(base).hostname === 'api.anthropic.com'; } catch (_) { nativeAnthropic = false; }
+  }
+  const effective = !api || api === 'auto' ? (nativeAnthropic ? 'anthropic-messages' : 'chat-completions') : api;
+  return { model, supported: known ? supported : [], known, incompatible: known && !supported.includes(effective) };
+}
+
+function incompatibleProtocols() {
+  return Array.from(S.sections.values()).filter(sec => sec.groupID === 'providers' &&
+    !S.removed.has(sec.name) && modelProtocolInfo(sec).incompatible);
+}
+
+function renderModelProtocol(sec, field, id, disabled, cur, unsetLabel) {
+  const info = modelProtocolInfo(sec);
+  const val = cur == null ? '' : String(cur);
+  const choices = info.known ? info.supported : field.options;
+  const opts = [{ value: '', label: unsetLabel }].concat(choices.map(value => ({ value, label: optionLabel(field, value) })));
+  if (val && !choices.includes(val)) opts.push({ value: val, label: optionLabel(field, val) });
+  const message = !info.model ? 'protocol.chooseModel' : info.incompatible ? 'protocol.incompatible' :
+    info.known ? 'protocol.known' : 'protocol.unknown';
+  return renderSelect(id, disabled || (!info.model ? ' disabled' : ''), opts, val) +
+    '<div role="status" class="' + (info.incompatible ? 'error' : 'muted') + '">' + esc(t(message)) + '</div>';
+}
+
 function renderControl(sec, field, ek, id, disabled) {
+
   const type = field.type;
   const cur = currentRaw(ek, field);
   const unsetLabel = defaultPlaceholder(field);
+
+  if (sec.groupID === 'providers' && field.key === 'api') {
+    return renderModelProtocol(sec, field, id, disabled, cur, unsetLabel);
+  }
+  if (sec.groupID === 'providers' && field.key === 'model') {
+    const state = S.models.get(sec.name);
+    const models = state && state.models || [];
+    const val = cur == null ? '' : String(cur);
+    const opts = [{ value: '', label: unsetLabel }].concat(models.map(value => ({ value, label: value })));
+    if (val && !models.includes(val)) opts.push({ value: val, label: t('models.current', { value: val }) });
+    const message = !state ? t('models.idle') : state.loading ? t('models.loading') :
+      state.error ? t('models.failed', { msg: state.error }) : models.length ? '' : t('models.empty');
+    return renderSelect(id, disabled, opts, val) +
+      '<button class="btn" data-act="refresh-models"' + (disabled || (state && state.loading ? ' disabled' : '')) + '>' +
+      esc(t('models.refresh')) + '</button>' +
+      '<div role="status" class="muted">' + esc(message) + '</div>';
+  }
 
   if (field.ref) {
     const names = instanceNames(field.ref).filter(n => !S.removed.has(field.ref + '.' + n));
@@ -1187,7 +1260,7 @@ function renderMain() {
 function renderSavebar() {
   const bar = document.getElementById('savebar');
   const n = dirtyCount();
-  const bad = drafts.size;
+  const bad = drafts.size + incompatibleProtocols().length;
   const empties = addedWithoutFields();
   if (!n && !bad && !empties.length) { bar.hidden = true; bar.innerHTML = ''; return; }
   const parts = [];
@@ -1213,6 +1286,21 @@ function renderAll() {
 
 // 行级改动之后的局部刷新：不重画整页，焦点不会丢
 function afterRowChange(section, key) {
+  if (section.startsWith('providers.') && ['api_base', 'api_key', 'provider'].includes(key)) {
+    S.models.delete(section);
+    rerenderRow(section, 'model');
+  }
+  const providerSec = S.sections.get(section);
+  if (providerSec && providerSec.groupID === 'providers') {
+    if (key === 'model') {
+      const info = modelProtocolInfo(providerSec);
+      if (info.incompatible) {
+        commitValue(section, 'api', 'enum', info.supported[0], originalOf(ekOf(section, 'api')));
+        toast('warn', t('protocol.adjusted'));
+      }
+    }
+    rerenderRow(section, 'api');
+  }
   rerenderRow(section, key);
   rerenderDependents();
   const sec = S.sections.get(section);
@@ -1321,6 +1409,7 @@ function guardDiscard(action) {
 // ======================================================================
 
 function resetEdits() {
+  S.models.clear();
   edits.clear();
   drafts.clear();
   plaintexts.clear();
@@ -1345,6 +1434,37 @@ async function loadSnapshot() {
   S.snapshot = result;
   resetEdits();
   renderAll();
+  for (const sec of S.sections.values()) {
+    const base = sec.fields.find(f => f.key === 'api_base');
+    if (sec.groupID === 'providers' && sec.editable && base && base.hasValue && !parseLocked()) loadModels(sec.name);
+  }
+}
+
+async function loadModels(section) {
+  if (parseLocked() || S.busy || S.removed.has(section)) return;
+  const previous = S.models.get(section);
+  if (previous && previous.loading) return;
+  const state = { loading: true, models: [], protocols: previous && previous.protocols || {}, error: null };
+  S.models.set(section, state);
+  rerenderRow(section, 'model');
+  rerenderRow(section, 'api');
+  renderSavebar();
+  const args = { section };
+  for (const key of ['api_base', 'api_key']) {
+    const edit = edits.get(ekOf(section, key));
+    if (edit) args[key] = edit.op === 'unset' ? '' : edit.value;
+  }
+  const result = await callCommand('config.models', args);
+  if (S.models.get(section) !== state || !S.sections.has(section)) return;
+  state.loading = false;
+  if (result && result.ok && Array.isArray(result.models)) {
+    state.models = result.models;
+    state.protocols = result.model_protocols || {};
+  }
+  else state.error = result && result.message || '?';
+  rerenderRow(section, 'model');
+  rerenderRow(section, 'api');
+  renderSavebar();
 }
 
 // ======================================================================
@@ -1578,6 +1698,12 @@ function renderDiff(diff) {
 async function previewChanges() {
   if (S.busy) return;
   if (parseLocked()) { toast('error', t('toast.parseLocked')); return; }
+  const incompatible = incompatibleProtocols();
+  if (incompatible.length) {
+    toast('error', t('protocol.incompatible'));
+    flashRow(incompatible[0].name, 'api');
+    return;
+  }
   if (drafts.size) {
     toast('error', t('toast.fixInvalid'));
     const first = drafts.keys().next().value.split(NUL);
@@ -1876,6 +2002,7 @@ function onClick(event) {
     case 'discard-all': discardAll(); break;
     case 'revert': revertField(section, key); break;
     case 'reveal': revealSecret(section, key); break;
+    case 'refresh-models': loadModels(section); break;
     case 'replace': replaceSecret(section, key); break;
     case 'collapse-secret': collapseSecret(section, key); break;
     case 'toggle-secret': toggleSecret(section, key); break;

@@ -1,0 +1,43 @@
+{
+  "$id": "urn:willdeep:aspect-ratios:v1",
+  "comment": "首尾帧和视频必须是同一个画幅，否则上游会自己裁切或拉伸首帧，人物位置和景别当场走样。这张表是服务端（server/lib/aspect_ratios.rb）与页面（ui/src/aspect-ratios.ts）唯一的取值来源。image 是发给出图的 WxH；video 是发给视频上游的宽高，必须是 32 的整数倍；两者约分后必须与 id 完全相等（scripts/drama_test.rb 断言）。imageModels 是能出这一档的出图模型：gpt-image 系只支持 1024x1024 / 1536x1024 / 1024x1536 三种尺寸。legacy 那一档不对用户开放选择：0.30.0-rc3 之前的「9:16」剧实际按 2:3 出图（1024x1536）、按 768x1152 出片，旧剧继续按它算。",
+  "default": "9:16",
+  "legacy": "2:3",
+  "ratios": [
+    {
+      "id": "9:16",
+      "orientation": "portrait",
+      "image": "1080x1920",
+      "video": { "width": 576, "height": 1024 },
+      "imageModels": ["nano-banana-2"]
+    },
+    {
+      "id": "16:9",
+      "orientation": "landscape",
+      "image": "1920x1080",
+      "video": { "width": 1024, "height": 576 },
+      "imageModels": ["nano-banana-2"]
+    },
+    {
+      "id": "1:1",
+      "orientation": "square",
+      "image": "1024x1024",
+      "video": { "width": 768, "height": 768 },
+      "imageModels": ["nano-banana-2", "gpt-image-2"]
+    },
+    {
+      "id": "4:5",
+      "orientation": "portrait",
+      "image": "1024x1280",
+      "video": { "width": 768, "height": 960 },
+      "imageModels": ["nano-banana-2"]
+    },
+    {
+      "id": "2:3",
+      "orientation": "portrait",
+      "image": "1024x1536",
+      "video": { "width": 768, "height": 1152 },
+      "imageModels": ["nano-banana-2", "gpt-image-2"]
+    }
+  ]
+}

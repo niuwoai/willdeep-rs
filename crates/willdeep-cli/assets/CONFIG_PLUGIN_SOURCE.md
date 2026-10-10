@@ -2,7 +2,7 @@
 
 Source: https://github.com/niuwoai/willdeep-config
 
-Pinned commit: `40c95cf05069a8d3b145eee87dcc098e8a885d82`, package version `0.2.0`.
+Pinned commit: `cd6348c` (willdeep-config main), package version `0.4.0-rc1`.
 
 The `willdeep-config/` directory contains the unchanged plugin package from this
 commit. First-use Web setup installs this package only when no version of

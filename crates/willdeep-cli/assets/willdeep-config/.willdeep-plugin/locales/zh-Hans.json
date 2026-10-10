@@ -9,5 +9,6 @@
   "command.config.backups": "列出备份",
   "command.config.restore": "恢复备份",
   "command.config.render": "生成配置模板",
-  "command.config.reveal": "显示密钥"
+  "command.config.reveal": "显示密钥",
+  "command.config.models": "获取模型列表"
 }
